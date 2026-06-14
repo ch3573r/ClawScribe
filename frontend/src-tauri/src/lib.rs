@@ -640,6 +640,8 @@ pub fn run() {
             openai::auth::api_get_openai_auth_status,
             openai::auth::api_save_openai_auth_config,
             openai::auth::api_clear_openai_auth_config,
+            openai::auth::api_prepare_openai_oauth_pkce_authorization,
+            openai::auth::api_exchange_openai_oauth_pkce_code,
             openai::openai::get_openai_models,
             anthropic::anthropic::get_anthropic_models,
             groq::groq::get_groq_models,

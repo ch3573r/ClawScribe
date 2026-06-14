@@ -64,6 +64,23 @@ interface OpenAIModel {
   id: string;
 }
 
+interface OpenAIAuthStatus {
+  mode: 'disabled' | 'api_key' | 'oauth_pkce';
+  configured: boolean;
+  apiKeyPresent: boolean;
+  oauthPkceConfigured: boolean;
+  oauthBrowserLaunchReady: boolean;
+  oauthDeviceFlowConfigured: boolean;
+  canAuthenticateRequests: boolean;
+  requiresUserAction: boolean;
+  source: string;
+  message: string;
+  nextAction: string;
+  requestAuthentication: string;
+  authReferenceUrl: string;
+  unsupportedReason?: string;
+}
+
 interface AnthropicModel {
   id: string;
   display_name?: string;
@@ -165,6 +182,8 @@ export function ModelSettingsModal({
   const [isLoadingOpenAI, setIsLoadingOpenAI] = useState<boolean>(false);
   const [isLoadingClaude, setIsLoadingClaude] = useState<boolean>(false);
   const [isLoadingGroq, setIsLoadingGroq] = useState<boolean>(false);
+  const [openAIAuthStatus, setOpenAIAuthStatus] = useState<OpenAIAuthStatus | null>(null);
+  const [isLoadingOpenAIAuthStatus, setIsLoadingOpenAIAuthStatus] = useState<boolean>(false);
 
   // Use global download context instead of local state
   const { isDownloading, getProgress, downloadingModels } = useOllamaDownload();
@@ -577,12 +596,31 @@ export function ModelSettingsModal({
     }
   };
 
+  const loadOpenAIAuthStatus = async () => {
+    setIsLoadingOpenAIAuthStatus(true);
+    try {
+      const status = (await invoke('api_get_openai_auth_status')) as OpenAIAuthStatus;
+      setOpenAIAuthStatus(status);
+    } catch (err) {
+      console.error('Error loading OpenAI auth status:', err);
+      setOpenAIAuthStatus(null);
+    } finally {
+      setIsLoadingOpenAIAuthStatus(false);
+    }
+  };
+
   // Auto-fetch OpenAI models when provider is openai and we have an API key
   useEffect(() => {
     if (modelConfig.provider === 'openai' && apiKey?.trim()) {
       loadOpenAIModels(apiKey);
     }
   }, [modelConfig.provider, apiKey]);
+
+  useEffect(() => {
+    if (modelConfig.provider === 'openai') {
+      loadOpenAIAuthStatus();
+    }
+  }, [modelConfig.provider]);
 
   // Auto-fetch Claude models when provider is claude and we have an API key
   useEffect(() => {
@@ -665,7 +703,24 @@ export function ModelSettingsModal({
       updateProviderApiKey(updatedConfig.provider, updatedConfig.apiKey);
     }
 
-    onSave(updatedConfig);
+    if (updatedConfig.provider === 'openai') {
+      try {
+        const status = (await invoke('api_save_openai_auth_config', {
+          config: { mode: 'api_key' },
+        })) as OpenAIAuthStatus;
+        setOpenAIAuthStatus(status);
+      } catch (err) {
+        console.error('Failed to save OpenAI auth mode:', err);
+        toast.error('Failed to save OpenAI auth mode');
+        return;
+      }
+    }
+
+    await Promise.resolve(onSave(updatedConfig));
+
+    if (updatedConfig.provider === 'openai') {
+      await loadOpenAIAuthStatus();
+    }
   };
 
   // Test custom OpenAI connection
@@ -1112,6 +1167,55 @@ export function ModelSettingsModal({
               </div>
             </div>
           </div>
+        )}
+
+        {modelConfig.provider === 'openai' && (
+          <Alert className={cn(
+            'border-blue-200 bg-blue-50',
+            !apiKey?.trim() && 'border-yellow-500 bg-yellow-50'
+          )}>
+            <AlertDescription className={cn(
+              'text-blue-900',
+              !apiKey?.trim() && 'text-yellow-900'
+            )}>
+              <div className="space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">
+                      OpenAI API auth
+                    </div>
+                    <p className="text-sm">
+                      {isLoadingOpenAIAuthStatus
+                        ? 'Checking OpenAI auth status...'
+                        : openAIAuthStatus?.message || 'OpenAI requests use bearer API-key auth in this desktop build.'}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={loadOpenAIAuthStatus}
+                    disabled={isLoadingOpenAIAuthStatus}
+                    title="Refresh OpenAI auth status"
+                  >
+                    <RefreshCw className={cn('h-4 w-4', isLoadingOpenAIAuthStatus && 'animate-spin')} />
+                  </Button>
+                </div>
+                <p className="text-xs">
+                  OAuth PKCE token exchange is intentionally unsupported here until official OpenAI OAuth app endpoints and secure token storage are available.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => invoke('open_external_url', { url: 'https://platform.openai.com/api-keys' })}
+                >
+                  <ExternalLink className="mr-2 h-4 w-4" />
+                  Open API keys
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
         )}
 
         {modelConfig.provider === 'ollama' && (

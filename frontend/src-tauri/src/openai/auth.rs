@@ -1,8 +1,19 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{Duration, Utc};
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Runtime};
 use url::Url;
 
 use crate::{database::repositories::setting::SettingsRepository, state::AppState};
+
+const OPENAI_AUTH_REFERENCE_URL: &str =
+    "https://developers.openai.com/api/reference/overview#authentication";
+const OPENAI_OAUTH_UNSUPPORTED_REASON: &str =
+    "OpenAI API request authentication is available here with API-key bearer credentials. OAuth PKCE metadata can be prepared for a future OpenAI OAuth app, but this build does not have official OpenAI OAuth endpoints or a token exchange/storage path for API requests.";
+const PKCE_CODE_CHALLENGE_METHOD: &str = "S256";
+const PKCE_AUTH_REQUEST_TTL_MINUTES: i64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +32,8 @@ pub struct OpenAIOAuthPkceConfig {
     pub redirect_uri: String,
     #[serde(default)]
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
     #[serde(default)]
     pub issuer: Option<String>,
     #[serde(default)]
@@ -42,12 +55,35 @@ pub struct OpenAIAuthStatus {
     pub configured: bool,
     pub api_key_present: bool,
     pub oauth_pkce_configured: bool,
+    pub oauth_browser_launch_ready: bool,
+    pub oauth_device_flow_configured: bool,
     pub can_authenticate_requests: bool,
     pub requires_user_action: bool,
     pub source: String,
     pub message: String,
+    pub next_action: String,
+    pub request_authentication: String,
+    pub auth_reference_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_pkce: Option<OpenAIOAuthPkceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIOAuthPkceAuthorizationRequest {
+    pub authorization_url: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub state: String,
+    pub nonce: String,
+    pub code_verifier: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    pub expires_at: String,
+    pub token_exchange_supported: bool,
+    pub unsupported_reason: String,
 }
 
 fn is_present(value: Option<&str>) -> bool {
@@ -56,10 +92,16 @@ fn is_present(value: Option<&str>) -> bool {
 
 fn parse_openai_auth_config(json: Option<String>) -> Result<Option<OpenAIAuthConfig>, String> {
     json.map(|raw| {
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+
         serde_json::from_str::<OpenAIAuthConfig>(&raw)
+            .map(Some)
             .map_err(|e| format!("Invalid OpenAI auth configuration JSON: {}", e))
     })
     .transpose()
+    .map(|parsed| parsed.flatten())
 }
 
 fn validate_url_field(label: &str, value: &str) -> Result<(), String> {
@@ -93,6 +135,12 @@ fn normalize_oauth_pkce_config(
     validate_url_field("Authorization endpoint", authorization_endpoint)?;
     validate_url_field("Token endpoint", token_endpoint)?;
     validate_url_field("Redirect URI", redirect_uri)?;
+    if let Some(device_authorization_endpoint) = config.device_authorization_endpoint.as_deref() {
+        let endpoint = device_authorization_endpoint.trim();
+        if !endpoint.is_empty() {
+            validate_url_field("Device authorization endpoint", endpoint)?;
+        }
+    }
 
     let scopes = config
         .scopes
@@ -107,6 +155,9 @@ fn normalize_oauth_pkce_config(
         token_endpoint: token_endpoint.to_string(),
         redirect_uri: redirect_uri.to_string(),
         scopes,
+        device_authorization_endpoint: config.device_authorization_endpoint.and_then(|endpoint| {
+            (!endpoint.trim().is_empty()).then(|| endpoint.trim().to_string())
+        }),
         issuer: config
             .issuer
             .and_then(|issuer| (!issuer.trim().is_empty()).then(|| issuer.trim().to_string())),
@@ -139,6 +190,42 @@ fn normalize_auth_config(config: OpenAIAuthConfig) -> Result<OpenAIAuthConfig, S
     }
 }
 
+fn openai_auth_reference_url() -> String {
+    OPENAI_AUTH_REFERENCE_URL.to_string()
+}
+
+fn unsupported_reason() -> Option<String> {
+    Some(OPENAI_OAUTH_UNSUPPORTED_REASON.to_string())
+}
+
+fn api_key_ready_status(api_key_present: bool, source: &str, message: String) -> OpenAIAuthStatus {
+    OpenAIAuthStatus {
+        mode: OpenAIAuthMode::ApiKey,
+        configured: api_key_present,
+        api_key_present,
+        oauth_pkce_configured: false,
+        oauth_browser_launch_ready: false,
+        oauth_device_flow_configured: false,
+        can_authenticate_requests: api_key_present,
+        requires_user_action: !api_key_present,
+        source: source.to_string(),
+        message,
+        next_action: if api_key_present {
+            "OpenAI requests can use the stored API key.".to_string()
+        } else {
+            "Save an OpenAI API key before using OpenAI summaries.".to_string()
+        },
+        request_authentication: if api_key_present {
+            "bearer_api_key".to_string()
+        } else {
+            "missing_api_key".to_string()
+        },
+        auth_reference_url: openai_auth_reference_url(),
+        unsupported_reason: None,
+        oauth_pkce: None,
+    }
+}
+
 fn build_openai_auth_status(
     stored_config: Option<OpenAIAuthConfig>,
     legacy_api_key: Option<&str>,
@@ -152,34 +239,45 @@ fn build_openai_auth_status(
                 configured: false,
                 api_key_present,
                 oauth_pkce_configured: false,
+                oauth_browser_launch_ready: false,
+                oauth_device_flow_configured: false,
                 can_authenticate_requests: false,
                 requires_user_action: true,
                 source: "openai_auth_config".to_string(),
                 message: "OpenAI auth is disabled in auth-mode configuration".to_string(),
+                next_action:
+                    "Choose API-key auth and save an OpenAI API key to enable OpenAI summaries."
+                        .to_string(),
+                request_authentication: "disabled".to_string(),
+                auth_reference_url: openai_auth_reference_url(),
+                unsupported_reason: None,
                 oauth_pkce: None,
             },
-            OpenAIAuthMode::ApiKey => OpenAIAuthStatus {
-                mode: OpenAIAuthMode::ApiKey,
-                configured: api_key_present,
+            OpenAIAuthMode::ApiKey => api_key_ready_status(
                 api_key_present,
-                oauth_pkce_configured: false,
-                can_authenticate_requests: api_key_present,
-                requires_user_action: !api_key_present,
-                source: "openai_auth_config".to_string(),
-                message: if api_key_present {
-                    "OpenAI API key auth is configured through the legacy settings path".to_string()
+                "openai_auth_config",
+                if api_key_present {
+                    "OpenAI API key auth is configured through the existing settings path"
+                        .to_string()
                 } else {
                     "OpenAI API key auth is selected, but no API key is stored".to_string()
                 },
-                oauth_pkce: None,
-            },
+            ),
             OpenAIAuthMode::OauthPkce => {
                 let oauth_pkce_configured = config.oauth_pkce.is_some();
+                let oauth_device_flow_configured = config
+                    .oauth_pkce
+                    .as_ref()
+                    .and_then(|oauth| oauth.device_authorization_endpoint.as_ref())
+                    .map(|endpoint| !endpoint.trim().is_empty())
+                    .unwrap_or(false);
                 OpenAIAuthStatus {
                     mode: OpenAIAuthMode::OauthPkce,
                     configured: oauth_pkce_configured,
                     api_key_present,
                     oauth_pkce_configured,
+                    oauth_browser_launch_ready: oauth_pkce_configured,
+                    oauth_device_flow_configured,
                     can_authenticate_requests: false,
                     requires_user_action: true,
                     source: "openai_auth_config".to_string(),
@@ -189,34 +287,102 @@ fn build_openai_auth_status(
                     } else {
                         "OpenAI OAuth PKCE mode is selected, but metadata is incomplete".to_string()
                     },
+                    next_action: if oauth_pkce_configured {
+                        "Use api_prepare_openai_oauth_pkce_authorization only to prepare browser-launch metadata; API requests still require API-key auth in this build."
+                            .to_string()
+                    } else {
+                        "Provide OpenAI OAuth PKCE client metadata, or select API-key auth."
+                            .to_string()
+                    },
+                    request_authentication: "unsupported_oauth_pkce".to_string(),
+                    auth_reference_url: openai_auth_reference_url(),
+                    unsupported_reason: unsupported_reason(),
                     oauth_pkce: config.oauth_pkce,
                 }
             }
         },
-        None if api_key_present => OpenAIAuthStatus {
-            mode: OpenAIAuthMode::ApiKey,
-            configured: true,
-            api_key_present,
-            oauth_pkce_configured: false,
-            can_authenticate_requests: true,
-            requires_user_action: false,
-            source: "legacy_api_key".to_string(),
-            message: "OpenAI API key auth is configured through the legacy settings path"
-                .to_string(),
-            oauth_pkce: None,
-        },
+        None if api_key_present => api_key_ready_status(
+            true,
+            "legacy_api_key",
+            "OpenAI API key auth is configured through the existing settings path".to_string(),
+        ),
         None => OpenAIAuthStatus {
             mode: OpenAIAuthMode::Disabled,
             configured: false,
             api_key_present: false,
             oauth_pkce_configured: false,
+            oauth_browser_launch_ready: false,
+            oauth_device_flow_configured: false,
             can_authenticate_requests: false,
             requires_user_action: true,
             source: "not_configured".to_string(),
             message: "OpenAI auth is not configured".to_string(),
+            next_action: "Save an OpenAI API key to enable OpenAI summaries.".to_string(),
+            request_authentication: "not_configured".to_string(),
+            auth_reference_url: openai_auth_reference_url(),
+            unsupported_reason: None,
             oauth_pkce: None,
         },
     }
+}
+
+fn random_urlsafe_string(len: usize) -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(len)
+        .map(char::from)
+        .collect()
+}
+
+fn pkce_s256_challenge(code_verifier: &str) -> String {
+    let digest = Sha256::digest(code_verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn build_oauth_authorization_request(
+    oauth: OpenAIOAuthPkceConfig,
+) -> Result<OpenAIOAuthPkceAuthorizationRequest, String> {
+    let state = random_urlsafe_string(32);
+    let nonce = random_urlsafe_string(32);
+    let code_verifier = random_urlsafe_string(96);
+    let code_challenge = pkce_s256_challenge(&code_verifier);
+    let expires_at = (Utc::now() + Duration::minutes(PKCE_AUTH_REQUEST_TTL_MINUTES)).to_rfc3339();
+
+    let mut authorization_url = Url::parse(&oauth.authorization_endpoint)
+        .map_err(|e| format!("Authorization endpoint must be a valid URL: {}", e))?;
+    {
+        let mut pairs = authorization_url.query_pairs_mut();
+        pairs
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &oauth.client_id)
+            .append_pair("redirect_uri", &oauth.redirect_uri)
+            .append_pair("code_challenge", &code_challenge)
+            .append_pair("code_challenge_method", PKCE_CODE_CHALLENGE_METHOD)
+            .append_pair("state", &state)
+            .append_pair("nonce", &nonce);
+
+        if !oauth.scopes.is_empty() {
+            pairs.append_pair("scope", &oauth.scopes.join(" "));
+        }
+
+        if let Some(audience) = oauth.audience.as_deref() {
+            pairs.append_pair("audience", audience);
+        }
+    }
+
+    Ok(OpenAIOAuthPkceAuthorizationRequest {
+        authorization_url: authorization_url.to_string(),
+        redirect_uri: oauth.redirect_uri,
+        scopes: oauth.scopes,
+        state,
+        nonce,
+        code_verifier,
+        code_challenge,
+        code_challenge_method: PKCE_CODE_CHALLENGE_METHOD.to_string(),
+        expires_at,
+        token_exchange_supported: false,
+        unsupported_reason: OPENAI_OAUTH_UNSUPPORTED_REASON.to_string(),
+    })
 }
 
 /// Reports the configured OpenAI auth mode without returning secrets.
@@ -280,6 +446,45 @@ pub async fn api_clear_openai_auth_config<R: Runtime>(
     Ok(build_openai_auth_status(None, api_key.as_deref()))
 }
 
+/// Prepares a real OAuth PKCE S256 browser authorization request from stored metadata.
+/// This does not exchange codes, refresh tokens, or authenticate OpenAI API requests.
+#[tauri::command]
+pub async fn api_prepare_openai_oauth_pkce_authorization<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<OpenAIOAuthPkceAuthorizationRequest, String> {
+    let pool = state.db_manager.pool();
+    let stored_config = parse_openai_auth_config(
+        SettingsRepository::get_openai_auth_config(pool)
+            .await
+            .map_err(|e| format!("Failed to read OpenAI auth configuration: {}", e))?,
+    )?;
+
+    let config =
+        stored_config.ok_or_else(|| "OpenAI OAuth PKCE metadata is not configured".to_string())?;
+    if config.mode != OpenAIAuthMode::OauthPkce {
+        return Err("OpenAI auth mode is not oauth_pkce".to_string());
+    }
+
+    let oauth = config
+        .oauth_pkce
+        .ok_or_else(|| "OpenAI OAuth PKCE metadata is incomplete".to_string())?;
+
+    build_oauth_authorization_request(oauth)
+}
+
+/// Explicit unsupported state for future callback wiring. No fake OAuth tokens are minted.
+#[tauri::command]
+pub async fn api_exchange_openai_oauth_pkce_code<R: Runtime>(
+    _app: AppHandle<R>,
+    _state: tauri::State<'_, AppState>,
+    _code: String,
+    _state_param: String,
+    _code_verifier: String,
+) -> Result<OpenAIAuthStatus, String> {
+    Err(OPENAI_OAUTH_UNSUPPORTED_REASON.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +496,9 @@ mod tests {
             token_endpoint: "https://auth.example.test/oauth/token".to_string(),
             redirect_uri: "http://127.0.0.1:38451/openai/oauth/callback".to_string(),
             scopes: vec![" openai ".to_string(), "".to_string()],
+            device_authorization_endpoint: Some(
+                "https://auth.example.test/oauth/device".to_string(),
+            ),
             issuer: Some(" ".to_string()),
             audience: Some(" api ".to_string()),
         }
@@ -303,6 +511,7 @@ mod tests {
         assert_eq!(status.mode, OpenAIAuthMode::ApiKey);
         assert!(status.configured);
         assert!(status.can_authenticate_requests);
+        assert_eq!(status.request_authentication, "bearer_api_key");
         assert_eq!(status.source, "legacy_api_key");
     }
 
@@ -335,7 +544,10 @@ mod tests {
         assert_eq!(status.mode, OpenAIAuthMode::OauthPkce);
         assert!(status.configured);
         assert!(status.oauth_pkce_configured);
+        assert!(status.oauth_browser_launch_ready);
+        assert!(status.oauth_device_flow_configured);
         assert!(!status.can_authenticate_requests);
+        assert!(status.unsupported_reason.is_some());
     }
 
     #[test]
@@ -351,6 +563,10 @@ mod tests {
         assert_eq!(oauth.scopes, vec!["openai"]);
         assert_eq!(oauth.issuer, None);
         assert_eq!(oauth.audience.as_deref(), Some("api"));
+        assert_eq!(
+            oauth.device_authorization_endpoint.as_deref(),
+            Some("https://auth.example.test/oauth/device")
+        );
     }
 
     #[test]
@@ -365,5 +581,24 @@ mod tests {
         .expect_err("non-localhost http endpoint should fail");
 
         assert!(error.contains("must use https"));
+    }
+
+    #[test]
+    fn pkce_authorization_request_uses_s256_without_claiming_token_exchange() {
+        let config = normalize_oauth_pkce_config(oauth_config()).expect("valid oauth config");
+        let request = build_oauth_authorization_request(config).expect("authorization request");
+
+        assert!(request
+            .authorization_url
+            .starts_with("https://auth.example.test/oauth/authorize?"));
+        assert!(request.authorization_url.contains("response_type=code"));
+        assert!(request
+            .authorization_url
+            .contains("code_challenge_method=S256"));
+        assert!(request.authorization_url.contains("scope=openai"));
+        assert_eq!(request.code_challenge_method, "S256");
+        assert_eq!(request.code_verifier.len(), 96);
+        assert!(!request.token_exchange_supported);
+        assert!(request.unsupported_reason.contains("OAuth PKCE metadata"));
     }
 }
