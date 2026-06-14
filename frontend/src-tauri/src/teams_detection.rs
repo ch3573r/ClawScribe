@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use std::collections::HashSet;
 use sysinfo::System;
 
 const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.65;
-const PROCESS_SIGNAL_CONFIDENCE: f32 = 0.35;
-const BROWSER_PROCESS_SIGNAL_CONFIDENCE: f32 = 0.15;
-const TITLE_SIGNAL_CONFIDENCE: f32 = 0.45;
+const PROCESS_SIGNAL_CONFIDENCE: f32 = 0.30;
+const BROWSER_PROCESS_SIGNAL_CONFIDENCE: f32 = 0.10;
+const TITLE_SIGNAL_CONFIDENCE: f32 = 0.50;
 const BROWSER_TITLE_SIGNAL_CONFIDENCE: f32 = 0.35;
+const FOREGROUND_TITLE_SIGNAL_CONFIDENCE: f32 = 0.10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +25,7 @@ impl Default for TeamsDetectionConfig {
             enabled: cfg!(target_os = "windows"),
             confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
             require_meeting_title_signal: true,
-            max_window_title_samples: 25,
+            max_window_title_samples: 100,
         }
     }
 }
@@ -33,6 +36,7 @@ pub struct TeamsDetectionStatus {
     pub supported: bool,
     pub enabled: bool,
     pub platform: String,
+    pub status: TeamsDetectionState,
     pub detected: bool,
     pub confidence: f32,
     pub threshold: f32,
@@ -59,7 +63,19 @@ pub struct TeamsDetectionCandidate {
     pub process_id: Option<u32>,
     pub process_name: Option<String>,
     pub window_title: Option<String>,
+    pub is_foreground: bool,
+    pub is_minimized: bool,
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamsDetectionState {
+    Unsupported,
+    Disabled,
+    NotDetected,
+    Possible,
+    Detected,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,12 +91,16 @@ pub enum TeamsDetectionAction {
 struct ProcessSnapshot {
     pid: u32,
     name: String,
+    exe_path: Option<String>,
+    command_line: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct WindowSnapshot {
     pid: Option<u32>,
     title: String,
+    is_foreground: bool,
+    is_minimized: bool,
 }
 
 #[tauri::command]
@@ -101,6 +121,7 @@ fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
             supported: false,
             enabled: false,
             platform: std::env::consts::OS.to_string(),
+            status: TeamsDetectionState::Unsupported,
             detected: false,
             confidence: 0.0,
             threshold,
@@ -122,6 +143,7 @@ fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
             supported: true,
             enabled: false,
             platform: std::env::consts::OS.to_string(),
+            status: TeamsDetectionState::Disabled,
             detected: false,
             confidence: 0.0,
             threshold,
@@ -139,7 +161,7 @@ fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
     }
 
     let processes = list_processes();
-    let windows = list_visible_windows(config.max_window_title_samples);
+    let windows = list_relevant_windows(config.max_window_title_samples, &processes);
     evaluate_snapshots(config, threshold, &processes, &windows)
 }
 
@@ -151,11 +173,11 @@ fn evaluate_snapshots(
 ) -> TeamsDetectionStatus {
     let teams_processes: Vec<&ProcessSnapshot> = processes
         .iter()
-        .filter(|process| is_teams_process(&process.name))
+        .filter(|process| is_teams_process(process))
         .collect();
     let browser_processes: Vec<&ProcessSnapshot> = processes
         .iter()
-        .filter(|process| is_browser_process(&process.name))
+        .filter(|process| is_browser_process(process))
         .collect();
 
     let teams_titles: Vec<&WindowSnapshot> = windows
@@ -168,9 +190,14 @@ fn evaluate_snapshots(
         .filter(|window| {
             window
                 .pid
-                .and_then(|pid| process_name_for_pid(processes, pid))
+                .and_then(|pid| process_for_pid(processes, pid))
                 .is_some_and(is_browser_process)
         })
+        .collect();
+    let foreground_meeting_titles: Vec<&WindowSnapshot> = teams_titles
+        .iter()
+        .copied()
+        .filter(|window| window.is_foreground && !window.is_minimized)
         .collect();
 
     let mut confidence = 0.0;
@@ -189,7 +216,10 @@ fn evaluate_snapshots(
             0.0
         },
         detail: if teams_process_matched {
-            format!("{} Teams process(es) found", teams_processes.len())
+            format!(
+                "{} Teams desktop process(es) found with verified names or Teams paths",
+                teams_processes.len()
+            )
         } else {
             "No Teams desktop process found".to_string()
         },
@@ -209,7 +239,7 @@ fn evaluate_snapshots(
         },
         detail: if browser_process_matched {
             format!(
-                "{} Edge/Chrome browser process(es) found",
+                "{} Edge/Chrome/WebView2 process(es) found",
                 browser_processes.len()
             )
         } else {
@@ -258,6 +288,25 @@ fn evaluate_snapshots(
         },
     });
 
+    let foreground_title_matched = !foreground_meeting_titles.is_empty();
+    if foreground_title_matched {
+        confidence += FOREGROUND_TITLE_SIGNAL_CONFIDENCE;
+    }
+    signals.push(TeamsDetectionSignal {
+        detector: "foreground-meeting-window".to_string(),
+        matched: foreground_title_matched,
+        confidence: if foreground_title_matched {
+            FOREGROUND_TITLE_SIGNAL_CONFIDENCE
+        } else {
+            0.0
+        },
+        detail: if foreground_title_matched {
+            "A Teams meeting-like window is currently foreground".to_string()
+        } else {
+            "No Teams meeting-like window is currently foreground".to_string()
+        },
+    });
+
     let title_requirement_met = !config.require_meeting_title_signal || title_matched;
     if !title_requirement_met {
         confidence = confidence.min(threshold - 0.01).max(0.0);
@@ -274,27 +323,33 @@ fn evaluate_snapshots(
                 process_id: Some(process.pid),
                 process_name: Some(process.name.clone()),
                 window_title: None,
+                is_foreground: false,
+                is_minimized: false,
                 confidence: PROCESS_SIGNAL_CONFIDENCE,
             }),
     );
     candidates.extend(teams_titles.iter().map(|window| {
         let process_name = window
             .pid
-            .and_then(|pid| process_name_for_pid(processes, pid))
-            .map(str::to_string);
+            .and_then(|pid| process_for_pid(processes, pid))
+            .map(|process| process.name.clone());
         TeamsDetectionCandidate {
             source: "window-title".to_string(),
             process_id: window.pid,
             process_name,
             window_title: Some(window.title.clone()),
+            is_foreground: window.is_foreground,
+            is_minimized: window.is_minimized,
             confidence: TITLE_SIGNAL_CONFIDENCE,
         }
     }));
+    let status = detection_state(detected, confidence, threshold, title_requirement_met);
 
     TeamsDetectionStatus {
         supported: cfg!(target_os = "windows"),
         enabled: config.enabled,
         platform: std::env::consts::OS.to_string(),
+        status,
         detected,
         confidence,
         threshold,
@@ -307,6 +362,21 @@ fn evaluate_snapshots(
         } else {
             TeamsDetectionAction::Idle
         },
+    }
+}
+
+fn detection_state(
+    detected: bool,
+    confidence: f32,
+    threshold: f32,
+    title_requirement_met: bool,
+) -> TeamsDetectionState {
+    if detected {
+        TeamsDetectionState::Detected
+    } else if confidence > 0.0 || !title_requirement_met || threshold == 0.0 {
+        TeamsDetectionState::Possible
+    } else {
+        TeamsDetectionState::NotDetected
     }
 }
 
@@ -348,37 +418,57 @@ fn list_processes() -> Vec<ProcessSnapshot> {
         .map(|(pid, process)| ProcessSnapshot {
             pid: pid.as_u32(),
             name: process.name().to_string_lossy().to_string(),
+            exe_path: process.exe().map(|path| path.to_string_lossy().to_string()),
+            command_line: process
+                .cmd()
+                .iter()
+                .map(|part| part.to_string_lossy().to_string())
+                .collect(),
         })
         .collect()
 }
 
 #[cfg(target_os = "windows")]
-fn list_visible_windows(max_samples: usize) -> Vec<WindowSnapshot> {
-    windows::list_visible_windows(max_samples)
+fn list_relevant_windows(max_samples: usize, processes: &[ProcessSnapshot]) -> Vec<WindowSnapshot> {
+    let relevant_process_ids = relevant_window_process_ids(processes);
+    windows::list_relevant_windows(max_samples, &relevant_process_ids)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn list_visible_windows(_max_samples: usize) -> Vec<WindowSnapshot> {
+fn list_relevant_windows(
+    _max_samples: usize,
+    _processes: &[ProcessSnapshot],
+) -> Vec<WindowSnapshot> {
     Vec::new()
 }
 
-fn process_name_for_pid(processes: &[ProcessSnapshot], pid: u32) -> Option<&str> {
+#[cfg(target_os = "windows")]
+fn relevant_window_process_ids(processes: &[ProcessSnapshot]) -> HashSet<u32> {
     processes
         .iter()
-        .find(|process| process.pid == pid)
-        .map(|process| process.name.as_str())
+        .filter(|process| is_teams_process(process) || is_browser_process(process))
+        .map(|process| process.pid)
+        .collect()
 }
 
-fn is_teams_process(process_name: &str) -> bool {
-    let name = normalize_process_name(process_name);
-    matches!(
-        name.as_str(),
-        "teams.exe" | "ms-teams.exe" | "msteams.exe" | "update.exe"
-    ) || name.contains("microsoft teams")
+fn process_for_pid(processes: &[ProcessSnapshot], pid: u32) -> Option<&ProcessSnapshot> {
+    processes.iter().find(|process| process.pid == pid)
 }
 
-fn is_browser_process(process_name: &str) -> bool {
-    let name = normalize_process_name(process_name);
+fn is_teams_process(process: &ProcessSnapshot) -> bool {
+    let name = normalize_process_name(&process.name);
+
+    if matches!(name.as_str(), "teams.exe" | "ms-teams.exe" | "msteams.exe")
+        || name.contains("microsoft teams")
+    {
+        return true;
+    }
+
+    name == "update.exe" && process_text_contains_teams_context(process)
+}
+
+fn is_browser_process(process: &ProcessSnapshot) -> bool {
+    let name = normalize_process_name(&process.name);
     matches!(
         name.as_str(),
         "msedge.exe" | "chrome.exe" | "msedgewebview2.exe"
@@ -387,6 +477,35 @@ fn is_browser_process(process_name: &str) -> bool {
 
 fn normalize_process_name(process_name: &str) -> String {
     process_name.trim().to_lowercase()
+}
+
+fn process_text_contains_teams_context(process: &ProcessSnapshot) -> bool {
+    let mut text = String::new();
+    if let Some(exe_path) = &process.exe_path {
+        text.push_str(exe_path);
+        text.push(' ');
+    }
+    for part in &process.command_line {
+        text.push_str(part);
+        text.push(' ');
+    }
+
+    let text = text.to_lowercase().replace('/', "\\");
+    text.contains("\\microsoft\\teams\\")
+        || text.contains("\\teams\\current\\")
+        || text.contains("com.squirrel.teams.teams")
+        || text.contains("processstart teams.exe")
+        || text.contains("teams.exe")
+        || text.contains("ms-teams.exe")
+        || text.contains("msteams.exe")
+}
+
+#[cfg(target_os = "windows")]
+fn looks_like_teams_window_context(title: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    title.contains("teams")
+        || title.contains("microsoft teams")
+        || title.contains("teams.microsoft.com")
 }
 
 fn looks_like_teams_meeting_title(title: &str) -> bool {
@@ -416,6 +535,7 @@ fn looks_like_teams_meeting_title(title: &str) -> bool {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::WindowSnapshot;
+    use std::collections::HashSet;
     use std::ffi::c_void;
 
     type Bool = i32;
@@ -432,24 +552,33 @@ mod windows {
         fn GetWindowTextLengthW(hwnd: Hwnd) -> i32;
         fn GetWindowTextW(hwnd: Hwnd, string: *mut u16, max_count: i32) -> i32;
         fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut Dword) -> Dword;
+        fn GetForegroundWindow() -> Hwnd;
+        fn IsIconic(hwnd: Hwnd) -> Bool;
         fn IsWindowVisible(hwnd: Hwnd) -> Bool;
     }
 
-    struct WindowCollector {
+    struct WindowCollector<'a> {
         max_samples: usize,
+        foreground_window: Hwnd,
+        relevant_process_ids: &'a HashSet<u32>,
         windows: Vec<WindowSnapshot>,
     }
 
-    pub fn list_visible_windows(max_samples: usize) -> Vec<WindowSnapshot> {
+    pub fn list_relevant_windows(
+        max_samples: usize,
+        relevant_process_ids: &HashSet<u32>,
+    ) -> Vec<WindowSnapshot> {
         let mut collector = WindowCollector {
-            max_samples,
+            max_samples: max_samples.max(1),
+            foreground_window: unsafe { GetForegroundWindow() },
+            relevant_process_ids,
             windows: Vec::new(),
         };
 
         unsafe {
             EnumWindows(
                 Some(enum_window),
-                &mut collector as *mut WindowCollector as Lparam,
+                &mut collector as *mut WindowCollector<'_> as Lparam,
             );
         }
 
@@ -466,6 +595,9 @@ mod windows {
         if IsWindowVisible(hwnd) == 0 {
             return 1;
         }
+
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, &mut process_id);
 
         let title_length = GetWindowTextLengthW(hwnd);
         if title_length <= 0 {
@@ -485,11 +617,17 @@ mod windows {
             return 1;
         }
 
-        let mut process_id = 0;
-        GetWindowThreadProcessId(hwnd, &mut process_id);
+        let has_relevant_pid =
+            process_id != 0 && collector.relevant_process_ids.contains(&process_id);
+        if !has_relevant_pid && !super::looks_like_teams_window_context(&title) {
+            return 1;
+        }
+
         collector.windows.push(WindowSnapshot {
             pid: (process_id != 0).then_some(process_id),
             title,
+            is_foreground: hwnd == collector.foreground_window,
+            is_minimized: IsIconic(hwnd) != 0,
         });
 
         1
@@ -499,6 +637,47 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process(pid: u32, name: &str) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.to_string(),
+            exe_path: None,
+            command_line: Vec::new(),
+        }
+    }
+
+    fn process_with_context(
+        pid: u32,
+        name: &str,
+        exe_path: Option<&str>,
+        command_line: &[&str],
+    ) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.to_string(),
+            exe_path: exe_path.map(str::to_string),
+            command_line: command_line.iter().map(|part| part.to_string()).collect(),
+        }
+    }
+
+    fn window(pid: Option<u32>, title: &str) -> WindowSnapshot {
+        WindowSnapshot {
+            pid,
+            title: title.to_string(),
+            is_foreground: false,
+            is_minimized: false,
+        }
+    }
+
+    fn foreground_window(pid: Option<u32>, title: &str) -> WindowSnapshot {
+        WindowSnapshot {
+            pid,
+            title: title.to_string(),
+            is_foreground: true,
+            is_minimized: false,
+        }
+    }
 
     #[test]
     fn title_detection_requires_teams_and_meeting_context() {
@@ -515,18 +694,16 @@ mod tests {
     #[test]
     fn confidence_detects_desktop_meeting_window() {
         let config = TeamsDetectionConfig::default();
-        let processes = vec![ProcessSnapshot {
-            pid: 42,
-            name: "ms-teams.exe".to_string(),
-        }];
-        let windows = vec![WindowSnapshot {
-            pid: Some(42),
-            title: "Weekly sync | Microsoft Teams Meeting".to_string(),
-        }];
+        let processes = vec![process(42, "ms-teams.exe")];
+        let windows = vec![foreground_window(
+            Some(42),
+            "Weekly sync | Microsoft Teams Meeting",
+        )];
 
         let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
 
         assert!(status.detected);
+        assert_eq!(status.status, TeamsDetectionState::Detected);
         assert!(status.confidence >= DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(
             status.next_recommended_action,
@@ -537,31 +714,60 @@ mod tests {
     #[test]
     fn process_only_is_not_detected_when_title_signal_is_required() {
         let config = TeamsDetectionConfig::default();
-        let processes = vec![ProcessSnapshot {
-            pid: 42,
-            name: "ms-teams.exe".to_string(),
-        }];
+        let processes = vec![process(42, "ms-teams.exe")];
 
         let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &[]);
 
         assert!(!status.detected);
+        assert_eq!(status.status, TeamsDetectionState::Possible);
         assert!(status.confidence < DEFAULT_CONFIDENCE_THRESHOLD);
     }
 
     #[test]
     fn browser_meeting_title_can_reach_threshold() {
         let config = TeamsDetectionConfig::default();
-        let processes = vec![ProcessSnapshot {
-            pid: 99,
-            name: "msedge.exe".to_string(),
-        }];
-        let windows = vec![WindowSnapshot {
-            pid: Some(99),
-            title: "teams.microsoft.com - Customer call - Microsoft Teams".to_string(),
-        }];
+        let processes = vec![process(99, "msedge.exe")];
+        let windows = vec![window(
+            Some(99),
+            "teams.microsoft.com - Customer call - Microsoft Teams",
+        )];
 
         let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
 
         assert!(status.detected);
+    }
+
+    #[test]
+    fn generic_update_process_is_not_a_teams_process() {
+        let update_process = process_with_context(
+            12,
+            "Update.exe",
+            Some(r"C:\Program Files\Vendor\Update.exe"),
+            &[r"C:\Program Files\Vendor\Update.exe", "--background"],
+        );
+
+        assert!(!is_teams_process(&update_process));
+    }
+
+    #[test]
+    fn teams_update_process_requires_teams_context() {
+        let update_process = process_with_context(
+            13,
+            "Update.exe",
+            Some(r"C:\Users\user\AppData\Local\Microsoft\Teams\Update.exe"),
+            &["Update.exe", "--processStart", "Teams.exe"],
+        );
+
+        assert!(is_teams_process(&update_process));
+    }
+
+    #[test]
+    fn no_signals_reports_not_detected() {
+        let config = TeamsDetectionConfig::default();
+        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &[], &[]);
+
+        assert!(!status.detected);
+        assert_eq!(status.status, TeamsDetectionState::NotDetected);
+        assert_eq!(status.next_recommended_action, TeamsDetectionAction::Idle);
     }
 }
