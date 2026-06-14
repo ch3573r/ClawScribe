@@ -45,6 +45,7 @@ pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
+pub mod openclaw;
 pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
@@ -616,6 +617,10 @@ pub fn run() {
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
             audio::recording_commands::get_active_audio_output,
+            // OpenClaw handoff commands
+            openclaw::get_openclaw_config_status,
+            openclaw::save_openclaw_config,
+            openclaw::submit_meeting_folder_to_openclaw,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,

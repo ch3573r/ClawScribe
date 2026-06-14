@@ -889,6 +889,12 @@ pub async fn stop_recording<R: Runtime>(
     )
     .map_err(|e| e.to_string())?;
 
+    crate::openclaw::submit_completed_recording(
+        app.clone(),
+        folder_path_str.clone(),
+        meeting_name_str.clone(),
+    );
+
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);
 
