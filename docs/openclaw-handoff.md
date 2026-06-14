@@ -14,6 +14,7 @@ the Settings page to see the exact resolved config path on the recorder.
 {
   "enabled": true,
   "endpoint": "http://openclaw-host.local:8765/meetings/completed",
+  "model_endpoint": "http://openclaw-host.local:8765/v1/chat/completions",
   "bearer_token": "replace-me",
   "source": "ClawScribe",
   "include_audio_path": false
@@ -24,10 +25,18 @@ the Settings page to see the exact resolved config path on the recorder.
 this fork. Use `http://127.0.0.1:8765/meetings/completed` only when the
 OpenClaw ingest service runs on the same Windows machine.
 
+When the summarization provider is set to `OpenClaw managed auth`, ClawScribe
+uses `model_endpoint` as an OpenAI-compatible chat-completions bridge. The
+default is `http://openclaw-host.local:8765/v1/chat/completions`; that endpoint is
+implemented by the OpenClaw ingest service and routes through the host's
+existing OpenClaw gateway/Codex auth. ClawScribe sends only the configured
+handoff bearer token and does not store ChatGPT/Codex tokens.
+
 The same values can be overridden with environment variables:
 
 - `MEETILY_OPENCLAW_ENABLED`
 - `MEETILY_OPENCLAW_ENDPOINT`
+- `MEETILY_OPENCLAW_MODEL_ENDPOINT`
 - `MEETILY_OPENCLAW_BEARER_TOKEN`
 - `MEETILY_OPENCLAW_SOURCE`
 - `MEETILY_OPENCLAW_INCLUDE_AUDIO_PATH`
@@ -58,6 +67,9 @@ MEETING_OPENCLAW_INGEST_PORT=8765
 MEETING_OPENCLAW_INGEST_OUTPUT_ROOT=/path/to/openclaw-ingest/out
 MEETING_OPENCLAW_INGEST_REQUIRE_TOKEN=1
 MEETING_OPENCLAW_INGEST_TOKEN=<long-random-token>
+MEETING_OPENCLAW_MODEL_PROCESSING_ENABLED=1
+MEETING_OPENCLAW_MODEL_PROCESSING_TRANSPORT=gateway
+MEETING_OPENCLAW_MODEL_PROCESSING_MODEL=openai/gpt-5.4
 ```
 
 Use `127.0.0.1` instead of `0.0.0.0` for loopback-only testing. If binding to

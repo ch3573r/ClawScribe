@@ -73,6 +73,7 @@ pub enum LLMProvider {
     OpenRouter,
     BuiltInAI,
     CustomOpenAI,
+    OpenClaw,
 }
 
 impl LLMProvider {
@@ -86,6 +87,7 @@ impl LLMProvider {
             "openrouter" => Ok(Self::OpenRouter),
             "builtin-ai" | "local-llama" | "localllama" => Ok(Self::BuiltInAI),
             "custom-openai" => Ok(Self::CustomOpenAI),
+            "openclaw" | "openclaw-managed" => Ok(Self::OpenClaw),
             _ => Err(format!("Unsupported LLM provider: {}", s)),
         }
     }
@@ -178,6 +180,14 @@ pub async fn generate_summary(
                 header::HeaderMap::new(),
             )
         }
+        LLMProvider::OpenClaw => {
+            let endpoint = custom_openai_endpoint
+                .ok_or_else(|| "OpenClaw model endpoint not configured".to_string())?;
+            (
+                endpoint.trim_end_matches('/').to_string(),
+                header::HeaderMap::new(),
+            )
+        }
         LLMProvider::Claude => {
             let mut header_map = header::HeaderMap::new();
             header_map.insert(
@@ -192,7 +202,10 @@ pub async fn generate_summary(
                     .parse()
                     .map_err(|_| "Invalid anthropic version".to_string())?,
             );
-            ("https://api.anthropic.com/v1/messages".to_string(), header_map)
+            (
+                "https://api.anthropic.com/v1/messages".to_string(),
+                header_map,
+            )
         }
         LLMProvider::BuiltInAI => {
             // This case is handled earlier with early returns
@@ -218,12 +231,13 @@ pub async fn generate_summary(
 
     // Build request body based on provider
     let request_body = if provider != &LLMProvider::Claude {
-        // For CustomOpenAI, apply optional parameters if provided
-        let (max_tokens_val, temperature_val, top_p_val) = if provider == &LLMProvider::CustomOpenAI {
-            (max_tokens, temperature, top_p)
-        } else {
-            (None, None, None)
-        };
+        // For operator-managed OpenAI-compatible endpoints, apply optional parameters if provided.
+        let (max_tokens_val, temperature_val, top_p_val) =
+            if matches!(provider, LLMProvider::CustomOpenAI | LLMProvider::OpenClaw) {
+                (max_tokens, temperature, top_p)
+            } else {
+                (None, None, None)
+            };
 
         serde_json::json!(ChatRequest {
             model: model_name.to_string(),
@@ -253,7 +267,11 @@ pub async fn generate_summary(
         })
     };
 
-    info!("🐞 LLM Request to {}: model={}", provider_name(provider), model_name);
+    info!(
+        "🐞 LLM Request to {}: model={}",
+        provider_name(provider),
+        model_name
+    );
 
     // Send request with timeout and cancellation support
     let request_future = client
@@ -342,5 +360,6 @@ fn provider_name(provider: &LLMProvider) -> &str {
         LLMProvider::BuiltInAI => "Built-in AI",
         LLMProvider::OpenRouter => "OpenRouter",
         LLMProvider::CustomOpenAI => "Custom OpenAI",
+        LLMProvider::OpenClaw => "OpenClaw managed auth",
     }
 }

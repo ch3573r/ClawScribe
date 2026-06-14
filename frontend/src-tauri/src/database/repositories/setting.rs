@@ -72,10 +72,10 @@ impl SettingsRepository {
         provider: &str,
         api_key: &str,
     ) -> std::result::Result<(), sqlx::Error> {
-        // Custom OpenAI uses JSON config (customOpenAIConfig) instead of a separate API key column
-        if provider == "custom-openai" {
+        // Operator-managed providers use their own config instead of a separate API key column.
+        if provider == "custom-openai" || provider == "openclaw" {
             return Err(sqlx::Error::Protocol(
-                "custom-openai provider should use save_custom_openai_config() instead of save_api_key()".into(),
+                format!("{provider} provider should not use save_api_key()").into(),
             ));
         }
 
@@ -116,6 +116,9 @@ impl SettingsRepository {
             let config = Self::get_custom_openai_config(pool).await?;
             return Ok(config.and_then(|c| c.api_key));
         }
+        if provider == "openclaw" {
+            return Ok(None);
+        }
 
         let api_key_column = match provider {
             "openai" => "openaiApiKey",
@@ -147,7 +150,6 @@ impl SettingsRepository {
                 .fetch_optional(pool)
                 .await?;
         Ok(setting)
-
     }
 
     pub async fn save_transcript_config(
@@ -198,7 +200,9 @@ impl SettingsRepository {
             ON CONFLICT(id) DO UPDATE SET
                 "{}" = $1
             "#,
-            api_key_column, crate::config::DEFAULT_PARAKEET_MODEL, api_key_column
+            api_key_column,
+            crate::config::DEFAULT_PARAKEET_MODEL,
+            api_key_column
         );
         sqlx::query(&query).bind(api_key).execute(pool).await?;
 
@@ -285,7 +289,7 @@ impl SettingsRepository {
             FROM settings
             WHERE id = '1'
             LIMIT 1
-            "#
+            "#,
         )
         .fetch_optional(pool)
         .await?;
@@ -296,10 +300,11 @@ impl SettingsRepository {
 
                 if let Some(json) = config_json {
                     // Parse JSON into CustomOpenAIConfig
-                    let config: CustomOpenAIConfig = serde_json::from_str(&json)
-                        .map_err(|e| sqlx::Error::Protocol(
-                            format!("Invalid JSON in customOpenAIConfig: {}", e).into()
-                        ))?;
+                    let config: CustomOpenAIConfig = serde_json::from_str(&json).map_err(|e| {
+                        sqlx::Error::Protocol(
+                            format!("Invalid JSON in customOpenAIConfig: {}", e).into(),
+                        )
+                    })?;
 
                     Ok(Some(config))
                 } else {
@@ -324,10 +329,9 @@ impl SettingsRepository {
         config: &CustomOpenAIConfig,
     ) -> std::result::Result<(), sqlx::Error> {
         // Serialize config to JSON
-        let config_json = serde_json::to_string(config)
-            .map_err(|e| sqlx::Error::Protocol(
-                format!("Failed to serialize config to JSON: {}", e).into()
-            ))?;
+        let config_json = serde_json::to_string(config).map_err(|e| {
+            sqlx::Error::Protocol(format!("Failed to serialize config to JSON: {}", e).into())
+        })?;
 
         // Upsert into settings table
         sqlx::query(

@@ -15,6 +15,7 @@ const SUBMITTED_MARKER: &str = ".openclaw-submitted.json";
 const FAILED_MARKER: &str = ".openclaw-failed.json";
 const PENDING_STALE_SECONDS: i64 = 15 * 60;
 const DEFAULT_ENDPOINT: &str = "http://openclaw-host.local:8765/meetings/completed";
+const DEFAULT_MODEL_ENDPOINT: &str = "http://openclaw-host.local:8765/v1/chat/completions";
 const DEFAULT_SOURCE: &str = "ClawScribe";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,7 @@ const DEFAULT_SOURCE: &str = "ClawScribe";
 pub struct OpenClawConfig {
     pub enabled: bool,
     pub endpoint: String,
+    pub model_endpoint: String,
     pub bearer_token: String,
     pub source: String,
     pub include_audio_path: bool,
@@ -32,6 +34,7 @@ impl Default for OpenClawConfig {
         Self {
             enabled: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
+            model_endpoint: DEFAULT_MODEL_ENDPOINT.to_string(),
             bearer_token: String::new(),
             source: DEFAULT_SOURCE.to_string(),
             include_audio_path: false,
@@ -46,6 +49,7 @@ pub struct OpenClawConfigStatus {
     pub ready: bool,
     pub bearer_token_configured: bool,
     pub endpoint: String,
+    pub model_endpoint: String,
     pub source: String,
     pub status_message: String,
     pub config_path: String,
@@ -95,6 +99,7 @@ pub async fn get_openclaw_config_status<R: Runtime>(
         ready,
         bearer_token_configured,
         endpoint: config.endpoint,
+        model_endpoint: config.model_endpoint,
         source: config.source,
         status_message: openclaw_status_message(
             config.enabled,
@@ -446,7 +451,7 @@ async fn submit_folder_with_config(
     }
 }
 
-fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
+pub(crate) fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
     let mut config = match fs::read_to_string(config_path(app)?) {
         Ok(content) if !content.trim().is_empty() => {
             serde_json::from_str::<OpenClawConfig>(&content).map_err(|e| e.to_string())?
@@ -462,6 +467,9 @@ fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String>
     }
     if let Ok(value) = env::var("MEETILY_OPENCLAW_ENDPOINT") {
         config.endpoint = value;
+    }
+    if let Ok(value) = env::var("MEETILY_OPENCLAW_MODEL_ENDPOINT") {
+        config.model_endpoint = value;
     }
     if let Ok(value) = env::var("MEETILY_OPENCLAW_BEARER_TOKEN") {
         config.bearer_token = value;
@@ -481,11 +489,15 @@ fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String>
 
 fn normalize_config(mut config: OpenClawConfig) -> OpenClawConfig {
     config.endpoint = config.endpoint.trim().to_string();
+    config.model_endpoint = config.model_endpoint.trim().to_string();
     config.bearer_token = config.bearer_token.trim().to_string();
     config.source = config.source.trim().to_string();
 
     if config.endpoint.is_empty() {
         config.endpoint = DEFAULT_ENDPOINT.to_string();
+    }
+    if config.model_endpoint.is_empty() {
+        config.model_endpoint = DEFAULT_MODEL_ENDPOINT.to_string();
     }
     if config.source.is_empty() {
         config.source = DEFAULT_SOURCE.to_string();

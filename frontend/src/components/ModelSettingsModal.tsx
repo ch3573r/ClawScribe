@@ -87,6 +87,7 @@ interface OpenClawConfigStatus {
   ready: boolean;
   bearer_token_configured: boolean;
   endpoint: string;
+  model_endpoint: string;
   source: string;
   status_message: string;
 }
@@ -1209,6 +1210,11 @@ export function ModelSettingsModal({
                       {openClawStatus?.endpoint && (
                         <p className="text-xs">
                           Handoff endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.endpoint}</code>
+                        </p>
+                      )}
+                      {openClawStatus?.model_endpoint && (
+                        <p className="text-xs">
+                          Model endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.model_endpoint}</code>
                         </p>
                       )}
                     </div>

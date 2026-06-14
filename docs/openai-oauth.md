@@ -41,15 +41,26 @@ backend that owns ChatGPT/Codex-authenticated processing. ClawScribe stores only
 endpoint metadata and does not mint, accept, persist, refresh, or expose ChatGPT
 or Codex tokens.
 
+In the current OpenClaw deployment, this endpoint is the ingest service's
+OpenAI-compatible model bridge:
+
+```text
+http://openclaw-host.local:8765/v1/chat/completions
+```
+
+That bridge runs `openclaw infer model run --gateway --model openai/gpt-5.4`
+on the trusted OpenClaw host, using the existing OpenClaw/ChatGPT/Codex auth
+state there.
+
 Configuration shape:
 
 ```json
 {
   "mode": "openclaw_codex_managed",
   "openclawCodexManaged": {
-    "endpoint": "http://127.0.0.1:41980/openclaw/codex/auth/process",
-    "statusEndpoint": "http://127.0.0.1:41980/openclaw/codex/auth/status",
-    "label": "OpenClaw local backend"
+    "endpoint": "http://openclaw-host.local:8765/v1/chat/completions",
+    "statusEndpoint": "http://openclaw-host.local:8765/readyz",
+    "label": "OpenClaw managed auth bridge"
   }
 }
 ```
