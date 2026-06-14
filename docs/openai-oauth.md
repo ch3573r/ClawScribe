@@ -1,7 +1,9 @@
 # OpenAI Auth Modes
 
-This fork treats OpenAI auth as a production configuration contract, not a fake
-OAuth implementation.
+This fork treats OpenAI auth as a production configuration contract. ClawScribe
+supports direct OpenAI API-key auth, and a separate OpenClaw/Codex managed route
+for ChatGPT/Codex-authenticated processing. The managed route is not public
+OpenAI OAuth.
 
 ## Supported Request Auth
 
@@ -30,57 +32,59 @@ Related commands:
 - `api_get_openai_auth_status`
 - `api_save_openai_auth_config` with `{ "mode": "api_key" }`
 
-## Explicit Unsupported Auth
+### OpenClaw/Codex Managed Auth
 
-### OAuth PKCE
+Status: supported and request-ready when an endpoint is configured.
 
-Status: metadata-only, not request-ready.
+This mode represents a production handoff to an OpenClaw endpoint or local
+backend that owns ChatGPT/Codex-authenticated processing. ClawScribe stores only
+endpoint metadata and does not mint, accept, persist, refresh, or expose ChatGPT
+or Codex tokens.
 
-The backend accepts and validates public OAuth PKCE metadata so the app can keep
-a concrete future integration shape:
+Configuration shape:
 
-- `clientId`
-- `authorizationEndpoint`
-- `tokenEndpoint`
-- `redirectUri`
-- `scopes`
-- optional `deviceAuthorizationEndpoint`
-- optional `issuer`
-- optional `audience`
+```json
+{
+  "mode": "openclaw_codex_managed",
+  "openclawCodexManaged": {
+    "endpoint": "http://127.0.0.1:41980/openclaw/codex/auth/process",
+    "statusEndpoint": "http://127.0.0.1:41980/openclaw/codex/auth/status",
+    "label": "OpenClaw local backend"
+  }
+}
+```
 
-The backend can prepare a real short-lived PKCE S256 browser authorization
-request with:
+Fields:
 
-- generated `state`
-- generated `nonce`
-- generated `codeVerifier`
-- derived `codeChallenge`
-- `codeChallengeMethod: "S256"`
-- browser-launch `authorizationUrl`
-- 10-minute `expiresAt`
+- `endpoint`: required OpenClaw/local backend endpoint used for managed
+  ChatGPT/Codex-authenticated processing.
+- `statusEndpoint`: optional endpoint for backend sign-in/readiness checks.
+- `label`: optional operator-facing name for the configured backend.
 
-Command:
+URLs must use `https`, except localhost and `127.0.0.1` endpoints may use
+`http` for local desktop backends.
+
+Related command:
+
+- `api_save_openai_auth_config` with `{ "mode": "openclaw_codex_managed" }`
+
+## Public OpenAI OAuth PKCE
+
+Status: compatibility metadata only, not request-ready.
+
+Public OpenAI OAuth PKCE is intentionally distinct from the OpenClaw/Codex
+managed route. The backend may still validate legacy PKCE metadata and prepare a
+short-lived browser authorization URL for compatibility, but that path does not
+authenticate ClawScribe requests.
+
+Compatibility commands:
 
 - `api_prepare_openai_oauth_pkce_authorization`
-
-This command does not open the browser by itself and does not store tokens.
-
-Token exchange is intentionally unsupported in this build. The explicit
-unsupported command is:
-
 - `api_exchange_openai_oauth_pkce_code`
 
-It returns an error instead of minting, accepting, storing, or pretending to
-refresh OAuth tokens.
-
-Before OAuth can become request-ready, the product still needs official OpenAI
-OAuth app/client details for this desktop app, allowed redirect URI rules,
-authorization and token endpoint requirements, scopes, and a secure local token
-storage design. Until then, `canAuthenticateRequests` is false for
-`oauth_pkce`.
-
-No OAuth client secret, access token, refresh token, or fake token is stored in
-source code or settings.
+`api_exchange_openai_oauth_pkce_code` returns an error. No OAuth client secret,
+access token, refresh token, ChatGPT token, Codex token, or fake token is stored
+in source code or settings.
 
 ## Disabled Or Not Configured
 
@@ -93,20 +97,26 @@ When no OpenAI auth metadata and no API key are present,
 
 Important fields:
 
-- `mode`: `disabled`, `api_key`, or `oauth_pkce`.
+- `mode`: `disabled`, `api_key`, `openclaw_codex_managed`, or `oauth_pkce`.
 - `configured`: whether the selected mode has enough local configuration.
 - `apiKeyPresent`: whether the OpenAI API key exists.
-- `oauthPkceConfigured`: whether OAuth PKCE metadata exists.
-- `oauthBrowserLaunchReady`: whether an authorization URL can be prepared.
-- `oauthDeviceFlowConfigured`: whether a device endpoint was configured.
-- `canAuthenticateRequests`: true only for API-key auth with a stored key.
+- `openclawCodexManagedConfigured`: whether managed endpoint metadata exists.
+- `openclawCodexEndpointPresent`: whether the managed request endpoint exists.
+- `oauthPkceConfigured`: whether legacy public OAuth PKCE metadata exists.
+- `oauthBrowserLaunchReady`: whether a legacy authorization URL can be prepared.
+- `oauthDeviceFlowConfigured`: whether a legacy device endpoint was configured.
+- `canAuthenticateRequests`: true for API-key auth with a stored key, or for
+  `openclaw_codex_managed` with an endpoint configured.
 - `requestAuthentication`: `bearer_api_key`, `missing_api_key`,
+  `openclaw_codex_managed`, `missing_openclaw_codex_endpoint`,
   `unsupported_oauth_pkce`, `disabled`, or `not_configured`.
-- `unsupportedReason`: why OAuth cannot authenticate OpenAI requests yet.
+- `unsupportedReason`: why legacy public OAuth PKCE cannot authenticate
+  requests.
 - `nextAction`: operator-facing next step.
 
 ## Validation Notes
 
-The Rust unit tests cover legacy API-key compatibility, disabled mode, OAuth
-metadata normalization, URL validation, status capability fields, and PKCE S256
-authorization request generation.
+The Rust unit tests cover legacy API-key compatibility, disabled mode,
+OpenClaw/Codex managed endpoint normalization and status capability fields,
+legacy public OAuth metadata handling, URL validation, and PKCE S256
+authorization request compatibility.
