@@ -620,6 +620,7 @@ pub fn run() {
             audio::recording_commands::get_active_audio_output,
             // OpenClaw handoff commands
             openclaw::get_openclaw_config_status,
+            openclaw::get_openclaw_submission_status,
             openclaw::save_openclaw_config,
             openclaw::submit_meeting_folder_to_openclaw,
             // Teams meeting detection commands
