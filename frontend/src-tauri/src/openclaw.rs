@@ -14,6 +14,8 @@ const PENDING_MARKER: &str = ".openclaw-pending.json";
 const SUBMITTED_MARKER: &str = ".openclaw-submitted.json";
 const FAILED_MARKER: &str = ".openclaw-failed.json";
 const PENDING_STALE_SECONDS: i64 = 15 * 60;
+const DEFAULT_ENDPOINT: &str = "http://openclaw-host.local:8765/meetings/completed";
+const DEFAULT_SOURCE: &str = "ClawScribe";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,9 +31,9 @@ impl Default for OpenClawConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            endpoint: "http://127.0.0.1:8765/meetings/completed".to_string(),
+            endpoint: DEFAULT_ENDPOINT.to_string(),
             bearer_token: String::new(),
-            source: "ClawScribe".to_string(),
+            source: DEFAULT_SOURCE.to_string(),
             include_audio_path: false,
         }
     }
@@ -41,9 +43,11 @@ impl Default for OpenClawConfig {
 pub struct OpenClawConfigStatus {
     pub enabled: bool,
     pub configured: bool,
+    pub ready: bool,
     pub bearer_token_configured: bool,
     pub endpoint: String,
     pub source: String,
+    pub status_message: String,
     pub config_path: String,
     pub last_status_path: String,
     pub include_audio_path: bool,
@@ -80,13 +84,24 @@ pub async fn get_openclaw_config_status<R: Runtime>(
     let config_path = config_path(&app)?;
     let last_status_path = last_status_path(&app)?;
     let bearer_token_configured = !config.bearer_token.trim().is_empty();
+    let endpoint_configured = !config.endpoint.trim().is_empty();
+    let source_configured = !config.source.trim().is_empty();
+    let configured = endpoint_configured && source_configured && bearer_token_configured;
+    let ready = config.enabled && configured;
 
     Ok(OpenClawConfigStatus {
         enabled: config.enabled,
-        configured: !config.endpoint.trim().is_empty() && bearer_token_configured,
+        configured,
+        ready,
         bearer_token_configured,
         endpoint: config.endpoint,
         source: config.source,
+        status_message: openclaw_status_message(
+            config.enabled,
+            endpoint_configured,
+            source_configured,
+            bearer_token_configured,
+        ),
         config_path: config_path.to_string_lossy().to_string(),
         last_status_path: last_status_path.to_string_lossy().to_string(),
         include_audio_path: config.include_audio_path,
@@ -104,6 +119,7 @@ pub async fn save_openclaw_config<R: Runtime>(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
+    let config = normalize_config(config);
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
 }
@@ -460,7 +476,44 @@ fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String>
         );
     }
 
-    Ok(config)
+    Ok(normalize_config(config))
+}
+
+fn normalize_config(mut config: OpenClawConfig) -> OpenClawConfig {
+    config.endpoint = config.endpoint.trim().to_string();
+    config.bearer_token = config.bearer_token.trim().to_string();
+    config.source = config.source.trim().to_string();
+
+    if config.endpoint.is_empty() {
+        config.endpoint = DEFAULT_ENDPOINT.to_string();
+    }
+    if config.source.is_empty() {
+        config.source = DEFAULT_SOURCE.to_string();
+    }
+
+    config
+}
+
+fn openclaw_status_message(
+    enabled: bool,
+    endpoint_configured: bool,
+    source_configured: bool,
+    bearer_token_configured: bool,
+) -> String {
+    if !enabled {
+        return "OpenClaw handoff is disabled".to_string();
+    }
+    if !endpoint_configured {
+        return "OpenClaw endpoint is missing".to_string();
+    }
+    if !source_configured {
+        return "OpenClaw source is missing".to_string();
+    }
+    if !bearer_token_configured {
+        return "OpenClaw bearer token is missing".to_string();
+    }
+
+    "OpenClaw handoff is ready".to_string()
 }
 
 fn config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {

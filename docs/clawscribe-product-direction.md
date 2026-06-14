@@ -40,8 +40,7 @@ before automatically starting or stopping a recording.
 
 - Keep ClawScribe as the fork-facing product name while upstream Meetily remains
   the implementation base for artifact formats and build structure.
-- Do not rename package identifiers, config filenames, environment variables, or
-  install paths unless the build and migration impact is handled in the same
-  change.
+- Use `net.rismondo.openclaw.clawscribe` for the Windows package identity.
+  Keep `MEETILY_OPENCLAW_*` environment variables for deployment compatibility.
 - Keep the OpenClaw handoff reset-safe: artifact markers should live inside the
   recording folder, and repeated submissions should remain idempotent.

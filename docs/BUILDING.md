@@ -310,10 +310,14 @@ The application will be built with Metal GPU acceleration automatically.
 # Development mode (with hot reload)
 pnpm tauri:dev
 
-# Production build
-pnpm tauri:build
+# Production MSI/NSIS artifacts
+.\scripts\build-windows-release.ps1
 ```
 
-By default, the application will be built with CPU-only processing. To enable GPU acceleration, see the [GPU Acceleration Guide](GPU_ACCELERATION.md).
+The OpenClaw-focused Windows build is packaged as ClawScribe
+(`net.rismondo.openclaw.clawscribe`) and emits MSI/NSIS artifacts under
+`frontend\src-tauri\target\release\bundle`. See
+[ClawScribe Windows Release](windows-release.md) for the validation-only path,
+feature overrides, signing behavior, and OpenClaw endpoint configuration.
 
 </details>

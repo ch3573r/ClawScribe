@@ -6,7 +6,9 @@ and final `transcripts.json` and `metadata.json` artifacts have been written.
 
 ## Configuration
 
-ClawScribe reads this JSON file from its Tauri app config directory:
+ClawScribe reads this JSON file from its Tauri app config directory. The
+Windows production app identifier is `net.rismondo.openclaw.clawscribe`; use
+the Settings page to see the exact resolved config path on the recorder.
 
 ```json
 {
@@ -18,9 +20,9 @@ ClawScribe reads this JSON file from its Tauri app config directory:
 }
 ```
 
-Use `http://127.0.0.1:8765/meetings/completed` only when the OpenClaw ingest
-service runs on the same Windows machine. The current LAN handoff target is the
-OpenClaw host at `openclaw-host.local`, port `8765`, path `/meetings/completed`.
+`http://openclaw-host.local:8765/meetings/completed` is the production default in
+this fork. Use `http://127.0.0.1:8765/meetings/completed` only when the
+OpenClaw ingest service runs on the same Windows machine.
 
 The same values can be overridden with environment variables:
 
@@ -31,9 +33,9 @@ The same values can be overridden with environment variables:
 - `MEETILY_OPENCLAW_INCLUDE_AUDIO_PATH`
 
 The `MEETILY_OPENCLAW_*` names are intentionally retained as implementation
-keys for reset-safe compatibility with the fork's current handoff code. Rename
-package identifiers, config filenames, or environment variables only as a
-coordinated build/install change.
+keys for reset-safe compatibility with existing recorder deployments. The
+Windows package identity is now ClawScribe, but the environment variable names
+remain unchanged.
 
 Keep the bearer token out of committed files. On Windows, prefer setting
 `MEETILY_OPENCLAW_BEARER_TOKEN` as a user environment variable and leaving the
@@ -41,7 +43,7 @@ JSON `bearer_token` blank or placeholder-only in any copied example.
 
 ## OpenClaw Ingest Endpoint
 
-The live OpenClaw-side ingest scaffold is in:
+The live OpenClaw-side ingest service is in:
 
 ```text
 /path/to/openclaw-ingest
@@ -94,14 +96,14 @@ folder and removes stale pending or failure markers. On failure, it writes
 manual retries do not accidentally double-post a completed recording.
 
 The Tauri app config directory also contains `openclaw-last-submission.json`,
-which mirrors the most recent automatic or manual handoff outcome for frontend
-status panels.
+which mirrors the most recent automatic or manual handoff outcome for the
+Settings status panel.
 
 Frontend status commands:
 
 - `get_openclaw_config_status` returns enabled/configured state, config path,
-  last-status path, token-present status, audio-path setting, and the last
-  submission state if present.
+  last-status path, token-present status, audio-path setting, ready/not-ready
+  state, status message, and the last submission state if present.
 - `get_openclaw_submission_status` accepts a recording folder path and returns
   the folder's pending, submitted, or failed marker state.
 - `submit_meeting_folder_to_openclaw` manually submits a folder and updates the
@@ -109,4 +111,4 @@ Frontend status commands:
 
 The companion Windows tray/agent is no longer needed for the happy path once
 this fork is used as the recorder. It can remain as a diagnostic/manual
-processor while the fork-native handoff is being hardened.
+processor outside the recorder's production submission path.
