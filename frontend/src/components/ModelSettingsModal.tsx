@@ -17,7 +17,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
-import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown } from 'lucide-react';
+import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   Command,
@@ -31,7 +31,7 @@ import { cn, isOllamaNotInstalledError } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai';
+  provider: 'ollama' | 'groq' | 'claude' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw';
   model: string;
   whisperModel: string;
   apiKey?: string | null;
@@ -79,6 +79,16 @@ interface OpenAIAuthStatus {
   requestAuthentication: string;
   authReferenceUrl: string;
   unsupportedReason?: string;
+}
+
+interface OpenClawConfigStatus {
+  enabled: boolean;
+  configured: boolean;
+  ready: boolean;
+  bearer_token_configured: boolean;
+  endpoint: string;
+  source: string;
+  status_message: string;
 }
 
 interface AnthropicModel {
@@ -184,6 +194,9 @@ export function ModelSettingsModal({
   const [isLoadingGroq, setIsLoadingGroq] = useState<boolean>(false);
   const [openAIAuthStatus, setOpenAIAuthStatus] = useState<OpenAIAuthStatus | null>(null);
   const [isLoadingOpenAIAuthStatus, setIsLoadingOpenAIAuthStatus] = useState<boolean>(false);
+  const [openClawStatus, setOpenClawStatus] = useState<OpenClawConfigStatus | null>(null);
+  const [openClawStatusError, setOpenClawStatusError] = useState<string>('');
+  const [isLoadingOpenClawStatus, setIsLoadingOpenClawStatus] = useState<boolean>(false);
 
   // Use global download context instead of local state
   const { isDownloading, getProgress, downloadingModels } = useOllamaDownload();
@@ -250,6 +263,7 @@ export function ModelSettingsModal({
     openrouter: openRouterModels.map((m) => m.id),
     'builtin-ai': builtinAiModels.map((m) => m.name),
     'custom-openai': customOpenAIModel ? [customOpenAIModel] : [], // User specifies model manually
+    openclaw: ['openclaw-managed'],
   };
 
   const requiresApiKey =
@@ -287,7 +301,7 @@ export function ModelSettingsModal({
           setModelConfig(data);
 
           // Fetch API key if not included in response and provider requires it
-          if (data.provider !== 'ollama' && !data.apiKey) {
+          if (data.provider !== 'ollama' && data.provider !== 'openclaw' && !data.apiKey) {
             try {
               const apiKeyData = await invoke('api_get_api_key', {
                 provider: data.provider
@@ -609,6 +623,22 @@ export function ModelSettingsModal({
     }
   };
 
+  const loadOpenClawStatus = async () => {
+    setIsLoadingOpenClawStatus(true);
+    setOpenClawStatusError('');
+    try {
+      const status = (await invoke('get_openclaw_config_status')) as OpenClawConfigStatus;
+      setOpenClawStatus(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Error loading OpenClaw handoff status:', err);
+      setOpenClawStatus(null);
+      setOpenClawStatusError(message);
+    } finally {
+      setIsLoadingOpenClawStatus(false);
+    }
+  };
+
   // Auto-fetch OpenAI models when provider is openai and we have an API key
   useEffect(() => {
     if (modelConfig.provider === 'openai' && apiKey?.trim()) {
@@ -619,6 +649,9 @@ export function ModelSettingsModal({
   useEffect(() => {
     if (modelConfig.provider === 'openai') {
       loadOpenAIAuthStatus();
+    }
+    if (modelConfig.provider === 'openai' || modelConfig.provider === 'openclaw') {
+      loadOpenClawStatus();
     }
   }, [modelConfig.provider]);
 
@@ -923,6 +956,10 @@ export function ModelSettingsModal({
                     console.error('Failed to load custom OpenAI config:', err);
                   });
                 }
+
+                if (provider === 'openclaw') {
+                  loadOpenClawStatus();
+                }
               }}
             >
               <SelectTrigger>
@@ -935,11 +972,12 @@ export function ModelSettingsModal({
                 <SelectItem value="groq">Groq</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="openai">OpenAI</SelectItem>
+                <SelectItem value="openclaw">OpenClaw managed auth</SelectItem>
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
               </SelectContent>
             </Select>
 
-            {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && (
+            {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && modelConfig.provider !== 'openclaw' && (
               <Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen} modal={true}>
                 <PopoverTrigger asChild>
                   <Button
@@ -1125,6 +1163,75 @@ export function ModelSettingsModal({
           </div>
         )}
 
+        {modelConfig.provider === 'openclaw' && (
+          <Alert className={cn(
+            'border-amber-200 bg-amber-50',
+            openClawStatus?.ready && 'border-green-200 bg-green-50'
+          )}>
+            <AlertDescription className={cn(
+              'text-amber-900',
+              openClawStatus?.ready && 'text-green-900'
+            )}>
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className={cn(
+                      'mt-0.5 rounded-md p-2',
+                      openClawStatus?.ready ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                    )}>
+                      <ServerCog className="h-4 w-4" />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">Use OpenClaw ChatGPT/Codex auth</span>
+                        <span className={cn(
+                          'rounded-full px-2 py-0.5 text-xs font-medium',
+                          openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                        )}>
+                          {isLoadingOpenClawStatus
+                            ? 'Checking'
+                            : openClawStatus?.ready
+                              ? 'Ready'
+                              : 'Not ready'}
+                        </span>
+                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                          Production option
+                        </span>
+                      </div>
+                      <p className="text-sm">
+                        ClawScribe hands meeting processing to OpenClaw, which uses its managed ChatGPT/Codex auth. ClawScribe does not store ChatGPT tokens.
+                      </p>
+                      <p className="text-xs">
+                        {openClawStatusError
+                          ? `OpenClaw status unavailable: ${openClawStatusError}`
+                          : openClawStatus?.status_message || 'OpenClaw handoff status has not been checked yet.'}
+                      </p>
+                      {openClawStatus?.endpoint && (
+                        <p className="text-xs">
+                          Handoff endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.endpoint}</code>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={loadOpenClawStatus}
+                    disabled={isLoadingOpenClawStatus}
+                    title="Refresh OpenClaw handoff status"
+                  >
+                    <RefreshCw className={cn('h-4 w-4', isLoadingOpenClawStatus && 'animate-spin')} />
+                  </Button>
+                </div>
+                <p className="text-xs">
+                  This is separate from OpenAI API-key mode and custom OpenAI-compatible servers. Public OpenAI OAuth is not request-ready in this build.
+                </p>
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
         {requiresApiKey && (
           <div>
             <Label>API Key</Label>
@@ -1202,8 +1309,64 @@ export function ModelSettingsModal({
                   </Button>
                 </div>
                 <p className="text-xs">
-                  OAuth PKCE token exchange is intentionally unsupported here until official OpenAI OAuth app endpoints and secure token storage are available.
+                  Public OpenAI OAuth is not request-ready in this build. OAuth PKCE token exchange remains intentionally unsupported until official OpenAI app endpoints and secure token storage are available.
                 </p>
+                <div className={cn(
+                  'rounded-md border bg-white/80 p-3',
+                  openClawStatus?.ready ? 'border-green-200' : 'border-amber-200'
+                )}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className={cn(
+                        'mt-0.5 rounded-md p-2',
+                        openClawStatus?.ready ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                      )}>
+                        <ServerCog className="h-4 w-4" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">Use OpenClaw ChatGPT/Codex auth</span>
+                          <span className={cn(
+                            'rounded-full px-2 py-0.5 text-xs font-medium',
+                            openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                          )}>
+                            {isLoadingOpenClawStatus
+                              ? 'Checking'
+                              : openClawStatus?.ready
+                                ? 'Ready'
+                                : 'Not ready'}
+                          </span>
+                          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                            Production option
+                          </span>
+                        </div>
+                        <p className="text-sm">
+                          ClawScribe hands completed meeting processing to OpenClaw, where the managed ChatGPT/Codex auth is used. ClawScribe does not store ChatGPT tokens.
+                        </p>
+                        <p className="text-xs">
+                          {openClawStatusError
+                            ? `OpenClaw status unavailable: ${openClawStatusError}`
+                            : openClawStatus?.status_message || 'OpenClaw handoff status has not been checked yet.'}
+                        </p>
+                        {openClawStatus?.endpoint && (
+                          <p className="text-xs">
+                            Handoff endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.endpoint}</code>
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={loadOpenClawStatus}
+                      disabled={isLoadingOpenClawStatus}
+                      title="Refresh OpenClaw handoff status"
+                    >
+                      <RefreshCw className={cn('h-4 w-4', isLoadingOpenClawStatus && 'animate-spin')} />
+                    </Button>
+                  </div>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
