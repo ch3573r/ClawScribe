@@ -1382,6 +1382,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
                 meeting_id: "clawscribe-openai-compatible-test".to_string(),
                 meeting_title: Some("ClawScribe OpenAI-compatible test".to_string()),
                 transcript: "[00:00] Alice: We will send the release checklist today.\n[00:05] Bob: I will review the installer by tomorrow.".to_string(),
+                custom_prompt: None,
                 output_dir: Some(output_dir),
             },
             None,

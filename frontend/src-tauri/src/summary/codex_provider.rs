@@ -149,6 +149,7 @@ mod app_server_tests {
             "thread-1",
             "gpt-5.5",
             "[00:01] Alex: ship it",
+            Some("Customer calls Alex the project lead."),
             serde_json::json!({ "meeting_id": "m1" }),
         );
 
@@ -160,6 +161,10 @@ mod app_server_tests {
             .as_str()
             .unwrap()
             .contains("ship it"));
+        assert!(turn["params"]["input"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("project lead"));
         assert!(turn["params"]["input"][0]["text"]
             .as_str()
             .unwrap()
@@ -326,6 +331,7 @@ for line in sys.stdin:
                 meeting_id: "meeting-1".to_string(),
                 meeting_title: Some("Runtime".to_string()),
                 transcript: "[00:01] Bundle Codex.".to_string(),
+                custom_prompt: None,
                 output_dir: Some(temp.path().join("meeting")),
                 scratch_root: Some(temp.path().join("runs")),
             })
@@ -356,6 +362,7 @@ for line in sys.stdin:
                 meeting_id: "meeting-auth".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
+                custom_prompt: None,
                 output_dir: None,
                 scratch_root: Some(temp.path().join("runs")),
             })
@@ -723,6 +730,7 @@ impl CodexAppServerProvider {
             .process_turn(
                 &self.config.model,
                 "ClawScribe Codex app-server smoke test",
+                None,
                 serde_json::json!({ "meeting_id": "codex-smoke-test" }),
             )
             .await?;
@@ -781,6 +789,7 @@ impl CodexAppServerProvider {
             .process_turn(
                 &self.config.model,
                 &request.transcript,
+                request.custom_prompt.as_deref(),
                 serde_json::json!({
                     "meeting_id": request.meeting_id,
                     "meeting_title": request.meeting_title,
@@ -857,6 +866,7 @@ pub struct CodexMeetingProcessRequest {
     pub meeting_id: String,
     pub meeting_title: Option<String>,
     pub transcript: String,
+    pub custom_prompt: Option<String>,
     pub output_dir: Option<PathBuf>,
     pub scratch_root: Option<PathBuf>,
 }
@@ -1002,6 +1012,7 @@ pub async fn codex_process_meeting<R: Runtime>(
             meeting_id,
             meeting_title: Some(meeting.title),
             transcript,
+            custom_prompt: None,
             output_dir,
             scratch_root: None,
         })
@@ -1306,6 +1317,7 @@ fn app_server_turn_start_request(
     thread_id: &str,
     model: &str,
     transcript: &str,
+    custom_prompt: Option<&str>,
     metadata: Value,
 ) -> Value {
     json_rpc_request(
@@ -1316,7 +1328,7 @@ fn app_server_turn_start_request(
             "model": model,
             "input": [{
                 "type": "text",
-                "text": build_app_server_turn_text(transcript, metadata),
+                "text": build_app_server_turn_text(transcript, custom_prompt, metadata),
             }],
         }),
     )
@@ -1451,6 +1463,14 @@ impl AppServerSession {
         if let Some(url) = json_string_at(&response, &["verificationUrl"])
             .or_else(|| json_string_at(&response, &["verification_url"]))
         {
+            if login_type == "chatgptDeviceCode" && cfg!(target_os = "windows") {
+                match open_url_in_default_browser(&url) {
+                    Ok(()) => lines.push(format!("Opened ChatGPT device-code page: {url}")),
+                    Err(e) => lines.push(format!(
+                        "Could not open device-code page automatically: {e}"
+                    )),
+                }
+            }
             lines.push(format!("Verification URL: {url}"));
         }
         if let Some(code) = json_string_at(&response, &["userCode"])
@@ -1478,6 +1498,7 @@ impl AppServerSession {
         &mut self,
         model: &str,
         transcript: &str,
+        custom_prompt: Option<&str>,
         metadata: Value,
     ) -> Result<String, String> {
         let thread_response = self
@@ -1495,6 +1516,7 @@ impl AppServerSession {
                 &thread_id,
                 model,
                 transcript,
+                custom_prompt,
                 metadata.clone(),
             ))
             .await?;
@@ -1675,8 +1697,8 @@ fn hide_std_child_console(_command: &mut StdCommand) {}
 
 fn open_url_in_default_browser(url: &str) -> Result<(), String> {
     let mut command = if cfg!(target_os = "windows") {
-        let mut command = StdCommand::new("cmd");
-        command.args(["/C", "start", "", url]);
+        let mut command = StdCommand::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", url]);
         command
     } else if cfg!(target_os = "macos") {
         let mut command = StdCommand::new("open");
@@ -1694,14 +1716,29 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn build_app_server_turn_text(transcript: &str, metadata: Value) -> String {
-    format!(
+fn build_app_server_turn_text(
+    transcript: &str,
+    custom_prompt: Option<&str>,
+    metadata: Value,
+) -> String {
+    let mut text = format!(
         "{}\n\n<metadata>\n{}\n</metadata>\n\n<output_schema>\n{}\n</output_schema>\n\n<untrusted_transcript>\n{}\n</untrusted_transcript>\n",
         build_meeting_prompt(),
         serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "{}".to_string()),
         output_schema_json(),
         normalize_transcript_markdown(transcript)
-    )
+    );
+
+    if let Some(context) = custom_prompt
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    {
+        text.push_str("\nUser Provided Context:\n\n<user_context>\n");
+        text.push_str(context);
+        text.push_str("\n</user_context>\n");
+    }
+
+    text
 }
 
 fn parse_account_state(value: &Value) -> CodexAccountState {
@@ -2619,6 +2656,7 @@ exit 2
                 meeting_id: "meeting-1".to_string(),
                 meeting_title: Some("Codex Standup".to_string()),
                 transcript: "[00:01] We will use Codex.".to_string(),
+                custom_prompt: None,
                 output_dir: Some(output_dir.clone()),
                 scratch_root: Some(temp.path().join("runs")),
             })
@@ -2639,6 +2677,7 @@ exit 2
                 meeting_id: "meeting-2".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
+                custom_prompt: None,
                 output_dir: Some(temp.path().join("meeting")),
                 scratch_root: Some(temp.path().join("runs")),
             })
@@ -2656,6 +2695,7 @@ exit 2
                 meeting_id: "meeting-3".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
+                custom_prompt: None,
                 output_dir: Some(temp.path().join("meeting")),
                 scratch_root: Some(temp.path().join("runs")),
             })

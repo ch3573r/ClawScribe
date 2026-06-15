@@ -611,6 +611,7 @@ impl SummaryService {
                                 meeting_id: meeting_id.clone(),
                                 meeting_title,
                                 transcript: text.clone(),
+                                custom_prompt: Some(custom_prompt.clone()),
                                 output_dir,
                             },
                             Some(&cancellation_token),
@@ -705,6 +706,7 @@ impl SummaryService {
                             meeting_id: meeting_id.clone(),
                             meeting_title,
                             transcript: text.clone(),
+                            custom_prompt: Some(custom_prompt.clone()),
                             output_dir,
                             scratch_root: None,
                         })
