@@ -105,7 +105,7 @@ export function SettingsModals({
                     >
                       <option value="custom-openai">OpenAI / OpenAI-compatible API</option>
                       <option value="openclaw">OpenClaw</option>
-                      <option value="codex">Advanced: Codex runtime</option>
+                      <option value="codex">Advanced: Codex app-server</option>
                       <option value="builtin-ai">Built-in AI</option>
                       <option value="ollama">Ollama</option>
                       <option value="openrouter">OpenRouter</option>

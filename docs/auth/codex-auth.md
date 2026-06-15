@@ -1,25 +1,37 @@
-# Codex Auth
+# Codex App-Server Auth
 
-ClawScribe supports OpenAI login through Codex. This is Codex-managed
-ChatGPT/OpenAI sign-in, not a generic OAuth client inside ClawScribe.
+Codex is an advanced standalone ClawScribe provider, not the default processing
+path and not an OpenClaw dependency.
 
-ClawScribe does not implement private OpenAI OAuth endpoints, scrape ChatGPT
-cookies, or extract Codex access or refresh tokens. The boundary is the Codex
-runtime:
+Provider order:
 
-- `codex login`
-- `codex login --device-auth`
-- `codex login status`
-- `codex logout`
-- `codex exec`
+1. OpenAI / OpenAI-compatible API key
+2. OpenClaw
+3. Advanced: Codex app-server
 
-API-key mode remains available separately as the `OpenAI API Key` provider.
-OpenClaw Gateway mode remains available separately as the `OpenClaw` provider
-and existing OpenClaw handoff is unchanged.
+Normal ClawScribe meeting processing must work without any Codex runtime.
+
+## Boundary
+
+ClawScribe must not implement DIY OpenAI/Codex OAuth, copy Codex tokens, shape
+private Codex backend traffic, or depend on a global `codex.exe`.
+
+The supported boundary is the official Codex app-server runtime:
+
+- bundled/pinned platform-specific runtime, or controlled first-run installer
+- JSON-RPC over stdio / JSONL
+- isolated ClawScribe `CODEX_HOME`
+- app-server account/thread/turn RPC methods
+
+ClawScribe must not launch or suggest:
+
+- `%LOCALAPPDATA%\Microsoft\WindowsApps\codex.exe`
+- Microsoft Store app internals
+- user-browsed Codex executables
+- `codex` from `PATH`
+- the user's normal `~/.codex` profile
 
 ## Provider Shape
-
-Codex is one processing backend, not the only backend:
 
 ```json
 {
@@ -36,133 +48,99 @@ Codex is one processing backend, not the only backend:
 }
 ```
 
-The existing direct API-key and OpenClaw paths are preserved:
+`useExistingUserCodexSession` is retained only for backward config
+compatibility. Runtime normalization forces an isolated ClawScribe-owned
+`CODEX_HOME`.
 
-```json
-{ "processing": { "provider": "api-key" } }
-```
+## App-Server Flow
 
-```json
-{ "processing": { "provider": "openclaw" } }
-```
-
-## Codex Discovery
-
-ClawScribe discovers Codex in this order:
-
-1. Bundled Codex binary in app resources.
-2. User-configured Codex binary path.
-3. `codex` on `PATH`.
-4. A clear UI error with install instructions.
-
-ClawScribe does not silently install Codex.
-
-## CODEX_HOME
-
-The default mode is isolated:
+Startup:
 
 ```text
-%APPDATA%\ClawScribe\codex
+resolve bundled/pinned runtime
+start Codex app-server with stdio transport
+send initialize
+send notifications/initialized
+send account/read
 ```
 
-In isolated mode, ClawScribe creates the directory if needed, writes a minimal
-`config.toml`, sets `CODEX_HOME` only for Codex child processes, and treats any
-file-backed auth material as secret.
-
-The user may explicitly choose `Existing user Codex session`. In that mode,
-ClawScribe removes `CODEX_HOME` from the Codex child process environment so
-Codex uses the normal user profile instead of an inherited ClawScribe override.
-
-Never share:
-
-- `auth.json`
-- access tokens
-- refresh tokens
-- API keys
-- bearer tokens
-- full command environments
-
-Safe to share:
-
-- Codex version
-- Codex binary path
-- selected CODEX_HOME path
-- sanitized stderr/stdout
-- processing-log excerpts after redaction
-
-## Processing Flow
+Login:
 
 ```text
-recording finished
- -> transcript normalized
- -> CodexProcessingProvider invoked
- -> codex exec runs with prompt + transcript
- -> structured JSON validated
- -> meeting-output.json written
- -> meeting-notes.md written
- -> follow-up-email.md written
- -> OpenClaw handoff remains available
+account/login/start { "type": "chatgpt" }
 ```
 
-Codex run folders are created under:
+Device-code login:
 
 ```text
-%LOCALAPPDATA%\ClawScribe\codex-runs\<meeting-id>\
+account/login/start { "type": "chatgptDeviceCode" }
 ```
 
-Each run writes:
+The UI must surface `verificationUrl` and `userCode` when the device-code flow
+returns them, then listen for:
 
-- `transcript.md`
-- `metadata.json`
-- `output-schema.json`
-- `prompt.md`
-- `codex-output.json`
-- `codex-final.md`
-- `codex-events.jsonl`
+- `account/login/completed`
+- `account/updated`
+- progress notifications
+- auth failures
+- rate-limit or overload events
 
-Meeting output folders receive:
+Logout:
+
+```text
+account/logout
+```
+
+Meeting processing:
+
+```text
+thread/start
+turn/run
+```
+
+Each meeting must use a fresh thread/turn. The only meeting content sent to
+Codex is the normalized transcript, metadata, and strict output instructions.
+
+## Output Contract
+
+Codex app-server output must match the other providers:
 
 - `meeting-output.json`
 - `meeting-notes.md`
 - `follow-up-email.md`
 - `processing-log.json`
 
-## Settings
+Malformed structured output must fail loudly. Never silently accept malformed
+JSON.
 
-Open Settings -> AI Provider and choose `Advanced: Codex runtime`.
+## Security
 
-Available controls:
+- Use isolated `%APPDATA%\ClawScribe\codex` by default.
+- Do not read or write the user's global `~/.codex`.
+- Do not share auth state with standalone Codex CLI.
+- Prefer OS credential storage if the app-server runtime supports it.
+- Redact access tokens, refresh tokens, bearer strings, auth files, API keys,
+  and full command environments from logs and UI output.
 
-- Check Codex installation
-- CODEX_HOME mode
-- Sign in with OpenAI via Codex
-- Sign in with device code
-- Use existing Codex session
-- Use OpenAI API key instead, by selecting `OpenAI API Key`
-- Test OpenAI/Codex processing
-- Logout / clear Codex auth
+## Packaging
 
-## Verification Status Wording
-
-Use this wording until Alex completes the Windows checklist:
+The Codex provider is valid only when ClawScribe can resolve its own pinned
+app-server runtime. If no runtime is bundled yet, Settings must show:
 
 ```text
-Codex provider implemented and fake-tested. Linux Codex smoke tested if
-available. Windows login/runtime verification pending Alex after Windows build.
+runtime not installed
 ```
 
-Do not claim Windows Codex login/runtime verification from Linux checks.
-Windows verification requires `docs/verification/alex-windows-codex-checklist.md`
-to pass on the Windows meeting device.
+with a controlled repair/install action. OpenAI API key and OpenClaw must remain
+fully usable when the Codex runtime is missing.
 
-## Logout
+## Current Implementation Status
 
-ClawScribe first uses the supported Codex command:
+The product-facing direction has been switched to `Advanced: Codex app-server`.
+CLI discovery, WindowsApps suggestions, user-browsed `codex.exe`, global
+`PATH`, existing-user Codex sessions, and `codex exec` fallback are disabled for
+the provider surface.
 
-```powershell
-codex logout
-```
-
-For isolated mode, this operates on ClawScribe's `CODEX_HOME`. ClawScribe must
-not delete the user's global `~\.codex` unless the user explicitly selected the
-existing user session mode and confirmed that ClawScribe should manage it.
+Until the pinned app-server runtime is bundled or a controlled first-run
+installer is implemented, the Codex provider reports runtime-not-installed and
+normal processing should use OpenAI / OpenAI-compatible API or OpenClaw.

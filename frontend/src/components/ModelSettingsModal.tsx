@@ -17,7 +17,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
-import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, FolderOpen, Wrench } from 'lucide-react';
+import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, Wrench } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   Command,
@@ -109,9 +109,13 @@ interface CodexInstallationStatus {
   found: boolean;
   version?: string | null;
   path?: string | null;
+  runtimeKind: string;
   codexHome: string;
   codexHomeMode: 'clawscribe-isolated' | 'existing-user-codex-session';
   authStatus?: string | null;
+  accountEmail?: string | null;
+  planType?: string | null;
+  rateLimitState?: string | null;
   desktopAppDetected?: boolean;
   installCommand?: string | null;
   message: string;
@@ -767,9 +771,9 @@ export function ModelSettingsModal({
       setCodexStatus(status);
       setCodexLastResult(status.message);
       if (status.found) {
-        toast.success(`Codex found: ${status.version || status.path || 'installed'}`);
+        toast.success(`Codex app-server runtime found: ${status.version || status.path || 'installed'}`);
       } else {
-        toast.error(status.message || 'Codex was not found');
+        toast.error(status.message || 'Codex app-server runtime was not installed');
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -788,31 +792,11 @@ export function ModelSettingsModal({
       setCodexStatus(status);
       setCodexLastResult(status.message);
       if (status.found && status.path) {
-        setCodexConfig((prev) => ({ ...prev, codexBinaryPath: status.path || null }));
-        toast.success(`Codex found: ${status.version || status.path}`);
+        setCodexConfig((prev) => ({ ...prev, codexBinaryPath: null }));
+        toast.success(`Codex app-server runtime found: ${status.version || status.path}`);
       } else {
-        toast.error(status.message || 'Codex runtime was not found');
+        toast.error(status.message || 'Codex app-server runtime was not installed');
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setCodexLastResult(message);
-      toast.error(message);
-    } finally {
-      setIsCodexBusy(false);
-    }
-  };
-
-  const browseForCodexBinary = async () => {
-    setIsCodexBusy(true);
-    try {
-      const path = (await invoke('codex_browse_for_binary')) as string | null;
-      if (!path) {
-        setCodexLastResult('Codex binary selection cancelled.');
-        return;
-      }
-      const nextConfig = { ...codexConfig, codexBinaryPath: path };
-      setCodexConfig(nextConfig);
-      await checkCodexInstallation(nextConfig);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setCodexLastResult(message);
@@ -837,7 +821,7 @@ export function ModelSettingsModal({
         alternatives ? `\nAlternatives:\n${alternatives}` : '',
         `\nDocs: ${plan.docsUrl}`,
       ].filter(Boolean).join('\n'));
-      toast.info('Codex install/repair command prepared. Nothing was installed.');
+      toast.info('Codex app-server repair information prepared. Nothing was installed.');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setCodexLastResult(message);
@@ -850,6 +834,9 @@ export function ModelSettingsModal({
   const saveCodexConfig = async (nextConfig = codexConfig) => {
     const normalized = {
       ...nextConfig,
+      codexHomeMode: 'clawscribe-isolated' as const,
+      useExistingUserCodexSession: false,
+      codexBinaryPath: null,
       model: nextConfig.model.trim() || 'gpt-5.1-codex',
       timeoutSeconds: nextConfig.timeoutSeconds || 600,
     };
@@ -1302,7 +1289,7 @@ export function ModelSettingsModal({
               <SelectContent className="max-h-64 overflow-y-auto">
                 <SelectItem value="custom-openai">OpenAI / OpenAI-compatible API</SelectItem>
                 <SelectItem value="openclaw">OpenClaw</SelectItem>
-                <SelectItem value="codex">Advanced: Codex runtime</SelectItem>
+                <SelectItem value="codex">Advanced: Codex app-server</SelectItem>
                 <SelectItem value="builtin-ai">Built-in AI (Offline, No API needed)</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
@@ -1555,30 +1542,30 @@ export function ModelSettingsModal({
             <div className="flex items-start justify-between gap-3">
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">Advanced: Codex runtime</span>
+                  <span className="font-medium">Advanced: Codex app-server</span>
                   <span className={cn(
                     'rounded-full px-2 py-0.5 text-xs font-medium',
                     codexStatus?.found ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
                   )}>
-                    {isCodexBusy ? 'Checking' : codexStatus?.found ? 'Codex found' : 'Needs Codex'}
+                    {isCodexBusy ? 'Checking' : codexStatus?.found ? 'Bundled runtime found' : 'Runtime not installed'}
                   </span>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  ClawScribe can process meetings without Codex using an OpenAI API key or OpenClaw. Codex mode is optional and requires the Codex command-line runtime for automated processing.
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  When enabled, ClawScribe invokes <code>codex exec</code> and keeps Codex auth outside the app. This is an advanced runtime path for users who already manage Codex locally.
+                  Codex app-server mode uses a bundled/pinned Codex runtime and ChatGPT/Codex sign-in. It does not use the Microsoft Store app executable and does not require Codex to be installed globally. For normal use without Codex, choose OpenAI API key or OpenClaw.
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {codexStatus?.found
-                    ? `${codexStatus.version || 'Codex installed'} at ${codexStatus.path || 'PATH'}`
-                    : codexStatus?.message || 'Check Codex installation before signing in.'}
+                    ? `${codexStatus.version || 'Codex app-server runtime'} at ${codexStatus.path || 'bundled resources'}`
+                    : codexStatus?.message || 'Check bundled Codex app-server runtime before signing in.'}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   CODEX_HOME: {codexStatus?.codexHome || codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}
                 </p>
+                <p className="text-xs text-muted-foreground">
+                  Runtime: {codexStatus?.runtimeKind || 'codex-app-server'} · Account: {codexStatus?.accountEmail || codexStatus?.authStatus || 'not signed in'}{codexStatus?.planType ? ` · Plan: ${codexStatus.planType}` : ''}{codexStatus?.rateLimitState ? ` · Rate limit: ${codexStatus.rateLimitState}` : ''}
+                </p>
                 {codexStatus?.authStatus && (
-                  <p className="text-xs text-muted-foreground">Auth: {codexStatus.authStatus}</p>
+                  <p className="text-xs text-muted-foreground">Auth state: {codexStatus.authStatus}</p>
                 )}
               </div>
               <Button
@@ -1594,52 +1581,22 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <Label htmlFor="codex-home-mode">CODEX_HOME mode</Label>
-              <Select
-                value={codexConfig.useExistingUserCodexSession ? 'existing-user-codex-session' : 'clawscribe-isolated'}
-                onValueChange={(value) => {
-                  const useExisting = value === 'existing-user-codex-session';
-                  setCodexConfig((prev) => ({
-                    ...prev,
-                    codexHomeMode: value as CodexProviderConfig['codexHomeMode'],
-                    useExistingUserCodexSession: useExisting,
-                  }));
-                }}
-              >
-                <SelectTrigger id="codex-home-mode" className="mt-1">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="clawscribe-isolated">ClawScribe isolated</SelectItem>
-                  <SelectItem value="existing-user-codex-session">Existing user Codex session</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {!codexConfig.useExistingUserCodexSession && (
-              <div>
-                <Label htmlFor="codex-home-path">Isolated CODEX_HOME</Label>
-                <Input
-                  id="codex-home-path"
-                  value={codexConfig.codexHomePath || ''}
-                  onChange={(e) => setCodexConfig((prev) => ({ ...prev, codexHomePath: e.target.value }))}
-                  placeholder="%APPDATA%\\ClawScribe\\codex"
-                  className="mt-1"
-                />
-              </div>
-            )}
-
-            <div>
-              <Label htmlFor="codex-binary-path">Codex binary path</Label>
+              <Label htmlFor="codex-home-path">Isolated CODEX_HOME</Label>
               <Input
-                id="codex-binary-path"
-                value={codexConfig.codexBinaryPath || ''}
-                onChange={(e) => setCodexConfig((prev) => ({ ...prev, codexBinaryPath: e.target.value || null }))}
-                placeholder="Leave empty to search configured defaults and PATH"
+                id="codex-home-path"
+                value={codexConfig.codexHomePath || ''}
+                onChange={(e) => setCodexConfig((prev) => ({
+                  ...prev,
+                  codexHomeMode: 'clawscribe-isolated',
+                  useExistingUserCodexSession: false,
+                  codexHomePath: e.target.value,
+                  codexBinaryPath: null,
+                }))}
+                placeholder="%APPDATA%\\ClawScribe\\codex"
                 className="mt-1"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Discovery checks this path, PATH, standard Windows Codex CLI locations, and bundled ClawScribe resources.
+                ClawScribe never uses the user's normal ~/.codex profile or the standalone Codex CLI auth state for this provider.
               </p>
             </div>
 
@@ -1674,47 +1631,27 @@ export function ModelSettingsModal({
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <Button type="button" variant="outline" onClick={findCodexAutomatically} disabled={isCodexBusy}>
                 <RefreshCw className={cn('mr-2 h-4 w-4', isCodexBusy && 'animate-spin')} />
-                Find Codex automatically
-              </Button>
-              <Button type="button" variant="outline" onClick={browseForCodexBinary} disabled={isCodexBusy}>
-                <FolderOpen className="mr-2 h-4 w-4" />
-                Browse for codex.exe
+                Check bundled runtime
               </Button>
               <Button type="button" variant="outline" onClick={prepareCodexInstallRepair} disabled={isCodexBusy}>
                 <Wrench className="mr-2 h-4 w-4" />
-                Install/repair Codex CLI
+                Install/repair app-server
               </Button>
               <Button type="button" variant="outline" onClick={() => runCodexAction('codex_test_processing')} disabled={isCodexBusy}>
                 <CheckCircle2 className="mr-2 h-4 w-4" />
-                Test OpenAI/Codex processing
+                Test meeting processing
               </Button>
               <Button type="button" variant="outline" onClick={() => runCodexAction('codex_login_browser')} disabled={isCodexBusy}>
                 <ExternalLink className="mr-2 h-4 w-4" />
-                Sign in with OpenAI via Codex
+                Sign in with ChatGPT
               </Button>
               <Button type="button" variant="outline" onClick={() => runCodexAction('codex_login_device')} disabled={isCodexBusy}>
                 <CheckCircle2 className="mr-2 h-4 w-4" />
                 Sign in with device code
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setCodexConfig((prev) => ({
-                    ...prev,
-                    codexHomeMode: 'existing-user-codex-session',
-                    useExistingUserCodexSession: true,
-                  }));
-                  setCodexLastResult('Existing user Codex session selected. Save settings to persist this mode.');
-                }}
-                disabled={isCodexBusy}
-              >
-                <Check className="mr-2 h-4 w-4" />
-                Use existing Codex session
-              </Button>
               <Button type="button" variant="outline" onClick={() => runCodexAction('codex_logout')} disabled={isCodexBusy}>
                 <Lock className="mr-2 h-4 w-4" />
-                Logout / clear Codex auth
+                Logout
               </Button>
             </div>
 
@@ -1920,7 +1857,7 @@ export function ModelSettingsModal({
                       OpenAI API key
                     </div>
                     <p className="text-sm">
-                      Paste a key from the OpenAI platform. For local Codex automation, choose Advanced: Codex runtime.
+                      Paste a key from the OpenAI platform. For standalone Codex app-server mode, choose Advanced: Codex app-server.
                     </p>
                   </div>
                   <Button

@@ -109,9 +109,9 @@ cargo test --manifest-path frontend/src-tauri/Cargo.toml teams_detection --lib
 
 Expected:
 
-- Codex tests confirm fake-Codex discovery, login, device login, `codex exec`
-  processing, invalid JSON handling, non-zero exits, secret redaction, isolated
-  `CODEX_HOME`, and explicit existing-user session behavior.
+- Codex tests confirm app-server runtime discovery, missing-runtime behavior,
+  WindowsApps rejection, no PATH/global executable discovery, app-server
+  account/thread request shapes, secret redaction, and isolated `CODEX_HOME`.
 - Auth tests confirm API-key and OpenClaw managed-auth status behavior.
 - Teams tests confirm detector invariants at code level.
 - These tests do not replace Windows runtime Teams or audio verification.
@@ -266,37 +266,27 @@ Expected:
 Linux-side implementation gate:
 
 ```bash
-codex --version || true
 cargo test --manifest-path frontend/src-tauri/Cargo.toml codex_provider --lib
-```
-
-Optional Linux-only smoke when a logged-in Codex CLI is available:
-
-```bash
-scratch="$(mktemp -d)"
-cd "$scratch"
-codex exec --ephemeral --sandbox read-only --skip-git-repo-check \
-  "Reply exactly with CLASCRIBE_CODEX_OK."
 ```
 
 Expected:
 
-- Fake-Codex tests pass.
-- Any real Codex smoke is labeled Linux-only.
-- Do not claim Windows Codex login/runtime verification from Linux.
+- App-server direction tests pass.
+- No global Codex CLI, PATH, WindowsApps, or `codex exec` path is required.
+- Do not claim Windows Codex app-server verification until a bundled/pinned
+  runtime or controlled runtime installer is tested on Windows.
 
 Windows runtime gate:
 
 1. Build/install a Windows ClawScribe candidate.
 2. Run `docs/verification/alex-windows-codex-checklist.md`.
-3. Record the commit, installer artifact name, Windows version, Codex version,
-   and result.
+3. Record the commit, installer artifact name, Windows version, Codex
+   app-server runtime version/path, and result.
 
 Required status wording until Alex completes the checklist:
 
-> Codex provider implemented and fake-tested. Linux Codex smoke tested if
-> available. Windows login/runtime verification pending Alex after Windows
-> build.
+> Codex app-server provider direction implemented and fake-tested. Bundled
+> runtime packaging and Windows app-server auth/runtime verification pending.
 
 ## Manual Windows Runtime Gate
 
@@ -306,7 +296,7 @@ areas:
 - launch and installed-app branding
 - About dialog and legal attribution
 - light/dark theme
-- Advanced: Codex runtime provider fake-tested and awaiting Windows runtime
+- Advanced: Codex app-server provider fake-tested and awaiting Windows runtime
   verification
 - OpenAI API-key fallback
 - OpenClaw managed auth provider

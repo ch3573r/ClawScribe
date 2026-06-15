@@ -51,22 +51,24 @@ Secrets observed:
 Notes:
 ```
 
-## Codex Discovery And Runtime
+## Codex App-Server Runtime
 
-- [ ] Codex CLI path is discovered or configured on Windows.
-- [ ] `codex --version` succeeds.
-- [ ] Codex login state is reported without copying tokens into ClawScribe.
-- [ ] Device-code login path works or the limitation is recorded.
-- [ ] `codex exec` summary generation works from ClawScribe.
-- [ ] The report states whether Codex is bundled, auto-installed, or only
-  discovered from the user's PATH/configured path.
+- [ ] Codex remains third provider: `Advanced: Codex app-server`.
+- [ ] OpenAI/OpenAI-compatible processing works without Codex runtime.
+- [ ] OpenClaw processing works without Codex runtime.
+- [ ] Missing Codex app-server runtime warns only when Codex provider is
+  selected.
+- [ ] WindowsApps, PATH discovery, browsed `codex.exe`, and standalone CLI auth
+  are rejected or absent from UI.
+- [ ] The report states whether the pinned app-server runtime is bundled,
+  installed by controlled first-run setup, or not yet installed.
 
 Result:
 
 ```text
-Codex version:
-Bundled/auto-installed/discovered:
-Discovery path:
+Codex app-server runtime version:
+Bundled/controlled install/missing:
+Runtime path:
 Summary generated:
 Limitations:
 Notes:

@@ -1,306 +1,179 @@
-# Alex Windows Codex Checklist
+# Alex Windows Codex App-Server Checklist
 
 Status before this checklist:
 
-> Codex provider implemented and fake-tested. Linux Codex smoke tested if
-> available. Windows login/runtime verification pending Alex after Windows
-> build.
+> Codex is an advanced standalone app-server provider. It is not the default
+> processing path and must not be required for OpenAI API key or OpenClaw
+> processing.
 
-Do not mark Windows Codex auth as verified until this checklist passes on the
-Windows meeting device.
+Do not ship another Windows build where Codex means browsing to `codex.exe`,
+using `codex` from `PATH`, using WindowsApps, or running `codex exec`.
 
-## 1. Install Or Start ClawScribe
+## 1. Provider Order
 
-Install the current ClawScribe Windows build, or run a developer build from the
-repo:
+Open **Settings -> AI Provider**.
 
-```powershell
-cd <clawscribe-repo>\frontend
-pnpm install --frozen-lockfile
-pnpm tauri dev
-```
+Expected order:
 
-If using the installer, launch `ClawScribe` from the Start menu.
-
-Record:
-
-```text
-ClawScribe commit:
-Installer/artifact name:
-Windows version:
-Codex version:
-Verification date:
-```
-
-## 2. Open AI Provider Settings
-
-1. Open **Settings**.
-2. Open **AI Provider** / **Model Settings**.
-3. Select **Advanced: Codex runtime**.
+1. `OpenAI / OpenAI-compatible API`
+2. `OpenClaw`
+3. `Advanced: Codex app-server`
 
 Expected:
 
-- The provider is labeled `Advanced: Codex runtime`.
-- The panel says `OpenAI login via Codex`.
-- It does not call this generic OpenAI OAuth.
-- It shows controls for:
-  - Check Codex installation
-  - CODEX_HOME mode
-  - Sign in with OpenAI via Codex
-  - Sign in with device code
-  - Use existing Codex session
-  - Test OpenAI/Codex processing
-  - Logout / clear Codex auth
+- OpenAI/OpenAI-compatible remains the normal default path.
+- OpenClaw remains available.
+- Missing Codex runtime does not block app startup.
+- Missing Codex runtime does not block OpenAI/OpenClaw processing.
 
-## 3. Check Codex Installation
+## 2. Codex App-Server Panel
 
-Click **Check Codex installation**.
-
-Expected if Codex is installed:
-
-- Codex found: yes.
-- Codex path and version are shown.
-- CODEX_HOME mode/path are shown.
-
-If Codex is missing, install Codex using OpenAI's supported installer or install
-instructions for Windows, then reopen ClawScribe and retry:
-
-```powershell
-codex --version
-```
-
-If Codex is installed but not on `PATH`, set the Codex binary path in
-ClawScribe settings and retry **Check Codex installation**.
-
-## 4. Use Isolated CODEX_HOME First
-
-Set CODEX_HOME mode to:
+Select:
 
 ```text
-ClawScribe isolated
+Advanced: Codex app-server
 ```
 
-Expected isolated path:
+Expected text:
 
 ```text
-%APPDATA%\ClawScribe\codex
+Codex app-server mode uses a bundled/pinned Codex runtime and ChatGPT/Codex sign-in. It does not use the Microsoft Store app executable and does not require Codex to be installed globally. For normal use without Codex, choose OpenAI API key or OpenClaw.
 ```
 
-This keeps ClawScribe's Codex login separate from the user's normal `~\.codex`
-profile.
+Expected controls:
 
-## 5. Browser Login
+- Status: bundled runtime found / runtime not installed
+- Runtime version/path when available
+- Isolated `CODEX_HOME` location
+- Sign in with ChatGPT
+- Sign in with device code
+- Logout
+- Test Codex app-server
+- Test meeting processing
+- Rate-limit/account state if available
 
-Click:
+Expected not present:
+
+- Browse for `codex.exe`
+- Find `codex` on `PATH`
+- Use existing Codex session
+- WindowsApps path suggestions
+- CLI install instructions as the normal path
+
+## 3. Missing Runtime Behavior
+
+If the pinned app-server runtime is not bundled yet, expected status:
 
 ```text
-Sign in with OpenAI via Codex
+runtime not installed
 ```
 
 Expected:
 
-- Codex opens its normal browser login flow.
-- Complete login in the browser.
-- ClawScribe reports the Codex command completed or gives a human-readable
-  Codex error.
-- No access token, refresh token, auth code, API key, `auth.json` content, or
-  full command environment appears in the UI or logs.
+- The Codex panel shows a repair/install action.
+- The repair/install action does not silently install anything.
+- OpenAI/OpenAI-compatible processing still works.
+- OpenClaw processing still works.
 
-After login, click **Check Codex installation** again.
+## 4. WindowsApps Rejection
 
-Expected:
-
-- The Codex status is usable/authenticated, or at least no longer reports that
-  login is missing.
-
-## 6. Device-Code Login Fallback
-
-If browser login fails, click:
+If any old config points to a path like:
 
 ```text
-Sign in with device code
+C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\codex.exe
 ```
 
 Expected:
 
-- ClawScribe shows Codex's device-code instructions/output.
-- Complete the device-code flow in the browser.
-- ClawScribe reports success or a clear Codex error.
-- **Test OpenAI/Codex processing** can run afterward.
+- ClawScribe rejects it with a friendly explanation.
+- It does not launch it.
+- It does not treat it as a valid runtime source.
 
-## 7. Test Processing
+## 5. App-Server Auth Flow
 
-Click:
+When the bundled runtime exists, verify:
 
 ```text
-Test OpenAI/Codex processing
+initialize
+notifications/initialized
+account/read
+```
+
+Browser login should use:
+
+```json
+{ "type": "chatgpt" }
+```
+
+Device-code login should use:
+
+```json
+{ "type": "chatgptDeviceCode" }
 ```
 
 Expected:
 
-- ClawScribe creates a temporary scratch workspace.
-- Codex runs a small `codex exec` test.
-- Success is reported only if Codex returns:
+- Device-code flow shows `verificationUrl` and `userCode`.
+- Completion is driven by app-server notifications such as
+  `account/login/completed` and `account/updated`.
+- `account/read` shows signed-in state, email if returned, and plan type if
+  returned.
+- `account/logout` signs out.
+
+## 6. Meeting Processing
+
+When the bundled runtime exists, process a tiny synthetic transcript.
+
+Expected app-server methods:
 
 ```text
-CLASCRIBE_CODEX_OK
+thread/start
+turn/run
 ```
 
-Record the result:
-
-```text
-Test processing result:
-Any error text:
-```
-
-## 8. Process A Tiny Synthetic Transcript
-
-Create or import a tiny test meeting/transcript with content like:
-
-```text
-[00:01] Alex: We will verify Codex processing on Windows today.
-[00:05] Nora: Action item for Nora: document the Windows Codex result.
-```
-
-Use **Advanced: Codex runtime** as the summary provider and generate notes.
-
-Expected meeting output files:
+Expected files:
 
 - `meeting-output.json`
 - `meeting-notes.md`
 - `follow-up-email.md`
 - `processing-log.json`
 
-Expected Codex run folder under:
+Expected:
+
+- Valid structured JSON only.
+- No invented owners or due dates.
+- Prompt-injection guard remains active.
+- Auth failures show a re-auth prompt.
+- Overload/transient failures use bounded retry/backoff.
+- No infinite retry loops.
+
+## 7. Secret Hygiene
+
+Search app output/log folders for:
 
 ```text
-%LOCALAPPDATA%\ClawScribe\codex-runs\<meeting-id>\
-```
-
-Expected run files:
-
-- `transcript.md`
-- `metadata.json`
-- `output-schema.json`
-- `prompt.md`
-- `codex-output.json`
-- `codex-final.md`
-- `codex-events.jsonl`
-
-Validate the structured JSON:
-
-```powershell
-$json = Get-Content "<meeting-folder>\meeting-output.json" -Raw | ConvertFrom-Json
-$json.executive_summary
-$json.action_items
+sk-
+sk-proj-
+access_token
+refresh_token
+Authorization: Bearer
+auth.json
 ```
 
 Expected:
 
-- JSON parses.
-- Action items do not invent owners or due dates.
-- Unknown owners/due dates are `null`.
-- Source timestamps are included when available.
+- No raw tokens.
+- No auth file contents.
+- No full bearer strings.
+- Redacted placeholders are acceptable.
 
-## 9. Process One Real Recording
+## 8. Provider Switching
 
-1. Record a short real ClawScribe/Meetily meeting with spoken content.
-2. Stop recording.
-3. Wait for transcription to complete.
-4. Generate notes using **Advanced: Codex runtime**.
+Verify:
 
-Expected:
-
-- Transcript content is non-empty.
-- `meeting-output.json` is valid JSON.
-- `meeting-notes.md` contains a useful summary.
-- `follow-up-email.md` is present.
-- `processing-log.json` reports the Codex provider and sanitized command status.
-
-## 10. Secret Hygiene Check
-
-Run this in PowerShell:
-
-```powershell
-$paths = @(
-  "$env:LOCALAPPDATA\ClawScribe",
-  "$env:APPDATA\ClawScribe"
-)
-foreach ($path in $paths) {
-  if (Test-Path $path) {
-    Select-String -Path "$path\**\*.json","$path\**\*.jsonl","$path\**\*.log","$path\**\*.md" `
-      -Pattern "sk-proj-|sk-|refresh_token|access_token|Authorization: Bearer|auth.json" `
-      -CaseSensitive:$false -ErrorAction SilentlyContinue
-  }
-}
-```
-
-Expected:
-
-- No raw OpenAI/Codex access tokens.
-- No refresh tokens.
-- No API keys.
-- No full `Authorization: Bearer ...` headers.
-- Redacted placeholders such as `[REDACTED]` are allowed.
-
-Do not paste auth files, tokens, or screenshots containing credentials into
-chat or issues.
-
-## 11. Provider Switching
-
-Verify switching still works:
-
-1. Select **Advanced: Codex runtime** and run **Test OpenAI/Codex processing**.
-2. Select **OpenAI API Key**, save settings, and confirm the UI asks for an API
-   key instead of Codex login.
-3. Select **OpenClaw Gateway**, save settings, and confirm the OpenClaw
-   endpoint/bearer-token fields are shown.
-4. Switch back to **Advanced: Codex runtime** and confirm Codex settings are still
-   present.
-
-Expected:
-
-- No provider switch exposes saved secrets.
-- API-key mode does not require Codex.
-- Codex mode does not require OpenClaw.
-- OpenClaw mode does not require Codex tokens in ClawScribe.
-
-## 12. Logout
-
-With CODEX_HOME mode set to **ClawScribe isolated**, click:
-
-```text
-Logout / clear Codex auth
-```
-
-Expected:
-
-- ClawScribe invokes the supported Codex logout behavior.
-- Only ClawScribe-owned isolated Codex auth/cache is cleared.
-- The user's normal `~\.codex` profile is not deleted.
-
-Confirm:
-
-```powershell
-dir "$env:APPDATA\ClawScribe\codex"
-dir "$env:USERPROFILE\.codex"
-```
-
-Do not delete the user's global `~\.codex` unless explicitly testing existing
-user session cleanup and you understand the consequence.
-
-## Pass/Fail Statement
-
-Use this exact wording until all steps pass:
-
-```text
-Codex provider implemented and fake-tested. Linux Codex smoke tested if
-available. Windows login/runtime verification pending Alex after Windows build.
-```
-
-Use this only after all steps pass:
-
-```text
-Windows Codex login/runtime verification passed on <date> using ClawScribe
-commit <sha> and Codex <version>.
-```
+1. OpenAI API provider works without Codex runtime.
+2. OpenClaw provider works without Codex runtime.
+3. Codex missing-runtime warning appears only when `Advanced: Codex app-server`
+   is selected.
+4. Switching back from Codex does not leave a global Codex error on other
+   provider screens.

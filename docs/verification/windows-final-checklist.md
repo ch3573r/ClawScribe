@@ -114,7 +114,8 @@ OpenAI login path is Codex-managed login; the direct fallback is OpenAI Platform
 API-key auth.
 
 - Open model/provider settings.
-- Confirm `Advanced: Codex runtime` exposes OpenAI login via Codex.
+- Confirm `Advanced: Codex app-server` is a standalone advanced provider and
+  does not ask for global `codex.exe`, PATH discovery, or WindowsApps.
 - Confirm OpenAI direct auth asks for an OpenAI Platform API key, not ChatGPT web
   login.
 - Confirm any OpenAI OAuth/PKCE text is clearly marked unsupported for direct

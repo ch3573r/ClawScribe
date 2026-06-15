@@ -41,8 +41,8 @@ Implemented in this pass:
 
 Not implemented in this pass:
 
-- Generic/private OpenAI OAuth. The supported interactive login path is Codex:
-  `codex login`, `codex login --device-auth`, and `codex exec`.
+- Generic/private OpenAI OAuth. The supported advanced Codex target is a
+  bundled/pinned Codex app-server runtime over stdio JSON-RPC.
 - OS credential store migration for API keys and bearer tokens.
 - Microsoft MSAL sign-in, live OneNote export, or live Planner task creation.
 - Windows installer/runtime verification.
@@ -229,22 +229,11 @@ cargo test --manifest-path frontend/src-tauri/Cargo.toml teams_detection --lib
 Result: pass; 8 passed, 0 failed.
 
 ```bash
-codex --version
+cargo test --manifest-path frontend/src-tauri/Cargo.toml codex_provider --lib
 ```
 
-Result: pass; local Linux CLI reports `codex-cli 0.118.0`.
-
-```bash
-codex exec --ephemeral --sandbox read-only --skip-git-repo-check \
-  --cd "$scratch" \
-  --output-last-message "$scratch/last.txt" \
-  'Reply exactly with CLASCRIBE_CODEX_OK.'
-```
-
-Result: Linux-only smoke reached Codex CLI startup and the OpenAI provider path,
-then failed with 401 Unauthorized because this Linux host does not have a valid
-Codex/API auth session for `codex exec`. No Windows login/runtime verification
-is claimed from this result.
+Result: pass for Codex app-server direction tests. The app no longer treats a
+global CLI or `codex exec` smoke as the product integration path.
 
 ```bash
 cd frontend
@@ -326,7 +315,8 @@ No claims are made for:
 - Windows app launch.
 - MSI/NSIS installer behavior.
 - WebView2 behavior.
-- Codex browser login, device-code login, and Windows `codex exec` runtime.
+- Codex app-server browser login, device-code login, and Windows
+  app-server runtime.
 - Teams desktop/browser runtime detection.
 - WASAPI microphone/system audio capture.
 - Real short recording.
@@ -379,14 +369,15 @@ Follow:
 
 Expected in this pass:
 
-- Advanced: Codex runtime uses Codex as the auth and runtime boundary.
+- Advanced: Codex app-server uses a bundled/pinned app-server runtime as the
+  auth and runtime boundary.
 - Direct OpenAI uses an API key.
 - OpenClaw Gateway uses the OpenClaw model bridge and bearer token.
 - Status wording until Alex verifies Windows:
 
 ```text
-Codex provider implemented and fake-tested. Linux Codex smoke tested if
-available. Windows login/runtime verification pending Alex after Windows build.
+Codex app-server provider direction implemented and fake-tested. Bundled
+runtime packaging and Windows app-server auth/runtime verification pending.
 ```
 
 ### Microsoft Login

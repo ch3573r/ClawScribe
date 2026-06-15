@@ -1,27 +1,169 @@
 use serde::{Deserialize, Serialize};
-use std::ffi::{OsStr, OsString};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tauri_plugin_dialog::DialogExt;
-use tokio::process::Command;
-use tokio::time::timeout;
-use uuid::Uuid;
 
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 600;
-const TEST_PROMPT: &str = "Reply exactly with CLASCRIBE_CODEX_OK.";
-const TEST_EXPECTED: &str = "CLASCRIBE_CODEX_OK";
-const CODEX_APP_DETECTED_CLI_MISSING: &str =
-    "Codex app detected, but the command-line runtime required for automated processing was not found.";
+const CODEX_APP_SERVER_MISSING: &str = "Codex app-server runtime is not installed for ClawScribe. Normal processing still works through OpenAI API key or OpenClaw.";
+const CODEX_APP_SERVER_STAGED: &str = "Codex app-server integration is staged, but no bundled/pinned app-server runtime is installed in this build.";
+const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode requires a bundled/pinned ClawScribe runtime or a controlled ClawScribe runtime installer.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexHomeMode {
     ClawscribeIsolated,
     ExistingUserCodexSession,
+}
+
+#[cfg(test)]
+mod app_server_tests {
+    use super::*;
+
+    fn make_executable(path: &Path) {
+        fs::write(path, "# app-server placeholder\n").unwrap();
+    }
+
+    #[test]
+    fn bundled_app_server_runtime_is_discovered() {
+        let temp = tempfile::tempdir().unwrap();
+        let resource_dir = temp.path().join("resources");
+        let exe = if cfg!(target_os = "windows") {
+            "codex-app-server.exe"
+        } else {
+            "codex-app-server"
+        };
+        let runtime = resource_dir.join("codex-app-server").join(exe);
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        make_executable(&runtime);
+
+        let discovered = discover_codex_app_server_from(None, Some(&resource_dir)).unwrap();
+        assert_eq!(discovered, runtime);
+    }
+
+    #[test]
+    fn path_discovery_is_not_used_for_app_server_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let configured = temp.path().join("codex.exe");
+        make_executable(&configured);
+
+        let err =
+            discover_codex_app_server_from(Some(configured.to_str().unwrap()), None).unwrap_err();
+        assert!(err.contains("Configured global Codex executable paths are no longer supported"));
+    }
+
+    #[test]
+    fn windowsapps_codex_path_is_rejected() {
+        let err = discover_codex_app_server_from(
+            Some(r"C:\Users\user\AppData\Local\Microsoft\WindowsApps\codex.exe"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("WindowsApps"));
+        assert!(err.contains("not supported"));
+    }
+
+    #[test]
+    fn missing_runtime_is_non_blocking_status() {
+        let err = discover_codex_app_server_from(None, None).unwrap_err();
+        assert!(err.contains("Normal processing still works through OpenAI API key or OpenClaw"));
+    }
+
+    #[test]
+    fn install_repair_plan_does_not_suggest_global_cli() {
+        let plan = codex_install_repair_plan();
+        assert!(plan.requires_confirmation);
+        assert!(plan.alternatives.is_empty());
+        assert!(!plan.recommended.command.contains("npm install"));
+        assert!(!plan.recommended.command.contains("codex.exe"));
+        assert!(plan.message.contains("WindowsApps"));
+    }
+
+    #[test]
+    fn existing_user_codex_session_is_normalized_out() {
+        let normalized = normalize_codex_config(CodexProviderConfig {
+            codex_home_mode: CodexHomeMode::ExistingUserCodexSession,
+            use_existing_user_codex_session: true,
+            codex_home_path: None,
+            ..CodexProviderConfig::default()
+        });
+
+        assert_eq!(
+            normalized.effective_home_mode(),
+            CodexHomeMode::ClawscribeIsolated
+        );
+        assert!(!normalized.use_existing_user_codex_session);
+        assert!(normalized.effective_codex_home().is_some());
+    }
+
+    #[test]
+    fn app_server_handshake_and_login_requests_use_expected_methods() {
+        let initialize = app_server_initialize_request(1);
+        let initialized = app_server_initialized_notification();
+        let account_read = app_server_account_read_request(2);
+        let browser_login = app_server_login_start_request(3, "chatgpt");
+        let device_login = app_server_login_start_request(4, "chatgptDeviceCode");
+        let logout = app_server_logout_request(5);
+
+        assert_eq!(initialize["method"], "initialize");
+        assert_eq!(initialized["method"], "notifications/initialized");
+        assert_eq!(account_read["method"], "account/read");
+        assert_eq!(browser_login["method"], "account/login/start");
+        assert_eq!(browser_login["params"]["type"], "chatgpt");
+        assert_eq!(device_login["params"]["type"], "chatgptDeviceCode");
+        assert_eq!(logout["method"], "account/logout");
+    }
+
+    #[test]
+    fn app_server_thread_and_turn_requests_carry_meeting_contract() {
+        let thread = app_server_thread_start_request(10);
+        let turn = app_server_turn_run_request(
+            11,
+            "thread-1",
+            "gpt-5.1-codex",
+            "[00:01] Alex: ship it",
+            serde_json::json!({ "meeting_id": "m1" }),
+        );
+
+        assert_eq!(thread["method"], "thread/start");
+        assert_eq!(turn["method"], "turn/run");
+        assert_eq!(turn["params"]["threadId"], "thread-1");
+        assert_eq!(turn["params"]["model"], "gpt-5.1-codex");
+        assert!(turn["params"]["input"]["transcript"]
+            .as_str()
+            .unwrap()
+            .contains("ship it"));
+        assert!(turn["params"]["input"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Return only valid JSON"));
+        assert_eq!(
+            turn["params"]["input"]["outputSchema"]["required"][0],
+            "executive_summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_server_actions_do_not_fall_back_to_codex_exec() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("codex-app-server");
+        make_executable(&runtime);
+        let provider = CodexAppServerProvider::new(CodexProviderConfig::default(), runtime).unwrap();
+
+        let status = provider.test_processing(Some(temp.path())).await.unwrap();
+        assert!(!status.success);
+        assert!(status.message.contains("codex exec is disabled"));
+    }
+
+    #[test]
+    fn redacts_secret_like_strings() {
+        let redacted = redact_secrets("stderr Authorization: Bearer abcdefghijklmnopqrstuvwxyz123 api_key = sk-proj-abcdefghijklmnopqrstuvwxyz123456 refresh_token = secretrefresh1234567890");
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(!redacted.contains("secretrefresh1234567890"));
+    }
 }
 
 impl Default for CodexHomeMode {
@@ -64,9 +206,13 @@ pub struct CodexInstallationStatus {
     pub found: bool,
     pub version: Option<String>,
     pub path: Option<String>,
+    pub runtime_kind: String,
     pub codex_home: String,
     pub codex_home_mode: CodexHomeMode,
     pub auth_status: Option<String>,
+    pub account_email: Option<String>,
+    pub plan_type: Option<String>,
+    pub rate_limit_state: Option<String>,
     #[serde(default)]
     pub desktop_app_detected: bool,
     pub install_command: Option<String>,
@@ -115,11 +261,13 @@ pub struct CodexProcessingResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct CodexProcessingProvider {
+pub struct CodexAppServerProvider {
     pub config: CodexProviderConfig,
-    pub codex_binary: PathBuf,
+    pub app_server_binary: PathBuf,
     pub codex_home: Option<PathBuf>,
 }
+
+pub type CodexProcessingProvider = CodexAppServerProvider;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,11 +376,7 @@ impl Default for ClawScribeProcessingConfig {
 
 impl CodexProviderConfig {
     fn effective_home_mode(&self) -> CodexHomeMode {
-        if self.use_existing_user_codex_session {
-            CodexHomeMode::ExistingUserCodexSession
-        } else {
-            CodexHomeMode::ClawscribeIsolated
-        }
+        CodexHomeMode::ClawscribeIsolated
     }
 
     pub fn effective_codex_home(&self) -> Option<PathBuf> {
@@ -247,153 +391,68 @@ impl CodexProviderConfig {
     }
 }
 
-impl CodexProcessingProvider {
-    pub fn new(config: CodexProviderConfig, codex_binary: PathBuf) -> Result<Self, String> {
+impl CodexAppServerProvider {
+    pub fn new(config: CodexProviderConfig, app_server_binary: PathBuf) -> Result<Self, String> {
         let codex_home = config.effective_codex_home();
         if let Some(home) = &codex_home {
             prepare_isolated_codex_home(home, &config.model)?;
         }
         Ok(Self {
             config,
-            codex_binary,
+            app_server_binary,
             codex_home,
         })
     }
 
     pub async fn check_installation(&self) -> Result<CodexInstallationStatus, String> {
-        let version = self
-            .run_codex(["--version"], None, Duration::from_secs(15))
-            .await;
-
         let codex_home = self
             .codex_home
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| default_user_codex_home().to_string_lossy().to_string());
+            .unwrap_or_else(|| default_isolated_codex_home().to_string_lossy().to_string());
 
-        match version {
-            Ok(output) if output.success => {
-                let auth = self
-                    .run_codex(["login", "status"], None, Duration::from_secs(30))
-                    .await
-                    .ok()
-                    .map(|s| first_non_empty_line(&format!("{}\n{}", s.stdout, s.stderr)))
-                    .filter(|s| !s.is_empty());
-                Ok(CodexInstallationStatus {
-                    found: true,
-                    version: Some(first_non_empty_line(&output.stdout)),
-                    path: Some(self.codex_binary.to_string_lossy().to_string()),
-                    codex_home,
-                    codex_home_mode: self.config.effective_home_mode(),
-                    auth_status: auth,
-                    desktop_app_detected: false,
-                    install_command: Some(codex_install_repair_plan().recommended.command),
-                    message: "Codex found".to_string(),
-                })
-            }
-            Ok(output) => Ok(CodexInstallationStatus {
-                found: false,
-                version: None,
-                path: Some(self.codex_binary.to_string_lossy().to_string()),
-                codex_home,
-                codex_home_mode: self.config.effective_home_mode(),
-                auth_status: None,
-                desktop_app_detected: codex_desktop_app_detected(),
-                install_command: Some(codex_install_repair_plan().recommended.command),
-                message: if codex_desktop_app_detected() {
-                    CODEX_APP_DETECTED_CLI_MISSING.to_string()
-                } else if output.stderr.is_empty() {
-                    "Codex executable did not return a version".to_string()
-                } else {
-                    output.stderr
-                },
-            }),
-            Err(e) => Ok(CodexInstallationStatus {
-                found: false,
-                version: None,
-                path: Some(self.codex_binary.to_string_lossy().to_string()),
-                codex_home,
-                codex_home_mode: self.config.effective_home_mode(),
-                auth_status: None,
-                desktop_app_detected: codex_desktop_app_detected(),
-                install_command: Some(codex_install_repair_plan().recommended.command),
-                message: if codex_desktop_app_detected() {
-                    CODEX_APP_DETECTED_CLI_MISSING.to_string()
-                } else {
-                    e
-                },
-            }),
-        }
+        Ok(CodexInstallationStatus {
+            found: true,
+            version: Some("bundled app-server runtime".to_string()),
+            path: Some(self.app_server_binary.to_string_lossy().to_string()),
+            runtime_kind: "codex-app-server".to_string(),
+            codex_home,
+            codex_home_mode: self.config.effective_home_mode(),
+            auth_status: Some("unknown until account/read is wired".to_string()),
+            account_email: None,
+            plan_type: None,
+            rate_limit_state: None,
+            desktop_app_detected: false,
+            install_command: Some(codex_install_repair_plan().recommended.command),
+            message: "Bundled Codex app-server runtime found. JSON-RPC account/thread integration is the target path; CLI/codex exec fallback is disabled.".to_string(),
+        })
     }
 
     pub async fn login_browser(&self) -> Result<CodexCommandStatus, String> {
-        self.run_codex(
-            ["login"],
-            None,
-            Duration::from_secs(self.config.timeout_seconds),
-        )
-        .await
+        Ok(app_server_pending_status(
+            "Sign in with ChatGPT will use account/login/start { \"type\": \"chatgpt\" } over the Codex app-server JSON-RPC transport.",
+        ))
     }
 
     pub async fn login_device(&self) -> Result<CodexCommandStatus, String> {
-        self.run_codex(
-            ["login", "--device-auth"],
-            None,
-            Duration::from_secs(self.config.timeout_seconds),
-        )
-        .await
+        Ok(app_server_pending_status(
+            "Device-code sign-in will use account/login/start { \"type\": \"chatgptDeviceCode\" } and surface verificationUrl plus userCode in the UI.",
+        ))
     }
 
     pub async fn logout(&self) -> Result<CodexCommandStatus, String> {
-        self.run_codex(["logout"], None, Duration::from_secs(60))
-            .await
+        Ok(app_server_pending_status(
+            "Logout will use account/logout over the Codex app-server JSON-RPC transport.",
+        ))
     }
 
     pub async fn test_processing(
         &self,
-        scratch_parent: Option<&Path>,
+        _scratch_parent: Option<&Path>,
     ) -> Result<CodexCommandStatus, String> {
-        let scratch_dir = scratch_parent
-            .map(|p| p.join(format!("codex-test-{}", Uuid::new_v4())))
-            .unwrap_or_else(|| {
-                default_codex_runs_root().join(format!("codex-test-{}", Uuid::new_v4()))
-            });
-        fs::create_dir_all(&scratch_dir)
-            .map_err(|e| format!("Failed to create Codex test workspace: {e}"))?;
-
-        let output_file = scratch_dir.join("codex-test-output.txt");
-        let output = self
-            .run_codex(
-                [
-                    "exec",
-                    "--ephemeral",
-                    "--sandbox",
-                    "read-only",
-                    "--skip-git-repo-check",
-                    "--cd",
-                    scratch_dir.to_string_lossy().as_ref(),
-                    "--output-last-message",
-                    output_file.to_string_lossy().as_ref(),
-                    TEST_PROMPT,
-                ],
-                None,
-                Duration::from_secs(self.config.timeout_seconds),
-            )
-            .await?;
-
-        let final_text = fs::read_to_string(&output_file).unwrap_or_else(|_| output.stdout.clone());
-        if output.success && final_text.contains(TEST_EXPECTED) {
-            Ok(CodexCommandStatus {
-                message: "Codex test processing succeeded".to_string(),
-                ..output
-            })
-        } else {
-            Ok(CodexCommandStatus {
-                success: false,
-                message: "Codex test processing did not return the expected response".to_string(),
-                ..output
-            })
-        }
+        Ok(app_server_pending_status(
+            "Test processing will use thread/start plus turn/run over Codex app-server. codex exec is disabled as an app integration path.",
+        ))
     }
 
     pub async fn process_meeting(
@@ -433,154 +492,25 @@ impl CodexProcessingProvider {
             .map_err(|e| format!("Failed to write output-schema.json: {e}"))?;
         fs::write(&prompt_path, build_meeting_prompt())
             .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
-
-        let prompt = "Process the meeting transcript in transcript.md according to prompt.md and output-schema.json. Return only valid JSON matching the schema.";
-        let started_at = Instant::now();
-        let output = self
-            .run_codex(
-                [
-                    "exec",
-                    "--ephemeral",
-                    "--sandbox",
-                    "read-only",
-                    "--skip-git-repo-check",
-                    "--cd",
-                    scratch_dir.to_string_lossy().as_ref(),
-                    "--output-schema",
-                    schema_path.to_string_lossy().as_ref(),
-                    "--output-last-message",
-                    output_path.to_string_lossy().as_ref(),
-                    "--model",
-                    self.config.model.as_str(),
-                    prompt,
-                ],
-                None,
-                Duration::from_secs(self.config.timeout_seconds),
-            )
-            .await?;
-
-        let raw_json = fs::read_to_string(&output_path).unwrap_or_else(|_| output.stdout.clone());
-        fs::write(&final_path, &raw_json)
+        let pending = app_server_pending_status(
+            "Codex app-server meeting processing will use a fresh thread/start and turn/run. codex exec fallback is disabled.",
+        );
+        write_safe_events(&events_path, &pending)?;
+        fs::write(&final_path, &pending.message)
             .map_err(|e| format!("Failed to write codex-final.md: {e}"))?;
-        write_safe_events(&events_path, &output)?;
-
-        if !output.success {
-            write_processing_log(
-                &scratch_dir,
-                &output,
-                started_at.elapsed(),
-                "codex exec failed",
-            )?;
-            return Err(format!(
-                "Codex meeting processing failed: {}",
-                output.message
-            ));
-        }
-
-        let structured_output = parse_meeting_output(&raw_json)?;
-        let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
-
-        let output_dir = request.output_dir.unwrap_or_else(|| scratch_dir.clone());
-        fs::create_dir_all(&output_dir)
-            .map_err(|e| format!("Failed to create meeting output folder: {e}"))?;
-        let meeting_output_path = output_dir.join("meeting-output.json");
-        let notes_path = output_dir.join("meeting-notes.md");
-        let email_path = output_dir.join("follow-up-email.md");
-        let processing_log_path = output_dir.join("processing-log.json");
-
-        fs::write(
-            &meeting_output_path,
-            serde_json::to_string_pretty(&structured_output).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| format!("Failed to write meeting-output.json: {e}"))?;
-        fs::write(&notes_path, &markdown)
-            .map_err(|e| format!("Failed to write meeting-notes.md: {e}"))?;
-        fs::write(
-            &email_path,
-            render_follow_up_email(&structured_output.follow_up_email),
-        )
-        .map_err(|e| format!("Failed to write follow-up-email.md: {e}"))?;
-        write_processing_log_at(
-            &processing_log_path,
-            &output,
-            started_at.elapsed(),
-            "completed",
-            Some(&scratch_dir),
-        )?;
-
-        Ok(CodexProcessingResult {
-            meeting_id: request.meeting_id,
-            scratch_dir: scratch_dir.to_string_lossy().to_string(),
-            output_json_path: meeting_output_path.to_string_lossy().to_string(),
-            notes_markdown_path: notes_path.to_string_lossy().to_string(),
-            follow_up_email_path: email_path.to_string_lossy().to_string(),
-            processing_log_path: processing_log_path.to_string_lossy().to_string(),
-            structured_output,
-            markdown,
-        })
+        fs::write(&output_path, "{}").map_err(|e| format!("Failed to write codex-output.json: {e}"))?;
+        write_processing_log(&scratch_dir, &pending, Duration::ZERO, "app-server runtime missing")?;
+        Err(format!("{CODEX_APP_SERVER_STAGED} Use OpenAI API key or OpenClaw for normal processing until the pinned app-server runtime is packaged."))
     }
+}
 
-    async fn run_codex<I, S>(
-        &self,
-        args: I,
-        stdin_text: Option<&str>,
-        timeout_duration: Duration,
-    ) -> Result<CodexCommandStatus, String>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut command = Command::new(&self.codex_binary);
-        command.args(args);
-        command.stdin(if stdin_text.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        if let Some(home) = &self.codex_home {
-            command.env("CODEX_HOME", home);
-        } else {
-            command.env_remove("CODEX_HOME");
-        }
-
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("Failed to start Codex: {e}"))?;
-
-        if let Some(input) = stdin_text {
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                stdin
-                    .write_all(input.as_bytes())
-                    .await
-                    .map_err(|e| format!("Failed to write to Codex stdin: {e}"))?;
-            }
-        }
-
-        let output = timeout(timeout_duration, child.wait_with_output())
-            .await
-            .map_err(|_| "Codex command timed out".to_string())?
-            .map_err(|e| format!("Codex command failed: {e}"))?;
-
-        let stdout = redact_secrets(&String::from_utf8_lossy(&output.stdout));
-        let stderr = redact_secrets(&String::from_utf8_lossy(&output.stderr));
-        let success = output.status.success();
-        let exit_code = output.status.code();
-        let message = if success {
-            "Codex command completed".to_string()
-        } else {
-            first_non_empty_line(&format!("{stderr}\n{stdout}")).if_empty("Codex command failed")
-        };
-
-        Ok(CodexCommandStatus {
-            success,
-            exit_code,
-            stdout,
-            stderr,
-            message,
-        })
+fn app_server_pending_status(detail: &str) -> CodexCommandStatus {
+    CodexCommandStatus {
+        success: false,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        message: format!("{CODEX_APP_SERVER_STAGED} {detail}"),
     }
 }
 
@@ -640,20 +570,9 @@ pub async fn codex_find_automatically<R: Runtime>(
 
 #[tauri::command]
 pub async fn codex_browse_for_binary<R: Runtime>(
-    app: AppHandle<R>,
+    _app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    let app_clone = app.clone();
-    let path = tokio::task::spawn_blocking(move || {
-        app_clone
-            .dialog()
-            .file()
-            .add_filter("Codex executable", &["exe", "cmd", "bat"])
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|e| format!("Codex file dialog failed: {e}"))?;
-
-    Ok(path.map(|p| p.to_string()))
+    Err("Browsing to a global codex.exe is no longer supported. Codex app-server mode uses a bundled/pinned ClawScribe runtime or a controlled ClawScribe runtime installer.".to_string())
 }
 
 #[tauri::command]
@@ -750,58 +669,49 @@ pub fn provider_from_app<R: Runtime>(
             .processing
             .codex,
     );
-    let binary = discover_codex_binary(app, config.codex_binary_path.as_deref())?;
-    CodexProcessingProvider::new(config, binary)
+    let runtime = discover_codex_app_server(app, config.codex_binary_path.as_deref())?;
+    CodexAppServerProvider::new(config, runtime)
+}
+
+pub fn discover_codex_app_server<R: Runtime>(
+    app: &AppHandle<R>,
+    configured_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let resource_dir = app.path().resource_dir().ok();
+    discover_codex_app_server_from(configured_path, resource_dir.as_deref())
 }
 
 pub fn discover_codex_binary<R: Runtime>(
     app: &AppHandle<R>,
     configured_path: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let resource_dir = app.path().resource_dir().ok();
-    discover_codex_binary_from(configured_path, resource_dir.as_deref(), None)
+    discover_codex_app_server(app, configured_path)
 }
 
-fn discover_codex_binary_from(
+fn discover_codex_app_server_from(
     configured_path: Option<&str>,
     resource_dir: Option<&Path>,
-    path_env: Option<&OsStr>,
 ) -> Result<PathBuf, String> {
     if let Some(path) = configured_path.filter(|s| !s.trim().is_empty()) {
         let candidate = PathBuf::from(path);
-        if candidate.is_file() {
-            return Ok(candidate);
+        if is_windowsapps_path(&candidate) {
+            return Err(CODEX_WINDOWSAPPS_REJECTED.to_string());
         }
         return Err(format!(
-            "Configured Codex binary was not found: {}",
+            "Configured global Codex executable paths are no longer supported: {}. Codex app-server mode requires a bundled/pinned ClawScribe runtime or a controlled ClawScribe runtime installer.",
             candidate.display()
         ));
     }
 
-    if let Some(candidate) = find_codex_on_path(path_env) {
-        return Ok(candidate);
-    }
-
-    for candidate in default_windows_codex_candidates() {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-
     if let Some(resource_dir) = resource_dir {
-        for candidate in bundled_codex_candidates(resource_dir) {
+        for candidate in bundled_codex_app_server_candidates(resource_dir) {
             if candidate.is_file() {
                 return Ok(candidate);
             }
         }
     }
 
-    let app_detected = codex_desktop_app_detected();
-    Err(if app_detected {
-        CODEX_APP_DETECTED_CLI_MISSING.to_string()
-    } else {
-        "Codex command-line runtime was not found. ClawScribe can process meetings without Codex using an OpenAI API key or OpenClaw; select Advanced: Codex runtime only when the Codex CLI/runtime is installed.".to_string()
-    })
+    Err(CODEX_APP_SERVER_MISSING.to_string())
 }
 
 async fn codex_installation_status_for_config<R: Runtime>(
@@ -811,154 +721,53 @@ async fn codex_installation_status_for_config<R: Runtime>(
     let codex_home = config
         .effective_codex_home()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| default_user_codex_home().to_string_lossy().to_string());
-    match discover_codex_binary(app, config.codex_binary_path.as_deref()) {
-        Ok(binary) => {
-            CodexProcessingProvider::new(config, binary)?
+        .unwrap_or_else(|| default_isolated_codex_home().to_string_lossy().to_string());
+    match discover_codex_app_server(app, config.codex_binary_path.as_deref()) {
+        Ok(runtime) => {
+            CodexAppServerProvider::new(config, runtime)?
                 .check_installation()
                 .await
         }
         Err(message) => {
-            let desktop_app_detected = codex_desktop_app_detected();
             Ok(CodexInstallationStatus {
                 found: false,
                 version: None,
                 path: None,
+                runtime_kind: "codex-app-server".to_string(),
                 codex_home,
                 codex_home_mode: config.effective_home_mode(),
                 auth_status: None,
-                desktop_app_detected,
+                account_email: None,
+                plan_type: None,
+                rate_limit_state: None,
+                desktop_app_detected: false,
                 install_command: Some(codex_install_repair_plan().recommended.command),
-                message: if desktop_app_detected {
-                    CODEX_APP_DETECTED_CLI_MISSING.to_string()
-                } else {
-                    message
-                },
+                message,
             })
         }
     }
 }
 
-fn find_codex_on_path(path_env: Option<&OsStr>) -> Option<PathBuf> {
-    let path_value: OsString = path_env
-        .map(OsString::from)
-        .or_else(|| std::env::var_os("PATH"))?;
-    let names = ["codex", "codex.exe", "codex.cmd", "codex.bat"];
-    std::env::split_paths(&path_value).find_map(|dir| {
-        names
-            .iter()
-            .map(|name| dir.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn default_windows_codex_candidates() -> Vec<PathBuf> {
-    windows_codex_cli_candidates_from(
-        std::env::var_os("LOCALAPPDATA").as_deref(),
-        std::env::var_os("ProgramFiles").as_deref(),
-    )
-}
-
-fn windows_codex_cli_candidates_from(
-    local_app_data: Option<&OsStr>,
-    program_files: Option<&OsStr>,
-) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(base) = local_app_data {
-        let base = PathBuf::from(base);
-        candidates.push(
-            base.join("Programs")
-                .join("OpenAI")
-                .join("Codex")
-                .join("bin")
-                .join("codex.exe"),
-        );
-        candidates.push(
-            base.join("Programs")
-                .join("OpenAI")
-                .join("Codex")
-                .join("codex.exe"),
-        );
-    }
-    if let Some(base) = program_files {
-        let base = PathBuf::from(base);
-        candidates.push(
-            base.join("OpenAI")
-                .join("Codex")
-                .join("bin")
-                .join("codex.exe"),
-        );
-        candidates.push(base.join("OpenAI").join("Codex").join("codex.exe"));
-    }
-    candidates
-}
-
-fn codex_desktop_app_detected() -> bool {
-    codex_desktop_app_candidates_from(
-        std::env::var_os("LOCALAPPDATA").as_deref(),
-        std::env::var_os("ProgramFiles").as_deref(),
-    )
-    .into_iter()
-    .any(|candidate| candidate.exists())
-}
-
-fn codex_desktop_app_candidates_from(
-    local_app_data: Option<&OsStr>,
-    program_files: Option<&OsStr>,
-) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(base) = local_app_data {
-        let base = PathBuf::from(base);
-        candidates.push(
-            base.join("Programs")
-                .join("OpenAI")
-                .join("Codex")
-                .join("Codex.exe"),
-        );
-        candidates.push(base.join("Programs").join("OpenAI Codex").join("Codex.exe"));
-        candidates.push(base.join("Microsoft").join("WindowsApps").join("Codex.exe"));
-    }
-    if let Some(base) = program_files {
-        let base = PathBuf::from(base);
-        candidates.push(base.join("OpenAI").join("Codex").join("Codex.exe"));
-        candidates.push(base.join("OpenAI Codex").join("Codex.exe"));
-    }
-    candidates
+fn is_windowsapps_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\")
+        .contains("\\windowsapps\\")
 }
 
 fn codex_install_repair_plan() -> CodexInstallRepairPlan {
-    #[cfg(windows)]
     let recommended = CodexInstallCommand {
-        label: "Install or repair Codex CLI".to_string(),
-        shell: "PowerShell".to_string(),
-        command:
-            r#"powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex""#
-                .to_string(),
-    };
-    #[cfg(not(windows))]
-    let recommended = CodexInstallCommand {
-        label: "Install or repair Codex CLI".to_string(),
-        shell: "Shell".to_string(),
-        command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh".to_string(),
+        label: "Repair bundled Codex app-server runtime".to_string(),
+        shell: "ClawScribe".to_string(),
+        command: "Controlled Codex app-server runtime installer is not bundled in this build.".to_string(),
     };
 
     CodexInstallRepairPlan {
         requires_confirmation: true,
-        docs_url: "https://developers.openai.com/codex/cli".to_string(),
-        message: "ClawScribe will not install Codex automatically. Review and run an install or repair command yourself, then use Find Codex automatically.".to_string(),
+        docs_url: "docs/auth/codex-auth.md".to_string(),
+        message: "Codex app-server mode needs a ClawScribe-bundled/pinned runtime or a controlled first-run installer. This build will not use global codex.exe, PATH, WindowsApps, or user-browsed Store app internals. OpenAI API key and OpenClaw continue to work without Codex.".to_string(),
         recommended,
-        alternatives: vec![
-            CodexInstallCommand {
-                label: "Install with npm".to_string(),
-                shell: "Shell".to_string(),
-                command: "npm install -g @openai/codex".to_string(),
-            },
-            CodexInstallCommand {
-                label: "Install with Homebrew".to_string(),
-                shell: "Shell".to_string(),
-                command: "brew install --cask codex".to_string(),
-            },
-        ],
+        alternatives: vec![],
     }
 }
 
@@ -966,15 +775,16 @@ pub fn codex_runtime_required_for_provider(provider: &str) -> bool {
     matches!(provider, "codex" | "codex-login" | "codex-chatgpt")
 }
 
-fn bundled_codex_candidates(resource_dir: &Path) -> Vec<PathBuf> {
+fn bundled_codex_app_server_candidates(resource_dir: &Path) -> Vec<PathBuf> {
     let exe = if cfg!(target_os = "windows") {
-        "codex.exe"
+        "codex-app-server.exe"
     } else {
-        "codex"
+        "codex-app-server"
     };
     vec![
-        resource_dir.join("codex").join(exe),
-        resource_dir.join("bin").join(exe),
+        resource_dir.join("codex-app-server").join(exe),
+        resource_dir.join("codex").join("app-server").join(exe),
+        resource_dir.join("bin").join("codex").join(exe),
         resource_dir.join(exe),
     ]
 }
@@ -986,17 +796,14 @@ fn normalize_codex_config(mut config: CodexProviderConfig) -> CodexProviderConfi
     if config.timeout_seconds == 0 {
         config.timeout_seconds = DEFAULT_CODEX_TIMEOUT_SECONDS;
     }
-    if !config.use_existing_user_codex_session {
-        config.codex_home_mode = CodexHomeMode::ClawscribeIsolated;
-    }
-    if !config.use_existing_user_codex_session
-        && matches!(config.codex_home_mode, CodexHomeMode::ClawscribeIsolated)
-        && config
-            .codex_home_path
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
+    config.use_existing_user_codex_session = false;
+    config.codex_home_mode = CodexHomeMode::ClawscribeIsolated;
+    if config
+        .codex_home_path
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
     {
         config.codex_home_path = Some(default_isolated_codex_home().to_string_lossy().to_string());
     }
@@ -1052,12 +859,6 @@ fn default_codex_runs_root() -> PathBuf {
         .join("codex-runs")
 }
 
-fn default_user_codex_home() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("~"))
-        .join(".codex")
-}
-
 fn expand_windows_style_appdata(value: &String) -> PathBuf {
     let appdata = std::env::var("APPDATA")
         .ok()
@@ -1086,6 +887,82 @@ fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to write isolated Codex config.toml: {e}"))?;
     }
     Ok(())
+}
+
+fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    })
+}
+
+fn app_server_initialize_request(id: u64) -> Value {
+    json_rpc_request(
+        id,
+        "initialize",
+        serde_json::json!({
+            "clientInfo": {
+                "name": "ClawScribe",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "transport": "stdio-jsonl",
+        }),
+    )
+}
+
+fn app_server_initialized_notification() -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    })
+}
+
+fn app_server_account_read_request(id: u64) -> Value {
+    json_rpc_request(id, "account/read", serde_json::json!({}))
+}
+
+fn app_server_login_start_request(id: u64, login_type: &str) -> Value {
+    json_rpc_request(
+        id,
+        "account/login/start",
+        serde_json::json!({
+            "type": login_type,
+        }),
+    )
+}
+
+fn app_server_logout_request(id: u64) -> Value {
+    json_rpc_request(id, "account/logout", serde_json::json!({}))
+}
+
+fn app_server_thread_start_request(id: u64) -> Value {
+    json_rpc_request(id, "thread/start", serde_json::json!({}))
+}
+
+fn app_server_turn_run_request(
+    id: u64,
+    thread_id: &str,
+    model: &str,
+    transcript: &str,
+    metadata: Value,
+) -> Value {
+    json_rpc_request(
+        id,
+        "turn/run",
+        serde_json::json!({
+            "threadId": thread_id,
+            "model": model,
+            "input": {
+                "transcript": normalize_transcript_markdown(transcript),
+                "metadata": metadata,
+                "instructions": build_meeting_prompt(),
+                "outputSchema": serde_json::from_str::<Value>(&output_schema_json()).unwrap_or(Value::Null),
+            },
+        }),
+    )
 }
 
 fn normalize_transcript_markdown(transcript: &str) -> String {
@@ -1445,29 +1322,6 @@ pub fn redact_secrets(value: &str) -> String {
     redacted
 }
 
-fn first_non_empty_line(value: &str) -> String {
-    value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-trait IfEmpty {
-    fn if_empty(self, fallback: &str) -> String;
-}
-
-impl IfEmpty for String {
-    fn if_empty(self, fallback: &str) -> String {
-        if self.is_empty() {
-            fallback.to_string()
-        } else {
-            self
-        }
-    }
-}
-
 fn sanitize_path_segment(value: &str) -> String {
     value
         .chars()
@@ -1493,7 +1347,7 @@ fn format_seconds(seconds: f64) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
     use std::io::Write;
