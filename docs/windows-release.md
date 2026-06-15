@@ -38,6 +38,20 @@ cd frontend
 .\scripts\build-windows-release.ps1
 ```
 
+If you do not have a Windows build machine, use GitHub Actions instead:
+
+1. Push this branch to GitHub.
+2. Open **Actions**.
+3. Run **ClawScribe Windows Release** manually.
+4. Use `cpu` for the first build unless you explicitly need GPU acceleration.
+5. Download the `clawscribe-windows-<feature>` artifact from the completed run.
+
+The workflow builds on GitHub's `windows-latest` runner, stages the
+`llama-helper-x86_64-pc-windows-msvc.exe` sidecar, runs
+`frontend\scripts\build-windows-release.ps1`, and uploads the generated MSI and
+NSIS installers. The artifacts are unsigned unless Windows signing secrets are
+added in a future release workflow.
+
 The default build uses the `vulkan` feature for the Windows meeting recorder
 target. Override when needed:
 
