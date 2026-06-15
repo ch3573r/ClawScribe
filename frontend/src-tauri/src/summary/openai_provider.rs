@@ -476,7 +476,12 @@ fn normalize_base_url(value: String) -> String {
     if trimmed.is_empty() {
         DEFAULT_OPENAI_BASE_URL.to_string()
     } else {
-        trimmed.trim_end_matches('/').to_string()
+        let without_trailing_slash = trimmed.trim_end_matches('/');
+        without_trailing_slash
+            .strip_suffix("/chat/completions")
+            .unwrap_or(without_trailing_slash)
+            .trim_end_matches('/')
+            .to_string()
     }
 }
 
@@ -822,5 +827,25 @@ mod tests {
 
         assert!(status.success);
         assert!(status.message.contains("succeeded"));
+    }
+
+    #[tokio::test]
+    async fn full_chat_completions_url_is_normalized_to_base_url() {
+        let base_url = fake_openai_server(|request, _index| {
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+            assert!(!request.starts_with("POST /v1/chat/completions/chat/completions"));
+            (200, chat_response(TEST_EXPECTED))
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url: format!("{}/v1/chat/completions", base_url),
+            model: "test-model".to_string(),
+            ..OpenAICompatibleProviderConfig::default()
+        })
+        .unwrap();
+
+        let status = provider.test_connection().await.unwrap();
+
+        assert!(status.success);
     }
 }
