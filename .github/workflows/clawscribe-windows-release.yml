@@ -43,7 +43,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs['build-ref'] || github.ref }}
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Checkout requested build ref
+        if: ${{ inputs['build-ref'] != '' }}
+        shell: pwsh
+        run: |
+          git checkout --detach "${{ inputs['build-ref'] }}"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
