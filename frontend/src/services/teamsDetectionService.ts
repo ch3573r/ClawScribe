@@ -34,6 +34,27 @@ export interface TeamsDetectionSignal {
   detail: string;
 }
 
+export interface TeamsDetectionDiagnostics {
+  processCount: number;
+  teamsProcessCount: number;
+  browserProcessCount: number;
+  relevantWindowCount: number;
+  meetingTitleCount: number;
+  browserMeetingTitleCount: number;
+  foregroundMeetingTitleCount: number;
+  windowSampleLimit: number;
+  titleSignalRequired: boolean;
+  titleSignalSatisfied: boolean;
+  confidenceCappedByTitleRequirement: boolean;
+}
+
+export interface TeamsDetectionRecordingSafety {
+  mode: string;
+  automaticRecordingAllowed: boolean;
+  promptRequired: boolean;
+  detail: string;
+}
+
 export interface TeamsDetectionCandidate {
   source: string;
   processId: number | null;
@@ -56,6 +77,8 @@ export interface TeamsDetectionStatus {
   reason: string;
   signals: TeamsDetectionSignal[];
   candidates: TeamsDetectionCandidate[];
+  diagnostics: TeamsDetectionDiagnostics;
+  recordingSafety: TeamsDetectionRecordingSafety;
   nextRecommendedAction: TeamsDetectionAction;
 }
 
@@ -72,3 +95,34 @@ export class TeamsDetectionService {
 }
 
 export const teamsDetectionService = new TeamsDetectionService();
+
+export interface TeamsDetectionDebugBridge {
+  getConfig: () => Promise<TeamsDetectionConfig>;
+  getStatus: (config?: TeamsDetectionConfig) => Promise<TeamsDetectionStatus>;
+  printStatus: (config?: TeamsDetectionConfig) => Promise<TeamsDetectionStatus>;
+}
+
+declare global {
+  interface Window {
+    __clawscribeTeamsDetection?: TeamsDetectionDebugBridge;
+  }
+}
+
+export function installTeamsDetectionDebugBridge(): void {
+  if (typeof window === 'undefined' || process.env.NODE_ENV === 'production') {
+    return;
+  }
+
+  window.__clawscribeTeamsDetection = {
+    getConfig: () => teamsDetectionService.getConfig(),
+    getStatus: (config?: TeamsDetectionConfig) => teamsDetectionService.getStatus(config),
+    printStatus: async (config?: TeamsDetectionConfig) => {
+      const status = await teamsDetectionService.getStatus(config);
+      console.log('[ClawScribe] Teams detection status', status);
+      console.table(status.signals);
+      console.table([status.diagnostics]);
+      console.table([status.recordingSafety]);
+      return status;
+    },
+  };
+}

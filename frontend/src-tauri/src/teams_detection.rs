@@ -44,7 +44,34 @@ pub struct TeamsDetectionStatus {
     pub reason: String,
     pub signals: Vec<TeamsDetectionSignal>,
     pub candidates: Vec<TeamsDetectionCandidate>,
+    pub diagnostics: TeamsDetectionDiagnostics,
+    pub recording_safety: TeamsDetectionRecordingSafety,
     pub next_recommended_action: TeamsDetectionAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsDetectionDiagnostics {
+    pub process_count: usize,
+    pub teams_process_count: usize,
+    pub browser_process_count: usize,
+    pub relevant_window_count: usize,
+    pub meeting_title_count: usize,
+    pub browser_meeting_title_count: usize,
+    pub foreground_meeting_title_count: usize,
+    pub window_sample_limit: usize,
+    pub title_signal_required: bool,
+    pub title_signal_satisfied: bool,
+    pub confidence_capped_by_title_requirement: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsDetectionRecordingSafety {
+    pub mode: String,
+    pub automatic_recording_allowed: bool,
+    pub prompt_required: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +161,10 @@ fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
                 detail: format!("Unsupported platform: {}", std::env::consts::OS),
             }],
             candidates: Vec::new(),
+            diagnostics: diagnostics_for_unavailable_status(&config, false),
+            recording_safety: prompt_only_recording_safety(
+                "Unsupported platforms cannot trigger recording from Teams detection",
+            ),
             next_recommended_action: TeamsDetectionAction::Unsupported,
         };
     }
@@ -156,6 +187,10 @@ fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
                 detail: "Detection disabled".to_string(),
             }],
             candidates: Vec::new(),
+            diagnostics: diagnostics_for_unavailable_status(&config, true),
+            recording_safety: prompt_only_recording_safety(
+                "Disabled Teams detection cannot trigger recording",
+            ),
             next_recommended_action: TeamsDetectionAction::Disabled,
         };
     }
@@ -308,9 +343,12 @@ fn evaluate_snapshots(
     });
 
     let title_requirement_met = !config.require_meeting_title_signal || title_matched;
+    let confidence_before_title_requirement = confidence;
     if !title_requirement_met {
         confidence = confidence.min(threshold - 0.01).max(0.0);
     }
+    let confidence_capped_by_title_requirement =
+        !title_requirement_met && confidence_before_title_requirement > 0.0;
     confidence = confidence.min(1.0);
     let detected = confidence >= threshold && title_requirement_met;
 
@@ -344,6 +382,19 @@ fn evaluate_snapshots(
         }
     }));
     let status = detection_state(detected, confidence, threshold, title_requirement_met);
+    let diagnostics = TeamsDetectionDiagnostics {
+        process_count: processes.len(),
+        teams_process_count: teams_processes.len(),
+        browser_process_count: browser_processes.len(),
+        relevant_window_count: windows.len(),
+        meeting_title_count: teams_titles.len(),
+        browser_meeting_title_count: browser_teams_titles.len(),
+        foreground_meeting_title_count: foreground_meeting_titles.len(),
+        window_sample_limit: config.max_window_title_samples.max(1),
+        title_signal_required: config.require_meeting_title_signal,
+        title_signal_satisfied: title_requirement_met,
+        confidence_capped_by_title_requirement,
+    };
 
     TeamsDetectionStatus {
         supported: cfg!(target_os = "windows"),
@@ -357,11 +408,43 @@ fn evaluate_snapshots(
         reason: detection_reason(detected, confidence, threshold, title_requirement_met),
         signals,
         candidates,
+        diagnostics,
+        recording_safety: prompt_only_recording_safety(
+            "Teams detection is read-only and can only recommend a user prompt",
+        ),
         next_recommended_action: if detected {
             TeamsDetectionAction::PromptToRecord
         } else {
             TeamsDetectionAction::Idle
         },
+    }
+}
+
+fn diagnostics_for_unavailable_status(
+    config: &TeamsDetectionConfig,
+    title_signal_satisfied: bool,
+) -> TeamsDetectionDiagnostics {
+    TeamsDetectionDiagnostics {
+        process_count: 0,
+        teams_process_count: 0,
+        browser_process_count: 0,
+        relevant_window_count: 0,
+        meeting_title_count: 0,
+        browser_meeting_title_count: 0,
+        foreground_meeting_title_count: 0,
+        window_sample_limit: config.max_window_title_samples.max(1),
+        title_signal_required: config.require_meeting_title_signal,
+        title_signal_satisfied,
+        confidence_capped_by_title_requirement: false,
+    }
+}
+
+fn prompt_only_recording_safety(detail: &str) -> TeamsDetectionRecordingSafety {
+    TeamsDetectionRecordingSafety {
+        mode: "prompt-only".to_string(),
+        automatic_recording_allowed: false,
+        prompt_required: true,
+        detail: detail.to_string(),
     }
 }
 
@@ -387,7 +470,8 @@ fn detection_reason(
     title_requirement_met: bool,
 ) -> String {
     if detected {
-        return "Teams meeting confidence met the configured threshold".to_string();
+        return "Teams meeting confidence met the configured threshold; recording remains prompt-only"
+            .to_string();
     }
 
     if !title_requirement_met {
@@ -709,6 +793,12 @@ mod tests {
             status.next_recommended_action,
             TeamsDetectionAction::PromptToRecord
         );
+        assert_eq!(status.recording_safety.mode, "prompt-only");
+        assert!(!status.recording_safety.automatic_recording_allowed);
+        assert!(status.recording_safety.prompt_required);
+        assert_eq!(status.diagnostics.teams_process_count, 1);
+        assert_eq!(status.diagnostics.meeting_title_count, 1);
+        assert_eq!(status.diagnostics.foreground_meeting_title_count, 1);
     }
 
     #[test]
@@ -721,6 +811,10 @@ mod tests {
         assert!(!status.detected);
         assert_eq!(status.status, TeamsDetectionState::Possible);
         assert!(status.confidence < DEFAULT_CONFIDENCE_THRESHOLD);
+        assert!(status.diagnostics.title_signal_required);
+        assert!(!status.diagnostics.title_signal_satisfied);
+        assert!(status.diagnostics.confidence_capped_by_title_requirement);
+        assert_eq!(status.next_recommended_action, TeamsDetectionAction::Idle);
     }
 
     #[test]
@@ -735,6 +829,32 @@ mod tests {
         let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
 
         assert!(status.detected);
+        assert_eq!(status.status, TeamsDetectionState::Detected);
+        assert_eq!(
+            status.next_recommended_action,
+            TeamsDetectionAction::PromptToRecord
+        );
+        assert!(!status.recording_safety.automatic_recording_allowed);
+        assert_eq!(status.diagnostics.browser_process_count, 1);
+        assert_eq!(status.diagnostics.browser_meeting_title_count, 1);
+        assert!(status.diagnostics.title_signal_satisfied);
+    }
+
+    #[test]
+    fn browser_process_without_meeting_title_stays_prompt_idle() {
+        let config = TeamsDetectionConfig::default();
+        let processes = vec![process(99, "chrome.exe")];
+        let windows = vec![window(Some(99), "New tab - Google Chrome")];
+
+        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+
+        assert!(!status.detected);
+        assert_eq!(status.status, TeamsDetectionState::Possible);
+        assert_eq!(status.next_recommended_action, TeamsDetectionAction::Idle);
+        assert!(!status.recording_safety.automatic_recording_allowed);
+        assert_eq!(status.diagnostics.browser_process_count, 1);
+        assert_eq!(status.diagnostics.meeting_title_count, 0);
+        assert!(status.diagnostics.confidence_capped_by_title_requirement);
     }
 
     #[test]
@@ -769,5 +889,7 @@ mod tests {
         assert!(!status.detected);
         assert_eq!(status.status, TeamsDetectionState::NotDetected);
         assert_eq!(status.next_recommended_action, TeamsDetectionAction::Idle);
+        assert_eq!(status.diagnostics.process_count, 0);
+        assert!(!status.recording_safety.automatic_recording_allowed);
     }
 }
