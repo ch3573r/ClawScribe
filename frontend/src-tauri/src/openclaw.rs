@@ -124,7 +124,12 @@ pub async fn save_openclaw_config<R: Runtime>(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let config = normalize_config(config);
+    let mut config = normalize_config(config);
+    if config.bearer_token.is_empty() {
+        if let Ok(existing) = load_config(&app) {
+            config.bearer_token = existing.bearer_token;
+        }
+    }
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
 }

@@ -90,6 +90,7 @@ interface OpenClawConfigStatus {
   model_endpoint: string;
   source: string;
   status_message: string;
+  include_audio_path: boolean;
 }
 
 interface AnthropicModel {
@@ -198,6 +199,12 @@ export function ModelSettingsModal({
   const [openClawStatus, setOpenClawStatus] = useState<OpenClawConfigStatus | null>(null);
   const [openClawStatusError, setOpenClawStatusError] = useState<string>('');
   const [isLoadingOpenClawStatus, setIsLoadingOpenClawStatus] = useState<boolean>(false);
+  const [openClawEnabled, setOpenClawEnabled] = useState<boolean>(false);
+  const [openClawEndpoint, setOpenClawEndpoint] = useState<string>('');
+  const [openClawModelEndpoint, setOpenClawModelEndpoint] = useState<string>('');
+  const [openClawBearerToken, setOpenClawBearerToken] = useState<string>('');
+  const [openClawSource, setOpenClawSource] = useState<string>('ClawScribe');
+  const [openClawIncludeAudioPath, setOpenClawIncludeAudioPath] = useState<boolean>(false);
 
   // Use global download context instead of local state
   const { isDownloading, getProgress, downloadingModels } = useOllamaDownload();
@@ -283,10 +290,18 @@ export function ModelSettingsModal({
     !customOpenAIModel.trim()
   );
 
+  const isOpenClawInvalid = modelConfig.provider === 'openclaw' && (
+    !openClawEndpoint.trim() ||
+    !openClawModelEndpoint.trim() ||
+    !openClawSource.trim() ||
+    (!openClawBearerToken.trim() && !openClawStatus?.bearer_token_configured)
+  );
+
   const isDoneDisabled =
     (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
-    isCustomOpenAIInvalid;
+    isCustomOpenAIInvalid ||
+    isOpenClawInvalid;
 
   useEffect(() => {
     const fetchModelConfig = async () => {
@@ -630,6 +645,12 @@ export function ModelSettingsModal({
     try {
       const status = (await invoke('get_openclaw_config_status')) as OpenClawConfigStatus;
       setOpenClawStatus(status);
+      setOpenClawEnabled(status.enabled);
+      setOpenClawEndpoint(status.endpoint || '');
+      setOpenClawModelEndpoint(status.model_endpoint || '');
+      setOpenClawSource(status.source || 'ClawScribe');
+      setOpenClawIncludeAudioPath(status.include_audio_path);
+      setOpenClawBearerToken('');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('Error loading OpenClaw handoff status:', err);
@@ -746,6 +767,28 @@ export function ModelSettingsModal({
       } catch (err) {
         console.error('Failed to save OpenAI auth mode:', err);
         toast.error('Failed to save OpenAI auth mode');
+        return;
+      }
+    }
+
+    if (updatedConfig.provider === 'openclaw') {
+      try {
+        await invoke('save_openclaw_config', {
+          config: {
+            enabled: openClawEnabled,
+            endpoint: openClawEndpoint.trim(),
+            model_endpoint: openClawModelEndpoint.trim(),
+            bearer_token: openClawBearerToken.trim(),
+            source: openClawSource.trim(),
+            include_audio_path: openClawIncludeAudioPath,
+          },
+        });
+        setOpenClawBearerToken('');
+        await loadOpenClawStatus();
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error('Failed to save OpenClaw configuration:', err);
+        toast.error(errorMsg || 'Failed to save OpenClaw configuration');
         return;
       }
     }
@@ -974,7 +1017,7 @@ export function ModelSettingsModal({
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
                 <SelectItem value="claude">Claude</SelectItem>
                 <SelectItem value="groq">Groq</SelectItem>
-                <SelectItem value="openclaw">OpenClaw (Optional)</SelectItem>
+                <SelectItem value="openclaw">OpenClaw Gateway</SelectItem>
               </SelectContent>
             </Select>
 
@@ -1168,77 +1211,131 @@ export function ModelSettingsModal({
         )}
 
         {modelConfig.provider === 'openclaw' && (
-          <Alert className={cn(
-            'border-amber-200 bg-amber-50',
-            openClawStatus?.ready && 'border-green-200 bg-green-50'
-          )}>
-            <AlertDescription className={cn(
-              'text-amber-900',
-              openClawStatus?.ready && 'text-green-900'
-            )}>
-              <div className="space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3">
-                    <div className={cn(
-                      'mt-0.5 rounded-md p-2',
-                      openClawStatus?.ready ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
-                    )}>
-                      <ServerCog className="h-4 w-4" />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">Optional OpenClaw managed endpoint</span>
-                        <span className={cn(
-                          'rounded-full px-2 py-0.5 text-xs font-medium',
-                          openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
-                        )}>
-                          {isLoadingOpenClawStatus
-                            ? 'Checking'
-                            : openClawStatus?.ready
-                              ? 'Ready'
-                              : 'Not ready'}
-                        </span>
-                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
-                          Optional feature
-                        </span>
-                      </div>
-                      <p className="text-sm">
-                        ClawScribe can hand meeting processing to OpenClaw when that feature is configured. Standalone OpenAI auth does not depend on OpenClaw.
-                      </p>
-                      <p className="text-xs">
-                        {openClawStatusError
-                          ? `OpenClaw status unavailable: ${openClawStatusError}`
-                          : openClawStatus?.status_message || 'OpenClaw handoff status has not been checked yet.'}
-                      </p>
-                      {openClawStatus?.endpoint && (
-                        <p className="text-xs">
-                          Handoff endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.endpoint}</code>
-                        </p>
-                      )}
-                      {openClawStatus?.model_endpoint && (
-                        <p className="text-xs">
-                          Model endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.model_endpoint}</code>
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={loadOpenClawStatus}
-                    disabled={isLoadingOpenClawStatus}
-                    title="Refresh OpenClaw handoff status"
-                  >
-                    <RefreshCw className={cn('h-4 w-4', isLoadingOpenClawStatus && 'animate-spin')} />
-                  </Button>
+          <div className="space-y-4 border-t pt-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className={cn(
+                  'mt-0.5 rounded-md p-2',
+                  openClawStatus?.ready ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                )}>
+                  <ServerCog className="h-4 w-4" />
                 </div>
-                <p className="text-xs">
-                  This is separate from standalone OpenAI API-key mode and custom OpenAI-compatible managed endpoints.
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">OpenClaw gateway</span>
+                    <span className={cn(
+                      'rounded-full px-2 py-0.5 text-xs font-medium',
+                      openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                    )}>
+                      {isLoadingOpenClawStatus
+                        ? 'Checking'
+                        : openClawStatus?.ready
+                          ? 'Ready'
+                          : 'Needs setup'}
+                    </span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Route summaries through the OpenClaw ingest service. OAuth stays on the OpenClaw side; ClawScribe only stores this endpoint configuration and bearer token.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {openClawStatusError
+                      ? `OpenClaw status unavailable: ${openClawStatusError}`
+                      : openClawStatus?.status_message || 'OpenClaw status has not been checked yet.'}
+                  </p>
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={loadOpenClawStatus}
+                disabled={isLoadingOpenClawStatus}
+                title="Refresh OpenClaw status"
+              >
+                <RefreshCw className={cn('h-4 w-4', isLoadingOpenClawStatus && 'animate-spin')} />
+              </Button>
+            </div>
+
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div>
+                <Label htmlFor="openclaw-enabled">Enable OpenClaw handoff</Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Submit completed recordings and allow OpenClaw-backed summaries.
                 </p>
               </div>
-            </AlertDescription>
-          </Alert>
+              <Switch
+                id="openclaw-enabled"
+                checked={openClawEnabled}
+                onCheckedChange={setOpenClawEnabled}
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="openclaw-endpoint">Meeting Handoff URL *</Label>
+              <Input
+                id="openclaw-endpoint"
+                type="url"
+                value={openClawEndpoint}
+                onChange={(e) => setOpenClawEndpoint(e.target.value)}
+                placeholder="http://openclaw-host.local:8765/meetings/completed"
+                className="mt-1"
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="openclaw-model-endpoint">Summary Gateway URL *</Label>
+              <Input
+                id="openclaw-model-endpoint"
+                type="url"
+                value={openClawModelEndpoint}
+                onChange={(e) => setOpenClawModelEndpoint(e.target.value)}
+                placeholder="http://openclaw-host.local:8765/v1/chat/completions"
+                className="mt-1"
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="openclaw-bearer-token">Bearer Token *</Label>
+              <Input
+                id="openclaw-bearer-token"
+                type="password"
+                value={openClawBearerToken}
+                onChange={(e) => setOpenClawBearerToken(e.target.value)}
+                placeholder={openClawStatus?.bearer_token_configured ? 'Token already saved; enter a new one to replace it' : 'Paste the OpenClaw ingest bearer token'}
+                className="mt-1"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                {openClawStatus?.bearer_token_configured
+                  ? 'A token is already configured. Leaving this blank keeps the saved token.'
+                  : 'This must match MEETING_OPENCLAW_INGEST_TOKEN on the OpenClaw ingest service.'}
+              </p>
+            </div>
+
+            <div>
+              <Label htmlFor="openclaw-source">Source Name *</Label>
+              <Input
+                id="openclaw-source"
+                value={openClawSource}
+                onChange={(e) => setOpenClawSource(e.target.value)}
+                placeholder="ClawScribe"
+                className="mt-1"
+              />
+            </div>
+
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div>
+                <Label htmlFor="openclaw-include-audio-path">Include local audio path</Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Include the recorder machine's audio path in submitted metadata.
+                </p>
+              </div>
+              <Switch
+                id="openclaw-include-audio-path"
+                checked={openClawIncludeAudioPath}
+                onCheckedChange={setOpenClawIncludeAudioPath}
+              />
+            </div>
+          </div>
         )}
 
         {requiresApiKey && (
@@ -1286,24 +1383,16 @@ export function ModelSettingsModal({
         )}
 
         {modelConfig.provider === 'openai' && (
-          <Alert className={cn(
-            'border-blue-200 bg-blue-50',
-            !apiKey?.trim() && 'border-yellow-500 bg-yellow-50'
-          )}>
-            <AlertDescription className={cn(
-              'text-blue-900',
-              !apiKey?.trim() && 'text-yellow-900'
-            )}>
+          <Alert className="border-blue-200 bg-blue-50">
+            <AlertDescription className="text-blue-900">
               <div className="space-y-2">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="font-medium">
-                      OpenAI API auth
+                      OpenAI API key
                     </div>
                     <p className="text-sm">
-                      {isLoadingOpenAIAuthStatus
-                        ? 'Checking OpenAI auth status...'
-                        : openAIAuthStatus?.message || 'OpenAI requests use bearer API-key auth in this desktop build.'}
+                      Paste a key from the OpenAI platform. Sign in with OpenAI/ChatGPT OAuth is not available to this desktop app.
                     </p>
                   </div>
                   <Button
@@ -1318,7 +1407,11 @@ export function ModelSettingsModal({
                   </Button>
                 </div>
                 <p className="text-xs">
-                  Public OpenAI OAuth metadata is not treated as a usable API credential. For OAuth-backed processing without OpenClaw, use a standalone OpenAI-compatible managed endpoint under Custom OpenAI.
+                  {isLoadingOpenAIAuthStatus
+                    ? 'Checking saved API-key status...'
+                    : openAIAuthStatus?.apiKeyPresent
+                      ? 'An OpenAI API key is saved.'
+                      : 'OAuth metadata is informational only here; API requests still need an API key or an OpenAI-compatible gateway.'}
                 </p>
                 <Button
                   type="button"
