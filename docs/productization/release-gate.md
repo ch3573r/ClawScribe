@@ -273,8 +273,9 @@ Expected:
 
 - App-server direction tests pass.
 - No global Codex CLI, PATH, WindowsApps, or `codex exec` path is required.
-- Do not claim Windows Codex app-server verification until a bundled/pinned
-  runtime or controlled runtime installer is tested on Windows.
+- The Windows release artifact must bundle the pinned Codex app-server runtime.
+- Do not claim Windows Codex app-server auth/runtime verification until the
+  bundled runtime is tested on Windows.
 
 Windows runtime gate:
 
@@ -286,7 +287,8 @@ Windows runtime gate:
 Required status wording until Alex completes the checklist:
 
 > Codex app-server provider direction implemented and fake-tested. Bundled
-> runtime packaging and Windows app-server auth/runtime verification pending.
+> runtime packaging implemented; Windows app-server auth/runtime verification
+> pending.
 
 ## Manual Windows Runtime Gate
 
@@ -296,8 +298,8 @@ areas:
 - launch and installed-app branding
 - About dialog and legal attribution
 - light/dark theme
-- Advanced: Codex app-server provider fake-tested and awaiting Windows runtime
-  verification
+- Advanced: Codex app-server provider bundled-runtime packaging fake-tested and
+  awaiting Windows runtime verification
 - OpenAI API-key fallback
 - OpenClaw managed auth provider
 - Microsoft login, OneNote, and Planner marked not implemented or verified

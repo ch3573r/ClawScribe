@@ -109,6 +109,9 @@ interface CodexInstallationStatus {
   found: boolean;
   version?: string | null;
   path?: string | null;
+  runtimeSha256?: string | null;
+  runtimeSourcePackage?: string | null;
+  runtimeSourceUrl?: string | null;
   runtimeKind: string;
   codexHome: string;
   codexHomeMode: 'clawscribe-isolated' | 'existing-user-codex-session';
@@ -773,7 +776,7 @@ export function ModelSettingsModal({
       if (status.found) {
         toast.success(`Codex app-server runtime found: ${status.version || status.path || 'installed'}`);
       } else {
-        toast.error(status.message || 'Codex app-server runtime was not installed');
+        toast.error(status.message || 'Bundled Codex runtime is missing or damaged');
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -795,7 +798,7 @@ export function ModelSettingsModal({
         setCodexConfig((prev) => ({ ...prev, codexBinaryPath: null }));
         toast.success(`Codex app-server runtime found: ${status.version || status.path}`);
       } else {
-        toast.error(status.message || 'Codex app-server runtime was not installed');
+        toast.error(status.message || 'Bundled Codex runtime is missing or damaged');
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -821,7 +824,7 @@ export function ModelSettingsModal({
         alternatives ? `\nAlternatives:\n${alternatives}` : '',
         `\nDocs: ${plan.docsUrl}`,
       ].filter(Boolean).join('\n'));
-      toast.info('Codex app-server repair information prepared. Nothing was installed.');
+      toast.info('Codex app-server repair information prepared.');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setCodexLastResult(message);
@@ -847,7 +850,7 @@ export function ModelSettingsModal({
     return normalized;
   };
 
-  const runCodexAction = async (command: 'codex_login_browser' | 'codex_login_device' | 'codex_logout' | 'codex_test_processing') => {
+  const runCodexAction = async (command: 'codex_login_browser' | 'codex_login_device' | 'codex_logout' | 'codex_test_app_server' | 'codex_test_processing') => {
     setIsCodexBusy(true);
     try {
       await saveCodexConfig();
@@ -1547,7 +1550,7 @@ export function ModelSettingsModal({
                     'rounded-full px-2 py-0.5 text-xs font-medium',
                     codexStatus?.found ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
                   )}>
-                    {isCodexBusy ? 'Checking' : codexStatus?.found ? 'Bundled runtime found' : 'Runtime not installed'}
+                    {isCodexBusy ? 'Checking' : codexStatus?.found ? 'Bundled runtime found' : 'Missing or damaged'}
                   </span>
                 </div>
                 <p className="text-sm text-muted-foreground">
@@ -1556,8 +1559,13 @@ export function ModelSettingsModal({
                 <p className="text-xs text-muted-foreground">
                   {codexStatus?.found
                     ? `${codexStatus.version || 'Codex app-server runtime'} at ${codexStatus.path || 'bundled resources'}`
-                    : codexStatus?.message || 'Check bundled Codex app-server runtime before signing in.'}
+                    : codexStatus?.message || 'Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.'}
                 </p>
+                {codexStatus?.runtimeSha256 && (
+                  <p className="text-xs text-muted-foreground">
+                    Runtime SHA256: {codexStatus.runtimeSha256}
+                  </p>
+                )}
                 <p className="text-xs text-muted-foreground">
                   CODEX_HOME: {codexStatus?.codexHome || codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}
                 </p>
@@ -1636,6 +1644,10 @@ export function ModelSettingsModal({
               <Button type="button" variant="outline" onClick={prepareCodexInstallRepair} disabled={isCodexBusy}>
                 <Wrench className="mr-2 h-4 w-4" />
                 Install/repair app-server
+              </Button>
+              <Button type="button" variant="outline" onClick={() => runCodexAction('codex_test_app_server')} disabled={isCodexBusy}>
+                <CheckCircle2 className="mr-2 h-4 w-4" />
+                Test app-server
               </Button>
               <Button type="button" variant="outline" onClick={() => runCodexAction('codex_test_processing')} disabled={isCodexBusy}>
                 <CheckCircle2 className="mr-2 h-4 w-4" />

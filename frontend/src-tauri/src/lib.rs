@@ -677,6 +677,7 @@ pub fn run() {
             summary::codex_provider::codex_login_browser,
             summary::codex_provider::codex_login_device,
             summary::codex_provider::codex_logout,
+            summary::codex_provider::codex_test_app_server,
             summary::codex_provider::codex_test_processing,
             summary::codex_provider::codex_process_meeting,
             anthropic::anthropic::get_anthropic_models,

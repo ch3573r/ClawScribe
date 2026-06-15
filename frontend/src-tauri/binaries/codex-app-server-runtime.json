@@ -1,0 +1,13 @@
+{
+  "name": "Codex app-server runtime",
+  "runtime_version": "0.139.0",
+  "target": "x86_64-pc-windows-msvc",
+  "source_package": "@openai/codex@0.139.0-win32-x64",
+  "source_url": "https://registry.npmjs.org/@openai/codex/-/codex-0.139.0-win32-x64.tgz",
+  "source_sha256": "99698e69d6acf91c75703669fdfd00d54f4b249beabc7d32a03404e8c2c3b2c7",
+  "runtime_sha256": "77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10",
+  "license": "Apache-2.0",
+  "notice": "Codex is distributed by OpenAI under the Apache-2.0 license. ClawScribe bundles the pinned Windows x64 runtime only for the Advanced: Codex app-server provider.",
+  "build_date": "2026-06-15",
+  "entrypoint": "binaries/codex-app-server-x86_64-pc-windows-msvc.exe"
+}

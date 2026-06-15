@@ -19,7 +19,7 @@ WindowsApps, copied tokens, or a user-browsed executable.
 Expected:
 
 - ClawScribe resolves a bundled/pinned app-server runtime, or reports
-  `runtime not installed`.
+  `Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.`
 - Missing runtime appears only in the Codex app-server panel.
 - OpenAI/OpenAI-compatible processing works without Codex.
 - OpenClaw processing works without Codex.
@@ -32,7 +32,7 @@ Verify the app-server receives:
 
 ```text
 initialize
-notifications/initialized
+initialized
 account/read
 ```
 
@@ -61,7 +61,7 @@ Verify meeting processing uses:
 
 ```text
 thread/start
-turn/run
+turn/start
 ```
 
 Expected output files:

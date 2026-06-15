@@ -60,14 +60,14 @@ Notes:
   selected.
 - [ ] WindowsApps, PATH discovery, browsed `codex.exe`, and standalone CLI auth
   are rejected or absent from UI.
-- [ ] The report states whether the pinned app-server runtime is bundled,
-  installed by controlled first-run setup, or not yet installed.
+- [ ] The report states the pinned bundled app-server runtime version, SHA256,
+  source package, and Windows verification result.
 
 Result:
 
 ```text
 Codex app-server runtime version:
-Bundled/controlled install/missing:
+Bundled runtime SHA256:
 Runtime path:
 Summary generated:
 Limitations:

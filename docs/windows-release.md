@@ -40,6 +40,18 @@ cargo build -p llama-helper --release --target x86_64-pc-windows-msvc
 Copy-Item .\target\x86_64-pc-windows-msvc\release\llama-helper.exe .\frontend\src-tauri\binaries\llama-helper-x86_64-pc-windows-msvc.exe -Force
 ```
 
+The release script stages the pinned Codex app-server sidecar automatically for
+the Advanced Codex provider:
+
+```powershell
+cd frontend
+.\scripts\stage-codex-runtime.ps1
+```
+
+The pinned runtime metadata is in [codex-runtime.md](codex-runtime.md). The
+Windows build verifies both the source package SHA256 and runtime executable
+SHA256 before bundling.
+
 FFmpeg is downloaded and cached by `frontend/src-tauri/build.rs` during the
 Tauri build as `frontend/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`.
 
@@ -66,10 +78,10 @@ If you do not have a Windows build machine, use GitHub Actions instead:
 5. Download the `clawscribe-windows-<feature>` artifact from the completed run.
 
 The workflow builds on GitHub's `windows-latest` runner, stages the
-`llama-helper-x86_64-pc-windows-msvc.exe` sidecar, runs
-`frontend\scripts\build-windows-release.ps1`, and uploads the generated MSI and
-NSIS installers. The artifacts are unsigned unless Windows signing secrets are
-added in a future release workflow.
+`llama-helper-x86_64-pc-windows-msvc.exe` sidecar, stages the pinned Codex
+app-server runtime, runs `frontend\scripts\build-windows-release.ps1`, and
+uploads the generated MSI and NSIS installers. The artifacts are unsigned unless
+Windows signing secrets are added in a future release workflow.
 
 The default build uses the `vulkan` feature for the Windows meeting recorder
 target. Override when needed:
@@ -86,6 +98,7 @@ Artifacts are written under:
 frontend\src-tauri\target\release\bundle\msi\*.msi
 frontend\src-tauri\target\release\bundle\nsis\*.exe
 frontend\src-tauri\target\release\bundle\SHA256SUMS.txt
+frontend\src-tauri\target\release\bundle\BUILD-METADATA.txt
 ```
 
 Expected artifact names currently look like:
@@ -96,6 +109,10 @@ ClawScribe_0.5.0-alpha.2_x64-setup.exe
 SHA256SUMS.txt
 BUILD-METADATA.txt
 ```
+
+`BUILD-METADATA.txt` records the ClawScribe version, build commit, upstream
+Meetily base version, Codex runtime version, Codex runtime SHA256, source
+package, source URL, and license.
 
 The release script generates `SHA256SUMS.txt` after a successful installer
 build. Checksum entries are relative to the bundle root, for example

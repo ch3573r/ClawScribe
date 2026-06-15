@@ -1,15 +1,31 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::time::{sleep, timeout};
 
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 600;
-const CODEX_APP_SERVER_MISSING: &str = "Codex app-server runtime is not installed for ClawScribe. Normal processing still works through OpenAI API key or OpenClaw.";
-const CODEX_APP_SERVER_STAGED: &str = "Codex app-server integration is staged, but no bundled/pinned app-server runtime is installed in this build.";
-const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode requires a bundled/pinned ClawScribe runtime or a controlled ClawScribe runtime installer.";
+const CODEX_RUNTIME_VERSION: &str = "0.139.0";
+const CODEX_RUNTIME_TARGET: &str = "x86_64-pc-windows-msvc";
+const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.139.0-win32-x64";
+const CODEX_RUNTIME_SOURCE_URL: &str =
+    "https://registry.npmjs.org/@openai/codex/-/codex-0.139.0-win32-x64.tgz";
+const CODEX_RUNTIME_SHA256: &str =
+    "77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10";
+const CODEX_APP_SERVER_MISSING: &str =
+    "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
+const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
+const CODEX_REAUTH_MESSAGE: &str =
+    "Codex app-server authentication is required. Sign in with ChatGPT again.";
+const CODEX_OVERLOAD_CODE: i64 = -32001;
+const CODEX_MAX_OVERLOAD_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -21,9 +37,17 @@ pub enum CodexHomeMode {
 #[cfg(test)]
 mod app_server_tests {
     use super::*;
+    use std::io::Write;
 
     fn make_executable(path: &Path) {
         fs::write(path, "# app-server placeholder\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
     }
 
     #[test]
@@ -68,7 +92,7 @@ mod app_server_tests {
     #[test]
     fn missing_runtime_is_non_blocking_status() {
         let err = discover_codex_app_server_from(None, None).unwrap_err();
-        assert!(err.contains("Normal processing still works through OpenAI API key or OpenClaw"));
+        assert!(err.contains("Repair/reinstall ClawScribe"));
     }
 
     #[test]
@@ -108,7 +132,7 @@ mod app_server_tests {
         let logout = app_server_logout_request(5);
 
         assert_eq!(initialize["method"], "initialize");
-        assert_eq!(initialized["method"], "notifications/initialized");
+        assert_eq!(initialized["method"], "initialized");
         assert_eq!(account_read["method"], "account/read");
         assert_eq!(browser_login["method"], "account/login/start");
         assert_eq!(browser_login["params"]["type"], "chatgpt");
@@ -119,7 +143,7 @@ mod app_server_tests {
     #[test]
     fn app_server_thread_and_turn_requests_carry_meeting_contract() {
         let thread = app_server_thread_start_request(10);
-        let turn = app_server_turn_run_request(
+        let turn = app_server_turn_start_request(
             11,
             "thread-1",
             "gpt-5.1-codex",
@@ -128,21 +152,21 @@ mod app_server_tests {
         );
 
         assert_eq!(thread["method"], "thread/start");
-        assert_eq!(turn["method"], "turn/run");
+        assert_eq!(turn["method"], "turn/start");
         assert_eq!(turn["params"]["threadId"], "thread-1");
         assert_eq!(turn["params"]["model"], "gpt-5.1-codex");
-        assert!(turn["params"]["input"]["transcript"]
+        assert!(turn["params"]["input"][0]["text"]
             .as_str()
             .unwrap()
             .contains("ship it"));
-        assert!(turn["params"]["input"]["instructions"]
+        assert!(turn["params"]["input"][0]["text"]
             .as_str()
             .unwrap()
             .contains("Return only valid JSON"));
-        assert_eq!(
-            turn["params"]["input"]["outputSchema"]["required"][0],
-            "executive_summary"
-        );
+        assert!(turn["params"]["input"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("executive_summary"));
     }
 
     #[tokio::test]
@@ -150,11 +174,14 @@ mod app_server_tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = temp.path().join("codex-app-server");
         make_executable(&runtime);
-        let provider = CodexAppServerProvider::new(CodexProviderConfig::default(), runtime).unwrap();
+        let provider =
+            CodexAppServerProvider::new(CodexProviderConfig::default(), runtime).unwrap();
 
-        let status = provider.test_processing(Some(temp.path())).await.unwrap();
-        assert!(!status.success);
-        assert!(status.message.contains("codex exec is disabled"));
+        let err = provider
+            .test_processing(Some(temp.path()))
+            .await
+            .unwrap_err();
+        assert!(!err.contains("codex exec"));
     }
 
     #[test]
@@ -163,6 +190,188 @@ mod app_server_tests {
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
         assert!(!redacted.contains("secretrefresh1234567890"));
+    }
+
+    fn valid_meeting_json() -> String {
+        serde_json::json!({
+            "executive_summary": "The app-server processed the meeting.",
+            "decisions": [],
+            "risks_blockers": [],
+            "open_questions": [],
+            "action_items": [{
+                "task": "Ship bundled Codex runtime",
+                "owner": "Nora",
+                "due_date": null,
+                "source_timestamp": "00:01",
+                "confidence": "high"
+            }],
+            "follow_up_email": {
+                "subject": "Codex runtime",
+                "body_markdown": "The bundled runtime path is ready."
+            }
+        })
+        .to_string()
+    }
+
+    #[cfg(unix)]
+    fn fake_app_server(dir: &Path, scenario: &str) -> PathBuf {
+        let path = dir.join(format!("fake-codex-app-server-{scenario}"));
+        let mut file = fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+scenario = "{scenario}"
+overload_count = 0
+meeting_json = {meeting_json}
+sys.stderr.write("Authorization: Bearer secret-token-value-1234567890\n")
+sys.stderr.flush()
+
+def send(value):
+    print(json.dumps(value), flush=True)
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({{"id": mid, "result": {{"userAgent": "fake-codex", "platformFamily": "test", "platformOs": "linux"}}}})
+    elif method == "initialized":
+        continue
+    elif method == "account/read":
+        if scenario == "unauthenticated":
+            send({{"id": mid, "result": {{"account": None, "authStatus": "unauthenticated"}}}})
+        else:
+            send({{"id": mid, "result": {{"account": {{"email": "alex@example.test", "planType": "plus"}}, "authStatus": "authenticated"}}}})
+    elif method == "account/login/start":
+        send({{"id": mid, "result": {{"verificationUrl": "https://chatgpt.com/activate", "userCode": "ABCD-EFGH"}}}})
+        send({{"method": "account/login/completed", "params": {{"status": "ok"}}}})
+        send({{"method": "account/updated", "params": {{"account": {{"email": "alex@example.test"}}}}}})
+    elif method == "account/logout":
+        send({{"id": mid, "result": {{"ok": True}}}})
+    elif method == "thread/start":
+        send({{"id": mid, "result": {{"thread": {{"id": "thread-1"}}}}}})
+    elif method == "turn/start":
+        if scenario == "auth-failure":
+            send({{"id": mid, "error": {{"code": 401, "message": "not authenticated"}}}})
+            continue
+        if scenario == "overload" and overload_count == 0:
+            overload_count += 1
+            send({{"id": mid, "error": {{"code": -32001, "message": "Server overloaded; retry later."}}}})
+            continue
+        send({{"id": mid, "result": {{"turn": {{"id": "turn-1"}}}}}})
+        send({{"method": "item/agentMessage/delta", "params": {{"delta": meeting_json}}}})
+        send({{"method": "turn/completed", "params": {{"status": "completed"}}}})
+"#,
+            scenario = scenario,
+            meeting_json = serde_json::to_string(&valid_meeting_json()).unwrap(),
+        )
+        .unwrap();
+        drop(file);
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn provider_with_fake(temp: &tempfile::TempDir, scenario: &str) -> CodexAppServerProvider {
+        let binary = fake_app_server(temp.path(), scenario);
+        CodexAppServerProvider::new(
+            CodexProviderConfig {
+                codex_home_path: Some(temp.path().join("codex-home").to_string_lossy().to_string()),
+                ..CodexProviderConfig::default()
+            },
+            binary,
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_account_read_unauthenticated() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "unauthenticated");
+        let status = provider.check_installation().await.unwrap();
+        assert!(status.found);
+        assert_eq!(status.auth_status.as_deref(), Some("unauthenticated"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_device_code_login_flow_surfaces_code_and_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "ok");
+        let status = provider.login_device().await.unwrap();
+        assert!(status.success);
+        assert!(status.stdout.contains("https://chatgpt.com/activate"));
+        assert!(status.stdout.contains("ABCD-EFGH"));
+        assert!(status.stdout.contains("account/login/completed"));
+        assert!(!status.stderr.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_processing_turn_returns_valid_meeting_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "ok");
+        let result = provider
+            .process_meeting(CodexMeetingProcessRequest {
+                meeting_id: "meeting-1".to_string(),
+                meeting_title: Some("Runtime".to_string()),
+                transcript: "[00:01] Bundle Codex.".to_string(),
+                output_dir: Some(temp.path().join("meeting")),
+                scratch_root: Some(temp.path().join("runs")),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result.structured_output.action_items[0].task,
+            "Ship bundled Codex runtime"
+        );
+        let log = fs::read_to_string(
+            temp.path()
+                .join("runs")
+                .join("meeting-1")
+                .join("processing-log.json"),
+        )
+        .unwrap();
+        assert!(!log.contains("Bundle Codex"));
+        assert!(!log.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_auth_failure_becomes_reauth_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "auth-failure");
+        let err = provider
+            .process_meeting(CodexMeetingProcessRequest {
+                meeting_id: "meeting-auth".to_string(),
+                meeting_title: None,
+                transcript: "hello".to_string(),
+                output_dir: None,
+                scratch_root: Some(temp.path().join("runs")),
+            })
+            .await
+            .unwrap_err();
+        assert!(err.contains("Sign in with ChatGPT again"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_overload_gets_bounded_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "overload");
+        let status = provider.test_processing(Some(temp.path())).await.unwrap();
+        assert!(status.success);
+        assert!(status.stdout.contains("executive_summary"));
     }
 }
 
@@ -206,6 +415,9 @@ pub struct CodexInstallationStatus {
     pub found: bool,
     pub version: Option<String>,
     pub path: Option<String>,
+    pub runtime_sha256: Option<String>,
+    pub runtime_source_package: Option<String>,
+    pub runtime_source_url: Option<String>,
     pub runtime_kind: String,
     pub codex_home: String,
     pub codex_home_mode: CodexHomeMode,
@@ -405,54 +617,122 @@ impl CodexAppServerProvider {
     }
 
     pub async fn check_installation(&self) -> Result<CodexInstallationStatus, String> {
+        validate_codex_runtime_file(&self.app_server_binary)?;
         let codex_home = self
             .codex_home
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| default_isolated_codex_home().to_string_lossy().to_string());
+        let account = match AppServerSession::start(self).await {
+            Ok(mut session) => match session.account_read().await {
+                Ok(account) => account,
+                Err(e) if is_auth_failure_message(&e) => CodexAccountState::unauthenticated(),
+                Err(e) => CodexAccountState {
+                    auth_status: Some(format!("unknown: {}", redact_secrets(&e))),
+                    ..CodexAccountState::default()
+                },
+            },
+            Err(e) => CodexAccountState {
+                auth_status: Some(format!("app-server unavailable: {}", redact_secrets(&e))),
+                ..CodexAccountState::default()
+            },
+        };
 
         Ok(CodexInstallationStatus {
             found: true,
-            version: Some("bundled app-server runtime".to_string()),
+            version: Some(CODEX_RUNTIME_VERSION.to_string()),
             path: Some(self.app_server_binary.to_string_lossy().to_string()),
+            runtime_sha256: Some(CODEX_RUNTIME_SHA256.to_string()),
+            runtime_source_package: Some(CODEX_RUNTIME_SOURCE_PACKAGE.to_string()),
+            runtime_source_url: Some(CODEX_RUNTIME_SOURCE_URL.to_string()),
             runtime_kind: "codex-app-server".to_string(),
             codex_home,
             codex_home_mode: self.config.effective_home_mode(),
-            auth_status: Some("unknown until account/read is wired".to_string()),
-            account_email: None,
-            plan_type: None,
-            rate_limit_state: None,
+            auth_status: account.auth_status,
+            account_email: account.account_email,
+            plan_type: account.plan_type,
+            rate_limit_state: account.rate_limit_state,
             desktop_app_detected: false,
             install_command: Some(codex_install_repair_plan().recommended.command),
-            message: "Bundled Codex app-server runtime found. JSON-RPC account/thread integration is the target path; CLI/codex exec fallback is disabled.".to_string(),
+            message: format!(
+                "Bundled Codex app-server runtime found: {CODEX_RUNTIME_VERSION} ({CODEX_RUNTIME_TARGET})."
+            ),
         })
     }
 
     pub async fn login_browser(&self) -> Result<CodexCommandStatus, String> {
-        Ok(app_server_pending_status(
-            "Sign in with ChatGPT will use account/login/start { \"type\": \"chatgpt\" } over the Codex app-server JSON-RPC transport.",
-        ))
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let mut session = AppServerSession::start(self).await?;
+        session.login("chatgpt").await
     }
 
     pub async fn login_device(&self) -> Result<CodexCommandStatus, String> {
-        Ok(app_server_pending_status(
-            "Device-code sign-in will use account/login/start { \"type\": \"chatgptDeviceCode\" } and surface verificationUrl plus userCode in the UI.",
-        ))
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let mut session = AppServerSession::start(self).await?;
+        session.login("chatgptDeviceCode").await
     }
 
     pub async fn logout(&self) -> Result<CodexCommandStatus, String> {
-        Ok(app_server_pending_status(
-            "Logout will use account/logout over the Codex app-server JSON-RPC transport.",
-        ))
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let mut session = AppServerSession::start(self).await?;
+        let result = session
+            .request("account/logout", serde_json::json!({}))
+            .await?;
+        Ok(CodexCommandStatus {
+            success: true,
+            exit_code: None,
+            stdout: truncate_for_log(&result.to_string()),
+            stderr: String::new(),
+            message: "Codex app-server logout completed.".to_string(),
+        })
+    }
+
+    pub async fn test_app_server(&self) -> Result<CodexCommandStatus, String> {
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let mut session = AppServerSession::start(self).await?;
+        let account = session.account_read().await.unwrap_or_else(|e| {
+            if is_auth_failure_message(&e) {
+                CodexAccountState::unauthenticated()
+            } else {
+                CodexAccountState {
+                    auth_status: Some(format!("unknown: {}", redact_secrets(&e))),
+                    ..CodexAccountState::default()
+                }
+            }
+        });
+        Ok(CodexCommandStatus {
+            success: true,
+            exit_code: None,
+            stdout: format!(
+                "initialize ok\naccount/read: {}",
+                account.auth_status.unwrap_or_else(|| "unknown".to_string())
+            ),
+            stderr: session.take_stderr().await,
+            message: "Codex app-server initialize handshake succeeded.".to_string(),
+        })
     }
 
     pub async fn test_processing(
         &self,
         _scratch_parent: Option<&Path>,
     ) -> Result<CodexCommandStatus, String> {
-        Ok(app_server_pending_status(
-            "Test processing will use thread/start plus turn/run over Codex app-server. codex exec is disabled as an app integration path.",
-        ))
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let mut session = AppServerSession::start(self).await?;
+        let output = session
+            .process_turn(
+                &self.config.model,
+                "ClawScribe Codex app-server smoke test",
+                serde_json::json!({ "meeting_id": "codex-smoke-test" }),
+            )
+            .await?;
+        let _parsed = parse_meeting_output(&output)?;
+        Ok(CodexCommandStatus {
+            success: true,
+            exit_code: None,
+            stdout: truncate_for_log(&output),
+            stderr: session.take_stderr().await,
+            message: "Codex app-server test meeting processing succeeded.".to_string(),
+        })
     }
 
     pub async fn process_meeting(
@@ -492,25 +772,81 @@ impl CodexAppServerProvider {
             .map_err(|e| format!("Failed to write output-schema.json: {e}"))?;
         fs::write(&prompt_path, build_meeting_prompt())
             .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
-        let pending = app_server_pending_status(
-            "Codex app-server meeting processing will use a fresh thread/start and turn/run. codex exec fallback is disabled.",
-        );
-        write_safe_events(&events_path, &pending)?;
-        fs::write(&final_path, &pending.message)
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let started = std::time::Instant::now();
+        let mut session = AppServerSession::start(self).await?;
+        let raw_output = match session
+            .process_turn(
+                &self.config.model,
+                &request.transcript,
+                serde_json::json!({
+                    "meeting_id": request.meeting_id,
+                    "meeting_title": request.meeting_title,
+                }),
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                let status = CodexCommandStatus {
+                    success: false,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: session.take_stderr().await,
+                    message: redact_secrets(&e),
+                };
+                write_safe_events(&events_path, &status)?;
+                write_processing_log(&scratch_dir, &status, started.elapsed(), "failed")?;
+                return Err(redact_secrets(&e));
+            }
+        };
+        let structured_output = parse_meeting_output(&raw_output)?;
+        let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
+        let follow_up = render_follow_up_email(&structured_output.follow_up_email);
+        let output_dir = request.output_dir.unwrap_or_else(|| scratch_dir.clone());
+        fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create Codex output folder: {e}"))?;
+        let final_output_path = output_dir.join("meeting-output.json");
+        let notes_path = output_dir.join("meeting-notes.md");
+        let follow_up_path = output_dir.join("follow-up-email.md");
+        fs::write(
+            &final_output_path,
+            serde_json::to_string_pretty(&structured_output).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("Failed to write meeting-output.json: {e}"))?;
+        fs::write(&notes_path, &markdown)
+            .map_err(|e| format!("Failed to write meeting-notes.md: {e}"))?;
+        fs::write(&follow_up_path, &follow_up)
+            .map_err(|e| format!("Failed to write follow-up-email.md: {e}"))?;
+        fs::write(
+            &output_path,
+            serde_json::to_string_pretty(&structured_output).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("Failed to write codex-output.json: {e}"))?;
+        fs::write(&final_path, &markdown)
             .map_err(|e| format!("Failed to write codex-final.md: {e}"))?;
-        fs::write(&output_path, "{}").map_err(|e| format!("Failed to write codex-output.json: {e}"))?;
-        write_processing_log(&scratch_dir, &pending, Duration::ZERO, "app-server runtime missing")?;
-        Err(format!("{CODEX_APP_SERVER_STAGED} Use OpenAI API key or OpenClaw for normal processing until the pinned app-server runtime is packaged."))
-    }
-}
-
-fn app_server_pending_status(detail: &str) -> CodexCommandStatus {
-    CodexCommandStatus {
-        success: false,
-        exit_code: None,
-        stdout: String::new(),
-        stderr: String::new(),
-        message: format!("{CODEX_APP_SERVER_STAGED} {detail}"),
+        let status = CodexCommandStatus {
+            success: true,
+            exit_code: None,
+            stdout: "Codex app-server turn completed.".to_string(),
+            stderr: session.take_stderr().await,
+            message: "Codex app-server meeting processing succeeded.".to_string(),
+        };
+        write_safe_events(&events_path, &status)?;
+        write_processing_log(&scratch_dir, &status, started.elapsed(), "completed")?;
+        Ok(CodexProcessingResult {
+            meeting_id: request.meeting_id,
+            scratch_dir: scratch_dir.to_string_lossy().to_string(),
+            output_json_path: final_output_path.to_string_lossy().to_string(),
+            notes_markdown_path: notes_path.to_string_lossy().to_string(),
+            follow_up_email_path: follow_up_path.to_string_lossy().to_string(),
+            processing_log_path: scratch_dir
+                .join("processing-log.json")
+                .to_string_lossy()
+                .to_string(),
+            structured_output,
+            markdown,
+        })
     }
 }
 
@@ -609,6 +945,14 @@ pub async fn codex_logout<R: Runtime>(app: AppHandle<R>) -> Result<CodexCommandS
 }
 
 #[tauri::command]
+pub async fn codex_test_app_server<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<CodexCommandStatus, String> {
+    let provider = provider_from_app(&app)?;
+    provider.test_app_server().await
+}
+
+#[tauri::command]
 pub async fn codex_test_processing<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<CodexCommandStatus, String> {
@@ -670,6 +1014,7 @@ pub fn provider_from_app<R: Runtime>(
             .codex,
     );
     let runtime = discover_codex_app_server(app, config.codex_binary_path.as_deref())?;
+    validate_codex_runtime_file(&runtime)?;
     CodexAppServerProvider::new(config, runtime)
 }
 
@@ -728,23 +1073,24 @@ async fn codex_installation_status_for_config<R: Runtime>(
                 .check_installation()
                 .await
         }
-        Err(message) => {
-            Ok(CodexInstallationStatus {
-                found: false,
-                version: None,
-                path: None,
-                runtime_kind: "codex-app-server".to_string(),
-                codex_home,
-                codex_home_mode: config.effective_home_mode(),
-                auth_status: None,
-                account_email: None,
-                plan_type: None,
-                rate_limit_state: None,
-                desktop_app_detected: false,
-                install_command: Some(codex_install_repair_plan().recommended.command),
-                message,
-            })
-        }
+        Err(message) => Ok(CodexInstallationStatus {
+            found: false,
+            version: None,
+            path: None,
+            runtime_sha256: Some(CODEX_RUNTIME_SHA256.to_string()),
+            runtime_source_package: Some(CODEX_RUNTIME_SOURCE_PACKAGE.to_string()),
+            runtime_source_url: Some(CODEX_RUNTIME_SOURCE_URL.to_string()),
+            runtime_kind: "codex-app-server".to_string(),
+            codex_home,
+            codex_home_mode: config.effective_home_mode(),
+            auth_status: None,
+            account_email: None,
+            plan_type: None,
+            rate_limit_state: None,
+            desktop_app_detected: false,
+            install_command: Some(codex_install_repair_plan().recommended.command),
+            message,
+        }),
     }
 }
 
@@ -759,13 +1105,15 @@ fn codex_install_repair_plan() -> CodexInstallRepairPlan {
     let recommended = CodexInstallCommand {
         label: "Repair bundled Codex app-server runtime".to_string(),
         shell: "ClawScribe".to_string(),
-        command: "Controlled Codex app-server runtime installer is not bundled in this build.".to_string(),
+        command:
+            "Repair or reinstall ClawScribe so the bundled Codex app-server runtime is restored."
+                .to_string(),
     };
 
     CodexInstallRepairPlan {
         requires_confirmation: true,
         docs_url: "docs/auth/codex-auth.md".to_string(),
-        message: "Codex app-server mode needs a ClawScribe-bundled/pinned runtime or a controlled first-run installer. This build will not use global codex.exe, PATH, WindowsApps, or user-browsed Store app internals. OpenAI API key and OpenClaw continue to work without Codex.".to_string(),
+        message: "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe. This build will not use global codex.exe, PATH, WindowsApps, or user-browsed Store app internals. OpenAI API key and OpenClaw continue to work without Codex.".to_string(),
         recommended,
         alternatives: vec![],
     }
@@ -781,12 +1129,18 @@ fn bundled_codex_app_server_candidates(resource_dir: &Path) -> Vec<PathBuf> {
     } else {
         "codex-app-server"
     };
-    vec![
+    let mut candidates = vec![
         resource_dir.join("codex-app-server").join(exe),
         resource_dir.join("codex").join("app-server").join(exe),
         resource_dir.join("bin").join("codex").join(exe),
         resource_dir.join(exe),
-    ]
+    ];
+    if cfg!(target_os = "windows") {
+        let target_exe = format!("codex-app-server-{CODEX_RUNTIME_TARGET}.exe");
+        candidates.insert(0, resource_dir.join(&target_exe));
+        candidates.insert(0, resource_dir.join("binaries").join(&target_exe));
+    }
+    candidates
 }
 
 fn normalize_codex_config(mut config: CodexProviderConfig) -> CodexProviderConfig {
@@ -891,7 +1245,6 @@ fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
 
 fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
     serde_json::json!({
-        "jsonrpc": "2.0",
         "id": id,
         "method": method,
         "params": params,
@@ -905,17 +1258,19 @@ fn app_server_initialize_request(id: u64) -> Value {
         serde_json::json!({
             "clientInfo": {
                 "name": "ClawScribe",
+                "title": "ClawScribe",
                 "version": env!("CARGO_PKG_VERSION"),
             },
-            "transport": "stdio-jsonl",
+            "capabilities": {
+                "experimentalApi": true
+            },
         }),
     )
 }
 
 fn app_server_initialized_notification() -> Value {
     serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized",
+        "method": "initialized",
         "params": {},
     })
 }
@@ -942,7 +1297,7 @@ fn app_server_thread_start_request(id: u64) -> Value {
     json_rpc_request(id, "thread/start", serde_json::json!({}))
 }
 
-fn app_server_turn_run_request(
+fn app_server_turn_start_request(
     id: u64,
     thread_id: &str,
     model: &str,
@@ -951,18 +1306,525 @@ fn app_server_turn_run_request(
 ) -> Value {
     json_rpc_request(
         id,
-        "turn/run",
+        "turn/start",
         serde_json::json!({
             "threadId": thread_id,
             "model": model,
-            "input": {
-                "transcript": normalize_transcript_markdown(transcript),
-                "metadata": metadata,
-                "instructions": build_meeting_prompt(),
-                "outputSchema": serde_json::from_str::<Value>(&output_schema_json()).unwrap_or(Value::Null),
-            },
+            "input": [{
+                "type": "text",
+                "text": build_app_server_turn_text(transcript, metadata),
+            }],
         }),
     )
+}
+
+#[derive(Debug, Default)]
+struct CodexAccountState {
+    auth_status: Option<String>,
+    account_email: Option<String>,
+    plan_type: Option<String>,
+    rate_limit_state: Option<String>,
+}
+
+impl CodexAccountState {
+    fn unauthenticated() -> Self {
+        Self {
+            auth_status: Some("unauthenticated".to_string()),
+            ..Self::default()
+        }
+    }
+}
+
+struct AppServerSession {
+    child: Child,
+    stdin: ChildStdin,
+    lines: Lines<BufReader<ChildStdout>>,
+    stderr_task: Option<tokio::task::JoinHandle<String>>,
+    next_id: u64,
+    timeout: Duration,
+    overload_retries: usize,
+}
+
+impl AppServerSession {
+    async fn start(provider: &CodexAppServerProvider) -> Result<Self, String> {
+        let mut command = Command::new(&provider.app_server_binary);
+        command
+            .arg("app-server")
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in codex_sidecar_env(provider) {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().map_err(|e| {
+            format!(
+                "Failed to spawn bundled Codex app-server at {}: {e}",
+                provider.app_server_binary.display()
+            )
+        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open Codex app-server stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
+        let stderr = child.stderr.take();
+        let stderr_task = stderr.map(|mut stderr| {
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let _ = stderr.read_to_end(&mut buf).await;
+                truncate_for_log(&String::from_utf8_lossy(&buf))
+            })
+        });
+        let mut session = Self {
+            child,
+            stdin,
+            lines: BufReader::new(stdout).lines(),
+            stderr_task,
+            next_id: 1,
+            timeout: Duration::from_secs(provider.config.timeout_seconds.max(30)),
+            overload_retries: 0,
+        };
+        session.initialize().await?;
+        Ok(session)
+    }
+
+    async fn initialize(&mut self) -> Result<(), String> {
+        let id = self.next_id();
+        self.send(&app_server_initialize_request(id)).await?;
+        let _ = self.read_response(id).await?;
+        self.send(&app_server_initialized_notification()).await
+    }
+
+    async fn account_read(&mut self) -> Result<CodexAccountState, String> {
+        let value = self.request("account/read", serde_json::json!({})).await?;
+        Ok(parse_account_state(&value))
+    }
+
+    async fn login(&mut self, login_type: &str) -> Result<CodexCommandStatus, String> {
+        let response = self
+            .request(
+                "account/login/start",
+                serde_json::json!({
+                    "type": login_type,
+                }),
+            )
+            .await?;
+        let mut lines = Vec::new();
+        if let Some(url) = json_string_at(&response, &["verificationUrl"])
+            .or_else(|| json_string_at(&response, &["verification_url"]))
+        {
+            lines.push(format!("Verification URL: {url}"));
+        }
+        if let Some(code) = json_string_at(&response, &["userCode"])
+            .or_else(|| json_string_at(&response, &["user_code"]))
+        {
+            lines.push(format!("User code: {code}"));
+        }
+        let notification = self
+            .wait_for_notification(&["account/login/completed", "account/updated"])
+            .await
+            .ok();
+        if let Some(notification) = &notification {
+            lines.push(format!(
+                "Notification: {}",
+                notification
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("account/updated")
+            ));
+        }
+        let stderr = self.take_stderr().await;
+        Ok(CodexCommandStatus {
+            success: true,
+            exit_code: None,
+            stdout: truncate_for_log(&lines.join("\n")),
+            stderr,
+            message: if notification.is_some() {
+                "Codex app-server sign-in completed.".to_string()
+            } else {
+                "Codex app-server sign-in started.".to_string()
+            },
+        })
+    }
+
+    async fn process_turn(
+        &mut self,
+        model: &str,
+        transcript: &str,
+        metadata: Value,
+    ) -> Result<String, String> {
+        let thread_response = self
+            .request_with_overload_retry("thread/start", serde_json::json!({ "model": model }))
+            .await?;
+        let thread_id = json_string_at(&thread_response, &["thread", "id"])
+            .or_else(|| json_string_at(&thread_response, &["id"]))
+            .ok_or_else(|| {
+                "Codex app-server thread/start did not return a thread id".to_string()
+            })?;
+        for attempt in 0..=CODEX_MAX_OVERLOAD_RETRIES {
+            let id = self.next_id();
+            self.send(&app_server_turn_start_request(
+                id,
+                &thread_id,
+                model,
+                transcript,
+                metadata.clone(),
+            ))
+            .await?;
+            match self.read_turn_result(id).await {
+                Ok(output) => return Ok(output),
+                Err(e) if is_overload_message(&e) && attempt < CODEX_MAX_OVERLOAD_RETRIES => {
+                    self.overload_retries += 1;
+                    let delay = Duration::from_millis(150 * (1 << attempt));
+                    sleep(delay).await;
+                }
+                Err(e) if is_auth_failure_message(&e) => {
+                    return Err(CODEX_REAUTH_MESSAGE.to_string());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err("Codex app-server is overloaded after bounded retries.".to_string())
+    }
+
+    async fn read_turn_result(&mut self, id: u64) -> Result<String, String> {
+        let mut response_seen = false;
+        let mut output = String::new();
+        loop {
+            let message = self.read_message().await?;
+            if message.get("id").and_then(Value::as_u64) == Some(id) {
+                if let Some(error) = message.get("error") {
+                    return Err(app_server_error_message(error));
+                }
+                response_seen = true;
+                collect_output_text(message.get("result").unwrap_or(&Value::Null), &mut output);
+                continue;
+            }
+            if let Some(method) = message.get("method").and_then(Value::as_str) {
+                if method == "item/agentMessage/delta" || method == "item/completed" {
+                    collect_output_text(message.get("params").unwrap_or(&Value::Null), &mut output);
+                }
+                if method == "turn/completed" {
+                    collect_output_text(message.get("params").unwrap_or(&Value::Null), &mut output);
+                    if response_seen || !output.trim().is_empty() {
+                        return Ok(strip_json_fence(&output));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id();
+        self.send(&json_rpc_request(id, method, params)).await?;
+        self.read_response(id).await
+    }
+
+    async fn request_with_overload_retry(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        for attempt in 0..=CODEX_MAX_OVERLOAD_RETRIES {
+            match self.request(method, params.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(e) if is_overload_message(&e) && attempt < CODEX_MAX_OVERLOAD_RETRIES => {
+                    self.overload_retries += 1;
+                    let delay = Duration::from_millis(150 * (1 << attempt));
+                    sleep(delay).await;
+                }
+                Err(e) if is_auth_failure_message(&e) => {
+                    return Err(CODEX_REAUTH_MESSAGE.to_string())
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err("Codex app-server is overloaded after bounded retries.".to_string())
+    }
+
+    async fn wait_for_notification(&mut self, methods: &[&str]) -> Result<Value, String> {
+        let deadline = Duration::from_secs(120).min(self.timeout);
+        timeout(deadline, async {
+            loop {
+                let message = self.read_message().await?;
+                if let Some(method) = message.get("method").and_then(Value::as_str) {
+                    if methods.contains(&method) {
+                        return Ok(message);
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| "Timed out waiting for Codex app-server notification".to_string())?
+    }
+
+    async fn read_response(&mut self, id: u64) -> Result<Value, String> {
+        loop {
+            let message = self.read_message().await?;
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                return Err(app_server_error_message(error));
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn read_message(&mut self) -> Result<Value, String> {
+        timeout(self.timeout, self.lines.next_line())
+            .await
+            .map_err(|_| "Timed out waiting for Codex app-server response".to_string())?
+            .map_err(|e| format!("Failed to read Codex app-server response: {e}"))?
+            .ok_or_else(|| "Codex app-server exited before completing the request".to_string())
+            .and_then(|line| {
+                serde_json::from_str::<Value>(&line)
+                    .map_err(|e| format!("Invalid Codex app-server JSONL response: {e}"))
+            })
+    }
+
+    async fn send(&mut self, value: &Value) -> Result<(), String> {
+        let line = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write Codex app-server request: {e}"))?;
+        self.stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("Failed to write Codex app-server request: {e}"))?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Failed to flush Codex app-server request: {e}"))
+    }
+
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    async fn take_stderr(&mut self) -> String {
+        if let Some(task) = self.stderr_task.take() {
+            let _ = self.child.kill().await;
+            task.await.unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }
+}
+
+impl Drop for AppServerSession {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+fn build_app_server_turn_text(transcript: &str, metadata: Value) -> String {
+    format!(
+        "{}\n\n<metadata>\n{}\n</metadata>\n\n<output_schema>\n{}\n</output_schema>\n\n<untrusted_transcript>\n{}\n</untrusted_transcript>\n",
+        build_meeting_prompt(),
+        serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "{}".to_string()),
+        output_schema_json(),
+        normalize_transcript_markdown(transcript)
+    )
+}
+
+fn parse_account_state(value: &Value) -> CodexAccountState {
+    let account = value.get("account").unwrap_or(value);
+    let email = json_string_at(account, &["email"])
+        .or_else(|| json_string_at(account, &["profile", "email"]));
+    let plan = json_string_at(account, &["planType"])
+        .or_else(|| json_string_at(account, &["plan_type"]))
+        .or_else(|| json_string_at(account, &["plan", "type"]));
+    let rate_limit = json_string_at(account, &["rateLimitState"])
+        .or_else(|| json_string_at(account, &["rate_limit_state"]));
+    let auth_status = json_string_at(value, &["authStatus"])
+        .or_else(|| json_string_at(value, &["auth_status"]))
+        .or_else(|| {
+            if email.is_some() {
+                Some("authenticated".to_string())
+            } else {
+                Some("unauthenticated".to_string())
+            }
+        });
+    CodexAccountState {
+        auth_status,
+        account_email: email,
+        plan_type: plan,
+        rate_limit_state: rate_limit,
+    }
+}
+
+fn json_string_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().map(|s| s.to_string())
+}
+
+fn app_server_error_message(error: &Value) -> String {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Codex app-server request failed");
+    let code = error.get("code").and_then(Value::as_i64);
+    if code == Some(CODEX_OVERLOAD_CODE) {
+        return "Codex app-server overloaded; retry later.".to_string();
+    }
+    redact_secrets(message)
+}
+
+fn is_overload_message(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("overload")
+        || value.contains("Server overloaded; retry later")
+}
+
+fn is_auth_failure_message(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("auth")
+        || lower.contains("login")
+        || lower.contains("unauthorized")
+        || lower.contains("not authenticated")
+        || lower.contains("sign in")
+}
+
+fn collect_output_text(value: &Value, output: &mut String) {
+    if let Some(text) = value.as_str() {
+        output.push_str(text);
+        return;
+    }
+    for key in ["delta", "text", "message", "content", "output", "finalText"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            output.push_str(text);
+            return;
+        }
+    }
+    if let Some(items) = value.as_array() {
+        for item in items {
+            collect_output_text(item, output);
+        }
+    }
+    if let Some(obj) = value.as_object() {
+        for key in ["item", "agentMessage", "turn", "result"] {
+            if let Some(nested) = obj.get(key) {
+                collect_output_text(nested, output);
+            }
+        }
+    }
+}
+
+fn validate_codex_runtime_file(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(CODEX_APP_SERVER_MISSING.to_string());
+    }
+    if cfg!(target_os = "windows")
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == format!("codex-app-server-{CODEX_RUNTIME_TARGET}.exe"))
+            .unwrap_or(false)
+    {
+        let actual = sha256_file(path)?;
+        if actual != CODEX_RUNTIME_SHA256 {
+            return Err(CODEX_APP_SERVER_MISSING.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+
+    let mut file = fs::File::open(path).map_err(|e| format!("Failed to open runtime: {e}"))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 1024 * 64];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to hash runtime: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn codex_sidecar_env(provider: &CodexAppServerProvider) -> Vec<(String, String)> {
+    let mut envs = Vec::new();
+    if let Some(home) = &provider.codex_home {
+        envs.push(("CODEX_HOME".to_string(), home.to_string_lossy().to_string()));
+    }
+    envs.push(("CODEX_MANAGED_BY_CLAWSCRIBE".to_string(), "1".to_string()));
+    envs.push(("CODEX_MANAGED_BY_NPM".to_string(), "1".to_string()));
+    if let Some(root) = codex_managed_package_root(&provider.app_server_binary) {
+        envs.push((
+            "CODEX_MANAGED_PACKAGE_ROOT".to_string(),
+            root.to_string_lossy().to_string(),
+        ));
+        if let Some(path) = codex_runtime_path_env(&root) {
+            envs.push(("PATH".to_string(), path));
+        }
+    }
+    for key in [
+        "SystemRoot",
+        "WINDIR",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "USERNAME",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            envs.push((key.to_string(), value));
+        }
+    }
+    envs
+}
+
+fn codex_managed_package_root(sidecar: &Path) -> Option<PathBuf> {
+    let dir = sidecar.parent()?;
+    for runtime in [
+        dir.join("codex-app-server-runtime"),
+        dir.join("binaries").join("codex-app-server-runtime"),
+    ] {
+        if runtime.exists() {
+            return Some(runtime);
+        }
+    }
+    None
+}
+
+fn codex_runtime_path_env(root: &Path) -> Option<String> {
+    let path_dir = root
+        .join("vendor")
+        .join(CODEX_RUNTIME_TARGET)
+        .join("codex-path");
+    if path_dir.is_dir() {
+        let mut parts = vec![path_dir.to_string_lossy().to_string()];
+        if cfg!(target_os = "windows") {
+            if let Ok(windir) = std::env::var("WINDIR") {
+                parts.push(format!("{windir}\\System32"));
+                parts.push(windir);
+            }
+        }
+        Some(parts.join(if cfg!(target_os = "windows") {
+            ";"
+        } else {
+            ":"
+        }))
+    } else {
+        None
+    }
 }
 
 fn normalize_transcript_markdown(transcript: &str) -> String {

@@ -95,10 +95,13 @@
             "icons/app_icon.ico"
         ],
         "resources": [
-            "templates/*.json"
+            "templates/*.json",
+            "binaries/codex-app-server-runtime.json",
+            "binaries/codex-app-server-runtime/**/*"
         ],
         "externalBin": [
             "binaries/llama-helper",
+            "binaries/codex-app-server",
             "binaries/ffmpeg"
         ],
         "macOS": {

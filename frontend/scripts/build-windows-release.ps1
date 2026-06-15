@@ -52,6 +52,11 @@ Assert-Command "cargo"
 $windowsTarget = "x86_64-pc-windows-msvc"
 $llamaHelperBinary = Join-Path $tauriRoot "binaries\llama-helper-$windowsTarget.exe"
 Assert-File $llamaHelperBinary "Build it from the repository root with 'cargo build -p llama-helper --release --target $windowsTarget', then copy 'target\$windowsTarget\release\llama-helper.exe' to this path."
+$codexRuntimeBinary = Join-Path $tauriRoot "binaries\codex-app-server-$windowsTarget.exe"
+if (-not $CheckOnly) {
+    & (Join-Path $PSScriptRoot "stage-codex-runtime.ps1") -TauriRoot $tauriRoot
+    Assert-File $codexRuntimeBinary "Run 'frontend\scripts\stage-codex-runtime.ps1' before bundling the Windows installers."
+}
 
 $env:NEXT_TELEMETRY_DISABLED = "1"
 $env:TAURI_BUNDLE_TARGETS = "msi,nsis"
@@ -125,7 +130,13 @@ $metadata = @(
     "upstream_base_version=$upstreamBaseVersion",
     "build_commit=$commit",
     "build_commit_short=$shortCommit",
-    "build_date_utc=$buildDateUtc"
+    "build_date_utc=$buildDateUtc",
+    "codex_runtime_version=0.139.0",
+    "codex_runtime_target=$windowsTarget",
+    "codex_runtime_source_package=@openai/codex@0.139.0-win32-x64",
+    "codex_runtime_source_url=https://registry.npmjs.org/@openai/codex/-/codex-0.139.0-win32-x64.tgz",
+    "codex_runtime_sha256=77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10",
+    "codex_runtime_license=Apache-2.0"
 )
 $metadata | Set-Content -LiteralPath $metadataPath -Encoding ascii
 

@@ -60,7 +60,7 @@ Startup:
 resolve bundled/pinned runtime
 start Codex app-server with stdio transport
 send initialize
-send notifications/initialized
+send initialized
 send account/read
 ```
 
@@ -95,7 +95,7 @@ Meeting processing:
 
 ```text
 thread/start
-turn/run
+turn/start
 ```
 
 Each meeting must use a fresh thread/turn. The only meeting content sent to
@@ -125,22 +125,22 @@ JSON.
 ## Packaging
 
 The Codex provider is valid only when ClawScribe can resolve its own pinned
-app-server runtime. If no runtime is bundled yet, Settings must show:
+app-server runtime. If the bundled runtime is missing or its SHA256 does not
+match, Settings must show:
 
 ```text
-runtime not installed
+Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.
 ```
 
 with a controlled repair/install action. OpenAI API key and OpenClaw must remain
 fully usable when the Codex runtime is missing.
 
+Pinned runtime metadata is recorded in [../codex-runtime.md](../codex-runtime.md)
+and in Windows release `BUILD-METADATA.txt`.
+
 ## Current Implementation Status
 
-The product-facing direction has been switched to `Advanced: Codex app-server`.
+The product-facing implementation is `Advanced: Codex app-server`.
 CLI discovery, WindowsApps suggestions, user-browsed `codex.exe`, global
 `PATH`, existing-user Codex sessions, and `codex exec` fallback are disabled for
 the provider surface.
-
-Until the pinned app-server runtime is bundled or a controlled first-run
-installer is implemented, the Codex provider reports runtime-not-installed and
-normal processing should use OpenAI / OpenAI-compatible API or OpenClaw.

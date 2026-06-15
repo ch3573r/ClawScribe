@@ -42,8 +42,8 @@ Codex app-server mode uses a bundled/pinned Codex runtime and ChatGPT/Codex sign
 
 Expected controls:
 
-- Status: bundled runtime found / runtime not installed
-- Runtime version/path when available
+- Status: bundled runtime found / missing or damaged
+- Runtime version/path/SHA256 when available
 - Isolated `CODEX_HOME` location
 - Sign in with ChatGPT
 - Sign in with device code
@@ -62,16 +62,17 @@ Expected not present:
 
 ## 3. Missing Runtime Behavior
 
-If the pinned app-server runtime is not bundled yet, expected status:
+If the pinned app-server runtime is absent or damaged, expected status:
 
 ```text
-runtime not installed
+Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.
 ```
 
 Expected:
 
-- The Codex panel shows a repair/install action.
-- The repair/install action does not silently install anything.
+- The Codex panel shows a repair/reinstall action.
+- The repair/reinstall action does not suggest PATH, WindowsApps, Store app
+  internals, or browsing to `codex.exe`.
 - OpenAI/OpenAI-compatible processing still works.
 - OpenClaw processing still works.
 
@@ -95,7 +96,7 @@ When the bundled runtime exists, verify:
 
 ```text
 initialize
-notifications/initialized
+initialized
 account/read
 ```
 
@@ -128,7 +129,7 @@ Expected app-server methods:
 
 ```text
 thread/start
-turn/run
+turn/start
 ```
 
 Expected files:

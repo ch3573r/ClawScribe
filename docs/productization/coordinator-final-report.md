@@ -376,8 +376,7 @@ Expected in this pass:
 - Status wording until Alex verifies Windows:
 
 ```text
-Codex app-server provider direction implemented and fake-tested. Bundled
-runtime packaging and Windows app-server auth/runtime verification pending.
+Codex app-server provider direction implemented and fake-tested. Bundled runtime packaging implemented; Windows app-server auth/runtime verification pending.
 ```
 
 ### Microsoft Login
