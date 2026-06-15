@@ -112,9 +112,15 @@ jobs:
         if: ${{ !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $feature = "${{ inputs.feature }}"
           cd frontend
-          $env:CARGO_TARGET_DIR = (Resolve-Path "src-tauri").Path + "\target"
-          .\scripts\build-windows-release.ps1 -Feature ${{ inputs.feature }}
+          pnpm install --frozen-lockfile
+          pnpm build
+          if ($feature -eq "cpu") {
+            pnpm exec tauri build
+          } else {
+            pnpm exec tauri build -- --features $feature
+          }
 
       - name: Write build metadata
         if: ${{ !inputs['check-only'] }}
@@ -125,17 +131,30 @@ jobs:
           $installerVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
           $commit = git rev-parse HEAD
           $shortCommit = git rev-parse --short HEAD
-          if ($sourceVersion -ne $installerVersion) {
-            $renameCandidates = @()
-            $renameCandidates += Get-ChildItem -Path (Join-Path $bundleRoot "msi\*.msi") -ErrorAction SilentlyContinue
-            $renameCandidates += Get-ChildItem -Path (Join-Path $bundleRoot "nsis\*.exe") -ErrorAction SilentlyContinue
-            $renameCandidates | ForEach-Object {
-              if ($_.Name.Contains($installerVersion)) {
-                $renamed = $_.Name.Replace($installerVersion, $sourceVersion)
-                Move-Item -LiteralPath $_.FullName -Destination (Join-Path $_.DirectoryName $renamed) -Force
-              }
-            }
+          $sourceMsi = Get-ChildItem -Path "." -Recurse -File -Filter "*.msi" |
+            Where-Object { $_.Name -like "ClawScribe_*" } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          $sourceNsis = Get-ChildItem -Path "." -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.Name -like "ClawScribe_*setup.exe" } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $sourceMsi) {
+            throw "No ClawScribe MSI artifact was found after the Windows build."
           }
+          if (-not $sourceNsis) {
+            throw "No ClawScribe NSIS setup artifact was found after the Windows build."
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "msi") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "nsis") | Out-Null
+          $msiName = $sourceMsi.Name
+          $nsisName = $sourceNsis.Name
+          if ($sourceVersion -ne $installerVersion) {
+            $msiName = $msiName.Replace($installerVersion, $sourceVersion)
+            $nsisName = $nsisName.Replace($installerVersion, $sourceVersion)
+          }
+          Copy-Item -LiteralPath $sourceMsi.FullName -Destination (Join-Path $bundleRoot "msi\$msiName") -Force
+          Copy-Item -LiteralPath $sourceNsis.FullName -Destination (Join-Path $bundleRoot "nsis\$nsisName") -Force
           $artifactFiles = @()
           $artifactFiles += Get-ChildItem -Path (Join-Path $bundleRoot "msi\*.msi") -ErrorAction SilentlyContinue
           $artifactFiles += Get-ChildItem -Path (Join-Path $bundleRoot "nsis\*.exe") -ErrorAction SilentlyContinue
