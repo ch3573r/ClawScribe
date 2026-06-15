@@ -11,9 +11,9 @@ use crate::{database::repositories::setting::SettingsRepository, state::AppState
 const OPENAI_AUTH_REFERENCE_URL: &str =
     "https://developers.openai.com/api/reference/overview#authentication";
 const OPENAI_OAUTH_UNSUPPORTED_REASON: &str =
-    "Public OpenAI OAuth PKCE is not the ClawScribe request-auth route. Use direct OpenAI API-key auth, or configure OpenClaw/Codex managed auth so ChatGPT/Codex authentication is handled by OpenClaw without storing ChatGPT tokens in ClawScribe.";
+    "Public OpenAI OAuth PKCE metadata alone cannot authenticate OpenAI API requests in ClawScribe. Use direct OpenAI API-key auth, or configure a standalone OpenAI-compatible managed endpoint that owns OAuth and accepts bearer-authenticated chat/completions requests.";
 const OPENCLAW_CODEX_MANAGED_MESSAGE: &str =
-    "OpenClaw/Codex managed auth is configured. ClawScribe sends requests to the configured OpenClaw endpoint and does not store ChatGPT or Codex tokens locally.";
+    "Optional OpenClaw managed auth is configured. ClawScribe sends requests to the configured OpenClaw endpoint and does not store ChatGPT or Codex tokens locally.";
 const PKCE_CODE_CHALLENGE_METHOD: &str = "S256";
 const PKCE_AUTH_REQUEST_TTL_MINUTES: i64 = 10;
 
@@ -402,17 +402,18 @@ fn build_openai_auth_status(
                     requires_user_action: true,
                     source: "openai_auth_config".to_string(),
                     message: if oauth_pkce_configured {
-                        "Public OpenAI OAuth PKCE metadata is configured, but it is not the ClawScribe request-auth route"
+                        "Public OpenAI OAuth PKCE metadata is configured, but it is not enough by itself to authenticate OpenAI API requests"
                             .to_string()
                     } else {
                         "Public OpenAI OAuth PKCE mode is selected, but metadata is incomplete"
                             .to_string()
                     },
                     next_action: if oauth_pkce_configured {
-                        "Use direct API-key auth or configure OpenClaw/Codex managed auth for request authentication."
+                        "Use direct API-key auth, or select a standalone OpenAI-compatible managed endpoint that owns OAuth."
                             .to_string()
                     } else {
-                        "Configure OpenClaw/Codex managed auth, or select API-key auth.".to_string()
+                        "Select API-key auth, or configure a standalone OpenAI-compatible managed endpoint."
+                            .to_string()
                     },
                     request_authentication: "unsupported_oauth_pkce".to_string(),
                     auth_reference_url: openai_auth_reference_url(),
@@ -530,7 +531,8 @@ pub async fn api_get_openai_auth_status<R: Runtime>(
 
 /// Saves OpenAI auth-mode metadata. API keys still use the existing settings path.
 /// ChatGPT/Codex tokens, OAuth client secrets, and OAuth tokens are intentionally
-/// not accepted or stored here.
+/// not accepted or stored here. OpenClaw is an optional managed endpoint, not the
+/// OpenAI auth foundation for the distributable desktop app.
 #[tauri::command]
 pub async fn api_save_openai_auth_config<R: Runtime>(
     _app: AppHandle<R>,
@@ -748,7 +750,7 @@ mod tests {
             .unsupported_reason
             .as_deref()
             .unwrap_or_default()
-            .contains("OpenClaw/Codex managed auth"));
+            .contains("standalone OpenAI-compatible managed endpoint"));
     }
 
     #[test]

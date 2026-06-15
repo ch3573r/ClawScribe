@@ -1,9 +1,13 @@
 # OpenAI Auth Modes
 
-This fork treats OpenAI auth as a production configuration contract. ClawScribe
-supports direct OpenAI API-key auth, and a separate OpenClaw/Codex managed route
-for ChatGPT/Codex-authenticated processing. The managed route is not public
-OpenAI OAuth.
+This fork treats OpenAI auth as a production configuration contract for a
+distributable desktop app. OpenClaw is an optional integration, not the
+foundation for OpenAI auth.
+
+ClawScribe supports direct OpenAI API-key auth, custom OpenAI-compatible
+endpoints, and an optional OpenClaw managed endpoint. Public OpenAI OAuth PKCE
+metadata is kept as compatibility metadata only; it is not treated as a usable
+OpenAI API credential.
 
 ## Supported Request Auth
 
@@ -32,14 +36,42 @@ Related commands:
 - `api_get_openai_auth_status`
 - `api_save_openai_auth_config` with `{ "mode": "api_key" }`
 
-### OpenClaw/Codex Managed Auth
+### Standalone OpenAI-Compatible Managed Endpoint
+
+Status: supported through the `custom-openai` provider.
+
+This is the distributable path for an OAuth-backed or operator-managed backend:
+the backend owns OAuth/token refresh/secrets, exposes an OpenAI-compatible
+`/chat/completions` endpoint, and ClawScribe sends bearer-authenticated requests
+to that endpoint. The endpoint can be local, LAN, cloud, or vendor-hosted.
+
+This path does not require OpenClaw.
+
+Configuration shape:
+
+```json
+{
+  "provider": "custom-openai",
+  "customOpenAIEndpoint": "https://model-gateway.example.com/v1",
+  "customOpenAIModel": "gpt-5.4",
+  "customOpenAIApiKey": "gateway-bearer-token"
+}
+```
+
+Related commands:
+
+- `api_save_custom_openai_config`
+- `api_get_custom_openai_config`
+- `api_test_custom_openai_connection`
+
+### Optional OpenClaw Managed Auth
 
 Status: supported and request-ready when an endpoint is configured.
 
-This mode represents a production handoff to an OpenClaw endpoint or local
-backend that owns ChatGPT/Codex-authenticated processing. ClawScribe stores only
-endpoint metadata and does not mint, accept, persist, refresh, or expose ChatGPT
-or Codex tokens.
+This mode represents an optional production handoff to an OpenClaw endpoint that
+owns ChatGPT/Codex-authenticated processing. ClawScribe stores only endpoint
+metadata and does not mint, accept, persist, refresh, or expose ChatGPT or Codex
+tokens.
 
 In the current OpenClaw deployment, this endpoint is the ingest service's
 OpenAI-compatible model bridge:
@@ -48,9 +80,10 @@ OpenAI-compatible model bridge:
 http://openclaw-host.local:8765/v1/chat/completions
 ```
 
-That bridge runs `openclaw infer model run --gateway --model openai/gpt-5.4`
-on the trusted OpenClaw host, using the existing OpenClaw/ChatGPT/Codex auth
-state there.
+That bridge runs `openclaw infer model run --gateway --model openai/gpt-5.4` on
+the trusted OpenClaw host, using the existing OpenClaw/ChatGPT/Codex auth state
+there. This is one managed endpoint implementation, not a requirement for the
+desktop app.
 
 Configuration shape:
 
@@ -79,13 +112,14 @@ Related command:
 
 - `api_save_openai_auth_config` with `{ "mode": "openclaw_codex_managed" }`
 
-## Public OpenAI OAuth PKCE
+## Public OpenAI OAuth PKCE Metadata
 
-Status: compatibility metadata only, not request-ready.
+Status: compatibility metadata only, not request-ready by itself.
 
-Public OpenAI OAuth PKCE is intentionally distinct from the OpenClaw/Codex
-managed route. The backend may still validate legacy PKCE metadata and prepare a
-short-lived browser authorization URL for compatibility, but that path does not
+Public OpenAI OAuth PKCE metadata is intentionally distinct from both standalone
+OpenAI API-key auth and managed OpenAI-compatible endpoints. The backend may
+still validate legacy PKCE metadata and prepare a short-lived browser
+authorization URL for compatibility, but that metadata alone does not
 authenticate ClawScribe requests.
 
 Compatibility commands:
@@ -95,7 +129,8 @@ Compatibility commands:
 
 `api_exchange_openai_oauth_pkce_code` returns an error. No OAuth client secret,
 access token, refresh token, ChatGPT token, Codex token, or fake token is stored
-in source code or settings.
+in source code or settings. For OAuth-backed processing in the distributable app,
+use a standalone OpenAI-compatible managed endpoint.
 
 ## Disabled Or Not Configured
 
@@ -117,7 +152,8 @@ Important fields:
 - `oauthBrowserLaunchReady`: whether a legacy authorization URL can be prepared.
 - `oauthDeviceFlowConfigured`: whether a legacy device endpoint was configured.
 - `canAuthenticateRequests`: true for API-key auth with a stored key, or for
-  `openclaw_codex_managed` with an endpoint configured.
+  `openclaw_codex_managed` with an endpoint configured. Custom OpenAI-compatible
+  endpoint readiness is reported by the custom provider config/test commands.
 - `requestAuthentication`: `bearer_api_key`, `missing_api_key`,
   `openclaw_codex_managed`, `missing_openclaw_codex_endpoint`,
   `unsupported_oauth_pkce`, `disabled`, or `not_configured`.
@@ -127,7 +163,7 @@ Important fields:
 
 ## Validation Notes
 
-The Rust unit tests cover legacy API-key compatibility, disabled mode,
-OpenClaw/Codex managed endpoint normalization and status capability fields,
-legacy public OAuth metadata handling, URL validation, and PKCE S256
-authorization request compatibility.
+The Rust unit tests cover legacy API-key compatibility, disabled mode, optional
+OpenClaw managed endpoint normalization and status capability fields, legacy
+public OAuth metadata handling, URL validation, and PKCE S256 authorization
+request compatibility.

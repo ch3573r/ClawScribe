@@ -651,7 +651,7 @@ export function ModelSettingsModal({
     if (modelConfig.provider === 'openai') {
       loadOpenAIAuthStatus();
     }
-    if (modelConfig.provider === 'openai' || modelConfig.provider === 'openclaw') {
+    if (modelConfig.provider === 'openclaw') {
       loadOpenClawStatus();
     }
   }, [modelConfig.provider]);
@@ -969,11 +969,11 @@ export function ModelSettingsModal({
               <SelectContent className="max-h-64 overflow-y-auto">
                 <SelectItem value="builtin-ai">Built-in AI (Offline, No API needed)</SelectItem>
                 <SelectItem value="claude">Claude</SelectItem>
-                <SelectItem value="custom-openai">Custom Server (OpenAI)</SelectItem>
+                <SelectItem value="custom-openai">OpenAI-compatible Endpoint</SelectItem>
                 <SelectItem value="groq">Groq</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="openclaw">OpenClaw managed auth</SelectItem>
+                <SelectItem value="openclaw">OpenClaw (Optional)</SelectItem>
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
               </SelectContent>
             </Select>
@@ -1051,7 +1051,7 @@ export function ModelSettingsModal({
                 className="mt-1"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Base URL of the OpenAI-compatible API
+                Base URL of a standalone OpenAI-compatible API or OAuth-backed gateway.
               </p>
             </div>
 
@@ -1070,15 +1070,18 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <Label htmlFor="custom-api-key">API Key (optional)</Label>
+              <Label htmlFor="custom-api-key">Bearer Token (optional)</Label>
               <Input
                 id="custom-api-key"
                 type="password"
                 value={customOpenAIApiKey}
                 onChange={(e) => setCustomOpenAIApiKey(e.target.value)}
-                placeholder="Leave empty if not required"
+                placeholder="Leave empty if the endpoint does not require one"
                 className="mt-1"
               />
+              <p className="text-xs text-muted-foreground mt-1">
+                Use the token expected by this endpoint. For OAuth-backed deployments, the endpoint owns OAuth and token refresh.
+              </p>
             </div>
 
             {/* Advanced Options (Collapsible) */}
@@ -1184,7 +1187,7 @@ export function ModelSettingsModal({
                     </div>
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">Use OpenClaw ChatGPT/Codex auth</span>
+                        <span className="font-medium">Optional OpenClaw managed endpoint</span>
                         <span className={cn(
                           'rounded-full px-2 py-0.5 text-xs font-medium',
                           openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
@@ -1196,11 +1199,11 @@ export function ModelSettingsModal({
                               : 'Not ready'}
                         </span>
                         <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
-                          Production option
+                          Optional feature
                         </span>
                       </div>
                       <p className="text-sm">
-                        ClawScribe hands meeting processing to OpenClaw, which uses its managed ChatGPT/Codex auth. ClawScribe does not store ChatGPT tokens.
+                        ClawScribe can hand meeting processing to OpenClaw when that feature is configured. Standalone OpenAI auth does not depend on OpenClaw.
                       </p>
                       <p className="text-xs">
                         {openClawStatusError
@@ -1231,7 +1234,7 @@ export function ModelSettingsModal({
                   </Button>
                 </div>
                 <p className="text-xs">
-                  This is separate from OpenAI API-key mode and custom OpenAI-compatible servers. Public OpenAI OAuth is not request-ready in this build.
+                  This is separate from standalone OpenAI API-key mode and custom OpenAI-compatible managed endpoints.
                 </p>
               </div>
             </AlertDescription>
@@ -1315,64 +1318,8 @@ export function ModelSettingsModal({
                   </Button>
                 </div>
                 <p className="text-xs">
-                  Public OpenAI OAuth is not request-ready in this build. OAuth PKCE token exchange remains intentionally unsupported until official OpenAI app endpoints and secure token storage are available.
+                  Public OpenAI OAuth metadata is not treated as a usable API credential. For OAuth-backed processing without OpenClaw, use a standalone OpenAI-compatible managed endpoint under Custom OpenAI.
                 </p>
-                <div className={cn(
-                  'rounded-md border bg-white/80 p-3',
-                  openClawStatus?.ready ? 'border-green-200' : 'border-amber-200'
-                )}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      <div className={cn(
-                        'mt-0.5 rounded-md p-2',
-                        openClawStatus?.ready ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
-                      )}>
-                        <ServerCog className="h-4 w-4" />
-                      </div>
-                      <div className="space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium">Use OpenClaw ChatGPT/Codex auth</span>
-                          <span className={cn(
-                            'rounded-full px-2 py-0.5 text-xs font-medium',
-                            openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
-                          )}>
-                            {isLoadingOpenClawStatus
-                              ? 'Checking'
-                              : openClawStatus?.ready
-                                ? 'Ready'
-                                : 'Not ready'}
-                          </span>
-                          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
-                            Production option
-                          </span>
-                        </div>
-                        <p className="text-sm">
-                          ClawScribe hands completed meeting processing to OpenClaw, where the managed ChatGPT/Codex auth is used. ClawScribe does not store ChatGPT tokens.
-                        </p>
-                        <p className="text-xs">
-                          {openClawStatusError
-                            ? `OpenClaw status unavailable: ${openClawStatusError}`
-                            : openClawStatus?.status_message || 'OpenClaw handoff status has not been checked yet.'}
-                        </p>
-                        {openClawStatus?.endpoint && (
-                          <p className="text-xs">
-                            Handoff endpoint: <code className="break-all rounded bg-muted px-1 py-0.5">{openClawStatus.endpoint}</code>
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={loadOpenClawStatus}
-                      disabled={isLoadingOpenClawStatus}
-                      title="Refresh OpenClaw handoff status"
-                    >
-                      <RefreshCw className={cn('h-4 w-4', isLoadingOpenClawStatus && 'animate-spin')} />
-                    </Button>
-                  </div>
-                </div>
                 <Button
                   type="button"
                   variant="outline"
