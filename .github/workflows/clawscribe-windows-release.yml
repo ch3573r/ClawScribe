@@ -113,7 +113,7 @@ jobs:
         shell: pwsh
         run: |
           cd frontend
-          $env:CARGO_TARGET_DIR = "src-tauri\target"
+          $env:CARGO_TARGET_DIR = (Resolve-Path "src-tauri").Path + "\target"
           .\scripts\build-windows-release.ps1 -Feature ${{ inputs.feature }}
 
       - name: Write build metadata
