@@ -380,6 +380,26 @@ for line in sys.stdin:
         assert!(status.success);
         assert!(status.stdout.contains("executive_summary"));
     }
+
+    #[test]
+    fn parse_meeting_output_ignores_trailing_characters() {
+        let raw = format!(
+            "{}\n\nLet me know if you need anything else!",
+            valid_meeting_json()
+        );
+        let parsed = parse_meeting_output(&raw).expect("trailing prose should be tolerated");
+        assert_eq!(
+            parsed.executive_summary,
+            "The app-server processed the meeting."
+        );
+    }
+
+    #[test]
+    fn parse_meeting_output_skips_leading_prose() {
+        let raw = format!("Here are the notes:\n{}", valid_meeting_json());
+        let parsed = parse_meeting_output(&raw).expect("leading prose should be tolerated");
+        assert_eq!(parsed.follow_up_email.subject, "Codex runtime");
+    }
 }
 
 impl Default for CodexHomeMode {
@@ -1695,7 +1715,7 @@ fn hide_std_child_console(command: &mut StdCommand) {
 #[cfg(not(windows))]
 fn hide_std_child_console(_command: &mut StdCommand) {}
 
-fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+pub(crate) fn open_url_in_default_browser(url: &str) -> Result<(), String> {
     let mut command = if cfg!(target_os = "windows") {
         let mut command = StdCommand::new("rundll32.exe");
         command.args(["url.dll,FileProtocolHandler", url]);
@@ -2068,10 +2088,26 @@ pub fn output_schema_json() -> String {
 
 pub(crate) fn parse_meeting_output(raw: &str) -> Result<MeetingNotesOutput, String> {
     let cleaned = strip_json_fence(raw);
-    if cleaned.trim().is_empty() {
+    // Skip any leading prose before the JSON object so we deserialize from the
+    // first `{`. Some providers wrap the structured output in explanatory text.
+    let json_start = cleaned
+        .find('{')
+        .map(|idx| &cleaned[idx..])
+        .unwrap_or(cleaned.as_str());
+    if json_start.trim().is_empty() {
         return Err("Provider returned no meeting JSON. Sign in with ChatGPT and try again; if already signed in, check the Codex model and account/rate-limit state.".to_string());
     }
-    serde_json::from_str::<MeetingNotesOutput>(&cleaned)
+    // Read only the first JSON value via the streaming deserializer so trailing
+    // characters after the object (extra prose, a second value, etc.) don't fail
+    // parsing the way `serde_json::from_str` would.
+    serde_json::Deserializer::from_str(json_start)
+        .into_iter::<MeetingNotesOutput>()
+        .next()
+        .unwrap_or_else(|| {
+            Err(serde::de::Error::custom(
+                "Provider returned no meeting JSON",
+            ))
+        })
         .map_err(|e| format!("Provider returned invalid meeting JSON: {e}"))
 }
 
