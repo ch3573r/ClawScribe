@@ -133,8 +133,11 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
                 false,
             )
         }
-        GraphOutcome::Failed(kind) => {
+        GraphOutcome::Failed(kind, detail) => {
             let status = kind.export_status();
+            if let Some(d) = &detail {
+                log::warn!("Graph export failed ({}): {d}", kind.code());
+            }
             ledger.record_failure(&dedupe_key, status, Some(kind.code().to_string()), now_rfc3339());
             let stop = kind == GraphErrorKind::Unauthorized;
             (

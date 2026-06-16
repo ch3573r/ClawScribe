@@ -62,8 +62,9 @@ impl Sleeper for TokioSleeper {
 #[derive(Debug, Clone)]
 pub enum GraphOutcome {
     Success(GraphResponse),
-    /// A mapped, sanitized failure.
-    Failed(GraphErrorKind),
+    /// A mapped, sanitized failure. The optional detail is the Graph
+    /// `error.code`/`error.message` (no token/body) for diagnostics.
+    Failed(GraphErrorKind, Option<String>),
     /// Network/timeout with no HTTP status. For non-idempotent creates the
     /// caller must treat this as `unknown_after_submit`.
     Unknown(String),
@@ -102,7 +103,13 @@ impl<T: GraphTransport, S: Sleeper> GraphClient<T, S> {
                         attempt += 1;
                         continue;
                     }
-                    return GraphOutcome::Failed(kind);
+                    let detail = match (resp.error_code.as_deref(), resp.error_message.as_deref()) {
+                        (Some(c), Some(m)) => Some(format!("{c}: {m}")),
+                        (Some(c), None) => Some(c.to_string()),
+                        (None, Some(m)) => Some(m.to_string()),
+                        (None, None) => None,
+                    };
+                    return GraphOutcome::Failed(kind, detail);
                 }
                 Err(TransportError::Network(msg)) => return GraphOutcome::Unknown(msg),
             }

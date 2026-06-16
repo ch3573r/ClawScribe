@@ -30,6 +30,9 @@ pub struct GraphResponse {
     pub retry_after_secs: Option<u64>,
     /// Graph `error.code`, when the body carried one.
     pub error_code: Option<String>,
+    /// Graph `error.message`, when present. A human-readable reason (e.g. why
+    /// OneNote denied a notebook) — surfaced for diagnostics, never a token.
+    pub error_message: Option<String>,
     /// Response body. For successes the exporter parses `id`/`webUrl`.
     pub body: String,
 }
@@ -44,6 +47,7 @@ impl GraphResponse {
             status,
             retry_after_secs: None,
             error_code: None,
+            error_message: None,
             body: body.into(),
         }
     }
@@ -53,6 +57,7 @@ impl GraphResponse {
             status,
             retry_after_secs: None,
             error_code: error_code.map(|c| c.to_string()),
+            error_message: None,
             body: String::new(),
         }
     }

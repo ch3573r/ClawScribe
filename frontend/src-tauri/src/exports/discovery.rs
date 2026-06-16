@@ -57,7 +57,10 @@ fn map_outcome<T: serde::de::DeserializeOwned>(
                 .map_err(|e| format!("Failed to parse Graph response: {e}"))?;
             Ok(list.value)
         }
-        GraphOutcome::Failed(kind) => Err(format!("Graph error: {}", kind.code())),
+        GraphOutcome::Failed(kind, detail) => Err(match detail {
+            Some(d) => format!("Graph error ({}): {d}", kind.code()),
+            None => format!("Graph error: {}", kind.code()),
+        }),
         GraphOutcome::Unknown(msg) => Err(format!("Network error: {msg}")),
     }
 }

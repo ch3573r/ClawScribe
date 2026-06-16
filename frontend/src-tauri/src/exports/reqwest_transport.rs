@@ -57,14 +57,19 @@ impl GraphTransport for ReqwestGraphTransport {
             .await
             .map_err(|e| TransportError::Network(e.to_string()))?;
 
-        let error_code = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
+        let parsed_error = serde_json::from_str::<serde_json::Value>(&body).ok();
+        let error_code = parsed_error
+            .as_ref()
             .and_then(|v| v.get("error")?.get("code")?.as_str().map(String::from));
+        let error_message = parsed_error
+            .as_ref()
+            .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from));
 
         Ok(GraphResponse {
             status,
             retry_after_secs: retry_after,
             error_code,
+            error_message,
             body,
         })
     }
