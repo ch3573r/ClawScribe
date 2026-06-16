@@ -79,6 +79,36 @@ pub async fn list_notebooks<T: GraphTransport, S: Sleeper>(
     map_outcome(client.execute(&request, token).await)
 }
 
+/// Create a new section in a notebook and return it.
+///
+/// Unlike listing sections, this is a POST (not a library enumeration), so it
+/// is not subject to the OneNote 5,000-items-per-document-library limit
+/// (error 10008). This is how exports target a notebook whose library is too
+/// large to enumerate: a fresh dated section is created per export.
+pub async fn create_section<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    notebook_id: &str,
+    display_name: &str,
+) -> Result<SectionInfo, String> {
+    let request = GraphRequest {
+        method: "POST".into(),
+        url: format!("{GRAPH_BASE}/me/onenote/notebooks/{notebook_id}/sections"),
+        content_type: "application/json".into(),
+        body: serde_json::json!({ "displayName": display_name }).to_string(),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+    };
+    match client.execute(&request, token).await {
+        GraphOutcome::Success(resp) => serde_json::from_str::<SectionInfo>(&resp.body)
+            .map_err(|e| format!("Failed to parse created section: {e}")),
+        GraphOutcome::Failed(kind, detail) => Err(match detail {
+            Some(d) => format!("Graph error ({}): {d}", kind.code()),
+            None => format!("Graph error: {}", kind.code()),
+        }),
+        GraphOutcome::Unknown(msg) => Err(format!("Network error: {msg}")),
+    }
+}
+
 pub async fn list_sections<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     token: &str,

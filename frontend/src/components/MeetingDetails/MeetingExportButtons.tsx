@@ -4,6 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { NotebookTabs, ListTodo, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   microsoftExportService,
   type MicrosoftConnectionInfo,
@@ -23,10 +33,19 @@ interface MeetingExportButtonsProps {
 
 type Busy = "onenote" | "planner" | null;
 
+/** Default section name: `YYYY-MM-DD: <meeting title>`. */
+function defaultSectionName(title: string): string {
+  const date = new Date().toISOString().slice(0, 10);
+  const clean = (title || "Untitled meeting").trim();
+  return `${date}: ${clean}`;
+}
+
 /**
  * Per-meeting export actions shown in the summary view. OneNote is always
- * available once Microsoft is connected; Planner appears only when the summary
- * has action items. Destinations come from Settings → Add-ons.
+ * available once Microsoft is connected and a notebook is chosen; exporting
+ * opens a dialog to name the section that will be created (a dated section per
+ * export — this avoids the OneNote 5,000-item enumeration limit). Planner
+ * appears only when the summary has action items.
  */
 export function MeetingExportButtons({
   meetingId,
@@ -36,6 +55,9 @@ export function MeetingExportButtons({
   const [connected, setConnected] = useState(false);
   const [hasActionItems, setHasActionItems] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
+
+  const [oneNoteOpen, setOneNoteOpen] = useState(false);
+  const [sectionName, setSectionName] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -81,13 +103,25 @@ export function MeetingExportButtons({
     [],
   );
 
-  const exportOneNote = useCallback(async () => {
+  // Opening the OneNote dialog: require a notebook, then prefill the section name.
+  const openOneNote = useCallback(() => {
     if (!hasOneNoteDestination(getExportDestinations())) {
-      toast.info("Pick a OneNote section first", {
+      toast.info("Pick a OneNote notebook first", {
         description: "Settings → Add-ons → OneNote export.",
       });
       return;
     }
+    setSectionName(defaultSectionName(meetingTitle));
+    setOneNoteOpen(true);
+  }, [meetingTitle]);
+
+  const confirmOneNote = useCallback(async () => {
+    const name = sectionName.trim();
+    if (!name) {
+      toast.info("Enter a section name.");
+      return;
+    }
+    const { notebookId } = getExportDestinations();
     setBusy("onenote");
     try {
       const md = await getMarkdown();
@@ -95,14 +129,15 @@ export function MeetingExportButtons({
         toast.info("Nothing to export yet — generate a summary first.");
         return;
       }
-      const { sectionId } = getExportDestinations();
-      const report = await microsoftExportService.exportMeetingMarkdownToOneNote(
+      const report = await microsoftExportService.exportMeetingToOneNoteSection(
         meetingId,
         meetingTitle,
         md,
-        sectionId!,
+        notebookId!,
+        name,
       );
       reportToast("OneNote", report);
+      setOneNoteOpen(false);
     } catch (e) {
       toast.error("OneNote export failed", {
         description: e instanceof Error ? e.message : String(e),
@@ -110,7 +145,7 @@ export function MeetingExportButtons({
     } finally {
       setBusy(null);
     }
-  }, [getMarkdown, meetingId, meetingTitle, reportToast]);
+  }, [sectionName, getMarkdown, meetingId, meetingTitle, reportToast]);
 
   const exportPlanner = useCallback(async () => {
     if (!hasPlannerDestination(getExportDestinations())) {
@@ -149,9 +184,9 @@ export function MeetingExportButtons({
         type="button"
         variant="outline"
         size="sm"
-        onClick={exportOneNote}
+        onClick={openOneNote}
         disabled={busy !== null}
-        title="Export this meeting's summary to OneNote"
+        title="Export this meeting's summary to a new OneNote section"
       >
         {busy === "onenote" ? (
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -178,6 +213,44 @@ export function MeetingExportButtons({
           Planner
         </Button>
       )}
+
+      <Dialog open={oneNoteOpen} onOpenChange={(o) => !busy && setOneNoteOpen(o)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Export to OneNote</DialogTitle>
+            <DialogDescription>
+              A new section with this name will be created in your selected
+              notebook ({getExportDestinations().notebookName ?? "notebook"}).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="onenote-section-name">Section name</Label>
+            <Input
+              id="onenote-section-name"
+              value={sectionName}
+              onChange={(e) => setSectionName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void confirmOneNote();
+              }}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOneNoteOpen(false)}
+              disabled={busy === "onenote"}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={confirmOneNote} disabled={busy === "onenote"}>
+              {busy === "onenote" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Create section &amp; export
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

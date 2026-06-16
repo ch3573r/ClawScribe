@@ -810,6 +810,7 @@ pub fn run() {
             exports::commands::export_to_onenote,
             exports::commands::export_to_planner,
             exports::commands::export_meeting_markdown_to_onenote,
+            exports::commands::export_meeting_to_onenote_section,
             exports::commands::export_meeting_markdown_to_planner,
             exports::commands::summary_has_action_items,
             exports::commands::list_onenote_notebooks,

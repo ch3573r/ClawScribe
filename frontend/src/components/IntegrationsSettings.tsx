@@ -234,7 +234,6 @@ function OneNotePanel() {
   const ms = useMicrosoftExport();
   const saved = getExportDestinations();
   const [selectedNotebook, setSelectedNotebook] = useState<string>(saved.notebookId ?? "");
-  const [selectedSection, setSelectedSection] = useState<string>(saved.sectionId ?? "");
 
   const isConnected = ms.connection.state === "connected";
 
@@ -244,94 +243,58 @@ function OneNotePanel() {
     }
   }, [isConnected]);
 
-  // Load the sections for whatever notebook is selected (including a restored
-  // one). The selected section is only cleared on an explicit notebook change
-  // (handled in the picker onChange), so a saved destination survives a reload.
+  // Persist the chosen notebook. The section is created per-export (a dated
+  // section), so there is no section picker — this also sidesteps the OneNote
+  // 5,000-items-per-library enumeration limit, which only affects listing.
   useEffect(() => {
-    if (selectedNotebook) {
-      void ms.loadSections(selectedNotebook);
-    }
-  }, [selectedNotebook]);
-
-  // Persist the chosen destination so the per-meeting export buttons can use it.
-  useEffect(() => {
-    if (!selectedSection) return;
+    if (!selectedNotebook) return;
     setExportDestinations({
       notebookId: selectedNotebook,
       notebookName: ms.notebooks.find((n) => n.id === selectedNotebook)?.displayName,
-      sectionId: selectedSection,
-      sectionName: ms.sections.find((s) => s.id === selectedSection)?.displayName,
+      sectionId: undefined,
+      sectionName: undefined,
     });
-  }, [selectedSection, selectedNotebook, ms.notebooks, ms.sections]);
+  }, [selectedNotebook, ms.notebooks]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
-    ? "Select a notebook and section for meeting note exports."
+    ? "Pick a notebook. Each export creates a new dated section in it."
     : "Sign in with Microsoft above to enable OneNote export.";
 
   return (
     <AddonPanel icon={NotebookTabs} title="OneNote export" state={panelState} detail={detail}>
       {isConnected && (
         <div className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <div className="mb-1 flex items-center justify-between">
-                <label className="block text-xs font-medium text-muted-foreground">
-                  Notebook
-                </label>
-                <button
-                  type="button"
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-                  onClick={() => void ms.loadNotebooks()}
-                  disabled={ms.loadingNotebooks}
-                >
-                  <RefreshCw className={`h-3 w-3 ${ms.loadingNotebooks ? "animate-spin" : ""}`} />
-                  Reload
-                </button>
-              </div>
-              <select
-                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                value={selectedNotebook}
-                onChange={(e) => {
-                  setSelectedNotebook(e.target.value);
-                  setSelectedSection("");
-                }}
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="block text-xs font-medium text-muted-foreground">
+                Notebook
+              </label>
+              <button
+                type="button"
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                onClick={() => void ms.loadNotebooks()}
                 disabled={ms.loadingNotebooks}
               >
-                <option value="">
-                  {ms.loadingNotebooks ? "Loading…" : "Select a notebook"}
-                </option>
-                {ms.notebooks.map((nb) => (
-                  <option key={nb.id} value={nb.id}>
-                    {nb.displayName}
-                  </option>
-                ))}
-              </select>
+                <RefreshCw className={`h-3 w-3 ${ms.loadingNotebooks ? "animate-spin" : ""}`} />
+                Reload
+              </button>
             </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                Section
-              </label>
-              <select
-                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                value={selectedSection}
-                onChange={(e) => setSelectedSection(e.target.value)}
-                disabled={!selectedNotebook || ms.loadingSections}
-              >
-                <option value="">
-                  {ms.loadingSections
-                    ? "Loading…"
-                    : !selectedNotebook
-                      ? "Select a notebook first"
-                      : "Select a section"}
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+              value={selectedNotebook}
+              onChange={(e) => setSelectedNotebook(e.target.value)}
+              disabled={ms.loadingNotebooks}
+            >
+              <option value="">
+                {ms.loadingNotebooks ? "Loading…" : "Select a notebook"}
+              </option>
+              {ms.notebooks.map((nb) => (
+                <option key={nb.id} value={nb.id}>
+                  {nb.displayName}
                 </option>
-                {ms.sections.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.displayName}
-                  </option>
-                ))}
-              </select>
-            </div>
+              ))}
+            </select>
           </div>
           {ms.error && (
             <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
@@ -343,11 +306,11 @@ function OneNotePanel() {
             <p className="rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
               No OneNote notebooks were returned for this account. If you expect
               notebooks here, confirm you signed in with the same account that
-              owns them and that this app has been granted the OneNote
-              (Notes.ReadWrite) permission, then use Reload.
+              owns them and that this app has the OneNote permission, then use
+              Reload.
             </p>
           )}
-          {selectedSection && (
+          {selectedNotebook && (
             <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
               <CheckCircle2 className="h-4 w-4" />
               <span>

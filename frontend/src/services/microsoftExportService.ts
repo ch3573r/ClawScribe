@@ -110,6 +110,22 @@ export const microsoftExportService = {
     });
   },
 
+  async exportMeetingToOneNoteSection(
+    meetingId: string,
+    meetingTitle: string,
+    markdown: string,
+    notebookId: string,
+    sectionName: string,
+  ): Promise<ExportReport> {
+    return invoke<ExportReport>("export_meeting_to_onenote_section", {
+      meetingId,
+      meetingTitle,
+      markdown,
+      notebookId,
+      sectionName,
+    });
+  },
+
   async exportMeetingMarkdownToPlanner(
     meetingId: string,
     meetingTitle: string,

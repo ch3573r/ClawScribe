@@ -362,6 +362,58 @@ pub async fn export_meeting_markdown_to_onenote(
     Ok(report.into())
 }
 
+/// Export a meeting's summary to OneNote by creating a fresh section in the
+/// chosen notebook (named by the caller, e.g. `2026-06-16: Standup`) and writing
+/// the notes into it. Creating a section is not subject to the 5,000-item
+/// enumeration limit (error 10008), so this works for notebooks whose OneDrive
+/// library is too large to list sections from.
+#[tauri::command]
+pub async fn export_meeting_to_onenote_section(
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+    meeting_title: String,
+    markdown: String,
+    notebook_id: String,
+    section_name: String,
+) -> Result<ExportReportResponse, String> {
+    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+
+    let section = discovery::create_section(&client, &token, &notebook_id, &section_name).await?;
+
+    let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
+        &meeting_id,
+        &meeting_title,
+        None,
+        &markdown,
+    );
+
+    let mut ledger = ExportLedger::new(&meeting_id);
+    let ctx = ExportContext {
+        tenant_id: &tenant_id,
+        user_id: &user_id,
+        bearer_token: &token,
+    };
+
+    let report = exporter::export_onenote(
+        &client,
+        &mut ledger,
+        &meeting_export,
+        &OneNoteTarget { section_id: section.id },
+        &ctx,
+    )
+    .await;
+
+    if report.connection_state == Some(MicrosoftConnectionState::Expired) {
+        let mut inner = state.inner.write().await;
+        inner.connection_state = MicrosoftConnectionState::Expired;
+    }
+
+    Ok(report.into())
+}
+
 #[tauri::command]
 pub async fn export_meeting_markdown_to_planner(
     state: tauri::State<'_, MicrosoftAuthState>,
