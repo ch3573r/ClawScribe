@@ -227,6 +227,7 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
             content_type: "application/xhtml+xml".into(),
             body: page.xhtml,
             correlation_id: uuid::Uuid::new_v4().to_string(),
+            headers: Vec::new(),
         };
         let (result, stop) =
             run_item(client, ledger, ctx.bearer_token, dedupe_key, local_id, request).await;
@@ -272,9 +273,20 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
             content_type: "application/json".into(),
             body: body.to_string(),
             correlation_id: uuid::Uuid::new_v4().to_string(),
+            headers: Vec::new(),
         };
         let (result, stop) =
             run_item(client, ledger, ctx.bearer_token, dedupe_key, local_id, request).await;
+
+        // Best-effort: attach a description with context to the new task. The
+        // task already exists, so a details failure must not fail the export.
+        if let Some(task_id) = result.resource_id.as_deref() {
+            if result.status == ExportStatus::Succeeded {
+                let description = planner::build_task_details_description(meeting, action);
+                set_planner_task_details(client, ctx.bearer_token, task_id, &description).await;
+            }
+        }
+
         items.push(result);
         if stop {
             break;
@@ -287,6 +299,55 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
         connection_state,
         items,
     })
+}
+
+/// Best-effort: set a Planner task's description (its "notes"). Planner keeps
+/// the description on a separate `/details` resource that requires the current
+/// ETag via `If-Match`, so this is GET-then-PATCH. Any failure is logged and
+/// ignored — the task itself already exists.
+async fn set_planner_task_details<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    task_id: &str,
+    description: &str,
+) {
+    let details_url = format!("{GRAPH_BASE}/planner/tasks/{task_id}/details");
+
+    let get = GraphRequest {
+        method: "GET".into(),
+        url: details_url.clone(),
+        content_type: "application/json".into(),
+        body: String::new(),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: Vec::new(),
+    };
+    let etag = match client.execute(&get, token).await {
+        GraphOutcome::Success(resp) => serde_json::from_str::<serde_json::Value>(&resp.body)
+            .ok()
+            .and_then(|v| v.get("@odata.etag")?.as_str().map(String::from)),
+        other => {
+            log::warn!("Planner task details GET failed: {other:?}");
+            None
+        }
+    };
+    let Some(etag) = etag else {
+        log::warn!("No ETag for Planner task {task_id}; skipping description");
+        return;
+    };
+
+    let patch = GraphRequest {
+        method: "PATCH".into(),
+        url: details_url,
+        content_type: "application/json".into(),
+        body: serde_json::json!({ "description": description }).to_string(),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: vec![("If-Match".to_string(), etag)],
+    };
+    if let other @ (GraphOutcome::Failed(..) | GraphOutcome::Unknown(_)) =
+        client.execute(&patch, token).await
+    {
+        log::warn!("Planner task details PATCH failed: {other:?}");
+    }
 }
 
 #[cfg(test)]

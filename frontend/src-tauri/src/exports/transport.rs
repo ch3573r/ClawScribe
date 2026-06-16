@@ -20,6 +20,9 @@ pub struct GraphRequest {
     pub body: String,
     /// Caller-generated `client-request-id` for correlation in logs.
     pub correlation_id: String,
+    /// Extra request headers (e.g. `If-Match` for Planner detail PATCHes). Never
+    /// used to carry the bearer token, which is supplied separately at send time.
+    pub headers: Vec<(String, String)>,
 }
 
 /// A response from Graph, already reduced to the fields the exporter needs.

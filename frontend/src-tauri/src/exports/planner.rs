@@ -69,12 +69,63 @@ pub fn build_task_request(
         return Err(PlannerBuildError::EmptyTitle);
     }
 
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "planId": destination.plan_id,
         "bucketId": destination.bucket_id,
         "title": title,
         "assignments": {},
-    }))
+    });
+    // Carry the parsed due date onto the task (Planner wants a DateTimeOffset).
+    if let Some(due) = action.due_date.as_deref().and_then(to_due_date_time) {
+        body["dueDateTime"] = serde_json::Value::String(due);
+    }
+    Ok(body)
+}
+
+/// Convert an extracted `YYYY-MM-DD` date into the ISO-8601 DateTimeOffset
+/// Planner expects. Returns `None` for anything that isn't a plain ISO date.
+fn to_due_date_time(date: &str) -> Option<String> {
+    let date = date.trim();
+    let bytes = date.as_bytes();
+    let looks_iso = date.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && date.chars().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                c == '-'
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    looks_iso.then(|| format!("{date}T00:00:00Z"))
+}
+
+/// Build the description (task notes) carrying context the single-line title
+/// can't: the source meeting, the owner hint, and a short meeting summary.
+pub fn build_task_details_description(meeting: &MeetingExport, action: &ExportActionItem) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("Action item: {}", normalize_title(&action.task)));
+    if let Some(owner) = action.owner.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("Owner (suggested): {owner}"));
+    }
+    if let Some(due) = action.due_date.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("Due: {due}"));
+    }
+    let meeting_line = match meeting.created_at.as_deref() {
+        Some(when) if !when.trim().is_empty() => format!("From meeting: {} ({})", meeting.title, when),
+        _ => format!("From meeting: {}", meeting.title),
+    };
+    lines.push(meeting_line);
+    let context = meeting.executive_summary.trim();
+    if !context.is_empty() {
+        let excerpt: String = context.chars().take(600).collect();
+        lines.push(String::new());
+        lines.push("Meeting context:".to_string());
+        lines.push(excerpt);
+    }
+    lines.push(String::new());
+    lines.push("Exported from ClawScribe.".to_string());
+    lines.join("\n")
 }
 
 /// Assign deterministic `action-1`, `action-2`, ... ids to action items that

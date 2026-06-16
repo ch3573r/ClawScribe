@@ -45,6 +45,7 @@ fn get_request(url: String) -> GraphRequest {
         content_type: "application/json".into(),
         body: String::new(),
         correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: Vec::new(),
     }
 }
 
@@ -97,6 +98,7 @@ pub async fn create_section<T: GraphTransport, S: Sleeper>(
         content_type: "application/json".into(),
         body: serde_json::json!({ "displayName": display_name }).to_string(),
         correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: Vec::new(),
     };
     match client.execute(&request, token).await {
         GraphOutcome::Success(resp) => serde_json::from_str::<SectionInfo>(&resp.body)

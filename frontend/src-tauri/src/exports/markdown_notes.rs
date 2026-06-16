@@ -39,6 +39,11 @@ static BULLET: Lazy<Regex> =
 /// Inline `**bold**`.
 static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("valid bold regex"));
 
+/// A whole line that is just a bold label, e.g. `**Action items**` or
+/// `**Decisions:**` — summaries often use these instead of `#` headings.
+static BOLD_HEADING: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\*\*([^*]+?)\*\*:?$").expect("valid bold heading regex"));
+
 /// Inline `` `code` ``.
 static CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`]+)`").expect("valid code regex"));
 
@@ -143,15 +148,30 @@ pub fn parse_action_items(markdown: &str) -> Vec<ExportActionItem> {
     let mut items: Vec<ExportActionItem> = Vec::new();
     let mut in_action_section = false;
 
-    for line in markdown.lines() {
+    for raw in markdown.lines() {
+        let line = raw.trim_end();
+
+        // A markdown heading switches the section on/off.
         if let Some((_, text)) = heading_level(line) {
             in_action_section = ACTION_HEADING.is_match(text);
+            continue;
+        }
+        // A bold-only line (e.g. `**Decisions**`) acts as a pseudo-heading, so a
+        // section divider that isn't a `#` heading still bounds the action list.
+        if let Some(caps) = BOLD_HEADING.captures(line.trim()) {
+            in_action_section = ACTION_HEADING.is_match(&caps[1]);
             continue;
         }
         if !in_action_section {
             continue;
         }
+        if line.trim().is_empty() {
+            continue;
+        }
         let Some(item_text) = bullet_text(line) else {
+            // Non-bullet prose ends the list, so we don't keep collecting items
+            // from whatever follows it under the same (or no) heading.
+            in_action_section = false;
             continue;
         };
 
@@ -336,6 +356,38 @@ Some closing thoughts.";
         // "Ship the beta on 2026-07-01" lives under Decisions, not Action Items.
         let items = parse_action_items(SAMPLE);
         assert!(items.iter().all(|i| !i.task.contains("Ship the beta")));
+    }
+
+    #[test]
+    fn bold_pseudo_heading_bounds_the_action_list() {
+        // Summaries that use **bold** labels instead of `#` headings must still
+        // stop the action list at the next (non-action) bold label.
+        let md = "\
+**Action Items**
+- Do the thing @bob
+- Email the client
+
+**Decisions**
+- Adopt plan B
+- Hire two engineers";
+        let items = parse_action_items(md);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.task.starts_with("Do the thing")));
+        assert!(items.iter().all(|i| !i.task.contains("Adopt plan B")));
+        assert!(items.iter().all(|i| !i.task.contains("Hire two engineers")));
+    }
+
+    #[test]
+    fn prose_after_the_list_ends_the_section() {
+        let md = "\
+## Next Steps
+- File the report
+
+Separately, the team also reviewed the budget and noted:
+- This is commentary, not a task";
+        let items = parse_action_items(md);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].task.starts_with("File the report"));
     }
 
     #[test]

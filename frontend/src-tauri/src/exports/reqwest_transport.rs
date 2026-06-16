@@ -40,6 +40,10 @@ impl GraphTransport for ReqwestGraphTransport {
                 .body(request.body.clone());
         }
 
+        for (name, value) in &request.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+
         let resp = builder
             .send()
             .await
