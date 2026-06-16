@@ -99,15 +99,32 @@ pub fn delete_token() -> Result<(), TokenStoreError> {
     }
 }
 
-/// Get a valid access token, refreshing if expired. Returns the token string
-/// and an updated [`StoredToken`] (which is also persisted to the keychain).
+/// Get a valid access token, refreshing if expired. Reads from the keychain.
+/// Prefer [`ensure_valid_token`] when a session token is held in memory.
 pub async fn get_valid_access_token(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
 ) -> Result<StoredToken, MsAuthError> {
-    let stored = load_token()
-        .map_err(|e| MsAuthError::TokenRefreshFailed(e.to_string()))?
-        .ok_or_else(|| MsAuthError::TokenRefreshFailed("No stored token".to_string()))?;
+    ensure_valid_token(http, config, None).await
+}
+
+/// Get a valid access token, refreshing if expired.
+///
+/// `current` is the session's in-memory token (the source of truth). When it is
+/// `None` we fall back to the keychain. A refreshed token is written back to the
+/// keychain on a best-effort basis: persistence failure does not fail the call,
+/// because the caller keeps the returned token in memory for the session.
+pub async fn ensure_valid_token(
+    http: &reqwest::Client,
+    config: &MicrosoftAuthConfig,
+    current: Option<StoredToken>,
+) -> Result<StoredToken, MsAuthError> {
+    let stored = match current {
+        Some(t) => t,
+        None => load_token()
+            .map_err(|e| MsAuthError::TokenRefreshFailed(e.to_string()))?
+            .ok_or_else(|| MsAuthError::TokenRefreshFailed("No stored token".to_string()))?,
+    };
 
     if stored.is_access_token_valid() {
         return Ok(stored);
@@ -127,6 +144,10 @@ pub async fn get_valid_access_token(
         ..stored
     };
 
-    save_token(&updated).map_err(|e| MsAuthError::TokenRefreshFailed(e.to_string()))?;
+    // Best-effort: a keychain write failure must not invalidate a token we
+    // already hold and can use for this session.
+    if let Err(e) = save_token(&updated) {
+        log::warn!("Failed to persist refreshed Microsoft token: {e}");
+    }
     Ok(updated)
 }

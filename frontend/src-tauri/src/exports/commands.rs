@@ -117,7 +117,12 @@ pub async fn microsoft_sign_in<R: Runtime>(
                     email.clone(),
                     config.tenant_id.clone(),
                 );
-                let _ = token_store::save_token(&stored);
+                // Persist for future sessions, but don't gate sign-in on it —
+                // the token is held in memory below so exports work this session
+                // even when the platform credential store is unavailable.
+                if let Err(e) = token_store::save_token(&stored) {
+                    log::warn!("Failed to persist Microsoft token to keychain: {e}");
+                }
 
                 {
                     let mut inner = state.inner.write().await;
@@ -126,6 +131,7 @@ pub async fn microsoft_sign_in<R: Runtime>(
                     inner.user_display_name = Some(display_name.clone());
                     inner.user_email = email.clone();
                     inner.user_id = Some(user_id);
+                    inner.current_token = Some(stored);
                 }
 
                 let _ = app_handle.emit(
@@ -165,6 +171,7 @@ pub async fn microsoft_sign_out(
     inner.user_display_name = None;
     inner.user_email = None;
     inner.user_id = None;
+    inner.current_token = None;
     Ok(())
 }
 
@@ -185,16 +192,23 @@ pub async fn microsoft_connection_status(
 async fn get_token_and_context(
     state: &MicrosoftAuthState,
 ) -> Result<(String, String, String), String> {
-    let (config, http);
+    let (config, http, current);
     {
         let inner = state.inner.read().await;
         config = inner.config.clone();
         http = inner.http.clone();
+        current = inner.current_token.clone();
     }
 
-    let stored = token_store::get_valid_access_token(&http, &config)
+    let stored = token_store::ensure_valid_token(&http, &config, current)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Cache any refreshed token for the rest of the session.
+    {
+        let mut inner = state.inner.write().await;
+        inner.current_token = Some(stored.clone());
+    }
 
     Ok((stored.access_token, stored.tenant_id, stored.user_id))
 }

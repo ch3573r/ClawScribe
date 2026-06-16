@@ -18,6 +18,10 @@ pub(crate) struct MicrosoftAuthInner {
     pub user_display_name: Option<String>,
     pub user_email: Option<String>,
     pub user_id: Option<String>,
+    /// In-memory copy of the active token. This — not the keychain — is the
+    /// source of truth for the current session, so exports still work when the
+    /// platform credential store is unavailable or a save fails.
+    pub current_token: Option<token_store::StoredToken>,
 }
 
 impl MicrosoftAuthState {
@@ -25,21 +29,21 @@ impl MicrosoftAuthState {
         let config = MicrosoftAuthConfig::default();
         let http = reqwest::Client::new();
 
-        let (connection_state, user_display_name, user_email, user_id) =
-            match token_store::load_token() {
-                Ok(Some(t)) if t.is_access_token_valid() => (
+        let restored = match token_store::load_token() {
+            Ok(Some(t)) if t.is_access_token_valid() || t.refresh_token.is_some() => Some(t),
+            _ => None,
+        };
+
+        let (connection_state, user_display_name, user_email, user_id, current_token) =
+            match restored {
+                Some(t) => (
                     MicrosoftConnectionState::Connected,
-                    Some(t.user_display_name),
-                    t.user_email,
-                    Some(t.user_id),
+                    Some(t.user_display_name.clone()),
+                    t.user_email.clone(),
+                    Some(t.user_id.clone()),
+                    Some(t),
                 ),
-                Ok(Some(t)) if t.refresh_token.is_some() => (
-                    MicrosoftConnectionState::Connected,
-                    Some(t.user_display_name),
-                    t.user_email,
-                    Some(t.user_id),
-                ),
-                _ => (MicrosoftConnectionState::NotConnected, None, None, None),
+                None => (MicrosoftConnectionState::NotConnected, None, None, None, None),
             };
 
         MicrosoftAuthState {
@@ -51,6 +55,7 @@ impl MicrosoftAuthState {
                 user_display_name,
                 user_email,
                 user_id,
+                current_token,
             }),
         }
     }
