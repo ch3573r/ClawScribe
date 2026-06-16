@@ -22,7 +22,15 @@ import { teamsDetectionService, TeamsDetectionStatus } from "@/services/teamsDet
 import { useMicrosoftExport } from "@/hooks/useMicrosoftExport";
 import { getExportDestinations, setExportDestinations } from "@/lib/exportDestinations";
 
-type AddonState = "ready" | "prompt" | "planned" | "provider" | "advanced" | "connected" | "connecting";
+type AddonState =
+  | "ready"
+  | "prompt"
+  | "planned"
+  | "provider"
+  | "advanced"
+  | "connected"
+  | "connecting"
+  | "signin";
 
 function stateBadge(state: AddonState) {
   switch (state) {
@@ -31,6 +39,8 @@ function stateBadge(state: AddonState) {
       return "Ready";
     case "connecting":
       return "Connecting…";
+    case "signin":
+      return "Sign-in required";
     case "prompt":
       return "Prompt only";
     case "provider":
@@ -49,6 +59,7 @@ function stateClasses(state: AddonState) {
     case "connected":
       return "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200";
     case "connecting":
+    case "signin":
       return "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200";
     case "prompt":
       return "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200";
@@ -129,7 +140,7 @@ function MicrosoftSignInPanel() {
   const panelState: AddonState = useMemo(() => {
     if (ms.connection.state === "connected") return "connected";
     if (ms.connection.state === "connecting" || ms.signingIn) return "connecting";
-    return "planned";
+    return "signin";
   }, [ms.connection.state, ms.signingIn]);
 
   const detail = useMemo(() => {
@@ -253,7 +264,7 @@ function OneNotePanel() {
     });
   }, [selectedSection, selectedNotebook, ms.notebooks, ms.sections]);
 
-  const panelState: AddonState = isConnected ? "connected" : "planned";
+  const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
     ? "Select a notebook and section for meeting note exports."
     : "Sign in with Microsoft above to enable OneNote export.";
@@ -380,7 +391,7 @@ function PlannerPanel() {
     });
   }, [selectedBucket, selectedPlan, ms.plans, ms.buckets]);
 
-  const panelState: AddonState = isConnected ? "connected" : "planned";
+  const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
     ? "Select a plan and bucket for action item exports."
     : "Sign in with Microsoft above to enable Planner export.";

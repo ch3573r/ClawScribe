@@ -70,14 +70,108 @@ impl std::fmt::Display for TokenStoreError {
     }
 }
 
+/// The subset of a token that is persisted between sessions.
+///
+/// The access token is deliberately NOT persisted: it is short-lived (~1h) and
+/// large. The Windows Credential Manager blob is capped at 2560 bytes, and a
+/// full Graph access-token JWT plus refresh token easily exceeds it — which
+/// silently failed every keychain write and lost the sign-in on restart. Only
+/// the refresh token (plus metadata) is needed to restore a session; it is
+/// re-exchanged for an access token on first use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedToken {
+    refresh_token: Option<String>,
+    user_id: String,
+    user_display_name: String,
+    user_email: Option<String>,
+    tenant_id: String,
+    #[serde(default)]
+    granted_scopes: String,
+}
+
+impl PersistedToken {
+    fn from_stored(t: &StoredToken) -> Self {
+        PersistedToken {
+            refresh_token: t.refresh_token.clone(),
+            user_id: t.user_id.clone(),
+            user_display_name: t.user_display_name.clone(),
+            user_email: t.user_email.clone(),
+            tenant_id: t.tenant_id.clone(),
+            granted_scopes: t.granted_scopes.clone(),
+        }
+    }
+
+    /// Reconstruct an in-memory token. The access token starts empty and
+    /// expired so the first use refreshes it via the refresh token.
+    fn into_stored(self) -> StoredToken {
+        StoredToken {
+            access_token: String::new(),
+            refresh_token: self.refresh_token,
+            // Already-expired, so the first use refreshes via the refresh token.
+            expires_at: Utc::now() - Duration::hours(1),
+            user_id: self.user_id,
+            user_display_name: self.user_display_name,
+            user_email: self.user_email,
+            tenant_id: self.tenant_id,
+            granted_scopes: self.granted_scopes,
+        }
+    }
+}
+
+/// Plaintext file fallback used when the OS keychain is unavailable or rejects
+/// the write (e.g. the Windows Credential Manager size limit). Lives in the
+/// per-user app config dir.
+fn fallback_token_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("ClawScribe").join("ms-token.json"))
+}
+
+fn save_to_file(json: &str) -> Result<(), TokenStoreError> {
+    let path = fallback_token_path()
+        .ok_or_else(|| TokenStoreError::KeyringError("no config dir for token fallback".into()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
+    }
+    std::fs::write(&path, json).map_err(|e| TokenStoreError::SerializationError(e.to_string()))
+}
+
+fn load_from_file() -> Option<PersistedToken> {
+    let path = fallback_token_path()?;
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn delete_file() {
+    if let Some(path) = fallback_token_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
-    let json = serde_json::to_string(token)
+    let json = serde_json::to_string(&PersistedToken::from_stored(token))
         .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
-    entry
-        .set_password(&json)
+
+    // Prefer the OS keychain; fall back to a file if it is unavailable or
+    // rejects the write. Keeping both in sync avoids a stale fallback shadowing
+    // a fresh keychain entry, so on a successful keychain write we clear the file.
+    let keychain = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
         .map_err(|e| TokenStoreError::KeyringError(e.to_string()))
+        .and_then(|entry| {
+            entry
+                .set_password(&json)
+                .map_err(|e| TokenStoreError::KeyringError(e.to_string()))
+        });
+
+    match keychain {
+        Ok(()) => {
+            delete_file();
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("Keychain token write failed ({e}); using file fallback");
+            save_to_file(&json)
+        }
+    }
 }
 
 pub fn load_token() -> Result<Option<StoredToken>, TokenStoreError> {
@@ -85,16 +179,18 @@ pub fn load_token() -> Result<Option<StoredToken>, TokenStoreError> {
         .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
     match entry.get_password() {
         Ok(json) => {
-            let token: StoredToken = serde_json::from_str(&json)
+            let persisted: PersistedToken = serde_json::from_str(&json)
                 .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
-            Ok(Some(token))
+            Ok(Some(persisted.into_stored()))
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(TokenStoreError::KeyringError(e.to_string())),
+        // Nothing in the keychain — check the file fallback before giving up.
+        Err(keyring::Error::NoEntry) => Ok(load_from_file().map(PersistedToken::into_stored)),
+        Err(_) => Ok(load_from_file().map(PersistedToken::into_stored)),
     }
 }
 
 pub fn delete_token() -> Result<(), TokenStoreError> {
+    delete_file();
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
         .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
     match entry.delete_credential() {
