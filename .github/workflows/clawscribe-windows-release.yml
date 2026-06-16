@@ -203,7 +203,7 @@ jobs:
         if: ${{ !inputs['check-only'] }}
         uses: actions/upload-artifact@v4
         with:
-          name: clawscribe-windows-${{ inputs.feature }}-${{ inputs['build-ref'] || github.sha }}
+          name: clawscribe-windows-${{ inputs.feature }}-${{ github.sha }}
           path: |
             frontend/src-tauri/target/release/bundle/msi/*.msi
             frontend/src-tauri/target/release/bundle/nsis/*.exe
