@@ -45,6 +45,10 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
+          # Self-hosted runner: keep untracked build outputs (target/, node_modules)
+          # between runs so cargo/tauri builds are incremental. Source files are
+          # still reset to the checked-out ref; only ignored artifacts persist.
+          clean: false
 
       - name: Checkout requested build ref
         if: ${{ inputs['build-ref'] != '' }}
@@ -85,18 +89,18 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Cache Rust builds
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            frontend/src-tauri -> frontend/src-tauri/target
-          key: clawscribe-windows-${{ inputs.feature }}
+      # Build cache is provided by the self-hosted runner's persistent disk
+      # (CARGO_HOME=C:\cargo for the registry, plus clean:false above to keep
+      # target/ between runs). No GitHub Actions cache is used, so nothing is
+      # written to the repo's Actions cache storage.
 
       - name: Install LLVM
         shell: pwsh
         run: |
-          choco install llvm -y --no-progress
+          # Pin LLVM 20.x: bindgen 0.69 (via whisper-rs-sys) mis-parses the
+          # whisper_full_params struct with clang 21+, dropping fields and
+          # failing the build. 20.1.8 matches the GitHub-hosted image.
+          choco install llvm --version=20.1.8 -y --no-progress --allow-downgrade
           $llvmBin = "C:\Program Files\LLVM\bin"
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PATH=$llvmBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
