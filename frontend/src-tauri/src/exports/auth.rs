@@ -7,7 +7,17 @@
 use serde::{Deserialize, Serialize};
 
 pub const CLAWSCRIBE_CLIENT_ID: &str = "4ab2ca8f-c2f1-45f3-b4ee-8bc9a511bcc8";
+
+/// The tenant where the app is registered. Kept for reference; sign-in uses the
+/// multi-tenant authority below so accounts from any work/school tenant can
+/// sign in (the registration must be set to multi-tenant in Entra).
 pub const RISMONDO_TENANT_ID: &str = "d0627577-cabb-4909-8ea1-c5d86abfd204";
+
+/// Authority used for sign-in. `organizations` accepts any Entra work/school
+/// tenant but not personal Microsoft accounts. (Use a specific tenant GUID to
+/// lock to one org, or `common` to also allow personal accounts — but Planner
+/// is unavailable for personal accounts.)
+pub const DEFAULT_AUTHORITY: &str = "organizations";
 
 pub const DEFAULT_SCOPES: &[&str] = &[
     "User.Read",
@@ -32,7 +42,7 @@ impl Default for MicrosoftAuthConfig {
     fn default() -> Self {
         MicrosoftAuthConfig {
             client_id: CLAWSCRIBE_CLIENT_ID.to_string(),
-            tenant_id: RISMONDO_TENANT_ID.to_string(),
+            tenant_id: DEFAULT_AUTHORITY.to_string(),
             scopes: DEFAULT_SCOPES.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -250,7 +260,10 @@ mod tests {
     fn default_config_has_expected_client_and_tenant() {
         let config = MicrosoftAuthConfig::default();
         assert_eq!(config.client_id, CLAWSCRIBE_CLIENT_ID);
-        assert_eq!(config.tenant_id, RISMONDO_TENANT_ID);
+        // Multi-tenant: sign-in targets the organizations authority, not a
+        // single tenant GUID, so any work/school tenant can sign in.
+        assert_eq!(config.tenant_id, DEFAULT_AUTHORITY);
+        assert_eq!(config.tenant_id, "organizations");
         assert!(config.scopes.contains(&"Notes.ReadWrite".to_string()));
         assert!(config.scopes.contains(&"offline_access".to_string()));
     }
@@ -267,7 +280,7 @@ mod tests {
     #[test]
     fn device_code_url_contains_tenant() {
         let config = MicrosoftAuthConfig::default();
-        assert!(config.device_code_url().contains(RISMONDO_TENANT_ID));
+        assert!(config.device_code_url().contains(DEFAULT_AUTHORITY));
         assert!(config.device_code_url().ends_with("/devicecode"));
     }
 }
