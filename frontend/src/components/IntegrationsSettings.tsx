@@ -247,9 +247,20 @@ function OneNotePanel() {
         <div className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                Notebook
-              </label>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="block text-xs font-medium text-muted-foreground">
+                  Notebook
+                </label>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  onClick={() => void ms.loadNotebooks()}
+                  disabled={ms.loadingNotebooks}
+                >
+                  <RefreshCw className={`h-3 w-3 ${ms.loadingNotebooks ? "animate-spin" : ""}`} />
+                  Reload
+                </button>
+              </div>
               <select
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
                 value={selectedNotebook}
@@ -294,6 +305,20 @@ function OneNotePanel() {
               </select>
             </div>
           </div>
+          {ms.error && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{ms.error}</span>
+            </div>
+          )}
+          {!ms.loadingNotebooks && !ms.error && ms.notebooks.length === 0 && (
+            <p className="rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
+              No OneNote notebooks were returned for this account. If you expect
+              notebooks here, confirm you signed in with the same account that
+              owns them and that this app has been granted the OneNote
+              (Notes.ReadWrite) permission, then use Reload.
+            </p>
+          )}
           {selectedSection && (
             <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
               <CheckCircle2 className="h-4 w-4" />
@@ -349,9 +374,20 @@ function PlannerPanel() {
         <div className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                Plan
-              </label>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="block text-xs font-medium text-muted-foreground">
+                  Plan
+                </label>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  onClick={() => void ms.loadPlans()}
+                  disabled={ms.loadingPlans}
+                >
+                  <RefreshCw className={`h-3 w-3 ${ms.loadingPlans ? "animate-spin" : ""}`} />
+                  Reload
+                </button>
+              </div>
               <select
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
                 value={selectedPlan}
@@ -396,6 +432,19 @@ function PlannerPanel() {
               </select>
             </div>
           </div>
+          {ms.error && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{ms.error}</span>
+            </div>
+          )}
+          {!ms.loadingPlans && !ms.error && ms.plans.length === 0 && (
+            <p className="rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
+              No Planner plans were returned for this account. Confirm you signed
+              in with the right account and that this app has the Tasks.ReadWrite
+              permission, then use Reload.
+            </p>
+          )}
           {selectedBucket && (
             <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
               <CheckCircle2 className="h-4 w-4" />
