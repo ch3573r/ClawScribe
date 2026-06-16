@@ -430,6 +430,7 @@ pub fn run() {
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(audio::init_system_audio_state())
+        .manage(exports::ms_auth_state::MicrosoftAuthState::new())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
@@ -802,6 +803,16 @@ pub fn run() {
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
+            // Microsoft Graph export commands
+            exports::commands::microsoft_sign_in,
+            exports::commands::microsoft_sign_out,
+            exports::commands::microsoft_connection_status,
+            exports::commands::export_to_onenote,
+            exports::commands::export_to_planner,
+            exports::commands::list_onenote_notebooks,
+            exports::commands::list_onenote_sections,
+            exports::commands::list_planner_plans,
+            exports::commands::list_planner_buckets,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

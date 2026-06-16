@@ -141,6 +141,7 @@ rayon = "1.10"
 rubato = "0.15.0"
 ringbuf = "0.4.8"
 sha2 = "0.10"
+keyring = { version = "3", features = ["sync-secret-service"] }
 tempfile = "3.3.0"
 whatlang = "0.16.4"
 

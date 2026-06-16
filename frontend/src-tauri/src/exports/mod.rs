@@ -15,13 +15,19 @@
 //! Until live sign-in lands, the Settings → Add-ons panels for OneNote and
 //! Planner should remain labeled "Not implemented".
 
+pub mod auth;
 pub mod client;
+pub mod commands;
+pub mod discovery;
 pub mod error;
 pub mod exporter;
 pub mod ledger;
 pub mod model;
+pub mod ms_auth_state;
 pub mod onenote;
 pub mod planner;
+pub mod reqwest_transport;
+pub mod token_store;
 pub mod transport;
 
 pub use error::GraphErrorKind;
