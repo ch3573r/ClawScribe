@@ -23,6 +23,9 @@ pub const DEFAULT_SCOPES: &[&str] = &[
     "User.Read",
     "Notes.ReadWrite",
     "Notes.Create",
+    // Read/write notebooks the user can access beyond their own OneDrive
+    // (Teams/SharePoint/shared notebooks). User-consentable.
+    "Notes.ReadWrite.All",
     "Tasks.ReadWrite",
     "Calendars.Read",
     "OnlineMeetings.Read",
