@@ -215,9 +215,17 @@ fn evaluate_snapshots(
         .filter(|process| is_browser_process(process))
         .collect();
 
+    // An active call opens a second Teams window beside the main app shell, so
+    // count open Teams windows to disambiguate an in-call window from a lone
+    // chat/idle window.
+    let teams_window_count = windows
+        .iter()
+        .filter(|window| is_teams_window(&window.title.trim().to_lowercase()))
+        .count();
+    let has_companion_teams_window = teams_window_count >= 2;
     let teams_titles: Vec<&WindowSnapshot> = windows
         .iter()
-        .filter(|window| window_looks_like_teams_meeting(window))
+        .filter(|window| window_looks_like_teams_meeting(window, has_companion_teams_window))
         .collect();
     let browser_teams_titles: Vec<&WindowSnapshot> = teams_titles
         .iter()
@@ -611,20 +619,29 @@ fn looks_like_teams_window_context(title: &str) -> bool {
 
 /// Whether a window looks like an active Teams meeting.
 ///
-/// Explicit meeting-keyword titles count from any window; the keyword-less
-/// new-Teams subject shape only counts for the **foreground** window, because
-/// the same `<subject> | <org> | <account> | Microsoft Teams` shape also
-/// describes a background chat/channel window and would otherwise false-positive
-/// (e.g. on app launch).
-fn window_looks_like_teams_meeting(window: &WindowSnapshot) -> bool {
+/// Explicit meeting-keyword titles count from any window. The keyword-less
+/// new-Teams subject shape (`<subject> | <org> | <account> | Microsoft Teams`)
+/// also describes a background chat/channel window, so on its own it would
+/// false-positive (e.g. on app launch). We disambiguate using the fact that an
+/// active call opens a **second** Teams window alongside the main app shell:
+/// a subject window counts when another Teams-surface window is also open, or
+/// when it is the foreground window.
+fn window_looks_like_teams_meeting(window: &WindowSnapshot, has_companion_teams_window: bool) -> bool {
     if looks_like_teams_meeting_title(&window.title) {
         return true;
     }
-    if window.is_foreground && !window.is_minimized {
-        let lower = window.title.trim().to_lowercase();
-        return looks_like_teams_meeting_subject(&lower);
+    let lower = window.title.trim().to_lowercase();
+    if looks_like_teams_meeting_subject(&lower) {
+        return has_companion_teams_window || (window.is_foreground && !window.is_minimized);
     }
     false
+}
+
+/// Whether a title is any Teams desktop/web surface (used to count how many
+/// Teams windows are open, which distinguishes an in-call window — main shell +
+/// call window — from a lone chat/idle window).
+fn is_teams_window(lower_title: &str) -> bool {
+    is_teams_surface(lower_title) && !lower_title.is_empty()
 }
 
 /// A real Teams surface: the title carries the "Microsoft Teams" product name,
@@ -976,30 +993,53 @@ mod tests {
     }
 
     #[test]
-    fn new_teams_in_call_window_subject_needs_foreground() {
+    fn new_teams_in_call_subject_counts_with_companion_or_foreground() {
         let title =
             "Test Appointment Stand Up | Rismondo | alexander.rismondo@rismondo.net | Microsoft Teams";
-        // The keyword-less in-call subject shape only counts when it's the
-        // foreground window (an active call) — not a backgrounded chat/idle view.
-        assert!(window_looks_like_teams_meeting(&foreground_window(Some(1), title)));
-        assert!(!window_looks_like_teams_meeting(&window(Some(1), title)));
+        // In a call there's a second Teams window (the main shell) → counts even
+        // in the background. A lone background subject window (a chat) does not.
+        assert!(window_looks_like_teams_meeting(&window(Some(1), title), true));
+        assert!(!window_looks_like_teams_meeting(&window(Some(1), title), false));
+        // Foreground still counts on its own (active call you're looking at).
+        assert!(window_looks_like_teams_meeting(&foreground_window(Some(1), title), false));
+    }
+
+    #[test]
+    fn missed_meeting_with_main_window_open_is_detected() {
+        // Reproduces the real snapshot: in a call (call window + "Calendar" main
+        // window) but the call window isn't foreground. Must be detected.
+        let config = TeamsDetectionConfig::default();
+        let processes = vec![process(1, "ms-teams.exe"), process(2, "ms-teams.exe")];
+        let windows = vec![
+            window(
+                Some(1),
+                "Test Appointment Stand Up | Rismondo | a@b.net | Microsoft Teams",
+            ),
+            window(Some(1), "Calendar | Rismondo | a@b.net | Microsoft Teams"),
+            window(None, "[screen 0: dev] Fix recording UI and Teams meeting detection"),
+        ];
+
+        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+
+        assert!(status.detected, "confidence {}", status.confidence);
+        assert_eq!(status.diagnostics.meeting_title_count, 1);
     }
 
     #[test]
     fn non_teams_window_mentioning_teams_meeting_is_not_a_match() {
         // The real false positive: a terminal/editor window whose title merely
         // contains the words "Teams" and "meeting". Not a Teams surface → ignored,
-        // even when it's the foreground window.
+        // even foreground and even with a companion window present.
         let title = "[screen 0: dev] Fix recording UI and Teams meeting detection";
         assert!(!looks_like_teams_meeting_title(title));
-        assert!(!window_looks_like_teams_meeting(&foreground_window(Some(1), title)));
+        assert!(!window_looks_like_teams_meeting(&foreground_window(Some(1), title), true));
     }
 
     #[test]
     fn teams_app_section_windows_are_not_meeting_titles() {
         // Main app window showing a navigation section — must not be a meeting,
-        // even when foreground and even when the section name contains a keyword
-        // (e.g. "Calls" contains "call").
+        // even foreground, with a companion window, or when the section name
+        // contains a keyword (e.g. "Calls" contains "call").
         for section in [
             "Planner | Rismondo | a@b.net | Microsoft Teams",
             "Chat | Rismondo | a@b.net | Microsoft Teams",
@@ -1009,7 +1049,7 @@ mod tests {
         ] {
             assert!(!looks_like_teams_meeting_title(section), "{section}");
             assert!(
-                !window_looks_like_teams_meeting(&foreground_window(Some(1), section)),
+                !window_looks_like_teams_meeting(&foreground_window(Some(1), section), true),
                 "{section}"
             );
         }
@@ -1017,15 +1057,30 @@ mod tests {
 
     #[test]
     fn explicit_meeting_keyword_matches_from_any_window() {
-        // Keyword titles are strong — they count even when not foreground.
-        assert!(window_looks_like_teams_meeting(&window(
-            Some(1),
-            "Meeting with Contoso | Microsoft Teams"
-        )));
-        assert!(window_looks_like_teams_meeting(&window(
-            Some(1),
-            "Wöchentliche Besprechung | Microsoft Teams"
-        )));
+        // Keyword titles are strong — they count even when not foreground and
+        // without a companion window.
+        assert!(window_looks_like_teams_meeting(
+            &window(Some(1), "Meeting with Contoso | Microsoft Teams"),
+            false
+        ));
+        assert!(window_looks_like_teams_meeting(
+            &window(Some(1), "Wöchentliche Besprechung | Microsoft Teams"),
+            false
+        ));
+    }
+
+    #[test]
+    fn lone_background_chat_window_is_not_detected() {
+        // A single Teams window with a non-section subject (a 1:1 chat) in the
+        // background must not auto-trigger.
+        let config = TeamsDetectionConfig::default();
+        let processes = vec![process(1, "ms-teams.exe")];
+        let windows = vec![window(Some(1), "Jane Doe | Rismondo | a@b.net | Microsoft Teams")];
+
+        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+
+        assert!(!status.detected);
+        assert_eq!(status.diagnostics.meeting_title_count, 0);
     }
 
     #[test]
