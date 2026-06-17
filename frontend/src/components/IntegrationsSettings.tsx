@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ElementType, ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -729,6 +730,156 @@ function PlannerPanel() {
   );
 }
 
+type OpenClawSubmissionStatus = {
+  state: string;
+  updated_at: string;
+  status_code?: number | null;
+  message: string;
+};
+
+type OpenClawConfigStatus = {
+  enabled: boolean;
+  configured: boolean;
+  ready: boolean;
+  bearer_token_configured: boolean;
+  endpoint: string;
+  source: string;
+  status_message: string;
+  config_path: string;
+  include_audio_path: boolean;
+  last_submission?: OpenClawSubmissionStatus | null;
+};
+
+// Live status for the OpenClaw handoff. It's configured as the OpenClaw provider
+// under Summary; this is the single place its handoff status is surfaced (it used
+// to be duplicated under General).
+function OpenClawPanel() {
+  const [status, setStatus] = useState<OpenClawConfigStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setStatus(await invoke<OpenClawConfigStatus>("get_openclaw_config_status"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const panelState: AddonState = status?.ready ? "ready" : "provider";
+
+  return (
+    <AddonPanel
+      icon={Cloud}
+      title="OpenClaw handoff"
+      state={panelState}
+      detail="Send finished meetings to your OpenClaw workspace. Configured as the OpenClaw provider under Summary; this shows its live status."
+    >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="flex flex-wrap items-center gap-2 text-sm">
+            <span
+              className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                status?.ready
+                  ? "bg-green-100 text-green-800 dark:bg-green-950/40 dark:text-green-200"
+                  : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+              }`}
+            >
+              {status?.ready ? "Ready" : "Not ready"}
+            </span>
+            <span className="text-muted-foreground">
+              {status?.status_message ??
+                (error ? "Status unavailable" : "Loading status…")}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-muted disabled:opacity-50"
+            aria-label="Refresh OpenClaw handoff status"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+
+        {error ? (
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        ) : (
+          <div className="grid gap-3 text-sm md:grid-cols-2">
+            <div>
+              <div className="text-xs font-medium uppercase text-muted-foreground">
+                Endpoint
+              </div>
+              <div className="mt-1 break-all font-mono text-xs text-foreground">
+                {status?.endpoint || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase text-muted-foreground">
+                Bearer token
+              </div>
+              <div className="mt-1 text-foreground">
+                {status?.bearer_token_configured ? "Configured" : "Missing"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase text-muted-foreground">
+                Audio path
+              </div>
+              <div className="mt-1 text-foreground">
+                {status?.include_audio_path ? "Included" : "Not included"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase text-muted-foreground">
+                Source
+              </div>
+              <div className="mt-1 font-mono text-xs text-foreground">
+                {status?.source || "—"}
+              </div>
+            </div>
+            {status?.last_submission && (
+              <div className="rounded-lg bg-muted p-3 md:col-span-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium uppercase text-muted-foreground">
+                    Last handoff
+                  </span>
+                  <span className="rounded-full bg-background px-2 py-0.5 text-xs font-medium text-foreground">
+                    {status.last_submission.state}
+                  </span>
+                  {status.last_submission.status_code && (
+                    <span className="text-xs text-muted-foreground">
+                      HTTP {status.last_submission.status_code}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 text-sm text-foreground">
+                  {status.last_submission.message}
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {status.last_submission.updated_at}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </AddonPanel>
+  );
+}
+
 export function IntegrationsSettings() {
   const [teamsStatus, setTeamsStatus] = useState<TeamsDetectionStatus | null>(
     null,
@@ -876,17 +1027,7 @@ export function IntegrationsSettings() {
         </div>
       </AddonPanel>
 
-      <AddonPanel
-        icon={Cloud}
-        title="OpenClaw handoff"
-        state="provider"
-        detail="Configured from Summary → OpenClaw provider. It can receive meeting.completed payloads and return the same notes contract as the other providers."
-      >
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-          <span>Available as a summary provider and handoff target.</span>
-        </div>
-      </AddonPanel>
+      <OpenClawPanel />
 
       <MicrosoftSignInPanel />
 

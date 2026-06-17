@@ -1,37 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Switch } from "./ui/switch";
-import { FolderOpen, RefreshCw, ServerCog } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import Analytics from "@/lib/analytics";
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext";
 import { ThemeSettings } from "./ThemeSettings";
 import { KeyboardShortcutsSettings } from "./KeyboardShortcutsSettings";
-
-type OpenClawSubmissionStatus = {
-  state: string;
-  updated_at: string;
-  status_code?: number | null;
-  message: string;
-  endpoint?: string | null;
-  source?: string | null;
-  idempotency_key?: string | null;
-};
-
-type OpenClawConfigStatus = {
-  enabled: boolean;
-  configured: boolean;
-  ready: boolean;
-  bearer_token_configured: boolean;
-  endpoint: string;
-  source: string;
-  status_message: string;
-  config_path: string;
-  last_status_path: string;
-  include_audio_path: boolean;
-  last_submission?: OpenClawSubmissionStatus | null;
-};
 
 export function PreferenceSettings() {
   const {
@@ -48,38 +24,14 @@ export function PreferenceSettings() {
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] =
     useState<boolean | null>(null);
-  const [openClawStatus, setOpenClawStatus] =
-    useState<OpenClawConfigStatus | null>(null);
-  const [openClawStatusError, setOpenClawStatusError] = useState<string | null>(
-    null,
-  );
-  const [isOpenClawStatusLoading, setIsOpenClawStatusLoading] = useState(false);
   const hasTrackedViewRef = useRef(false);
-
-  const loadOpenClawStatus = useCallback(async () => {
-    setIsOpenClawStatusLoading(true);
-    setOpenClawStatusError(null);
-
-    try {
-      const status = (await invoke(
-        "get_openclaw_config_status",
-      )) as OpenClawConfigStatus;
-      setOpenClawStatus(status);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setOpenClawStatusError(message);
-    } finally {
-      setIsOpenClawStatusLoading(false);
-    }
-  }, []);
 
   // Lazy load preferences on mount (only loads if not already cached)
   useEffect(() => {
     loadPreferences();
-    void loadOpenClawStatus();
     // Reset tracking ref on mount (every tab visit)
     hasTrackedViewRef.current = false;
-  }, [loadPreferences, loadOpenClawStatus]);
+  }, [loadPreferences]);
 
   // Track preferences viewed analytics on every tab visit (once per mount)
   useEffect(() => {
@@ -221,7 +173,7 @@ export function PreferenceSettings() {
   const notificationsEnabledValue = notificationsEnabled ?? false;
 
   return (
-    <div className="grid gap-5 xl:grid-cols-2">
+    <div className="space-y-5">
       <ThemeSettings />
       <KeyboardShortcutsSettings />
 
@@ -241,121 +193,6 @@ export function PreferenceSettings() {
             onCheckedChange={setNotificationsEnabled}
           />
         </div>
-      </div>
-
-      <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="mt-1 rounded-lg bg-muted p-2 text-foreground">
-              <ServerCog className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-foreground mb-2">
-                OpenClaw Handoff
-              </h3>
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className={`rounded-full px-2.5 py-1 text-xs font-medium ${openClawStatus?.ready ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"}`}
-                >
-                  {openClawStatus?.ready ? "Ready" : "Not ready"}
-                </span>
-                <span className="text-sm text-muted-foreground">
-                  {openClawStatus?.status_message ??
-                    (openClawStatusError
-                      ? "Status unavailable"
-                      : "Loading status")}
-                </span>
-              </div>
-            </div>
-          </div>
-          <button
-            onClick={() => void loadOpenClawStatus()}
-            disabled={isOpenClawStatusLoading}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
-            aria-label="Refresh OpenClaw handoff status"
-            title="Refresh OpenClaw handoff status"
-          >
-            <RefreshCw
-              className={`h-4 w-4 ${isOpenClawStatusLoading ? "animate-spin" : ""}`}
-            />
-          </button>
-        </div>
-
-        {openClawStatusError ? (
-          <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {openClawStatusError}
-          </div>
-        ) : (
-          <div className="mt-5 grid gap-3 text-sm md:grid-cols-2">
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Endpoint
-              </div>
-              <div className="mt-1 break-all font-mono text-xs text-foreground">
-                {openClawStatus?.endpoint ?? "Loading..."}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Source
-              </div>
-              <div className="mt-1 font-mono text-xs text-foreground">
-                {openClawStatus?.source ?? "Loading..."}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Bearer Token
-              </div>
-              <div className="mt-1 text-foreground">
-                {openClawStatus?.bearer_token_configured
-                  ? "Configured"
-                  : "Missing"}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Audio Path
-              </div>
-              <div className="mt-1 text-foreground">
-                {openClawStatus?.include_audio_path
-                  ? "Included"
-                  : "Not included"}
-              </div>
-            </div>
-            <div className="md:col-span-2">
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Config File
-              </div>
-              <div className="mt-1 break-all font-mono text-xs text-foreground">
-                {openClawStatus?.config_path ?? "Loading..."}
-              </div>
-            </div>
-            {openClawStatus?.last_submission && (
-              <div className="md:col-span-2 rounded-lg bg-muted p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium uppercase text-muted-foreground">
-                    Last Handoff
-                  </span>
-                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
-                    {openClawStatus.last_submission.state}
-                  </span>
-                  {openClawStatus.last_submission.status_code && (
-                    <span className="text-xs text-muted-foreground">
-                      HTTP {openClawStatus.last_submission.status_code}
-                    </span>
-                  )}
-                </div>
-                <div className="mt-2 text-sm text-foreground">
-                  {openClawStatus.last_submission.message}
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {openClawStatus.last_submission.updated_at}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Data Storage Locations Section */}
