@@ -68,6 +68,68 @@ export function setThemePreference(preference: ThemePreference): ResolvedTheme {
   return applyThemePreference(preference)
 }
 
+// ── Accent color ───────────────────────────────────────────────────────────
+// Overrides the --primary token (and its foreground/ring) so the user can pick
+// an accent. Values are HSL component triples matching the CSS tokens. `id`
+// "default" clears the override and falls back to the theme's built-in accent.
+
+export const ACCENT_STORAGE_KEY = "clawscribe.accent"
+
+export interface AccentColor {
+  id: string
+  name: string
+  /** HSL components, e.g. "203 100% 26%". */
+  primary: string
+  /** Readable text on the accent. */
+  foreground: string
+}
+
+export const accentColors: AccentColor[] = [
+  { id: "default", name: "Kontron Blue", primary: "203 100% 26%", foreground: "0 0% 98%" },
+  { id: "teal", name: "Teal", primary: "166 48% 42%", foreground: "0 0% 100%" },
+  { id: "sky", name: "Sky", primary: "203 100% 40%", foreground: "0 0% 100%" },
+  { id: "violet", name: "Violet", primary: "262 60% 58%", foreground: "0 0% 100%" },
+  { id: "magenta", name: "Magenta", primary: "329 75% 48%", foreground: "0 0% 100%" },
+  { id: "emerald", name: "Emerald", primary: "152 55% 38%", foreground: "0 0% 100%" },
+  { id: "amber", name: "Amber", primary: "38 92% 50%", foreground: "0 0% 10%" },
+]
+
+export function getStoredAccentId(): string {
+  if (typeof window === "undefined") return "default"
+  try {
+    return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? "default"
+  } catch {
+    return "default"
+  }
+}
+
+export function applyAccent(id: string): void {
+  if (typeof document === "undefined") return
+  const root = document.documentElement
+  const accent = accentColors.find((a) => a.id === id)
+  if (!accent || accent.id === "default") {
+    // Clear overrides → fall back to the theme's built-in accent.
+    root.style.removeProperty("--primary")
+    root.style.removeProperty("--primary-foreground")
+    root.style.removeProperty("--ring")
+    return
+  }
+  root.style.setProperty("--primary", accent.primary)
+  root.style.setProperty("--primary-foreground", accent.foreground)
+  root.style.setProperty("--ring", accent.primary)
+}
+
+export function setAccent(id: string): void {
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(ACCENT_STORAGE_KEY, id)
+    } catch {
+      // Apply even if storage is unavailable.
+    }
+  }
+  applyAccent(id)
+}
+
 export function subscribeToSystemTheme(callback: () => void): () => void {
   if (typeof window === "undefined") return () => undefined
 

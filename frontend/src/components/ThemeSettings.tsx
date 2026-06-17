@@ -3,9 +3,13 @@
 import { useEffect, useState } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import {
+  accentColors,
+  applyAccent,
   applyNativeThemePreference,
   applyThemePreference,
+  getStoredAccentId,
   getStoredThemePreference,
+  setAccent,
   setThemePreference,
   subscribeToSystemTheme,
   themePreferences,
@@ -46,6 +50,7 @@ export function ThemeInitializer() {
     };
 
     applyStoredTheme();
+    applyAccent(getStoredAccentId());
 
     const unsubscribeSystemTheme = subscribeToSystemTheme(applyStoredTheme);
     window.addEventListener("storage", applyStoredTheme);
@@ -61,6 +66,16 @@ export function ThemeInitializer() {
 
 export function ThemeSettings() {
   const [preference, setPreference] = useState<ThemePreference>("system");
+  const [accentId, setAccentId] = useState<string>("default");
+
+  useEffect(() => {
+    setAccentId(getStoredAccentId());
+  }, []);
+
+  const handleAccentChange = (id: string) => {
+    setAccentId(id);
+    setAccent(id);
+  };
 
   useEffect(() => {
     const syncThemePreference = () => {
@@ -113,7 +128,7 @@ export function ThemeSettings() {
               onClick={() => handlePreferenceChange(option)}
               className={`flex min-h-24 flex-col items-start gap-3 rounded-lg border p-4 text-left transition-colors ${
                 isSelected
-                  ? "border-primary/30 bg-primary/10 text-primary ring-1 ring-cyan-300/50"
+                  ? "border-primary/30 bg-primary/10 text-primary ring-1 ring-primary/50"
                   : "border-border bg-background text-muted-foreground hover:border-primary/70 hover:bg-muted"
               }`}
             >
@@ -125,6 +140,40 @@ export function ThemeSettings() {
             </button>
           );
         })}
+      </div>
+
+      <div className="mt-6">
+        <h4 className="text-sm font-semibold text-foreground">Accent color</h4>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Used for highlights, links, and primary buttons.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2" role="radiogroup" aria-label="Accent color">
+          {accentColors.map((accent) => {
+            const isSelected = accent.id === accentId;
+            return (
+              <button
+                key={accent.id}
+                type="button"
+                role="radio"
+                aria-checked={isSelected}
+                title={accent.name}
+                onClick={() => handleAccentChange(accent.id)}
+                className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  isSelected
+                    ? "border-foreground/30 text-foreground ring-2 ring-offset-2 ring-offset-card"
+                    : "border-border text-muted-foreground hover:bg-muted"
+                }`}
+                style={isSelected ? { boxShadow: `0 0 0 2px hsl(${accent.primary})` } : undefined}
+              >
+                <span
+                  className="h-3.5 w-3.5 rounded-full"
+                  style={{ backgroundColor: `hsl(${accent.primary})` }}
+                />
+                {accent.name}
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
