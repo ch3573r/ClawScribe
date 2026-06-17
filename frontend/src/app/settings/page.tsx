@@ -87,7 +87,7 @@ export default function SettingsPage() {
   return (
     <div className="h-screen overflow-hidden bg-background text-foreground">
       <div className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
-        <div className="mx-auto max-w-[1500px] px-8 py-7">
+        <div className="mx-auto w-full max-w-[2400px] px-8 py-7">
           <div className="flex items-center justify-between gap-6">
             <div className="flex items-center gap-5">
               <button
@@ -111,7 +111,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="h-[calc(100vh-121px)] overflow-y-auto">
-        <div className="mx-auto max-w-[1500px] p-8 pt-6">
+        <div className="mx-auto w-full max-w-[2400px] p-8 pt-6">
           <Tabs value={activeTab} onValueChange={setActiveTab}>
             <TabsList className="relative h-auto flex-wrap justify-start gap-1 rounded-none border-b border-border bg-transparent p-0">
               {TABS.map((tab, index) => {
