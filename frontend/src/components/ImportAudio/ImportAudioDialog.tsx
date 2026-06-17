@@ -12,6 +12,9 @@ import {
   HardDrive,
   ChevronDown,
   ChevronUp,
+  Gauge,
+  Zap,
+  Hash,
 } from 'lucide-react';
 import {
   Dialog,
@@ -79,6 +82,21 @@ export function ImportAudioDialog({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [titleModifiedByUser, setTitleModifiedByUser] = useState(false);
 
+  // Benchmark stats captured on a successful import, shown instead of navigating
+  // away immediately so the import dialog doubles as a transcription benchmark.
+  const [stats, setStats] = useState<{
+    meetingId: string;
+    segments: number;
+    audioSeconds: number;
+    processingSeconds: number;
+    modelLabel: string;
+  } | null>(null);
+  const importStartedAtRef = useRef<number | null>(null);
+  const importedModelLabelRef = useRef<string>('Default model');
+  // Tracks the last preselected path we validated so a file dropped onto an
+  // already-open dialog gets picked up without re-validating on every re-render.
+  const lastValidatedPathRef = useRef<string | null>(null);
+
   // Always start as false — represents "dialog has not yet been opened".
   // Do NOT initialize from the `open` prop: if the component mounts with open=true
   // (e.g. drag-drop path), we still need the initialization effect to run.
@@ -95,14 +113,22 @@ export function ImportAudioDialog({
   } = useTranscriptionModels(transcriptModelConfig);
 
   const handleImportComplete = useCallback((result: ImportResult) => {
-    toast.success(`Import complete! ${result.segments_count} segments created.`);
+    const startedAt = importStartedAtRef.current;
+    const processingSeconds = startedAt ? (performance.now() - startedAt) / 1000 : 0;
+    setStats({
+      meetingId: result.meeting_id,
+      segments: result.segments_count,
+      audioSeconds: result.duration_seconds,
+      processingSeconds,
+      modelLabel: importedModelLabelRef.current,
+    });
+    toast.success(`Import complete — ${result.segments_count} segments created.`);
 
-    // Refresh meetings list then navigate to the imported meeting
+    // Keep the dialog open to show benchmark stats; refresh the list in the
+    // background so the new meeting is ready when the user opens it.
     refetchMeetings();
     onComplete?.();
-    onOpenChange(false);
-    router.push(`/meeting-details?id=${result.meeting_id}`);
-  }, [router, refetchMeetings, onComplete, onOpenChange]);
+  }, [refetchMeetings, onComplete]);
 
   const handleImportError = useCallback((error: string) => {
     toast.error('Import failed', { description: error });
@@ -137,22 +163,31 @@ export function ImportAudioDialog({
       resetSelection();
       setTitle('');
       setTitleModifiedByUser(false);
+      setStats(null);
       setSelectedLang(selectedLanguage || 'auto');
       setShowAdvanced(false);
-
-      // Validate preselected file if provided
-      if (preselectedFile) {
-        validateFile(preselectedFile).then((info) => {
-          if (info) {
-            setTitle(info.filename);
-          }
-        });
-      }
 
       // Fetch available models using centralized hook
       fetchModels();
     }
-  }, [open, preselectedFile, selectedLanguage, transcriptModelConfig, reset, resetSelection, validateFile, fetchModels]);
+  }, [open, selectedLanguage, transcriptModelConfig, reset, resetSelection, fetchModels]);
+
+  // Validate the preselected file. Runs both on open and whenever the path
+  // changes while the dialog is already open, so dragging a new file onto an
+  // open dialog loads it instead of being ignored.
+  useEffect(() => {
+    if (!open) {
+      lastValidatedPathRef.current = null;
+      return;
+    }
+    if (!preselectedFile || lastValidatedPathRef.current === preselectedFile) return;
+    lastValidatedPathRef.current = preselectedFile;
+    setTitleModifiedByUser(false);
+    setStats(null);
+    validateFile(preselectedFile).then((info) => {
+      if (info) setTitle(info.filename);
+    });
+  }, [open, preselectedFile, validateFile]);
 
   // Update title when fileInfo changes
   useEffect(() => {
@@ -187,6 +222,9 @@ export function ImportAudioDialog({
   const handleStartImport = async () => {
     if (!fileInfo) return;
 
+    importStartedAtRef.current = performance.now();
+    importedModelLabelRef.current = selectedModel?.displayName || 'Default model';
+
     await startImport(
       fileInfo.path,
       title || fileInfo.filename,
@@ -194,6 +232,22 @@ export function ImportAudioDialog({
       selectedModel?.name || null,
       selectedModel?.provider || null
     );
+  };
+
+  const handleImportAnother = () => {
+    reset();
+    resetSelection();
+    setStats(null);
+    setTitle('');
+    setTitleModifiedByUser(false);
+    importStartedAtRef.current = null;
+    lastValidatedPathRef.current = null;
+  };
+
+  const handleOpenImportedMeeting = () => {
+    if (!stats) return;
+    onOpenChange(false);
+    router.push(`/meeting-details?id=${stats.meetingId}`);
   };
 
   const handleCancel = async () => {
@@ -235,22 +289,22 @@ export function ImportAudioDialog({
           <DialogTitle className="flex items-center gap-2">
             {isProcessing ? (
               <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
                 Importing Audio...
               </>
             ) : error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
+                <AlertCircle className="h-5 w-5 text-destructive" />
                 Import Failed
               </>
             ) : status === 'complete' ? (
               <>
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
+                <CheckCircle2 className="h-5 w-5 text-emerald-500" />
                 Import Complete
               </>
             ) : (
               <>
-                <Upload className="h-5 w-5 text-blue-600" />
+                <Upload className="h-5 w-5 text-primary" />
                 Import Audio File
               </>
             )}
@@ -260,21 +314,23 @@ export function ImportAudioDialog({
               ? progress?.message || 'Processing audio...'
               : error
               ? 'An error occurred during import'
+              : status === 'complete'
+              ? 'Your meeting is ready. Transcription benchmark below.'
               : 'Import an audio file to create a new meeting with transcripts'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
           {/* File selection / info */}
-          {!isProcessing && !error && (
+          {!isProcessing && !error && status !== 'complete' && (
             <>
               {fileInfo ? (
-                <div className="bg-gray-50 rounded-lg p-4 space-y-3">
+                <div className="bg-muted rounded-lg p-4 space-y-3">
                   <div className="flex items-start gap-3">
-                    <FileAudio className="h-8 w-8 text-blue-600 flex-shrink-0" />
+                    <FileAudio className="h-8 w-8 text-primary flex-shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-900 truncate">{fileInfo.filename}</p>
-                      <div className="flex items-center gap-4 text-sm text-gray-500 mt-1">
+                      <p className="font-medium text-foreground truncate">{fileInfo.filename}</p>
+                      <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
                         <span className="flex items-center gap-1">
                           <Clock className="h-3.5 w-3.5" />
                           {formatDuration(fileInfo.duration_seconds)}
@@ -283,14 +339,14 @@ export function ImportAudioDialog({
                           <HardDrive className="h-3.5 w-3.5" />
                           {formatFileSize(fileInfo.size_bytes)}
                         </span>
-                        <span className="text-blue-600 font-medium">{fileInfo.format}</span>
+                        <span className="text-primary font-medium">{fileInfo.format}</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Editable title */}
                   <div className="space-y-1">
-                    <label className="text-sm font-medium text-gray-700">Meeting Title</label>
+                    <label className="text-sm font-medium text-muted-foreground">Meeting Title</label>
                     <Input
                       value={title}
                       onChange={(e) => {
@@ -306,8 +362,8 @@ export function ImportAudioDialog({
                   </Button>
                 </div>
               ) : (
-                <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-                  <FileAudio className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                <div className="border-2 border-dashed border-border rounded-lg p-8 text-center">
+                  <FileAudio className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                   <Button onClick={handleSelectFile} disabled={status === 'validating'}>
                     {status === 'validating' ? (
                       <>
@@ -321,7 +377,7 @@ export function ImportAudioDialog({
                       </>
                     )}
                   </Button>
-                  <p className="text-sm text-gray-500 mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
+                  <p className="text-sm text-muted-foreground mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
                 </div>
               )}
 
@@ -330,7 +386,7 @@ export function ImportAudioDialog({
                 <div className="border rounded-lg">
                   <button
                     onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-muted-foreground hover:bg-muted"
                   >
                     <span>Advanced Options</span>
                     {showAdvanced ? (
@@ -413,13 +469,13 @@ export function ImportAudioDialog({
           {isProcessing && progress && (
             <div className="space-y-2">
               <div className="relative">
-                <div className="w-full bg-gray-200 rounded-full h-3">
+                <div className="w-full bg-muted rounded-full h-3">
                   <div
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
+                    className="bg-primary h-3 rounded-full transition-all duration-300 ease-out"
                     style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-xs text-gray-600 mt-1">
+                <div className="flex justify-between text-xs text-muted-foreground mt-1">
                   <span>{progress.stage}</span>
                   <span>{Math.round(progress.progress_percentage)}%</span>
                 </div>
@@ -430,25 +486,83 @@ export function ImportAudioDialog({
 
           {/* Error display */}
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
+            <div className="bg-destructive/10 border border-destructive/30 rounded-lg p-3">
+              <p className="text-sm text-destructive">{error}</p>
+            </div>
+          )}
+
+          {/* Benchmark stats (shown on success) */}
+          {status === 'complete' && stats && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Clock className="h-3.5 w-3.5" />
+                    Audio length
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {formatDuration(stats.audioSeconds)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Gauge className="h-3.5 w-3.5" />
+                    Processing time
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {stats.processingSeconds.toFixed(1)}s
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Zap className="h-3.5 w-3.5" />
+                    Speed
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {stats.processingSeconds > 0
+                      ? `${(stats.audioSeconds / stats.processingSeconds).toFixed(1)}× realtime`
+                      : '—'}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Hash className="h-3.5 w-3.5" />
+                    Segments
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">{stats.segments}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Cpu className="h-3.5 w-3.5" />
+                Transcribed with {stats.modelLabel}
+              </div>
             </div>
           )}
         </div>
 
         <DialogFooter>
-          {!isProcessing && !error && (
+          {!isProcessing && !error && status !== 'complete' && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
               <Button
                 onClick={handleStartImport}
-                className="bg-blue-600 hover:bg-blue-700"
+                className="bg-primary hover:bg-primary/90"
                 disabled={!fileInfo}
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import
+              </Button>
+            </>
+          )}
+          {status === 'complete' && (
+            <>
+              <Button variant="outline" onClick={handleImportAnother}>
+                Import Another
+              </Button>
+              <Button onClick={handleOpenImportedMeeting} className="bg-primary hover:bg-primary/90">
+                Open Meeting
               </Button>
             </>
           )}
