@@ -9,3 +9,4 @@
 // (catalog/download/load), `commands.rs`, and the provider wrapper follow.
 
 pub mod features;
+pub mod model;
