@@ -36,6 +36,15 @@ static MENTION: Lazy<Regex> =
 static BULLET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*(?:[-*+]|\d+[.)])\s+").expect("valid bullet regex"));
 
+/// Leading task-list checkbox, e.g. `[ ]` / `[x]`.
+static CHECKBOX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*\[[ xX]\]\s*").expect("valid checkbox regex"));
+
+/// A clock timestamp like `12:34`, `01:02:03`, optionally bracketed/parenthesized.
+static CLOCK: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\s*[\[(]?\b\d{1,2}:\d{2}(?::\d{2})?\b[\])]?\s*").expect("valid clock regex")
+});
+
 /// Inline `**bold**`.
 static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("valid bold regex"));
 
@@ -221,7 +230,11 @@ fn extract_labeled_owner(text: &str) -> Option<String> {
 
 /// Strip trailing owner/due annotations so the task title reads cleanly.
 fn clean_task_text(text: &str) -> String {
-    let mut t = text.to_string();
+    // Drop a leading task-list checkbox ("[ ]"/"[x]") and any clock timestamps
+    // so they don't end up in the Planner task title.
+    let without_checkbox = CHECKBOX.replace(text, "");
+    let without_clock = CLOCK.replace_all(&without_checkbox, " ");
+    let mut t = without_clock.split_whitespace().collect::<Vec<_>>().join(" ");
     // Drop a trailing "(...)" or "[...]" annotation if it looks like metadata.
     if let Some(pos) = t.rfind(" (") {
         let tail = &t[pos..].to_lowercase();

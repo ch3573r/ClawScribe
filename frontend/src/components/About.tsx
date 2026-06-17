@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from "react";
-import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import Image from 'next/image';
 import { UpdateDialog } from "./UpdateDialog";
@@ -19,14 +18,6 @@ export function About() {
         // Get current version on mount
         getVersion().then(setCurrentVersion).catch(console.error);
     }, []);
-
-    const handleContactClick = async () => {
-        try {
-            await invoke('open_external_url', { url: 'https://openclaw.ai' });
-        } catch (error) {
-            console.error('Failed to open link:', error);
-        }
-    };
 
     const handleCheckForUpdates = async () => {
         setIsChecking(true);
@@ -131,12 +122,6 @@ export function About() {
                 <p className="text-s text-gray-600">
                     ClawScribe is tuned for local-first capture and optional OpenClaw processing without a visible meeting bot.
                 </p>
-                <button
-                    onClick={handleContactClick}
-                    className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded transition-colors duration-200 shadow-sm hover:shadow-md"
-                >
-                    Learn more
-                </button>
             </div>
 
             {/* Footer - Compact */}

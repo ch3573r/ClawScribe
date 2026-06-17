@@ -51,7 +51,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         _ => {}
     }
 }
-fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     focus_main_window(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -116,7 +116,7 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-fn pause_recording_handler<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn pause_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     // Immediately show pausing state
     set_tray_state(app, RecordingState::Pausing);
 
@@ -133,7 +133,7 @@ fn pause_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-fn resume_recording_handler<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn resume_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     // Immediately show resuming state
     set_tray_state(app, RecordingState::Resuming);
 

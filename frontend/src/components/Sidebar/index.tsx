@@ -344,7 +344,7 @@ const Sidebar: React.FC = () => {
                 <TooltipTrigger asChild>
                   <button
                     onClick={item.onClick}
-                    className={`flex h-10 w-10 items-center justify-center rounded-lg transition ${
+                    className={`flex h-10 w-10 items-center justify-center rounded-md transition ${
                       item.active
                         ? "bg-primary/10 text-primary ring-1 ring-primary/20"
                         : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -365,7 +365,7 @@ const Sidebar: React.FC = () => {
               <button
                 onClick={handleRecordingToggle}
                 disabled={isRecording}
-                className={`flex h-10 w-10 items-center justify-center rounded-lg text-foreground shadow-lg transition ${
+                className={`flex h-10 w-10 items-center justify-center rounded-md text-foreground shadow-sm transition ${
                   isRecording
                     ? "cursor-not-allowed bg-red-500/60"
                     : "bg-gradient-to-br from-cyan-400 to-blue-600 shadow-cyan-500/20 hover:scale-105"
@@ -390,7 +390,7 @@ const Sidebar: React.FC = () => {
               <TooltipTrigger asChild>
                 <button
                   onClick={() => openImportDialog()}
-                  className="flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                  className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
                 >
                   <Upload className="h-5 w-5" />
                 </button>
@@ -432,7 +432,7 @@ const Sidebar: React.FC = () => {
               : `/notes/${item.id}`;
           router.push(basePath);
         }}
-        className={`group cursor-pointer rounded-lg border px-3 py-3 transition ${
+        className={`group cursor-pointer rounded-md border px-3 py-3 transition ${
           isActive
             ? "border-primary/30 bg-primary/10 text-primary"
             : hasTranscriptMatch
@@ -442,7 +442,7 @@ const Sidebar: React.FC = () => {
       >
         <div className="flex items-start gap-3">
           <div
-            className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+            className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
               isActive
                 ? "bg-primary/10 text-primary"
                 : "bg-muted text-muted-foreground"
@@ -463,7 +463,7 @@ const Sidebar: React.FC = () => {
                   e.stopPropagation();
                   handleEditStart(item.id, item.title);
                 }}
-                className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label="Edit meeting title"
               >
                 <Pencil className="h-3.5 w-3.5" />
@@ -473,7 +473,7 @@ const Sidebar: React.FC = () => {
                   e.stopPropagation();
                   setDeleteModalState({ isOpen: true, itemId: item.id });
                 }}
-                className="rounded-lg p-1.5 text-muted-foreground hover:bg-red-500/10 hover:text-red-300"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-red-500/10 hover:text-red-300"
                 aria-label="Delete meeting"
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -483,7 +483,7 @@ const Sidebar: React.FC = () => {
         </div>
 
         {hasTranscriptMatch && (
-          <div className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100/90">
+          <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100/90">
             <span className="font-medium text-amber-200">Match:</span>{" "}
             {matchingResult.matchContext}
           </div>
@@ -496,12 +496,18 @@ const Sidebar: React.FC = () => {
   const onAddons = onSettings && settingsTab === "integrations";
 
   const goToMeetingNotes = () => {
-    const target = currentMeeting?.id ?? meetings?.[0]?.id;
-    router.push(target ? `/meeting-details?id=${target}` : "/");
+    // Only open a real, loadable meeting; otherwise go home (the meetings list),
+    // never the placeholder "intro-call" (which 404s the details page).
+    const id = currentMeeting?.id;
+    const isReal = !!id && id !== "intro-call" && meetings?.some((m) => m.id === id);
+    router.push(isReal ? `/meeting-details?id=${id}` : "/");
   };
   const openSettingsTab = (tab: string) => {
     setSettingsTab(tab); // optimistic so the highlight swaps on query-only nav
     router.push(`/settings?tab=${tab}`);
+    // If the settings page is already mounted, query-only nav won't remount it,
+    // so signal the tab switch directly too.
+    window.dispatchEvent(new CustomEvent("open-settings-tab", { detail: tab }));
   };
 
   const navItems = [
@@ -535,7 +541,7 @@ const Sidebar: React.FC = () => {
     <div className="fixed left-0 top-0 z-40 h-screen">
       <button
         onClick={toggleCollapse}
-        className="absolute -right-3 top-24 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-lg transition hover:text-foreground"
+        className="absolute -right-3 top-24 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-sm transition hover:text-foreground"
         aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
       >
         {isCollapsed ? (
@@ -546,7 +552,7 @@ const Sidebar: React.FC = () => {
       </button>
 
       <aside
-        className={`flex h-screen flex-col border-r border-border bg-background text-muted-foreground shadow-2xl shadow-black/30 transition-all duration-300 ${
+        className={`flex h-screen flex-col border-r border-border bg-background text-muted-foreground shadow-sm transition-all duration-300 ${
           isCollapsed ? "w-16" : "w-[17.5rem]"
         }`}
       >
@@ -558,7 +564,7 @@ const Sidebar: React.FC = () => {
               <Logo isCollapsed={isCollapsed} />
 
               <div className="relative">
-                <InputGroup className="rounded-lg border-border bg-muted text-foreground">
+                <InputGroup className="rounded-md border-border bg-muted text-foreground">
                   <InputGroupInput
                     placeholder="Search meetings..."
                     value={searchQuery}
@@ -586,7 +592,7 @@ const Sidebar: React.FC = () => {
                   <button
                     key={item.label}
                     onClick={item.onClick}
-                    className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${
+                    className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition ${
                       item.active
                         ? "bg-primary/10 text-primary shadow-[inset_3px_0_0_hsl(var(--primary))]"
                         : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -619,7 +625,7 @@ const Sidebar: React.FC = () => {
                 {filteredSidebarItems.every(
                   (item) => !item.children?.length,
                 ) && (
-                  <div className="rounded-lg border border-border bg-muted px-3 py-5 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-border bg-muted px-3 py-5 text-center text-sm text-muted-foreground">
                     No meetings found.
                   </div>
                 )}
@@ -640,7 +646,7 @@ const Sidebar: React.FC = () => {
               <button
                 onClick={handleRecordingToggle}
                 disabled={isRecording}
-                className={`flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold text-foreground shadow-lg transition ${
+                className={`flex w-full items-center justify-center gap-2 rounded-md px-3 py-3 text-sm font-semibold text-foreground shadow-sm transition ${
                   isRecording
                     ? "cursor-not-allowed bg-red-500/60"
                     : "bg-gradient-to-r from-cyan-400 to-blue-600 shadow-cyan-500/20 hover:from-cyan-300 hover:to-blue-500"
@@ -659,7 +665,7 @@ const Sidebar: React.FC = () => {
               {betaFeatures.importAndRetranscribe && (
                 <button
                   onClick={() => openImportDialog()}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted px-3 py-2.5 text-sm font-medium text-foreground transition hover:bg-muted"
+                  className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted px-3 py-2.5 text-sm font-medium text-foreground transition hover:bg-muted"
                 >
                   <Upload className="h-4 w-4" />
                   Import Audio
@@ -668,16 +674,23 @@ const Sidebar: React.FC = () => {
 
               <button
                 onClick={() => router.push("/settings")}
-                className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted px-3 py-2.5 text-sm font-medium text-foreground transition hover:bg-muted"
+                className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted px-3 py-2.5 text-sm font-medium text-foreground transition hover:bg-muted"
               >
                 <Settings className="h-4 w-4" />
                 Settings
               </button>
 
-              <div className="flex items-center gap-2 rounded-lg border border-emerald-400/15 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-200">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                Ready for recording
-              </div>
+              {isRecording ? (
+                <div className="flex items-center gap-2 rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                  Recording
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  Ready for recording
+                </div>
+              )}
 
               <div className="px-1 text-center text-xs text-muted-foreground">
                 v0.5.0-alpha.2

@@ -63,6 +63,15 @@ export default function SettingsPage() {
     if (requestedTab && TABS.some((tab) => tab.value === requestedTab)) {
       setActiveTab(requestedTab);
     }
+    // Also react when the sidebar requests a tab while we're already mounted
+    // (query-only navigation doesn't remount this page).
+    const onOpenTab = (e: Event) => {
+      const tab = (e as CustomEvent<string>).detail;
+      if (tab && TABS.some((t) => t.value === tab)) setActiveTab(tab);
+    };
+    window.addEventListener("open-settings-tab", onOpenTab as EventListener);
+    return () =>
+      window.removeEventListener("open-settings-tab", onOpenTab as EventListener);
   }, []);
 
   useLayoutEffect(() => {
@@ -83,7 +92,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-5">
               <button
                 onClick={() => router.back()}
-                className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                className="flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground"
               >
                 <ArrowLeft className="h-4 w-4" />
                 Back

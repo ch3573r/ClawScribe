@@ -396,7 +396,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     : 'flex flex-col space-y-2';
   const controlsClassName = isDashboard
     ? 'flex items-center gap-3 bg-transparent p-0 shadow-none'
-    : 'flex items-center space-x-2 bg-card rounded-full shadow-lg px-4 py-2';
+    : 'flex items-center space-x-2 bg-card rounded-full shadow-sm px-4 py-2';
   const startButtonClassName = isDashboard
     ? `h-16 w-16 flex items-center justify-center rounded-full text-foreground shadow-[0_0_34px_rgba(34,211,238,0.42)] transition-all relative ${isStarting || isProcessing || isRecordingDisabled || isValidatingModel ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-cyan-400 to-blue-600 hover:scale-105 hover:shadow-[0_0_44px_rgba(34,211,238,0.6)]'}`
     : `w-12 h-12 flex items-center justify-center ${isStarting || isProcessing || isValidatingModel ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'} rounded-full text-foreground transition-colors relative`;

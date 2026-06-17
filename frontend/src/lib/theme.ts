@@ -84,36 +84,36 @@ export interface AccentColor {
   foreground: string
 }
 
+export const DEFAULT_ACCENT_ID = "blue"
+
+// Each swatch is an explicit accent applied in BOTH light and dark, so the
+// choice always shows (no falling back to a theme default). Values are tuned to
+// read on light and dark backgrounds with the given foreground.
 export const accentColors: AccentColor[] = [
-  { id: "default", name: "Kontron Blue", primary: "203 100% 26%", foreground: "0 0% 98%" },
-  { id: "teal", name: "Teal", primary: "166 48% 42%", foreground: "0 0% 100%" },
-  { id: "sky", name: "Sky", primary: "203 100% 40%", foreground: "0 0% 100%" },
+  { id: "blue", name: "Blue", primary: "203 100% 42%", foreground: "0 0% 100%" },
+  { id: "teal", name: "Teal", primary: "166 55% 42%", foreground: "0 0% 100%" },
+  { id: "sky", name: "Sky", primary: "199 89% 48%", foreground: "0 0% 100%" },
   { id: "violet", name: "Violet", primary: "262 60% 58%", foreground: "0 0% 100%" },
-  { id: "magenta", name: "Magenta", primary: "329 75% 48%", foreground: "0 0% 100%" },
-  { id: "emerald", name: "Emerald", primary: "152 55% 38%", foreground: "0 0% 100%" },
+  { id: "magenta", name: "Magenta", primary: "329 75% 52%", foreground: "0 0% 100%" },
+  { id: "emerald", name: "Emerald", primary: "152 55% 42%", foreground: "0 0% 100%" },
   { id: "amber", name: "Amber", primary: "38 92% 50%", foreground: "0 0% 10%" },
 ]
 
 export function getStoredAccentId(): string {
-  if (typeof window === "undefined") return "default"
+  if (typeof window === "undefined") return DEFAULT_ACCENT_ID
   try {
-    return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? "default"
+    return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT_ID
   } catch {
-    return "default"
+    return DEFAULT_ACCENT_ID
   }
 }
 
 export function applyAccent(id: string): void {
   if (typeof document === "undefined") return
   const root = document.documentElement
-  const accent = accentColors.find((a) => a.id === id)
-  if (!accent || accent.id === "default") {
-    // Clear overrides → fall back to the theme's built-in accent.
-    root.style.removeProperty("--primary")
-    root.style.removeProperty("--primary-foreground")
-    root.style.removeProperty("--ring")
-    return
-  }
+  const accent =
+    accentColors.find((a) => a.id === id) ??
+    accentColors.find((a) => a.id === DEFAULT_ACCENT_ID)!
   root.style.setProperty("--primary", accent.primary)
   root.style.setProperty("--primary-foreground", accent.foreground)
   root.style.setProperty("--ring", accent.primary)

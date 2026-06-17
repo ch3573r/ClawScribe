@@ -381,6 +381,23 @@ fn evaluate_snapshots(
             confidence: TITLE_SIGNAL_CONFIDENCE,
         }
     }));
+    // Surface every scanned window (even non-matching) so the settings panel can
+    // show the real meeting-window title when detection misses.
+    candidates.extend(windows.iter().map(|window| {
+        let process_name = window
+            .pid
+            .and_then(|pid| process_for_pid(processes, pid))
+            .map(|process| process.name.clone());
+        TeamsDetectionCandidate {
+            source: "scanned-window".to_string(),
+            process_id: window.pid,
+            process_name,
+            window_title: Some(window.title.clone()),
+            is_foreground: window.is_foreground,
+            is_minimized: window.is_minimized,
+            confidence: 0.0,
+        }
+    }));
     let status = detection_state(detected, confidence, threshold, title_requirement_met);
     let diagnostics = TeamsDetectionDiagnostics {
         process_count: processes.len(),

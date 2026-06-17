@@ -87,7 +87,7 @@ export function HomeDashboard({
         </header>
 
         <div className="grid gap-5 xl:grid-cols-[1.25fr_0.9fr]">
-          <section className="relative overflow-hidden rounded-xl border border-border bg-card p-7 shadow-2xl shadow-black/30">
+          <section className="relative overflow-hidden rounded-lg border border-border bg-card p-7 shadow-sm">
             <div className="absolute right-[-120px] top-[-120px] h-72 w-72 rounded-full bg-primary/5 blur-3xl" />
             <div className="absolute bottom-[-160px] left-[20%] h-72 w-72 rounded-full bg-primary/5 blur-3xl" />
 
@@ -123,7 +123,7 @@ export function HomeDashboard({
                     meetingName={meetingName}
                   />
                 ) : (
-                  <div className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                  <div className="rounded-md border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
                     Microphone access is required before recording.
                   </div>
                 )}
@@ -139,7 +139,7 @@ export function HomeDashboard({
           </section>
 
           <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-1">
-            <section className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+            <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
@@ -163,12 +163,12 @@ export function HomeDashboard({
               </button>
             </section>
 
-            <section className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+            <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
               <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <Sparkles className="h-4 w-4 text-primary" />
                 AI Meeting Summary
               </div>
-              <div className="mt-4 rounded-lg border border-border bg-muted p-4 text-sm leading-6 text-muted-foreground">
+              <div className="mt-4 rounded-md border border-border bg-muted p-4 text-sm leading-6 text-muted-foreground">
                 <p className="font-medium text-foreground">After recording:</p>
                 <ul className="mt-2 space-y-1 text-muted-foreground">
                   <li>• Key decisions and blockers</li>
@@ -187,7 +187,7 @@ export function HomeDashboard({
         </div>
 
         <div className="grid gap-5 xl:grid-cols-[1.25fr_0.9fr]">
-          <section className="rounded-xl border border-border bg-card shadow-xl shadow-black/20">
+          <section className="rounded-lg border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between border-b border-border px-6 py-5">
               <div>
                 <h2 className="text-lg font-semibold text-foreground">
@@ -213,7 +213,7 @@ export function HomeDashboard({
                     className="grid w-full grid-cols-[1fr_auto] items-center gap-4 px-6 py-4 text-left text-sm hover:bg-muted"
                   >
                     <div className="flex min-w-0 items-center gap-3">
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-primary">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-primary">
                         <FileText className="h-4 w-4" />
                       </span>
                       <div className="min-w-0">
@@ -240,7 +240,7 @@ export function HomeDashboard({
             </div>
           </section>
 
-          <section className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+          <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-foreground">Quick Actions</h2>
             <p className="mt-1 text-sm text-muted-foreground">
               Shortcuts for common setup and capture work.
@@ -272,7 +272,7 @@ export function HomeDashboard({
                   key={item.label}
                   onClick={item.onClick}
                   disabled={!item.enabled}
-                  className="flex w-full items-center justify-between rounded-lg border border-border bg-muted px-4 py-3 text-left text-sm text-foreground transition hover:border-primary/30 hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex w-full items-center justify-between rounded-md border border-border bg-muted px-4 py-3 text-left text-sm text-foreground transition hover:border-primary/30 hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span className="flex items-center gap-3">
                     <item.icon className="h-4 w-4 text-primary" />
@@ -285,7 +285,7 @@ export function HomeDashboard({
           </section>
         </div>
 
-        <footer className="grid gap-4 rounded-xl border border-border bg-card px-6 py-4 text-sm text-muted-foreground shadow-xl shadow-black/20 lg:grid-cols-[1fr_auto] lg:items-center">
+        <footer className="grid gap-4 rounded-lg border border-border bg-card px-6 py-4 text-sm text-muted-foreground shadow-sm lg:grid-cols-[1fr_auto] lg:items-center">
           <div className="flex items-center gap-3 font-medium text-foreground">
             <span className={`h-2.5 w-2.5 rounded-full ${appStatus.dot}`} />
             {appStatus.label}

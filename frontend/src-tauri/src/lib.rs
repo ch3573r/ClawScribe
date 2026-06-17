@@ -51,6 +51,7 @@ pub mod openai;
 pub mod openclaw;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod shortcuts;
 pub mod state;
 pub mod summary;
 pub mod teams_detection;
@@ -425,6 +426,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    shortcuts::on_shortcut(app, shortcut, event.state);
+                })
+                .build(),
+        )
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
@@ -441,6 +449,9 @@ pub fn run() {
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
+
+            // Register global recording shortcuts (persisted or defaults).
+            shortcuts::init_from_storage(_app.handle());
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
@@ -630,6 +641,9 @@ pub fn run() {
             start_audio_level_monitoring,
             stop_audio_level_monitoring,
             is_audio_level_monitoring,
+            // Global keyboard shortcuts
+            shortcuts::get_shortcuts,
+            shortcuts::set_shortcuts,
             // Recording pause/resume commands
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,

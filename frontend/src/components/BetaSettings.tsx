@@ -18,7 +18,7 @@ export function BetaSettings() {
   return (
     <div className="space-y-6">
       {/* Yellow Warning Banner */}
-      <div className="flex items-start gap-3 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+      <div className="flex items-start gap-3 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
         <AlertCircle className="h-5 w-5 text-yellow-600 flex-shrink-0 mt-0.5" />
         <div className="text-sm text-yellow-800">
           <p className="font-medium">Beta Features</p>
@@ -33,7 +33,7 @@ export function BetaSettings() {
       {featureOrder.map((featureKey) => (
         <div
           key={featureKey}
-          className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20"
+          className="rounded-lg border border-border bg-card p-6 shadow-sm"
         >
           <div className="flex items-center justify-between">
             <div className="flex-1">
@@ -64,7 +64,7 @@ export function BetaSettings() {
       ))}
 
       {/* Info Box */}
-      <div className="p-4 rounded-xl border border-primary/30 bg-primary/10">
+      <div className="p-4 rounded-lg border border-primary/30 bg-primary/10">
         <p className="text-sm text-primary">
           <strong>Note:</strong> When disabled, beta features will be hidden.
           Your existing meetings remain unaffected.

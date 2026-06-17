@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import Analytics from "@/lib/analytics";
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext";
 import { ThemeSettings } from "./ThemeSettings";
+import { KeyboardShortcutsSettings } from "./KeyboardShortcutsSettings";
 
 type OpenClawSubmissionStatus = {
   state: string;
@@ -222,9 +223,10 @@ export function PreferenceSettings() {
   return (
     <div className="grid gap-5 xl:grid-cols-2">
       <ThemeSettings />
+      <KeyboardShortcutsSettings />
 
       {/* Notifications Section */}
-      <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+      <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-foreground mb-2">
@@ -241,10 +243,10 @@ export function PreferenceSettings() {
         </div>
       </div>
 
-      <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+      <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
-            <div className="mt-1 rounded-xl bg-muted p-2 text-foreground">
+            <div className="mt-1 rounded-lg bg-muted p-2 text-foreground">
               <ServerCog className="h-5 w-5" />
             </div>
             <div>
@@ -269,7 +271,7 @@ export function PreferenceSettings() {
           <button
             onClick={() => void loadOpenClawStatus()}
             disabled={isOpenClawStatusLoading}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
             aria-label="Refresh OpenClaw handoff status"
             title="Refresh OpenClaw handoff status"
           >
@@ -280,7 +282,7 @@ export function PreferenceSettings() {
         </div>
 
         {openClawStatusError ? (
-          <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             {openClawStatusError}
           </div>
         ) : (
@@ -330,7 +332,7 @@ export function PreferenceSettings() {
               </div>
             </div>
             {openClawStatus?.last_submission && (
-              <div className="md:col-span-2 rounded-xl bg-muted p-3">
+              <div className="md:col-span-2 rounded-lg bg-muted p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-medium uppercase text-muted-foreground">
                     Last Handoff
@@ -357,7 +359,7 @@ export function PreferenceSettings() {
       </div>
 
       {/* Data Storage Locations Section */}
-      <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+      <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
         <h3 className="text-lg font-semibold text-foreground mb-4">
           Data Storage Locations
         </h3>
@@ -367,14 +369,14 @@ export function PreferenceSettings() {
 
         <div className="space-y-4">
           {/* Database Location */}
-          {/* <div className="p-4 border rounded-xl bg-gray-50">
+          {/* <div className="p-4 border rounded-lg bg-gray-50">
             <div className="font-medium mb-2">Database</div>
             <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
               {storageLocations?.database || 'Loading...'}
             </div>
             <button
               onClick={() => handleOpenFolder('database')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-xl hover:bg-gray-100 transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
               Open Folder
@@ -382,14 +384,14 @@ export function PreferenceSettings() {
           </div> */}
 
           {/* Models Location */}
-          {/* <div className="p-4 border rounded-xl bg-gray-50">
+          {/* <div className="p-4 border rounded-lg bg-gray-50">
             <div className="font-medium mb-2">Whisper Models</div>
             <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
               {storageLocations?.models || 'Loading...'}
             </div>
             <button
               onClick={() => handleOpenFolder('models')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-xl hover:bg-gray-100 transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
               Open Folder
@@ -397,14 +399,14 @@ export function PreferenceSettings() {
           </div> */}
 
           {/* Recordings Location */}
-          <div className="p-4 border rounded-xl bg-muted">
+          <div className="p-4 border rounded-lg bg-muted">
             <div className="font-medium mb-2">Meeting Recordings</div>
             <div className="text-sm text-muted-foreground mb-3 break-all font-mono text-xs">
               {storageLocations?.recordings || "Loading..."}
             </div>
             <button
               onClick={() => handleOpenFolder("recordings")}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-xl hover:bg-muted transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-lg hover:bg-muted transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
               Open Folder
@@ -412,7 +414,7 @@ export function PreferenceSettings() {
           </div>
         </div>
 
-        <div className="mt-4 rounded-xl bg-muted p-3">
+        <div className="mt-4 rounded-lg bg-muted p-3">
           <p className="text-xs text-foreground">
             <strong>Note:</strong> Database and models are stored together in
             your application data directory for unified management.

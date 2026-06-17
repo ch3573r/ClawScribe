@@ -96,10 +96,10 @@ function AddonPanel({
   children,
 }: AddonPanelProps) {
   return (
-    <section className="rounded-xl border border-border bg-card p-5 shadow-xl shadow-black/20">
+    <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
-          <div className="rounded-xl border border-border bg-muted p-2">
+          <div className="rounded-lg border border-border bg-muted p-2">
             <Icon className="h-5 w-5 text-primary" />
           </div>
           <div className="min-w-0">
@@ -129,21 +129,21 @@ function DetectionSummary({ status }: { status: TeamsDetectionStatus | null }) {
 
   return (
     <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-      <div className="rounded-xl border border-border bg-muted p-3">
+      <div className="rounded-lg border border-border bg-muted p-3">
         <p className="text-xs text-muted-foreground">Platform</p>
         <p className="font-medium text-foreground">{status.platform}</p>
       </div>
-      <div className="rounded-xl border border-border bg-muted p-3">
+      <div className="rounded-lg border border-border bg-muted p-3">
         <p className="text-xs text-muted-foreground">Status</p>
         <p className="font-medium text-foreground">{status.status}</p>
       </div>
-      <div className="rounded-xl border border-border bg-muted p-3">
+      <div className="rounded-lg border border-border bg-muted p-3">
         <p className="text-xs text-muted-foreground">Confidence</p>
         <p className="font-medium text-foreground">
           {Math.round(status.confidence * 100)}%
         </p>
       </div>
-      <div className="rounded-xl border border-border bg-muted p-3">
+      <div className="rounded-lg border border-border bg-muted p-3">
         <p className="text-xs text-muted-foreground">Action</p>
         <p className="font-medium text-foreground">
           {status.nextRecommendedAction}
@@ -151,7 +151,7 @@ function DetectionSummary({ status }: { status: TeamsDetectionStatus | null }) {
       </div>
 
       {/* Diagnostics so detection misses are debuggable in the shipped app. */}
-      <div className="sm:col-span-2 lg:col-span-4 space-y-3 rounded-xl border border-border bg-background p-3">
+      <div className="sm:col-span-2 lg:col-span-4 space-y-3 rounded-lg border border-border bg-background p-3">
         <p className="text-xs font-medium text-muted-foreground">
           Signals (need a meeting window title to detect a call)
         </p>
@@ -250,7 +250,7 @@ function MicrosoftSignInPanel() {
             {ms.connection.grantedScopes !== undefined &&
               ms.connection.grantedScopes !== null &&
               !/\bNotes\./i.test(ms.connection.grantedScopes ?? "") && (
-                <div className="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>
                     This session was granted no OneNote permission, so notebook
@@ -269,7 +269,7 @@ function MicrosoftSignInPanel() {
         )}
 
         {(ms.connection.state === "connecting" || ms.signingIn) && (
-          <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950/40">
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950/40">
             <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-200">
               <Loader2 className="h-4 w-4 animate-spin" />
               <span>
@@ -289,7 +289,7 @@ function MicrosoftSignInPanel() {
           )}
 
         {ms.error && (
-          <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{ms.error}</span>
           </div>
@@ -360,7 +360,7 @@ function OneNotePanel() {
               </button>
             </div>
             <select
-              className="w-full rounded-xl border border-border bg-muted px-3 py-2 text-sm"
+              className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
               value={selectedNotebook}
               onChange={(e) => setSelectedNotebook(e.target.value)}
               disabled={ms.loadingNotebooks}
@@ -376,13 +376,13 @@ function OneNotePanel() {
             </select>
           </div>
           {ms.error && (
-            <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{ms.error}</span>
             </div>
           )}
           {!ms.loadingNotebooks && !ms.error && ms.notebooks.length === 0 && (
-            <p className="rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
+            <p className="rounded-lg border border-border bg-muted p-3 text-sm text-muted-foreground">
               No OneNote notebooks were returned for this account. If you expect
               notebooks here, confirm you signed in with the same account that
               owns them and that this app has the OneNote permission, then use
@@ -469,7 +469,7 @@ function PlannerPanel() {
                 </button>
               </div>
               <select
-                className="w-full rounded-xl border border-border bg-muted px-3 py-2 text-sm"
+                className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
                 value={selectedPlan}
                 onChange={(e) => {
                   setSelectedPlan(e.target.value);
@@ -492,7 +492,7 @@ function PlannerPanel() {
                 Bucket
               </label>
               <select
-                className="w-full rounded-xl border border-border bg-muted px-3 py-2 text-sm"
+                className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
                 value={selectedBucket}
                 onChange={(e) => setSelectedBucket(e.target.value)}
                 disabled={!selectedPlan || ms.loadingBuckets}
@@ -513,13 +513,13 @@ function PlannerPanel() {
             </div>
           </div>
           {ms.error && (
-            <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{ms.error}</span>
             </div>
           )}
           {!ms.loadingPlans && !ms.error && ms.plans.length === 0 && (
-            <p className="rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
+            <p className="rounded-lg border border-border bg-muted p-3 text-sm text-muted-foreground">
               No Planner plans were returned for this account. Confirm you
               signed in with the right account and that this app has the
               Tasks.ReadWrite permission, then use Reload.
@@ -585,7 +585,7 @@ export function IntegrationsSettings() {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-xl border border-border bg-card p-5 shadow-xl shadow-black/20">
+      <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
         <div className="flex items-start gap-3">
           <ShieldCheck className="mt-0.5 h-5 w-5 text-primary" />
           <div>
@@ -607,7 +607,7 @@ export function IntegrationsSettings() {
         detail="Windows detector for Teams desktop and browser meetings. Detects meetings in several UI languages."
       >
         <div className="space-y-3">
-          <label className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border border-border bg-muted p-3">
+          <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
             <span>
               <span className="block text-sm font-medium text-foreground">
                 Auto-start recording when a meeting is detected
@@ -636,12 +636,12 @@ export function IntegrationsSettings() {
 
           <DetectionSummary status={teamsStatus} />
           {teamsStatus?.reason && (
-            <p className="rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
+            <p className="rounded-lg border border-border bg-muted p-3 text-sm text-muted-foreground">
               {teamsStatus.reason}
             </p>
           )}
           {teamsError && (
-            <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{teamsError}</span>
             </div>
