@@ -398,16 +398,16 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     ? 'flex items-center gap-3 bg-transparent p-0 shadow-none'
     : 'flex items-center space-x-2 bg-card rounded-full shadow-lg px-4 py-2';
   const startButtonClassName = isDashboard
-    ? `h-16 w-16 flex items-center justify-center rounded-full text-white shadow-[0_0_34px_rgba(34,211,238,0.42)] transition-all relative ${isStarting || isProcessing || isRecordingDisabled || isValidatingModel ? 'bg-slate-600 cursor-not-allowed' : 'bg-gradient-to-br from-cyan-400 to-blue-600 hover:scale-105 hover:shadow-[0_0_44px_rgba(34,211,238,0.6)]'}`
-    : `w-12 h-12 flex items-center justify-center ${isStarting || isProcessing || isValidatingModel ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'} rounded-full text-white transition-colors relative`;
+    ? `h-16 w-16 flex items-center justify-center rounded-full text-foreground shadow-[0_0_34px_rgba(34,211,238,0.42)] transition-all relative ${isStarting || isProcessing || isRecordingDisabled || isValidatingModel ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-cyan-400 to-blue-600 hover:scale-105 hover:shadow-[0_0_44px_rgba(34,211,238,0.6)]'}`
+    : `w-12 h-12 flex items-center justify-center ${isStarting || isProcessing || isValidatingModel ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'} rounded-full text-foreground transition-colors relative`;
   const secondaryButtonClassName = isDashboard
-    ? `h-12 w-12 flex items-center justify-center rounded-full border border-white/10 text-slate-200 transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-slate-800 text-slate-500' : 'bg-white/5 hover:bg-white/10'}`
+    ? `h-12 w-12 flex items-center justify-center rounded-full border border-border text-foreground transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-muted text-muted-foreground' : 'bg-muted hover:bg-accent'}`
     : `w-10 h-10 flex items-center justify-center ${isPausing || isResuming || isStopping ? 'bg-muted border-2 border-border text-muted-foreground' : 'bg-card border-2 border-border text-muted-foreground hover:border-ring hover:bg-muted'} rounded-full transition-colors relative`;
   const stopButtonClassName = isDashboard
-    ? `h-12 w-12 flex items-center justify-center rounded-full text-white transition-colors relative ${isStopping || isPausing || isResuming ? 'bg-slate-600 cursor-not-allowed' : 'bg-red-500 hover:bg-red-400'}`
-    : `w-10 h-10 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'} rounded-full text-white transition-colors relative`;
+    ? `h-12 w-12 flex items-center justify-center rounded-full text-foreground transition-colors relative ${isStopping || isPausing || isResuming ? 'bg-muted cursor-not-allowed' : 'bg-red-500 hover:bg-red-400'}`
+    : `w-10 h-10 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'} rounded-full text-foreground transition-colors relative`;
   const waveformClassName = isDashboard
-    ? 'flex items-center justify-center gap-1.5 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-4 py-3'
+    ? 'flex items-center justify-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-4 py-3'
     : 'flex items-center space-x-1 mx-4';
 
   return (
@@ -418,7 +418,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             <div
               className={
                 isDashboard
-                  ? 'flex items-center gap-3 rounded-full border border-white/10 bg-white/5 px-4 py-3 text-slate-200'
+                  ? 'flex items-center gap-3 rounded-full border border-border bg-muted px-4 py-3 text-foreground'
                   : 'flex items-center space-x-2'
               }
             >
@@ -432,7 +432,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               <span
                 className={
                   isDashboard
-                    ? 'text-sm text-slate-300'
+                    ? 'text-sm text-muted-foreground'
                     : 'text-sm text-muted-foreground'
                 }
               >
@@ -445,7 +445,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 <>
                   <button
                     onClick={handleStartRecording}
-                    className="w-10 h-10 flex items-center justify-center bg-red-500 rounded-full text-white hover:bg-red-600 transition-colors"
+                    className="w-10 h-10 flex items-center justify-center bg-red-500 rounded-full text-foreground hover:bg-red-600 transition-colors"
                   >
                     <Mic size={16} />
                   </button>
@@ -468,7 +468,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   </div>
 
                   <button
-                    className="w-10 h-10 flex items-center justify-center bg-gray-300 rounded-full text-white cursor-not-allowed"
+                    className="w-10 h-10 flex items-center justify-center bg-gray-300 rounded-full text-foreground cursor-not-allowed"
                     disabled
                   >
                     <Play size={16} />
@@ -612,7 +612,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           <div
             className={
               isDashboard
-                ? 'mt-2 text-center text-xs text-cyan-100/70'
+                ? 'mt-2 text-center text-xs text-primary/70'
                 : 'text-xs text-muted-foreground text-center mt-2'
             }
           >

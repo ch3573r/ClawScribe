@@ -87,10 +87,10 @@ export function ThemeSettings() {
   };
 
   return (
-    <div className="rounded-3xl border border-white/10 bg-[#0e1723] p-6 shadow-xl shadow-black/20">
+    <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
       <div className="mb-4">
-        <h3 className="text-lg font-semibold text-slate-100">Appearance</h3>
-        <p className="mt-2 text-sm text-slate-400">
+        <h3 className="text-lg font-semibold text-foreground">Appearance</h3>
+        <p className="mt-2 text-sm text-muted-foreground">
           Choose how ClawScribe follows light and dark mode.
         </p>
       </div>
@@ -111,10 +111,10 @@ export function ThemeSettings() {
               role="radio"
               aria-checked={isSelected}
               onClick={() => handlePreferenceChange(option)}
-              className={`flex min-h-24 flex-col items-start gap-3 rounded-2xl border p-4 text-left transition-colors ${
+              className={`flex min-h-24 flex-col items-start gap-3 rounded-lg border p-4 text-left transition-colors ${
                 isSelected
-                  ? "border-cyan-300/50 bg-cyan-300/10 text-cyan-50 ring-1 ring-cyan-300/50"
-                  : "border-border bg-background text-slate-400 hover:border-primary/70 hover:bg-muted"
+                  ? "border-primary/30 bg-primary/10 text-primary ring-1 ring-cyan-300/50"
+                  : "border-border bg-background text-muted-foreground hover:border-primary/70 hover:bg-muted"
               }`}
             >
               <span className="flex items-center gap-2 text-sm font-semibold">

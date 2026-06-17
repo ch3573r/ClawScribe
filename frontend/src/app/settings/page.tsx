@@ -76,23 +76,23 @@ export default function SettingsPage() {
   }, [activeTab]);
 
   return (
-    <div className="h-screen overflow-hidden bg-[#081019] text-slate-100">
-      <div className="sticky top-0 z-10 border-b border-white/10 bg-[#081019]/95 backdrop-blur">
+    <div className="h-screen overflow-hidden bg-background text-foreground">
+      <div className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
         <div className="mx-auto max-w-[1500px] px-8 py-7">
           <div className="flex items-center justify-between gap-6">
             <div className="flex items-center gap-5">
               <button
                 onClick={() => router.back()}
-                className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
+                className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground"
               >
                 <ArrowLeft className="h-4 w-4" />
                 Back
               </button>
               <div>
-                <h1 className="text-4xl font-semibold tracking-tight text-white">
+                <h1 className="text-4xl font-semibold tracking-tight text-foreground">
                   Settings
                 </h1>
-                <p className="mt-2 text-sm text-slate-400">
+                <p className="mt-2 text-sm text-muted-foreground">
                   Customize how ClawScribe works for you.
                 </p>
               </div>
@@ -104,7 +104,7 @@ export default function SettingsPage() {
       <div className="h-[calc(100vh-121px)] overflow-y-auto">
         <div className="mx-auto max-w-[1500px] p-8 pt-6">
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="relative h-auto flex-wrap justify-start gap-1 rounded-none border-b border-white/10 bg-transparent p-0">
+            <TabsList className="relative h-auto flex-wrap justify-start gap-1 rounded-none border-b border-border bg-transparent p-0">
               {TABS.map((tab, index) => {
                 const Icon = tab.icon;
                 return (
@@ -114,7 +114,7 @@ export default function SettingsPage() {
                     ref={(el) => {
                       tabRefs.current[index] = el;
                     }}
-                    className="relative z-10 flex items-center gap-2 rounded-none border-0 bg-transparent px-5 py-4 text-slate-500 shadow-none transition hover:text-slate-200 data-[state=active]:bg-transparent data-[state=active]:text-cyan-300 data-[state=active]:shadow-none"
+                    className="relative z-10 flex items-center gap-2 rounded-none border-0 bg-transparent px-5 py-4 text-muted-foreground shadow-none transition hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
                   >
                     <Icon className="h-4 w-4" />
                     {tab.label}

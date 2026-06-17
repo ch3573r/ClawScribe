@@ -224,13 +224,13 @@ export function PreferenceSettings() {
       <ThemeSettings />
 
       {/* Notifications Section */}
-      <div className="rounded-3xl border border-white/10 bg-[#0e1723] p-6 shadow-xl shadow-black/20">
+      <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold text-slate-100 mb-2">
+            <h3 className="text-lg font-semibold text-foreground mb-2">
               Notifications
             </h3>
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-muted-foreground">
               Enable or disable notifications of start and end of meeting
             </p>
           </div>
@@ -241,14 +241,14 @@ export function PreferenceSettings() {
         </div>
       </div>
 
-      <div className="rounded-3xl border border-white/10 bg-[#0e1723] p-6 shadow-xl shadow-black/20">
+      <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
-            <div className="mt-1 rounded-xl bg-white/[0.05] p-2 text-slate-200">
+            <div className="mt-1 rounded-xl bg-muted p-2 text-foreground">
               <ServerCog className="h-5 w-5" />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-slate-100 mb-2">
+              <h3 className="text-lg font-semibold text-foreground mb-2">
                 OpenClaw Handoff
               </h3>
               <div className="flex flex-wrap items-center gap-2">
@@ -257,7 +257,7 @@ export function PreferenceSettings() {
                 >
                   {openClawStatus?.ready ? "Ready" : "Not ready"}
                 </span>
-                <span className="text-sm text-slate-400">
+                <span className="text-sm text-muted-foreground">
                   {openClawStatus?.status_message ??
                     (openClawStatusError
                       ? "Status unavailable"
@@ -269,7 +269,7 @@ export function PreferenceSettings() {
           <button
             onClick={() => void loadOpenClawStatus()}
             disabled={isOpenClawStatusLoading}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 text-slate-400 transition-colors hover:bg-white/[0.08] disabled:opacity-50"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
             aria-label="Refresh OpenClaw handoff status"
             title="Refresh OpenClaw handoff status"
           >
@@ -286,68 +286,68 @@ export function PreferenceSettings() {
         ) : (
           <div className="mt-5 grid gap-3 text-sm md:grid-cols-2">
             <div>
-              <div className="text-xs font-medium uppercase text-slate-400">
+              <div className="text-xs font-medium uppercase text-muted-foreground">
                 Endpoint
               </div>
-              <div className="mt-1 break-all font-mono text-xs text-slate-100">
+              <div className="mt-1 break-all font-mono text-xs text-foreground">
                 {openClawStatus?.endpoint ?? "Loading..."}
               </div>
             </div>
             <div>
-              <div className="text-xs font-medium uppercase text-slate-400">
+              <div className="text-xs font-medium uppercase text-muted-foreground">
                 Source
               </div>
-              <div className="mt-1 font-mono text-xs text-slate-100">
+              <div className="mt-1 font-mono text-xs text-foreground">
                 {openClawStatus?.source ?? "Loading..."}
               </div>
             </div>
             <div>
-              <div className="text-xs font-medium uppercase text-slate-400">
+              <div className="text-xs font-medium uppercase text-muted-foreground">
                 Bearer Token
               </div>
-              <div className="mt-1 text-slate-100">
+              <div className="mt-1 text-foreground">
                 {openClawStatus?.bearer_token_configured
                   ? "Configured"
                   : "Missing"}
               </div>
             </div>
             <div>
-              <div className="text-xs font-medium uppercase text-slate-400">
+              <div className="text-xs font-medium uppercase text-muted-foreground">
                 Audio Path
               </div>
-              <div className="mt-1 text-slate-100">
+              <div className="mt-1 text-foreground">
                 {openClawStatus?.include_audio_path
                   ? "Included"
                   : "Not included"}
               </div>
             </div>
             <div className="md:col-span-2">
-              <div className="text-xs font-medium uppercase text-slate-400">
+              <div className="text-xs font-medium uppercase text-muted-foreground">
                 Config File
               </div>
-              <div className="mt-1 break-all font-mono text-xs text-slate-100">
+              <div className="mt-1 break-all font-mono text-xs text-foreground">
                 {openClawStatus?.config_path ?? "Loading..."}
               </div>
             </div>
             {openClawStatus?.last_submission && (
-              <div className="md:col-span-2 rounded-xl bg-white/[0.04] p-3">
+              <div className="md:col-span-2 rounded-xl bg-muted p-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium uppercase text-slate-400">
+                  <span className="text-xs font-medium uppercase text-muted-foreground">
                     Last Handoff
                   </span>
-                  <span className="rounded-full bg-white/[0.05] px-2 py-0.5 text-xs font-medium text-slate-200">
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
                     {openClawStatus.last_submission.state}
                   </span>
                   {openClawStatus.last_submission.status_code && (
-                    <span className="text-xs text-slate-400">
+                    <span className="text-xs text-muted-foreground">
                       HTTP {openClawStatus.last_submission.status_code}
                     </span>
                   )}
                 </div>
-                <div className="mt-2 text-sm text-slate-100">
+                <div className="mt-2 text-sm text-foreground">
                   {openClawStatus.last_submission.message}
                 </div>
-                <div className="mt-1 text-xs text-slate-400">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {openClawStatus.last_submission.updated_at}
                 </div>
               </div>
@@ -357,17 +357,17 @@ export function PreferenceSettings() {
       </div>
 
       {/* Data Storage Locations Section */}
-      <div className="rounded-3xl border border-white/10 bg-[#0e1723] p-6 shadow-xl shadow-black/20">
-        <h3 className="text-lg font-semibold text-slate-100 mb-4">
+      <div className="rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20">
+        <h3 className="text-lg font-semibold text-foreground mb-4">
           Data Storage Locations
         </h3>
-        <p className="text-sm text-slate-400 mb-6">
+        <p className="text-sm text-muted-foreground mb-6">
           View and access where ClawScribe stores your data
         </p>
 
         <div className="space-y-4">
           {/* Database Location */}
-          {/* <div className="p-4 border rounded-3xl bg-gray-50">
+          {/* <div className="p-4 border rounded-xl bg-gray-50">
             <div className="font-medium mb-2">Database</div>
             <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
               {storageLocations?.database || 'Loading...'}
@@ -382,7 +382,7 @@ export function PreferenceSettings() {
           </div> */}
 
           {/* Models Location */}
-          {/* <div className="p-4 border rounded-3xl bg-gray-50">
+          {/* <div className="p-4 border rounded-xl bg-gray-50">
             <div className="font-medium mb-2">Whisper Models</div>
             <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
               {storageLocations?.models || 'Loading...'}
@@ -397,14 +397,14 @@ export function PreferenceSettings() {
           </div> */}
 
           {/* Recordings Location */}
-          <div className="p-4 border rounded-3xl bg-white/[0.04]">
+          <div className="p-4 border rounded-xl bg-muted">
             <div className="font-medium mb-2">Meeting Recordings</div>
-            <div className="text-sm text-slate-400 mb-3 break-all font-mono text-xs">
+            <div className="text-sm text-muted-foreground mb-3 break-all font-mono text-xs">
               {storageLocations?.recordings || "Loading..."}
             </div>
             <button
               onClick={() => handleOpenFolder("recordings")}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-white/10 rounded-xl hover:bg-white/[0.08] transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-xl hover:bg-muted transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
               Open Folder
@@ -412,8 +412,8 @@ export function PreferenceSettings() {
           </div>
         </div>
 
-        <div className="mt-4 rounded-xl bg-white/[0.05] p-3">
-          <p className="text-xs text-slate-200">
+        <div className="mt-4 rounded-xl bg-muted p-3">
+          <p className="text-xs text-foreground">
             <strong>Note:</strong> Database and models are stored together in
             your application data directory for unified management.
           </p>

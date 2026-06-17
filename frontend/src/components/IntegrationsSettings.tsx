@@ -75,7 +75,7 @@ function stateClasses(state: AddonState) {
       return "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200";
     case "planned":
     default:
-      return "border-muted bg-muted text-slate-400";
+      return "border-muted bg-muted text-muted-foreground";
   }
 }
 
@@ -95,15 +95,15 @@ function AddonPanel({
   children,
 }: AddonPanelProps) {
   return (
-    <section className="rounded-3xl border border-white/10 bg-[#0e1723] p-5 shadow-xl shadow-black/20">
+    <section className="rounded-xl border border-border bg-card p-5 shadow-xl shadow-black/20">
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
-          <div className="rounded-xl border border-white/10 bg-white/[0.04] p-2">
+          <div className="rounded-xl border border-border bg-muted p-2">
             <Icon className="h-5 w-5 text-primary" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-base font-semibold text-slate-100">{title}</h3>
-            <p className="mt-1 text-sm text-slate-400">{detail}</p>
+            <h3 className="text-base font-semibold text-foreground">{title}</h3>
+            <p className="mt-1 text-sm text-muted-foreground">{detail}</p>
           </div>
         </div>
         <span
@@ -120,7 +120,7 @@ function AddonPanel({
 function DetectionSummary({ status }: { status: TeamsDetectionStatus | null }) {
   if (!status) {
     return (
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-muted-foreground">
         Status has not been checked in this session.
       </p>
     );
@@ -128,22 +128,22 @@ function DetectionSummary({ status }: { status: TeamsDetectionStatus | null }) {
 
   return (
     <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-      <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
-        <p className="text-xs text-slate-400">Platform</p>
+      <div className="rounded-xl border border-border bg-muted p-3">
+        <p className="text-xs text-muted-foreground">Platform</p>
         <p className="font-medium text-foreground">{status.platform}</p>
       </div>
-      <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
-        <p className="text-xs text-slate-400">Status</p>
+      <div className="rounded-xl border border-border bg-muted p-3">
+        <p className="text-xs text-muted-foreground">Status</p>
         <p className="font-medium text-foreground">{status.status}</p>
       </div>
-      <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
-        <p className="text-xs text-slate-400">Confidence</p>
+      <div className="rounded-xl border border-border bg-muted p-3">
+        <p className="text-xs text-muted-foreground">Confidence</p>
         <p className="font-medium text-foreground">
           {Math.round(status.confidence * 100)}%
         </p>
       </div>
-      <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
-        <p className="text-xs text-slate-400">Action</p>
+      <div className="rounded-xl border border-border bg-muted p-3">
+        <p className="text-xs text-muted-foreground">Action</p>
         <p className="font-medium text-foreground">
           {status.nextRecommendedAction}
         </p>
@@ -186,7 +186,7 @@ function MicrosoftSignInPanel() {
         {ms.connection.state === "connected" && (
           <>
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm text-slate-400">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                 <span>
                   {ms.connection.userDisplayName}
@@ -304,12 +304,12 @@ function OneNotePanel() {
         <div className="space-y-3">
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <label className="block text-xs font-medium text-slate-400">
+              <label className="block text-xs font-medium text-muted-foreground">
                 Notebook
               </label>
               <button
                 type="button"
-                className="flex items-center gap-1 text-xs text-slate-400 hover:text-foreground disabled:opacity-50"
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                 onClick={() => void ms.loadNotebooks()}
                 disabled={ms.loadingNotebooks}
               >
@@ -320,7 +320,7 @@ function OneNotePanel() {
               </button>
             </div>
             <select
-              className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm"
+              className="w-full rounded-xl border border-border bg-muted px-3 py-2 text-sm"
               value={selectedNotebook}
               onChange={(e) => setSelectedNotebook(e.target.value)}
               disabled={ms.loadingNotebooks}
@@ -342,7 +342,7 @@ function OneNotePanel() {
             </div>
           )}
           {!ms.loadingNotebooks && !ms.error && ms.notebooks.length === 0 && (
-            <p className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-sm text-slate-400">
+            <p className="rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
               No OneNote notebooks were returned for this account. If you expect
               notebooks here, confirm you signed in with the same account that
               owns them and that this app has the OneNote permission, then use
@@ -413,12 +413,12 @@ function PlannerPanel() {
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <div className="mb-1 flex items-center justify-between">
-                <label className="block text-xs font-medium text-slate-400">
+                <label className="block text-xs font-medium text-muted-foreground">
                   Plan
                 </label>
                 <button
                   type="button"
-                  className="flex items-center gap-1 text-xs text-slate-400 hover:text-foreground disabled:opacity-50"
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                   onClick={() => void ms.loadPlans()}
                   disabled={ms.loadingPlans}
                 >
@@ -429,7 +429,7 @@ function PlannerPanel() {
                 </button>
               </div>
               <select
-                className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm"
+                className="w-full rounded-xl border border-border bg-muted px-3 py-2 text-sm"
                 value={selectedPlan}
                 onChange={(e) => {
                   setSelectedPlan(e.target.value);
@@ -448,11 +448,11 @@ function PlannerPanel() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-400">
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
                 Bucket
               </label>
               <select
-                className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm"
+                className="w-full rounded-xl border border-border bg-muted px-3 py-2 text-sm"
                 value={selectedBucket}
                 onChange={(e) => setSelectedBucket(e.target.value)}
                 disabled={!selectedPlan || ms.loadingBuckets}
@@ -479,7 +479,7 @@ function PlannerPanel() {
             </div>
           )}
           {!ms.loadingPlans && !ms.error && ms.plans.length === 0 && (
-            <p className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-sm text-slate-400">
+            <p className="rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
               No Planner plans were returned for this account. Confirm you
               signed in with the right account and that this app has the
               Tasks.ReadWrite permission, then use Reload.
@@ -534,14 +534,14 @@ export function IntegrationsSettings() {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-3xl border border-white/10 bg-[#0e1723] p-5 shadow-xl shadow-black/20">
+      <div className="rounded-xl border border-border bg-card p-5 shadow-xl shadow-black/20">
         <div className="flex items-start gap-3">
           <ShieldCheck className="mt-0.5 h-5 w-5 text-primary" />
           <div>
-            <h2 className="text-lg font-semibold text-slate-100">
+            <h2 className="text-lg font-semibold text-foreground">
               Add-ons and integrations
             </h2>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-muted-foreground">
               Current status for meeting detection, handoff, exports, and
               advanced providers.
             </p>
@@ -558,7 +558,7 @@ export function IntegrationsSettings() {
         <div className="space-y-3">
           <DetectionSummary status={teamsStatus} />
           {teamsStatus?.reason && (
-            <p className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-sm text-slate-400">
+            <p className="rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
               {teamsStatus.reason}
             </p>
           )}
@@ -588,7 +588,7 @@ export function IntegrationsSettings() {
         state="provider"
         detail="Configured from Summary → OpenClaw provider. It can receive meeting.completed payloads and return the same notes contract as the other providers."
       >
-        <div className="flex items-center gap-2 text-sm text-slate-400">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <CheckCircle2 className="h-4 w-4 text-emerald-600" />
           <span>Available as a summary provider and handoff target.</span>
         </div>
