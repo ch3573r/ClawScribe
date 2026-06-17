@@ -38,7 +38,12 @@ fn engine() -> Option<Arc<NemotronEngine>> {
 }
 
 #[command]
-pub async fn nemotron_get_available_models() -> Result<Vec<ModelInfo>, String> {
+pub async fn nemotron_get_available_models<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<ModelInfo>, String> {
+    // Lazily initialize the engine so callers (e.g. the import/retranscribe model
+    // picker) can list Nemotron even when it isn't the selected provider yet.
+    nemotron_init(app).await?;
     let engine = engine().ok_or_else(|| "Nemotron engine not initialized".to_string())?;
     engine
         .discover_models()
