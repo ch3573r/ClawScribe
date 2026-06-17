@@ -47,6 +47,21 @@ export interface BucketInfo {
   name: string;
 }
 
+export interface PlannerTaskPreview {
+  localId: string;
+  title: string;
+  details: string;
+  owner: string | null;
+  dueDate: string | null;
+}
+
+export interface PlannerTaskInput {
+  title: string;
+  owner: string | null;
+  dueDate: string | null;
+  bucketId: string;
+}
+
 export const microsoftExportService = {
   async signIn(): Promise<void> {
     // Opens the system browser for interactive sign-in; completion arrives via
@@ -160,6 +175,32 @@ export const microsoftExportService = {
 
   async createNotebook(displayName: string): Promise<NotebookInfo> {
     return invoke<NotebookInfo>("create_onenote_notebook", { displayName });
+  },
+
+  async previewPlannerTasks(
+    meetingId: string,
+    meetingTitle: string,
+    markdown: string,
+  ): Promise<PlannerTaskPreview[]> {
+    return invoke<PlannerTaskPreview[]>("preview_planner_tasks", {
+      meetingId,
+      meetingTitle,
+      markdown,
+    });
+  },
+
+  async exportSelectedPlannerTasks(
+    meetingId: string,
+    meetingTitle: string,
+    planId: string,
+    tasks: PlannerTaskInput[],
+  ): Promise<ExportReport> {
+    return invoke<ExportReport>("export_selected_planner_tasks", {
+      meetingId,
+      meetingTitle,
+      planId,
+      tasks,
+    });
   },
 
   async createBucket(planId: string, name: string): Promise<BucketInfo> {

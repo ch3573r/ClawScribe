@@ -1,6 +1,6 @@
 //! Tauri commands for Microsoft Graph auth and exports.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::exports::auth;
@@ -479,6 +479,166 @@ pub async fn export_meeting_markdown_to_planner(
     }
 
     Ok(report.into())
+}
+
+// ── Planner export preview / selected export ─────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannerTaskPreview {
+    pub local_id: String,
+    pub title: String,
+    pub details: String,
+    pub owner: Option<String>,
+    pub due_date: Option<String>,
+}
+
+/// Parse a meeting summary's action items for the Planner export preview, so the
+/// user can review, edit, deselect, and route them to buckets before anything is
+/// created in Planner.
+#[tauri::command]
+pub async fn preview_planner_tasks(
+    meeting_id: String,
+    meeting_title: String,
+    markdown: String,
+) -> Result<Vec<PlannerTaskPreview>, String> {
+    let meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
+        &meeting_id,
+        &meeting_title,
+        None,
+        &markdown,
+    );
+    let previews = meeting_export
+        .action_items
+        .iter()
+        .map(|action| PlannerTaskPreview {
+            local_id: action.local_action_id.clone(),
+            title: action.task.clone(),
+            details: crate::exports::planner::build_task_details_description(
+                &meeting_export,
+                action,
+            ),
+            owner: action.owner.clone(),
+            due_date: action.due_date.clone(),
+        })
+        .collect();
+    Ok(previews)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannerTaskInput {
+    pub title: String,
+    pub owner: Option<String>,
+    pub due_date: Option<String>,
+    pub bucket_id: String,
+}
+
+/// Export a user-reviewed set of Planner tasks. Each task carries its own bucket,
+/// so action items from one meeting can be routed to different buckets. Tasks are
+/// grouped by bucket and created through the normal Planner exporter (dedupe +
+/// retries per bucket), then the per-bucket reports are merged.
+#[tauri::command]
+pub async fn export_selected_planner_tasks(
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+    meeting_title: String,
+    plan_id: String,
+    tasks: Vec<PlannerTaskInput>,
+) -> Result<ExportReportResponse, String> {
+    use std::collections::BTreeMap;
+
+    let tasks: Vec<PlannerTaskInput> = tasks
+        .into_iter()
+        .filter(|t| !t.title.trim().is_empty() && !t.bucket_id.trim().is_empty())
+        .collect();
+    if tasks.is_empty() {
+        return Err("No tasks selected to export.".to_string());
+    }
+
+    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+
+    let mut by_bucket: BTreeMap<String, Vec<PlannerTaskInput>> = BTreeMap::new();
+    for task in tasks {
+        by_bucket.entry(task.bucket_id.clone()).or_default().push(task);
+    }
+
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+    let ctx = ExportContext {
+        tenant_id: &tenant_id,
+        user_id: &user_id,
+        bearer_token: &token,
+    };
+
+    let mut merged_items: Vec<ExportItemResult> = Vec::new();
+    let mut expired = false;
+
+    for (bucket_id, group) in by_bucket {
+        let mut action_items: Vec<crate::exports::model::ExportActionItem> = group
+            .into_iter()
+            .map(|t| crate::exports::model::ExportActionItem {
+                local_action_id: String::new(),
+                task: t.title,
+                owner: t.owner,
+                due_date: t.due_date,
+            })
+            .collect();
+        crate::exports::planner::ensure_local_action_ids(&mut action_items);
+
+        let meeting_export = crate::exports::model::MeetingExport {
+            meeting_id: meeting_id.clone(),
+            title: meeting_title.clone(),
+            created_at: None,
+            executive_summary: String::new(),
+            decisions: Vec::new(),
+            action_items,
+            transcript_excerpt: None,
+            summary_html: None,
+        };
+
+        let mut ledger = ExportLedger::new(&meeting_id);
+        let destination = PlannerDestination {
+            plan_id: plan_id.clone(),
+            bucket_id,
+        };
+
+        let report =
+            exporter::export_planner(&client, &mut ledger, &meeting_export, &destination, &ctx)
+                .await
+                .map_err(|e| e.to_string())?;
+        if report.connection_state == Some(MicrosoftConnectionState::Expired) {
+            expired = true;
+        }
+        let resp: ExportReportResponse = report.into();
+        merged_items.extend(resp.items);
+    }
+
+    if expired {
+        let mut inner = state.inner.write().await;
+        inner.connection_state = MicrosoftConnectionState::Expired;
+    }
+
+    let overall = if merged_items.is_empty() {
+        "failed".to_string()
+    } else if merged_items
+        .iter()
+        .all(|i| i.status == "succeeded" || i.status == "skipped")
+    {
+        "succeeded".to_string()
+    } else {
+        "partial".to_string()
+    };
+
+    Ok(ExportReportResponse {
+        overall,
+        connection_state: if expired {
+            Some("expired".to_string())
+        } else {
+            None
+        },
+        items: merged_items,
+    })
 }
 
 // ── Discovery commands ──────────────────────────────────────────────────

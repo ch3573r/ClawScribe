@@ -537,7 +537,7 @@ function PlannerPanel() {
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
-    ? "Select a plan and bucket for action item exports."
+    ? "Pick a plan and a default bucket. You can review tasks and re-route each one per export."
     : "Sign in with Microsoft above to enable Planner export.";
 
   return (
@@ -588,7 +588,7 @@ function PlannerPanel() {
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                Bucket
+                Default Bucket
               </label>
               <select
                 className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"

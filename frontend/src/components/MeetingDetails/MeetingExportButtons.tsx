@@ -23,6 +23,7 @@ import {
   hasOneNoteDestination,
   hasPlannerDestination,
 } from "@/lib/exportDestinations";
+import { PlannerExportPreview } from "./PlannerExportPreview";
 
 interface MeetingExportButtonsProps {
   meetingId: string;
@@ -71,6 +72,7 @@ export function MeetingExportButtons({
   const [busy, setBusy] = useState<Busy>(null);
 
   const [oneNoteOpen, setOneNoteOpen] = useState(false);
+  const [plannerOpen, setPlannerOpen] = useState(false);
   const [sectionName, setSectionName] = useState("");
 
   useEffect(() => {
@@ -171,33 +173,17 @@ export function MeetingExportButtons({
     }
   }, [sectionName, getMarkdown, meetingId, meetingTitle, reportToast]);
 
-  const exportPlanner = useCallback(async () => {
+  // Planner export opens a review dialog (pick/edit/route action items) rather
+  // than creating tasks immediately.
+  const openPlanner = useCallback(() => {
     if (!hasPlannerDestination(getExportDestinations())) {
-      toast.info("Pick a Planner plan and bucket first", {
+      toast.info("Pick a Planner plan and default bucket first", {
         description: "Settings → Add-ons → Planner task export.",
       });
       return;
     }
-    setBusy("planner");
-    try {
-      const md = await getMarkdown();
-      const { planId, bucketId } = getExportDestinations();
-      const report = await microsoftExportService.exportMeetingMarkdownToPlanner(
-        meetingId,
-        meetingTitle,
-        md,
-        planId!,
-        bucketId!,
-      );
-      reportToast("Planner", report);
-    } catch (e) {
-      toast.error("Planner export failed", {
-        description: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      setBusy(null);
-    }
-  }, [getMarkdown, meetingId, meetingTitle, reportToast]);
+    setPlannerOpen(true);
+  }, []);
 
   // Export requires a Microsoft connection; the Add-ons panel handles sign-in.
   if (!connected) return null;
@@ -225,9 +211,9 @@ export function MeetingExportButtons({
           type="button"
           variant="outline"
           size="sm"
-          onClick={exportPlanner}
+          onClick={openPlanner}
           disabled={busy !== null}
-          title="Export action items to Planner"
+          title="Review and export action items to Planner"
         >
           {busy === "planner" ? (
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -281,6 +267,19 @@ export function MeetingExportButtons({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PlannerExportPreview
+        open={plannerOpen}
+        onOpenChange={(o) => !busy && setPlannerOpen(o)}
+        meetingId={meetingId}
+        meetingTitle={meetingTitle}
+        planId={getExportDestinations().planId ?? ""}
+        planName={getExportDestinations().planName}
+        defaultBucketId={getExportDestinations().bucketId ?? ""}
+        defaultBucketName={getExportDestinations().bucketName}
+        getMarkdown={getMarkdown}
+        onReport={(report) => reportToast("Planner", report)}
+      />
     </div>
   );
 }
