@@ -35,8 +35,12 @@ use ort::value::TensorRef;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::features::MelExtractor;
+
+/// Caps the on-device diagnostic logging to the first few windows.
+static DBG: AtomicU32 = AtomicU32::new(0);
 
 // Fixed model geometry (identical across the int8/fp16 exports — config.json).
 const MEL_BINS: usize = 128;
@@ -318,8 +322,37 @@ impl NemotronModel {
         }
         drop(outputs);
 
+        // First few windows: log encoder-output sanity so an empty transcript is
+        // diagnosable on-device (zeros/NaN ⇒ bad mel/mask; all-blank ⇒ decode).
+        let dbg = DBG.fetch_add(1, Ordering::Relaxed) < 4;
+        if dbg {
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            let mut sum = 0.0f64;
+            let mut nan = 0usize;
+            for &v in enc.iter() {
+                if v.is_nan() {
+                    nan += 1;
+                } else {
+                    mn = mn.min(v);
+                    mx = mx.max(v);
+                    sum += v as f64;
+                }
+            }
+            log::info!(
+                "Nemotron enc: shape={:?} min={:.3} max={:.3} mean={:.4} nan={}",
+                enc.shape(),
+                mn,
+                mx,
+                sum / enc.len().max(1) as f64,
+                nan
+            );
+        }
+
         // Greedy RNN-T over the committed encoder frames.
         let mut emitted = String::new();
+        let mut emit_count = 0usize;
+        let mut first_best = (-1i32, 0.0f32, 0.0f32); // (token, its logit, blank logit)
         for frame in 0..t_out {
             let mut enc_vec = Vec::with_capacity(ENCODER_HIDDEN);
             for k in 0..ENCODER_HIDDEN {
@@ -329,12 +362,31 @@ impl NemotronModel {
             for _ in 0..MAX_SYMBOLS {
                 let logits = self.joint_step(&enc_frame, dec_hidden)?;
                 let best = argmax(&logits);
+                if dbg && first_best.0 < 0 {
+                    first_best = (
+                        best,
+                        logits.get(best as usize).copied().unwrap_or(0.0),
+                        logits.get(BLANK_ID as usize).copied().unwrap_or(0.0),
+                    );
+                }
                 if best == BLANK_ID {
                     break;
                 }
                 emitted.push_str(&self.token_to_text(best));
+                emit_count += 1;
                 self.decoder_step(best as i64, dec_h, dec_c, dec_hidden)?;
             }
+        }
+        if dbg {
+            log::info!(
+                "Nemotron decode: t_out={} emitted={} first_best=(tok={} logit={:.3} blank_logit={:.3}) text={:?}",
+                t_out,
+                emit_count,
+                first_best.0,
+                first_best.1,
+                first_best.2,
+                emitted.chars().take(40).collect::<String>()
+            );
         }
         Ok(emitted)
     }
