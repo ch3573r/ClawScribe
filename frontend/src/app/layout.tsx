@@ -87,6 +87,7 @@ export default function RootLayout({
     // Push the stored Parakeet DirectML preference to the backend on startup so
     // it applies before the first recording even if Beta settings isn't opened.
     void import('@/lib/parakeetAccel').then((m) => m.applyParakeetDirectml())
+    void import('@/lib/nemotronAccel').then((m) => m.applyNemotronDirectml())
   }, [])
 
   useEffect(() => {

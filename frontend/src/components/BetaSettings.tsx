@@ -10,6 +10,7 @@ import {
   BETA_FEATURE_DESCRIPTIONS,
 } from "@/types/betaFeatures";
 import { getParakeetDirectml, setParakeetDirectml } from "@/lib/parakeetAccel";
+import { getNemotronDirectml, setNemotronDirectml } from "@/lib/nemotronAccel";
 import {
   getSourceAttribution,
   setSourceAttribution,
@@ -30,6 +31,17 @@ export function BetaSettings() {
   const onToggleParakeetDml = (checked: boolean) => {
     setParakeetDml(checked);
     void setParakeetDirectml(checked);
+  };
+
+  // Nemotron DirectML (GPU) — Nemotron is heavy on CPU; DirectML is the only
+  // GPU path for ONNX on Windows (the Vulkan build only accelerates Whisper).
+  const [nemotronDml, setNemotronDml] = useState(false);
+  useEffect(() => {
+    setNemotronDml(getNemotronDirectml());
+  }, []);
+  const onToggleNemotronDml = (checked: boolean) => {
+    setNemotronDml(checked);
+    void setNemotronDirectml(checked);
   };
 
   // Source attribution (Me/Participants) — experimental, opt-in (default off).
@@ -112,6 +124,33 @@ export function BetaSettings() {
           </div>
           <div className="ml-6">
             <Switch checked={parakeetDml} onCheckedChange={onToggleParakeetDml} />
+          </div>
+        </div>
+      </div>
+
+      {/* Nemotron GPU acceleration (DirectML) — experimental, opt-in */}
+      <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div className="flex-1">
+            <div className="mb-2 flex items-center gap-2">
+              <Cpu className="h-5 w-5 text-muted-foreground" />
+              <h3 className="text-lg font-semibold text-foreground">
+                GPU transcription (Nemotron · DirectML)
+              </h3>
+              <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
+                BETA
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Run Nemotron through DirectML on your GPU instead of the CPU.
+              Nemotron is heavy on the CPU, so this is the main way to make it
+              fast on Windows (the Vulkan build only accelerates Whisper, not
+              ONNX models). Requires a DirectML-enabled build; takes effect on
+              the next recording or import. Windows only.
+            </p>
+          </div>
+          <div className="ml-6">
+            <Switch checked={nemotronDml} onCheckedChange={onToggleNemotronDml} />
           </div>
         </div>
       </div>
