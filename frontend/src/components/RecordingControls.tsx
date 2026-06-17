@@ -398,7 +398,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     ? 'flex items-center gap-3 bg-transparent p-0 shadow-none'
     : 'flex items-center space-x-2 bg-card rounded-full shadow-sm px-4 py-2';
   const startButtonClassName = isDashboard
-    ? `h-16 w-16 flex items-center justify-center rounded-full text-foreground shadow-[0_0_34px_rgba(34,211,238,0.42)] transition-all relative ${isStarting || isProcessing || isRecordingDisabled || isValidatingModel ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-cyan-400 to-blue-600 hover:scale-105 hover:shadow-[0_0_44px_rgba(34,211,238,0.6)]'}`
+    ? `h-16 w-16 flex items-center justify-center rounded-full text-primary-foreground shadow-[0_0_34px_hsl(var(--primary)/0.42)] transition-all relative ${isStarting || isProcessing || isRecordingDisabled || isValidatingModel ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-primary to-primary/70 hover:scale-105 hover:shadow-[0_0_44px_hsl(var(--primary)/0.6)]'}`
     : `w-12 h-12 flex items-center justify-center ${isStarting || isProcessing || isValidatingModel ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'} rounded-full text-foreground transition-colors relative`;
   const secondaryButtonClassName = isDashboard
     ? `h-12 w-12 flex items-center justify-center rounded-full border border-border text-foreground transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-muted text-muted-foreground' : 'bg-muted hover:bg-accent'}`
@@ -425,7 +425,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               <div
                 className={
                   isDashboard
-                    ? 'h-5 w-5 animate-spin rounded-full border-b-2 border-cyan-300'
+                    ? 'h-5 w-5 animate-spin rounded-full border-b-2 border-primary'
                     : 'animate-spin rounded-full h-5 w-5 border-b-2 border-foreground'
                 }
               ></div>
@@ -586,7 +586,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                           isPaused
                             ? 'bg-orange-400'
                             : isDashboard
-                              ? 'bg-cyan-300'
+                              ? 'bg-primary'
                               : 'bg-red-500'
                         }`}
                         style={{

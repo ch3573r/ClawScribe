@@ -26,7 +26,7 @@ const themeOptions: Record<
 > = {
   light: {
     label: "Light",
-    description: "Use the Kontron light palette",
+    description: "Use the light palette",
     Icon: Sun,
   },
   dark: {

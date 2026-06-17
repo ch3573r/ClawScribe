@@ -364,10 +364,10 @@ const Sidebar: React.FC = () => {
             <TooltipTrigger asChild>
               <button
                 onClick={handleRecordingToggle}
-                className={`flex h-10 w-10 items-center justify-center rounded-md text-foreground shadow-sm transition ${
+                className={`flex h-10 w-10 items-center justify-center rounded-md shadow-sm transition ${
                   isRecording
-                    ? "bg-red-500 hover:bg-red-600"
-                    : "bg-gradient-to-br from-cyan-400 to-blue-600 shadow-cyan-500/20 hover:scale-105"
+                    ? "bg-red-500 text-white hover:bg-red-600"
+                    : "bg-gradient-to-br from-primary to-primary/70 text-primary-foreground shadow-primary/20 hover:scale-105"
                 }`}
               >
                 {isRecording ? (
@@ -649,10 +649,10 @@ const Sidebar: React.FC = () => {
               <button
                 onClick={handleRecordingToggle}
                 title={isRecording ? "Click to stop recording" : undefined}
-                className={`flex w-full items-center justify-center gap-2 rounded-md px-3 py-3 text-sm font-semibold text-foreground shadow-sm transition ${
+                className={`flex w-full items-center justify-center gap-2 rounded-md px-3 py-3 text-sm font-semibold shadow-sm transition ${
                   isRecording
-                    ? "bg-red-500 hover:bg-red-600"
-                    : "bg-gradient-to-r from-cyan-400 to-blue-600 shadow-cyan-500/20 hover:from-cyan-300 hover:to-blue-500"
+                    ? "bg-red-500 text-white hover:bg-red-600"
+                    : "bg-gradient-to-r from-primary to-primary/70 text-primary-foreground shadow-primary/20 hover:from-primary hover:to-primary/60"
                 }`}
               >
                 {isRecording ? (

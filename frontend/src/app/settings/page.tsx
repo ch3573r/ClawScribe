@@ -132,7 +132,7 @@ export default function SettingsPage() {
               })}
 
               <motion.div
-                className="absolute bottom-0 z-20 h-0.5 bg-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.6)]"
+                className="absolute bottom-0 z-20 h-0.5 bg-primary shadow-[0_0_18px_hsl(var(--primary)/0.6)]"
                 layoutId="underline"
                 style={{
                   left: underlineStyle.left,
