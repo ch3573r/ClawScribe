@@ -616,3 +616,28 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
     log::info!("Opened Parakeet models folder: {}", folder_path);
     Ok(())
 }
+
+/// Beta (opt-in): route Parakeet inference through the DirectML (Windows GPU)
+/// execution provider. Unloads any loaded model so the change applies on the
+/// next load. No effect unless the build includes the `directml` feature.
+#[command]
+pub async fn set_parakeet_use_directml(enabled: bool) -> Result<(), String> {
+    crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+
+    let engine = {
+        let guard = PARAKEET_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    if let Some(engine) = engine {
+        engine.unload_model().await;
+    }
+    log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
+    Ok(())
+}
+
+#[command]
+pub async fn get_parakeet_use_directml() -> Result<bool, String> {
+    Ok(crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
+        .load(std::sync::atomic::Ordering::Relaxed))
+}

@@ -1,6 +1,8 @@
 use ndarray::{Array, Array1, Array2, Array3, ArrayD, ArrayViewD, IxDyn};
 use once_cell::sync::Lazy;
 use ort::execution_providers::CPUExecutionProvider;
+#[cfg(feature = "directml")]
+use ort::execution_providers::DirectMLExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -62,10 +64,17 @@ impl Drop for ParakeetModel {
 }
 
 impl ParakeetModel {
-    pub fn new<P: AsRef<Path>>(model_dir: P, quantized: bool) -> Result<Self, ParakeetError> {
-        let encoder = Self::init_session(&model_dir, "encoder-model", None, quantized)?;
-        let decoder_joint = Self::init_session(&model_dir, "decoder_joint-model", None, quantized)?;
-        let preprocessor = Self::init_session(&model_dir, "nemo128", None, false)?;
+    pub fn new<P: AsRef<Path>>(
+        model_dir: P,
+        quantized: bool,
+        use_directml: bool,
+    ) -> Result<Self, ParakeetError> {
+        let encoder =
+            Self::init_session(&model_dir, "encoder-model", None, quantized, use_directml)?;
+        let decoder_joint =
+            Self::init_session(&model_dir, "decoder_joint-model", None, quantized, use_directml)?;
+        // Preprocessor is tiny — keep it on CPU to avoid DirectML transfer overhead.
+        let preprocessor = Self::init_session(&model_dir, "nemo128", None, false, false)?;
 
         let (vocab, blank_idx) = Self::load_vocab(&model_dir)?;
         let vocab_size = vocab.len();
@@ -91,8 +100,19 @@ impl ParakeetModel {
         model_name: &str,
         intra_threads: Option<usize>,
         try_quantized: bool,
+        use_directml: bool,
     ) -> Result<Session, ParakeetError> {
-        let providers = vec![CPUExecutionProvider::default().build()];
+        // DirectML (Windows GPU) when compiled in and enabled; CPU is always the
+        // fallback so unsupported ops — and non-directml builds — still run.
+        let mut providers = Vec::new();
+        #[cfg(feature = "directml")]
+        if use_directml {
+            log::info!("Parakeet: registering DirectML execution provider for {model_name}");
+            providers.push(DirectMLExecutionProvider::default().build());
+        }
+        #[cfg(not(feature = "directml"))]
+        let _ = use_directml;
+        providers.push(CPUExecutionProvider::default().build());
 
         // Try quantized version first if requested, fallback to regular version
         let model_filename = if try_quantized {

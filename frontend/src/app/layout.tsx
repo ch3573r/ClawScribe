@@ -84,6 +84,12 @@ export default function RootLayout({
   }, [])
 
   useEffect(() => {
+    // Push the stored Parakeet DirectML preference to the backend on startup so
+    // it applies before the first recording even if Beta settings isn't opened.
+    void import('@/lib/parakeetAccel').then((m) => m.applyParakeetDirectml())
+  }, [])
+
+  useEffect(() => {
     // Check onboarding status first
     invoke<{ completed: boolean } | null>('get_onboarding_status')
       .then((status) => {

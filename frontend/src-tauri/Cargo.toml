@@ -47,6 +47,7 @@ coreml = ["whisper-rs/coreml"]     # macOS: Apple CoreML acceleration
 cuda = ["whisper-rs/cuda"]         # Windows/Linux: NVIDIA CUDA GPU
 vulkan = ["whisper-rs/vulkan"]     # Windows/Linux: AMD/Intel Vulkan GPU
 hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
+directml = ["ort/directml"]        # Windows: DirectML GPU for Parakeet (experimental, opt-in)
 
 # CPU optimizations (fallback for systems without GPU)
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)

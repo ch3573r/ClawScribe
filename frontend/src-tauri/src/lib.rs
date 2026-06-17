@@ -623,6 +623,8 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
+            parakeet_engine::commands::set_parakeet_use_directml,
+            parakeet_engine::commands::get_parakeet_use_directml,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,

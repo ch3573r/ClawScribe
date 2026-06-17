@@ -10,6 +10,12 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
+/// Whether to route Parakeet inference through the DirectML (Windows GPU)
+/// execution provider. Beta, opt-in: set via `set_parakeet_use_directml`, read
+/// when a model is (re)loaded. No effect unless the `directml` feature is built.
+pub static USE_PARAKEET_DIRECTML: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Quantization type for Parakeet models
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum QuantizationType {
@@ -432,7 +438,10 @@ impl ParakeetEngine {
 
                 // Load model based on quantization type
                 let quantized = model_info.quantization == QuantizationType::Int8;
-                let model = ParakeetModel::new(&model_info.path, quantized)
+                // Beta opt-in: route inference through DirectML (Windows GPU) when enabled.
+                let use_directml =
+                    USE_PARAKEET_DIRECTML.load(std::sync::atomic::Ordering::Relaxed);
+                let model = ParakeetModel::new(&model_info.path, quantized, use_directml)
                     .map_err(|e| anyhow!("Failed to load Parakeet model {}: {}", model_name, e))?;
 
                 // Update current model and model name
