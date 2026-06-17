@@ -110,23 +110,62 @@ impl NemotronModel {
         filename: &str,
         use_directml: bool,
     ) -> Result<Session, NemotronError> {
-        let mut providers = Vec::new();
+        let path = model_dir.as_ref().join(filename);
+
+        // Try DirectML first when enabled + compiled. If its EP can't initialize
+        // the graph (e.g. INT4 ops it doesn't support → E_INVALIDARG), fall back
+        // to CPU so the model still loads instead of failing the whole load.
         #[cfg(feature = "directml")]
         if use_directml {
-            log::info!("Nemotron: registering DirectML execution provider for {filename}");
-            providers.push(DirectMLExecutionProvider::default().build());
+            match Self::build_session(&path, true) {
+                Ok(session) => {
+                    log::info!("Nemotron: loaded {filename} with DirectML (GPU)");
+                    Self::log_session_io(&session, filename);
+                    return Ok(session);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Nemotron: DirectML init failed for {filename} ({e}); falling back to CPU"
+                    );
+                }
+            }
         }
         #[cfg(not(feature = "directml"))]
         let _ = use_directml;
+
+        let session = Self::build_session(&path, false)?;
+        Self::log_session_io(&session, filename);
+        Ok(session)
+    }
+
+    fn build_session(path: &Path, directml: bool) -> Result<Session, NemotronError> {
+        let mut providers = Vec::new();
+        #[cfg(feature = "directml")]
+        if directml {
+            providers.push(DirectMLExecutionProvider::default().build());
+        }
         providers.push(CPUExecutionProvider::default().build());
 
-        let session = Session::builder()?
+        let mut builder = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_execution_providers(providers)?
-            .with_parallel_execution(true)?
-            .commit_from_file(model_dir.as_ref().join(filename))?;
+            .with_execution_providers(providers)?;
 
-        // Log I/O so on-device shape mismatches are obvious on first bring-up.
+        // The DirectML EP requires sequential execution and disables memory-pattern
+        // optimization; setting parallel execution / mem pattern throws E_INVALIDARG
+        // (0x80070057) at init. CPU keeps parallel execution for throughput.
+        builder = if directml {
+            builder
+                .with_parallel_execution(false)?
+                .with_memory_pattern(false)?
+        } else {
+            builder.with_parallel_execution(true)?
+        };
+
+        Ok(builder.commit_from_file(path)?)
+    }
+
+    /// Log a session's I/O so on-device shape/type mismatches are obvious.
+    fn log_session_io(session: &Session, filename: &str) {
         for input in &session.inputs {
             log::info!(
                 "Nemotron '{}' input: name={}, type={:?}",
@@ -143,7 +182,6 @@ impl NemotronModel {
                 output.output_type
             );
         }
-        Ok(session)
     }
 
     /// Load the sentencepiece vocab. Accepts either "token id" (space-separated,
