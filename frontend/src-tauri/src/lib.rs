@@ -596,6 +596,7 @@ pub fn run() {
             analytics::commands::track_analytics_disabled,
             analytics::commands::track_analytics_transparency_viewed,
             whisper_engine::commands::whisper_init,
+            whisper_engine::commands::whisper_get_acceleration_status,
             whisper_engine::commands::whisper_get_available_models,
             whisper_engine::commands::whisper_load_model,
             whisper_engine::commands::whisper_get_current_model,

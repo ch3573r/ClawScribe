@@ -39,6 +39,58 @@ fn get_models_directory() -> Option<PathBuf> {
     MODELS_DIR.lock().unwrap().clone()
 }
 
+/// The transcription backend actually compiled into this build, plus the GPU
+/// detected at runtime. Surfaced in the UI because runtime GPU detection can't
+/// help a CPU-only binary — users need to see whether they're on the CPU build
+/// or a GPU (e.g. Vulkan) build.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhisperAccelerationStatus {
+    /// Backend compiled into the binary: "Cpu", "Vulkan", "Cuda", "Metal", "HipBlas".
+    pub compiled_backend: String,
+    /// GPU detected on this machine at runtime: "None", "Vulkan", "Cuda", "Metal", "OpenCL".
+    pub runtime_detected_gpu: String,
+    /// Whether transcription will actually run on the GPU (compiled backend != CPU).
+    pub use_gpu: bool,
+    pub flash_attn: bool,
+    /// Human-readable status, e.g. "Vulkan GPU acceleration" / "CPU processing only".
+    pub label: String,
+    /// True when a GPU was detected but the binary is CPU-only — i.e. installing
+    /// the GPU build would unlock acceleration on this machine.
+    pub gpu_available_but_unused: bool,
+    pub cpu_cores: u8,
+    pub memory_gb: u8,
+    pub performance_tier: String,
+}
+
+#[command]
+pub async fn whisper_get_acceleration_status() -> Result<WhisperAccelerationStatus, String> {
+    use crate::audio::{GpuType, HardwareProfile};
+    use crate::whisper_engine::acceleration::{
+        whisper_context_acceleration_for, WhisperCompiledBackend,
+    };
+
+    let profile = HardwareProfile::detect();
+    let backend = WhisperCompiledBackend::current();
+    let accel =
+        whisper_context_acceleration_for(backend, profile.gpu_type, profile.performance_tier);
+
+    let gpu_available_but_unused =
+        !accel.use_gpu && !matches!(profile.gpu_type, GpuType::None);
+
+    Ok(WhisperAccelerationStatus {
+        compiled_backend: backend.as_str().to_string(),
+        runtime_detected_gpu: format!("{:?}", profile.gpu_type),
+        use_gpu: accel.use_gpu,
+        flash_attn: accel.flash_attn,
+        label: accel.status_label().to_string(),
+        gpu_available_but_unused,
+        cpu_cores: profile.cpu_cores,
+        memory_gb: profile.memory_gb,
+        performance_tier: format!("{:?}", profile.performance_tier),
+    })
+}
+
 #[command]
 pub async fn whisper_init() -> Result<(), String> {
     let mut guard = WHISPER_ENGINE.lock().unwrap();
