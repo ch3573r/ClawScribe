@@ -3,14 +3,10 @@
     windows_subsystem = "windows"
 )]
 
-use env_logger;
-use log;
-
+// Logging is initialized by tauri-plugin-log (registered in app_lib::run),
+// which writes to a file in the app log dir, stdout, and the webview console.
+// We intentionally do NOT init env_logger here — only one global logger can be
+// set, and double-init panics.
 fn main() {
-    std::env::set_var("RUST_LOG", "info");
-    env_logger::init();
-
-    // Async logger will be initialized lazily when first needed (after Tauri runtime starts)
-    log::info!("Starting application...");
     app_lib::run();
 }

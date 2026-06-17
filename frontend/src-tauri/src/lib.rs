@@ -422,6 +422,26 @@ pub fn run() {
     }
 
     builder
+        // File + stdout + webview logging. The file lives in the app log dir
+        // (Windows: %APPDATA%\net.rismondo.openclaw.clawscribe\logs\ClawScribe.log).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                // Bounded so logs never clutter the disk: rotate at 5 MB and keep
+                // only the single most recent rotated file (so ~10 MB max total).
+                .max_file_size(5_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
