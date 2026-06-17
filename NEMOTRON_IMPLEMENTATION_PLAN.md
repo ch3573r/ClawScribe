@@ -1,8 +1,18 @@
 # Nemotron 3.5 ASR Streaming 0.6B — Implementation Map
 
-Status: **in progress** (scaffolding). Target: add Nemotron as a third local
-transcription engine alongside Whisper and Parakeet, with full feature parity —
-selectable in the model picker, downloadable like the others, labelled BETA.
+Status: **wired end-to-end, pending on-device validation.** Nemotron is a third
+local transcription engine alongside Whisper and Parakeet — selectable in the
+picker + Settings, downloadable, labelled BETA, and routed through live
+recording, import, and retranscription. The inference tensor shapes
+(caches/LSTM-states/joint frames) and the `lang_id` table still need validation
+on a real Windows box with the 790 MB INT4 model (can't run in CI).
+
+Done: §3 module (`features.rs` mel + tests, `model.rs` streaming RNN-T,
+`nemotron_engine.rs` catalog/download/load, `commands.rs`), §4 wiring (provider,
+engine.rs dispatch, lib.rs registration, import.rs/retranscription.rs,
+`useTranscriptionModels`, `NemotronModelManager`, `TranscriptSettings`,
+`LanguageSelection`). Remaining: §6 open items (on-device shape/mel/lang_id
+validation), and benchmark vs Parakeet int8 on the i5-1235u.
 
 Model: `onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4`
 (HF, INT4, ~790 MB). NeMo FastConformer **streaming RNN-T**, multilingual
