@@ -24,10 +24,10 @@ on:
         type: string
         default: ""
       directml:
-        description: Also enable the DirectML feature (Parakeet GPU, experimental)
+        description: Include the DirectML EP (GPU transcription for Parakeet/Nemotron). On by default; toggle-gated at runtime (defaults off). Set false to exclude.
         required: false
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: clawscribe-windows-release-${{ github.ref }}
