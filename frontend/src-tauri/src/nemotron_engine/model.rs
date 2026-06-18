@@ -35,12 +35,8 @@ use ort::value::TensorRef;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::features::MelExtractor;
-
-/// Caps the on-device diagnostic logging to the first few windows.
-static DBG: AtomicU32 = AtomicU32::new(0);
 
 // Fixed model geometry (identical across the int8/fp16 exports — config.json).
 const MEL_BINS: usize = 128;
@@ -91,7 +87,12 @@ pub struct NemotronModel {
 impl NemotronModel {
     pub fn new<P: AsRef<Path>>(model_dir: P) -> Result<Self, NemotronError> {
         let dir = model_dir.as_ref();
-        let encoder = Self::init_session(dir, "encoder.onnx")?;
+        // The encoder is the heavy part AND the one DirectML mishandles. Try it
+        // on DirectML (graph optimizations disabled — a DML fusion/layout rewrite
+        // is the prime suspect for the encoder collapse) and self-test the output;
+        // fall back to CPU if it's still collapsed. decoder/joint are tiny and
+        // correct on CPU, so keep them there.
+        let encoder = Self::load_encoder(dir)?;
         let decoder = Self::init_session(dir, "decoder.onnx")?;
         let joint = Self::init_session(dir, "joint.onnx")?;
         let vocab = Self::load_vocab(dir)?;
@@ -112,12 +113,8 @@ impl NemotronModel {
         })
     }
 
-    /// Runs Nemotron on the CPU EP. DirectML miscomputes this conformer encoder
-    /// — its output collapses to ~±0.25 (vs ~±8 on CPU) for BOTH int8 and fp16,
-    /// so the joint only ever sees blank. The decoder/joint are fine on DirectML
-    /// but the encoder isn't, so we keep the whole model on CPU where fp16 is
-    /// verified correct. (Revisit GPU via a DirectML graph-optimization-disabled
-    /// probe or a QDQ re-export — see notes.)
+    /// CPU session (decoder/joint, and the encoder's fallback). fp16 runs
+    /// correctly here; int8's ConvInteger has no CPU kernel → clear error.
     fn init_session<P: AsRef<Path>>(
         model_dir: P,
         filename: &str,
@@ -133,6 +130,83 @@ impl NemotronModel {
         })
     }
 
+    /// Load the encoder, preferring DirectML (GPU) with graph optimizations
+    /// DISABLED — the encoder collapses on DML at full optimization, and a buggy
+    /// DML fusion/layout rewrite is the prime suspect. We self-test the loaded
+    /// session and fall back to CPU if the output is still collapsed, so the
+    /// model is always correct (worst case: slower CPU).
+    fn load_encoder(dir: &Path) -> Result<Session, NemotronError> {
+        let path = dir.join("encoder.onnx");
+        #[cfg(feature = "directml")]
+        {
+            match Self::build_session(&path, true) {
+                Ok(mut session) => {
+                    if Self::encoder_self_test(&mut session) {
+                        log::info!("Nemotron encoder: DirectML (GPU), self-test passed");
+                        return Ok(session);
+                    }
+                    log::warn!(
+                        "Nemotron encoder: DirectML output collapsed (self-test failed); using CPU"
+                    );
+                }
+                Err(e) => log::warn!("Nemotron encoder: DirectML init failed ({e}); using CPU"),
+            }
+        }
+        let session = Self::init_session(dir, "encoder.onnx")?;
+        log::info!("Nemotron encoder: CPU");
+        Ok(session)
+    }
+
+    /// Feed a synthetic energetic mel through the encoder and check the output
+    /// isn't collapsed. A correct encoder yields activations well above ±1; the
+    /// broken-DML path collapses to ~±0.25.
+    #[cfg(feature = "directml")]
+    fn encoder_self_test(enc: &mut Session) -> bool {
+        let mut audio = Array::zeros((1, MEL_BINS, CHUNK_MEL_FRAMES));
+        for b in 0..MEL_BINS {
+            for t in 0..CHUNK_MEL_FRAMES {
+                audio[[0, b, t]] = (b as f32 * 0.13 + t as f32 * 0.31).sin() * 3.0;
+            }
+        }
+        let audio = audio.into_dyn();
+        let length = Array1::<i32>::from_vec(vec![CHUNK_MEL_FRAMES as i32]);
+        let chl = Array1::<i32>::from_vec(vec![0]);
+        let mut mask = Array2::<f32>::zeros((1, NUM_PROMPTS));
+        mask[[0, 0]] = 1.0;
+        let mask = mask.into_dyn();
+        let pre = ArrayD::<f32>::zeros(IxDyn(&[1, MEL_BINS, PRE_CACHE_SIZE]));
+        let clc =
+            ArrayD::<f32>::zeros(IxDyn(&[ENCODER_LAYERS, 1, ATTN_LEFT_CONTEXT, ENCODER_HIDDEN]));
+        let clt =
+            ArrayD::<f32>::zeros(IxDyn(&[ENCODER_LAYERS, 1, ENCODER_HIDDEN, CONV_CACHE_SIZE]));
+        let run = (|| -> Result<f32, NemotronError> {
+            let out = enc.run(inputs![
+                "audio_signal" => TensorRef::from_array_view(audio.view())?,
+                "audio_length" => TensorRef::from_array_view(length.view())?,
+                "language_mask" => TensorRef::from_array_view(mask.view())?,
+                "pre_cache" => TensorRef::from_array_view(pre.view())?,
+                "cache_last_channel" => TensorRef::from_array_view(clc.view())?,
+                "cache_last_time" => TensorRef::from_array_view(clt.view())?,
+                "cache_last_channel_len" => TensorRef::from_array_view(chl.view())?,
+            ])?;
+            let e = out
+                .get("encoded_output")
+                .ok_or_else(|| NemotronError::OutputNotFound("encoded_output".into()))?
+                .try_extract_array::<f32>()?;
+            Ok(e.iter().fold(0.0f32, |m, &x| m.max(x.abs())))
+        })();
+        match run {
+            Ok(max_abs) => {
+                log::info!("Nemotron encoder self-test: max|out|={max_abs:.3} (collapsed if <1)");
+                max_abs > 1.0
+            }
+            Err(e) => {
+                log::warn!("Nemotron encoder self-test run failed: {e}");
+                false
+            }
+        }
+    }
+
     fn build_session(path: &Path, directml: bool) -> Result<Session, NemotronError> {
         let mut providers = Vec::new();
         #[cfg(feature = "directml")]
@@ -141,10 +215,16 @@ impl NemotronModel {
         }
         providers.push(CPUExecutionProvider::default().build());
 
+        // DirectML: disable graph optimizations (suspected fusion bug) + use the
+        // EP-required sequential execution / no memory pattern. CPU: full opt.
+        let opt = if directml {
+            GraphOptimizationLevel::Disable
+        } else {
+            GraphOptimizationLevel::Level3
+        };
         let mut builder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_optimization_level(opt)?
             .with_execution_providers(providers)?;
-        // DirectML requires sequential execution + no memory pattern.
         builder = if directml {
             builder
                 .with_parallel_execution(false)?
@@ -332,35 +412,8 @@ impl NemotronModel {
         }
         drop(outputs);
 
-        // First few windows: log encoder-output sanity so an empty transcript is
-        // diagnosable on-device (zeros/NaN ⇒ bad mel/mask; all-blank ⇒ decode).
-        let dbg = DBG.fetch_add(1, Ordering::Relaxed) < 4;
-        if dbg {
-            let mut mn = f32::INFINITY;
-            let mut mx = f32::NEG_INFINITY;
-            let mut sum = 0.0f64;
-            let mut nan = 0usize;
-            for &v in enc.iter() {
-                if v.is_nan() {
-                    nan += 1;
-                } else {
-                    mn = mn.min(v);
-                    mx = mx.max(v);
-                    sum += v as f64;
-                }
-            }
-            let (dh_mn, dh_mx, dh_abs) = stats(dec_hidden);
-            log::info!(
-                "Nemotron enc: shape={:?} min={:.3} max={:.3} mean={:.4} nan={} | dec_hidden min={:.3} max={:.3} absmean={:.4}",
-                enc.shape(), mn, mx, sum / enc.len().max(1) as f64, nan,
-                dh_mn, dh_mx, dh_abs
-            );
-        }
-
         // Greedy RNN-T over the committed encoder frames.
         let mut emitted = String::new();
-        let mut emit_count = 0usize;
-        let mut first_best = (-1i32, 0.0f32, 0.0f32); // (token, its logit, blank logit)
         for frame in 0..t_out {
             let mut enc_vec = Vec::with_capacity(ENCODER_HIDDEN);
             for k in 0..ENCODER_HIDDEN {
@@ -370,46 +423,12 @@ impl NemotronModel {
             for _ in 0..MAX_SYMBOLS {
                 let logits = self.joint_step(&enc_frame, dec_hidden)?;
                 let best = argmax(&logits);
-                if dbg && first_best.0 < 0 {
-                    // Best NON-blank token + its logit, to compare against blank.
-                    let mut nb_idx = 0i32;
-                    let mut nb_val = f32::NEG_INFINITY;
-                    for (i, &v) in logits.iter().take(N_LOGITS).enumerate() {
-                        if i as i32 != BLANK_ID && v > nb_val {
-                            nb_val = v;
-                            nb_idx = i as i32;
-                        }
-                    }
-                    log::info!(
-                        "Nemotron joint: best_nonblank=(tok={} logit={:.3}) blank_logit={:.3}",
-                        nb_idx,
-                        nb_val,
-                        logits.get(BLANK_ID as usize).copied().unwrap_or(0.0)
-                    );
-                    first_best = (
-                        best,
-                        logits.get(best as usize).copied().unwrap_or(0.0),
-                        logits.get(BLANK_ID as usize).copied().unwrap_or(0.0),
-                    );
-                }
                 if best == BLANK_ID {
                     break;
                 }
                 emitted.push_str(&self.token_to_text(best));
-                emit_count += 1;
                 self.decoder_step(best as i64, dec_h, dec_c, dec_hidden)?;
             }
-        }
-        if dbg {
-            log::info!(
-                "Nemotron decode: t_out={} emitted={} first_best=(tok={} logit={:.3} blank_logit={:.3}) text={:?}",
-                t_out,
-                emit_count,
-                first_best.0,
-                first_best.1,
-                first_best.2,
-                emitted.chars().take(40).collect::<String>()
-            );
         }
         Ok(emitted)
     }
@@ -462,26 +481,21 @@ impl NemotronModel {
     }
 
     fn token_to_text(&self, id: i32) -> String {
-        match self.vocab.get(id as usize) {
-            // SentencePiece ▁ (U+2581) → leading space.
-            Some(p) if p.starts_with('\u{2581}') => format!(" {}", &p['\u{2581}'.len_utf8()..]),
-            Some(p) => p.clone(),
-            None => String::new(),
+        let piece = match self.vocab.get(id as usize) {
+            Some(p) => p.as_str(),
+            None => return String::new(),
+        };
+        // Strip the SentencePiece word-boundary marker.
+        let (lead, body) = match piece.strip_prefix('\u{2581}') {
+            Some(rest) => (" ", rest),
+            None => ("", piece),
+        };
+        // Drop special / language-prompt tokens like <en-US>, <unk>, <bg-BG>.
+        if body.starts_with('<') && body.ends_with('>') {
+            return String::new();
         }
+        format!("{lead}{body}")
     }
-}
-
-/// (min, max, mean-of-abs) over a tensor — for diagnostic logging.
-fn stats(a: &ArrayD<f32>) -> (f32, f32, f64) {
-    let mut mn = f32::INFINITY;
-    let mut mx = f32::NEG_INFINITY;
-    let mut abs = 0.0f64;
-    for &v in a.iter() {
-        mn = mn.min(v);
-        mx = mx.max(v);
-        abs += v.abs() as f64;
-    }
-    (mn, mx, abs / a.len().max(1) as f64)
 }
 
 fn argmax(logits: &[f32]) -> i32 {
