@@ -137,6 +137,12 @@ impl NemotronModel {
     /// back to CPU if no level matches.
     fn load_encoder(dir: &Path) -> Result<Session, NemotronError> {
         let path = dir.join("encoder.onnx");
+        // Benchmark lever: NEMOTRON_FORCE_CPU=1 skips the DirectML probe so the
+        // same audio can be timed CPU-only vs GPU for an honest RTF comparison.
+        if std::env::var("NEMOTRON_FORCE_CPU").is_ok_and(|v| !v.is_empty() && v != "0") {
+            log::info!("Nemotron encoder: NEMOTRON_FORCE_CPU set — forcing CPU execution");
+            return Self::init_session(dir, "encoder.onnx");
+        }
         #[cfg(feature = "directml")]
         {
             let mut cpu_session = Self::init_session(dir, "encoder.onnx")?;
