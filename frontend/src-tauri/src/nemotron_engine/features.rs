@@ -40,7 +40,7 @@ impl MelExtractor {
     pub fn new() -> Self {
         Self {
             planner: RealFftPlanner::<f32>::new(),
-            window: build_hann(WIN_LENGTH),
+            window: build_centered_hann(WIN_LENGTH, N_FFT),
             mel_filters: build_mel_filterbank(),
         }
     }
@@ -56,10 +56,11 @@ impl MelExtractor {
             return vec![Vec::new(); N_MELS];
         }
 
-        // Matches soniqo speech-core: the MULTILINGUAL path (compute_mel) applies
-        // pre-emphasis 0.97, THEN the shared mel.cpp spectrogram (left-aligned
-        // symmetric Hann of win_length, win_length-based framing, reflect center
-        // padding, no per-feature normalization).
+        // Matches the model's training preprocessing (librosa/torch-style, which
+        // we verified end-to-end against the int8 ONNX): pre-emphasis 0.97, then
+        // an STFT with the win_length Hann window CENTERED inside the n_fft frame
+        // (NOT left-aligned), center reflect padding, slaney mel, log(x+2^-24),
+        // and NO per-feature normalization.
         let mut emph = vec![0.0f32; samples.len()];
         emph[0] = samples[0];
         for i in 1..samples.len() {
@@ -71,8 +72,8 @@ impl MelExtractor {
         let padded = reflect_pad(&emph, pad);
 
         let n_bins = N_FFT / 2 + 1;
-        let n_frames = if padded.len() >= WIN_LENGTH {
-            1 + (padded.len() - WIN_LENGTH) / HOP_LENGTH
+        let n_frames = if padded.len() >= N_FFT {
+            1 + (padded.len() - N_FFT) / HOP_LENGTH
         } else {
             0
         };
@@ -86,12 +87,9 @@ impl MelExtractor {
 
         for f in 0..n_frames {
             let start = f * HOP_LENGTH;
-            // Left-aligned windowed frame: window the first win_length samples,
-            // zero-pad the tail to n_fft.
-            for v in frame_buf.iter_mut() {
-                *v = 0.0;
-            }
-            for i in 0..WIN_LENGTH {
+            // Centered window: self.window is the periodic Hann placed in the
+            // middle of an n_fft-length buffer (zeros on the outer edges).
+            for i in 0..N_FFT {
                 frame_buf[i] = padded[start + i] * self.window[i];
             }
             r2c.process(&mut frame_buf, &mut spectrum)
@@ -124,14 +122,17 @@ impl Default for MelExtractor {
     }
 }
 
-/// Symmetric Hann window of `win` samples (denominator `win - 1`), matching
-/// speech-core mel.cpp. Applied to the first `win` samples of the n_fft frame.
-fn build_hann(win: usize) -> Vec<f32> {
-    (0..win)
-        .map(|i| {
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (win as f32 - 1.0)).cos())
-        })
-        .collect()
+/// Periodic Hann window of `win` samples (librosa/torch fftbins=True →
+/// denominator `win`), CENTERED inside an `n_fft` buffer (zeros on the outer
+/// `(n_fft - win)/2` samples each side), matching librosa.util.pad_center.
+fn build_centered_hann(win: usize, n_fft: usize) -> Vec<f32> {
+    let mut w = vec![0.0f32; n_fft];
+    let off = (n_fft - win) / 2;
+    for i in 0..win {
+        let x = (std::f32::consts::PI * i as f32 / win as f32).sin();
+        w[off + i] = x * x; // sin²(πi/win) = 0.5(1 - cos(2πi/win)) = periodic Hann
+    }
+    w
 }
 
 /// Reflect-pad by `pad` on each end, matching speech-core mel.cpp:
