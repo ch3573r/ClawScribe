@@ -376,6 +376,8 @@ impl NemotronModel {
         let lang_mask = mask.into_dyn();
 
         let t0 = std::time::Instant::now();
+        let mut enc_ms = 0.0f64;
+        let mut dec_ms = 0.0f64;
         let mut text = String::new();
         for k in 0..total_windows {
             text.push_str(&self.run_window(
@@ -390,12 +392,14 @@ impl NemotronModel {
                 &mut dec_h,
                 &mut dec_c,
                 &mut dec_hidden,
+                &mut enc_ms,
+                &mut dec_ms,
             )?);
         }
         let secs = (padded.len() as f32 / 16_000.0).max(0.001);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         log::info!(
-            "Nemotron segment: {secs:.1}s audio, {windows} windows, {ms:.0}ms compute, RTF {:.2} (lower=faster)",
+            "Nemotron segment: {secs:.1}s audio, {windows} windows, {ms:.0}ms compute (encoder {enc_ms:.0}ms, decode {dec_ms:.0}ms), RTF {:.2} (lower=faster)",
             (ms / 1000.0) / secs,
             windows = total_windows
         );
@@ -416,6 +420,8 @@ impl NemotronModel {
         dec_h: &mut ArrayD<f32>,
         dec_c: &mut ArrayD<f32>,
         dec_hidden: &mut ArrayD<f32>,
+        enc_ms: &mut f64,
+        dec_ms: &mut f64,
     ) -> Result<String, NemotronError> {
         // Slice the contiguous 32-frame window [f0 .. f0+32] out of the
         // segment's continuous mel (zero-pad any frames past the end).
@@ -430,6 +436,7 @@ impl NemotronModel {
         let audio_length = Array1::<i32>::from_vec(vec![CHUNK_MEL_FRAMES as i32]);
         let chl = Array1::<i32>::from_vec(vec![*ch_len]);
 
+        let t_enc = std::time::Instant::now();
         let outputs = self.encoder.run(inputs![
             "audio_signal" => TensorRef::from_array_view(audio.view())?,
             "audio_length" => TensorRef::from_array_view(audio_length.view())?,
@@ -439,6 +446,7 @@ impl NemotronModel {
             "cache_last_time" => TensorRef::from_array_view(clt.view())?,
             "cache_last_channel_len" => TensorRef::from_array_view(chl.view())?,
         ])?;
+        *enc_ms += t_enc.elapsed().as_secs_f64() * 1000.0;
 
         // Own the encoder output + roll caches, then drop `outputs` so the
         // borrow on `self.encoder` is released before the decode loop (which
@@ -477,6 +485,7 @@ impl NemotronModel {
         drop(outputs);
 
         // Greedy RNN-T over the committed encoder frames.
+        let t_dec = std::time::Instant::now();
         let mut emitted = String::new();
         for frame in 0..t_out {
             let mut enc_vec = Vec::with_capacity(ENCODER_HIDDEN);
@@ -494,6 +503,7 @@ impl NemotronModel {
                 self.decoder_step(best as i64, dec_h, dec_c, dec_hidden)?;
             }
         }
+        *dec_ms += t_dec.elapsed().as_secs_f64() * 1000.0;
         Ok(emitted)
     }
 
