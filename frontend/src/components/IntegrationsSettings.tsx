@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
   AlertTriangle,
+  CalendarClock,
   CheckCircle2,
   Cloud,
   FileCheck2,
@@ -1135,6 +1136,133 @@ function CodexPanel() {
   );
 }
 
+function formatEventTime(start: string | null, end: string | null): string {
+  if (!start) return "Time unknown";
+  const s = new Date(start);
+  const sStr = s.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  if (!end) return sStr;
+  const eStr = new Date(end).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${sStr} – ${eStr}`;
+}
+
+function attendeeLabel(a: { name: string | null; email: string | null }): string {
+  return a.name?.trim() || a.email?.trim() || "Unknown";
+}
+
+// Read-only calendar view: current/next meeting and the next 24h, with the
+// invited attendees ("attendance"). Sign-in-gated; reloads on auth changes.
+function CalendarPanel() {
+  const ms = useMicrosoftExport();
+  const isConnected = ms.connection.state === "connected";
+
+  useEffect(() => {
+    if (
+      isConnected &&
+      ms.calendarEvents.length === 0 &&
+      !ms.currentMeeting &&
+      !ms.loadingCalendar
+    ) {
+      void ms.loadCalendar();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected]);
+
+  const panelState: AddonState = isConnected ? "connected" : "signin";
+  const detail = isConnected
+    ? "Your current/next meeting and upcoming events, with invited attendees."
+    : "Sign in with Microsoft above to see your calendar.";
+  const current = ms.currentMeeting;
+
+  return (
+    <AddonPanel icon={CalendarClock} title="Calendar" state={panelState} detail={detail}>
+      {isConnected && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground">
+              Current / next meeting
+            </span>
+            <button
+              type="button"
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              onClick={() => void ms.loadCalendar()}
+              disabled={ms.loadingCalendar}
+            >
+              <RefreshCw className={`h-3 w-3 ${ms.loadingCalendar ? "animate-spin" : ""}`} />
+              Reload
+            </button>
+          </div>
+
+          {current ? (
+            <div className="rounded-lg border border-border bg-muted/50 p-3">
+              <div className="flex items-center gap-2">
+                <span className="truncate text-sm font-medium text-foreground">
+                  {current.subject || "(no title)"}
+                </span>
+                {current.isOnlineMeeting && (
+                  <span className="shrink-0 rounded-full border border-transparent bg-blue-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    Online
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {formatEventTime(current.start, current.end)}
+              </p>
+              {current.attendees.length > 0 && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  <span className="font-medium">Attendees:</span>{" "}
+                  {current.attendees.slice(0, 8).map(attendeeLabel).join(", ")}
+                  {current.attendees.length > 8
+                    ? ` +${current.attendees.length - 8} more`
+                    : ""}
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="rounded-lg border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
+              {ms.loadingCalendar
+                ? "Loading…"
+                : "No meetings scheduled in the next 12 hours."}
+            </p>
+          )}
+
+          {ms.calendarEvents.length > 0 && (
+            <div>
+              <span className="mb-1 block text-xs font-medium text-muted-foreground">
+                Upcoming (next 24h)
+              </span>
+              <ul className="space-y-1">
+                {ms.calendarEvents.slice(0, 8).map((ev) => (
+                  <li
+                    key={ev.id}
+                    className="flex items-baseline justify-between gap-2 text-xs"
+                  >
+                    <span className="truncate text-foreground">
+                      {ev.subject || "(no title)"}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {formatEventTime(ev.start, ev.end)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {ms.error && <p className="text-xs text-destructive">{ms.error}</p>}
+        </div>
+      )}
+    </AddonPanel>
+  );
+}
+
 export function IntegrationsSettings() {
   return (
     <div className="space-y-5">
@@ -1157,6 +1285,7 @@ export function IntegrationsSettings() {
       <MicrosoftSignInPanel />
       <OneNotePanel />
       <PlannerPanel />
+      <CalendarPanel />
     </div>
   );
 }

@@ -9,6 +9,7 @@ import {
   type SectionInfo,
   type PlanInfo,
   type BucketInfo,
+  type CalendarEvent,
 } from "@/services/microsoftExportService";
 
 export function useMicrosoftExport() {
@@ -29,6 +30,10 @@ export function useMicrosoftExport() {
   const [loadingSections, setLoadingSections] = useState(false);
   const [loadingPlans, setLoadingPlans] = useState(false);
   const [loadingBuckets, setLoadingBuckets] = useState(false);
+
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [currentMeeting, setCurrentMeeting] = useState<CalendarEvent | null>(null);
+  const [loadingCalendar, setLoadingCalendar] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -64,6 +69,8 @@ export function useMicrosoftExport() {
         setSections([]);
         setPlans([]);
         setBuckets([]);
+        setCalendarEvents([]);
+        setCurrentMeeting(null);
       },
     ).then((fn_) => {
       unlisten = fn_;
@@ -98,6 +105,8 @@ export function useMicrosoftExport() {
       setSections([]);
       setPlans([]);
       setBuckets([]);
+      setCalendarEvents([]);
+      setCurrentMeeting(null);
       // Broadcast so the OTHER hook instances (OneNote / Planner panels, which
       // each call this hook separately) also reset and don't show stale data.
       // Sign-in already broadcasts this event from the backend.
@@ -148,6 +157,28 @@ export function useMicrosoftExport() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingBuckets(false);
+    }
+  }, []);
+
+  // Current/next meeting + the next 24h of events (with attendees).
+  const loadCalendar = useCallback(async () => {
+    setLoadingCalendar(true);
+    try {
+      const now = new Date();
+      const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      const [events, current] = await Promise.all([
+        microsoftExportService.listCalendarEvents(
+          now.toISOString(),
+          end.toISOString(),
+        ),
+        microsoftExportService.currentOrNextMeeting(),
+      ]);
+      setCalendarEvents(events);
+      setCurrentMeeting(current);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingCalendar(false);
     }
   }, []);
 
@@ -208,5 +239,9 @@ export function useMicrosoftExport() {
     createNotebook,
     createBucket,
     refreshStatus,
+    calendarEvents,
+    currentMeeting,
+    loadingCalendar,
+    loadCalendar,
   };
 }

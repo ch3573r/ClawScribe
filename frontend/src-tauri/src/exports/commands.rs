@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::exports::auth;
+use crate::exports::calendar;
 use crate::exports::client::{GraphClient, RetryPolicy, TokioSleeper};
 use crate::exports::discovery;
 use crate::exports::exporter::{self, ExportContext, OneNoteTarget};
@@ -654,6 +655,30 @@ pub async fn list_onenote_notebooks(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_notebooks(&client, &token).await
+}
+
+/// Calendar events within an explicit ISO-8601 UTC window (recurrences expanded).
+#[tauri::command]
+pub async fn list_calendar_events(
+    state: tauri::State<'_, MicrosoftAuthState>,
+    start_iso: String,
+    end_iso: String,
+) -> Result<Vec<calendar::CalendarEvent>, String> {
+    let (token, _, _) = get_token_and_context(&state).await?;
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+    calendar::list_calendar_events(&client, &token, &start_iso, &end_iso).await
+}
+
+/// The meeting happening now, else the next one within ~12h (with attendees).
+#[tauri::command]
+pub async fn current_or_next_meeting(
+    state: tauri::State<'_, MicrosoftAuthState>,
+) -> Result<Option<calendar::CalendarEvent>, String> {
+    let (token, _, _) = get_token_and_context(&state).await?;
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+    calendar::current_or_next_meeting(&client, &token).await
 }
 
 /// OneNote notebook names reject `?*\/:<>|'#` and must be 128 characters or
