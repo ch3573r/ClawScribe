@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   microsoftExportService,
   type MicrosoftConnectionInfo,
@@ -57,6 +57,13 @@ export function useMicrosoftExport() {
           userDisplayName: event.payload.userDisplayName ?? null,
           userEmail: event.payload.userEmail ?? null,
         });
+        // Any auth transition (sign-in, sign-out, account switch) invalidates
+        // previously-loaded discovery data. Clear it everywhere so each panel
+        // re-fetches fresh and never shows the prior account's notebooks/plans.
+        setNotebooks([]);
+        setSections([]);
+        setPlans([]);
+        setBuckets([]);
       },
     ).then((fn_) => {
       unlisten = fn_;
@@ -91,6 +98,10 @@ export function useMicrosoftExport() {
       setSections([]);
       setPlans([]);
       setBuckets([]);
+      // Broadcast so the OTHER hook instances (OneNote / Planner panels, which
+      // each call this hook separately) also reset and don't show stale data.
+      // Sign-in already broadcasts this event from the backend.
+      await emit("microsoft-auth-complete", { state: "not_connected" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }

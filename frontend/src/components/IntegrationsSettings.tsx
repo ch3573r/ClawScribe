@@ -68,18 +68,21 @@ function stateBadge(state: AddonState) {
 
 function stateClasses(state: AddonState) {
   switch (state) {
+    // Solid saturated pills with white text: readable in both light and dark
+    // mode, and immune to the globals.css `.dark .bg-*-100` overrides that
+    // otherwise hijack soft-tint utilities in dark mode (unreadable text).
     case "ready":
     case "connected":
-      return "border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-100";
+      return "border-transparent bg-emerald-600 text-white";
     case "connecting":
     case "signin":
-      return "border-blue-300 bg-blue-100 text-blue-900 dark:border-blue-700 dark:bg-blue-900/60 dark:text-blue-100";
+      return "border-transparent bg-blue-600 text-white";
     case "prompt":
-      return "border-blue-300 bg-blue-100 text-blue-900 dark:border-blue-700 dark:bg-blue-900/60 dark:text-blue-100";
+      return "border-transparent bg-blue-600 text-white";
     case "provider":
       return "border-primary/30 bg-primary/15 text-primary";
     case "advanced":
-      return "border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-700 dark:bg-amber-900/60 dark:text-amber-100";
+      return "border-transparent bg-amber-600 text-white";
     case "planned":
     default:
       return "border-border bg-muted text-foreground";
@@ -913,13 +916,13 @@ function TeamsAutoStartPanel() {
       : mode === "prompt"
         ? {
             label: "Prompt",
-            classes:
-              "border-blue-300 bg-blue-100 text-blue-900 dark:border-blue-700 dark:bg-blue-900/60 dark:text-blue-100",
+            // Solid pill + white text: readable in both modes and immune to the
+            // globals.css `.dark .bg-blue-100` override.
+            classes: "border-transparent bg-blue-600 text-white",
           }
         : {
             label: "Auto-record",
-            classes:
-              "border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-100",
+            classes: "border-transparent bg-emerald-600 text-white",
           };
   return (
     <AddonPanel
