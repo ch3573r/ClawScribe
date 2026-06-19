@@ -6,7 +6,8 @@ After analyzing the src-tauri codebase, I've identified several areas requiring 
 ## Key Issues Identified
 
 ### 1. **Legacy Code Presence**
-- **`lib_old_complex.rs`** (2,437 lines) - Large legacy file that appears to contain old implementation
+- Legacy copied source files have been removed from the tracked tree. Avoid
+  reintroducing `.old`, `.backup`, or copied implementation files.
 - **Dual Audio Systems** - Both `audio/` and `audio_v2/` modules exist, indicating migration in progress
 - Multiple `pub use *` wildcard imports creating unclear dependency boundaries
 
@@ -30,9 +31,9 @@ After analyzing the src-tauri codebase, I've identified several areas requiring 
 ### Phase 1: Remove Dead Code & Legacy Systems
 **Priority: High | Risk: Low | Estimated: 2-3 hours**
 
-1. **Remove legacy file**
-   - Delete `lib_old_complex.rs` after ensuring no active dependencies
-   - Update any remaining references
+1. **Keep legacy copies out of the tree**
+   - Keep removed backup files out of version control
+   - Update any remaining documentation references when cleanup removes files
 
 2. **Consolidate audio systems**
    - Evaluate audio_v2 completion status

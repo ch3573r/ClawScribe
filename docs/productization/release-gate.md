@@ -238,7 +238,7 @@ sudo scripts/smoke-openclaw-bridge.py
 Windows recorder reachability:
 
 ```powershell
-Invoke-RestMethod your-openclaw-host:8765/readyz
+Invoke-RestMethod http://openclaw.local:8765/readyz
 ```
 
 Windows app-level handoff:

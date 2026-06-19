@@ -192,7 +192,7 @@ mod app_server_tests {
 
     #[test]
     fn redacts_secret_like_strings() {
-        let redacted = redact_secrets("stderr Authorization: Bearer abcdefghijklmnopqrstuvwxyz123 api_key = sk-proj-abcdefghijklmnopqrstuvwxyz123456 refresh_token = secretrefresh1234567890");
+        let redacted = redact_secrets("stderr Authorization: Bearer testbearertokenabcdefghijklmnopqrstuvwxyz123 api_key = OPENAIAPIKEYREDACTME12345 refresh_token = secretrefresh1234567890");
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
         assert!(!redacted.contains("secretrefresh1234567890"));
@@ -2841,7 +2841,7 @@ exit 2
 
     #[test]
     fn redacts_secret_like_strings() {
-        let redacted = redact_secrets("stderr Authorization: Bearer abcdefghijklmnopqrstuvwxyz123 api_key = sk-proj-abcdefghijklmnopqrstuvwxyz123456");
+        let redacted = redact_secrets("stderr Authorization: Bearer testbearertokenabcdefghijklmnopqrstuvwxyz123 api_key = OPENAIAPIKEYREDACTME12345");
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
     }

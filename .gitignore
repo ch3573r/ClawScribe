@@ -37,6 +37,11 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env
+*.env
+*.env.*
+!.env.example
+!*.env.example
+temp.env
 
 # vercel
 .vercel
@@ -75,6 +80,18 @@ node_modules/
 experiments/
 .cursor/
 target/
+*.backup
+*_backup.*
+*.bak
+*.old
+*.tmp
+*.msi
+*.exe
+*.dll
+*.pfx
+*.p12
+*.key
+*.crt
 
 frontend/src-tauri/binaries/*
 !frontend/src-tauri/binaries/codex-app-server-runtime.json

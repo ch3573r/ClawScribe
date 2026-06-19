@@ -102,8 +102,8 @@ Observed behavior:
 
 - ClawScribe keeps backward-compatible OpenClaw handoff config in
   `openclaw.json`.
-- The default model bridge is
-  `your-openclaw-host:8765/v1/chat/completions`.
+- An example model bridge is
+  `http://openclaw.local:8765/v1/chat/completions`.
 - Saving an empty bearer token preserves an existing token.
 - The status command returns whether a bearer token exists, not the token value.
 

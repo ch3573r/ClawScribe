@@ -87,7 +87,8 @@ Remaining docs such as `docs/BUILDING.md`, `docs/GPU_ACCELERATION.md`, `docs/bui
 
 ### Archived / Legacy Code
 
-`frontend/src-tauri/src/lib_old_complex.rs` still contains Meetily notification/title strings. It appears to be retained legacy code and was not changed in this branding pass.
+Legacy copied source files have since been removed from the tracked tree; avoid
+reintroducing copied implementation files for historical branding context.
 
 ## Recording Folder Migration Recommendation
 

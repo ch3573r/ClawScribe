@@ -402,7 +402,7 @@ Use `docs/productization/release-gate.md` and `docs/openclaw-handoff.md`.
 Minimum Windows recorder check:
 
 ```powershell
-Invoke-RestMethod your-openclaw-host:8765/readyz
+Invoke-RestMethod http://openclaw.local:8765/readyz
 ```
 
 Then record a short meeting with real spoken content, wait for handoff, and

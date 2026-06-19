@@ -7,7 +7,7 @@ This fork is packaged as **ClawScribe** for Windows.
 - Windows publisher/manufacturer: `OpenClaw`
 - MSI upgrade code: `8b6aff03-4baa-5d80-9239-e65d85c288d3`
 - Bundle targets: `msi`, `nsis`
-- OpenClaw default endpoint: `your-openclaw-host:8765/meetings/completed`
+- Optional OpenClaw endpoint example: `http://openclaw.local:8765/meetings/completed`
 
 Build Windows artifacts on a Windows host with Visual Studio Build Tools,
 Windows SDK, Rust, Node.js, pnpm, and LLVM installed. The release script must

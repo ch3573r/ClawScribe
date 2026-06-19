@@ -723,7 +723,7 @@ mod tests {
         .await;
         let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
             base_url,
-            api_key: Some("sk-test-secret-value-1234567890".to_string()),
+            api_key: Some("OPENAIAPIKEYREDACTME12345".to_string()),
             model: "test-model".to_string(),
             ..OpenAICompatibleProviderConfig::default()
         })
@@ -752,7 +752,7 @@ mod tests {
         assert!(output_dir.join("follow-up-email.md").exists());
         assert!(output_dir.join("processing-log.json").exists());
         let log = fs::read_to_string(output_dir.join("processing-log.json")).unwrap();
-        assert!(!log.contains("sk-test-secret"));
+        assert!(!log.contains("OPENAIAPIKEYREDACTME12345"));
     }
 
     #[tokio::test]

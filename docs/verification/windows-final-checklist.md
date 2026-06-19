@@ -147,7 +147,7 @@ Notes:
 - From the Windows recorder, run:
 
   ```powershell
-  Invoke-RestMethod your-openclaw-host:8765/readyz
+  Invoke-RestMethod http://openclaw.local:8765/readyz
   ```
 
 - Launch ClawScribe, select `OpenClaw managed auth`, and refresh handoff status.
@@ -305,7 +305,7 @@ sudo scripts/smoke-openclaw-bridge.py
 
 From Windows:
 
-- Confirm `Invoke-RestMethod your-openclaw-host:8765/readyz` succeeds.
+- Confirm `Invoke-RestMethod http://openclaw.local:8765/readyz` succeeds.
 - Enable OpenClaw handoff in ClawScribe.
 - Record a short meeting.
 - Stop recording and wait for finalization.
