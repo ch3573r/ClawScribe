@@ -70,8 +70,8 @@ export function HomeDashboard({
       : { label: "Microphone needed", dot: "bg-amber-400", glow: "shadow-[0_0_16px_rgba(251,191,36,0.7)]" };
 
   return (
-    <div className="min-h-screen overflow-y-auto bg-background px-8 py-7 text-foreground">
-      <div className="flex w-full flex-col gap-6">
+    <div className="min-h-0 flex-1 overflow-y-auto bg-background text-foreground">
+      <div className="mx-auto flex min-h-full w-full max-w-[2400px] flex-col gap-6 px-8 py-7">
         <header className="flex items-start justify-between gap-6">
           <div>
             <h1 className="text-4xl font-semibold tracking-tight text-foreground">
