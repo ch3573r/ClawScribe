@@ -60,16 +60,20 @@ export function clearPendingCalendar(): void {
 }
 
 /**
- * Snapshot the pending selection as the *active* recording's calendar event and
- * clear pending. Call at successful record-start: this freezes the choice for
- * the in-flight recording, so changing "Use for next recording" mid-recording
- * can't rebind it. Writing pending (possibly null) also clears any stale active
- * slot left by a discarded recording.
+ * Freeze `snapshot` (read once *before* the async record-start) as the active
+ * recording's calendar event, so the title and the attendee binding always come
+ * from the same event even if "Use for next recording" changes during startup.
+ * Writing the snapshot (possibly null) also clears any stale active slot left by
+ * a discarded recording. Pending is consumed only if it's still that same
+ * snapshot, so a change made during startup (meant for the next recording) is
+ * preserved.
  */
-export function beginRecordingCalendar(): void {
+export function beginRecordingCalendar(snapshot: MeetingCalendarLink | null): void {
+  write(session(), ACTIVE_KEY, snapshot);
   const pending = getPendingCalendar();
-  write(session(), ACTIVE_KEY, pending);
-  clearPendingCalendar();
+  if (snapshot && pending && pending.eventId === snapshot.eventId) {
+    clearPendingCalendar();
+  }
 }
 
 /** Consume (read + clear) the active recording's event, to bind to its meeting. */
