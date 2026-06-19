@@ -1754,7 +1754,7 @@ export function ModelSettingsModal({
                 type="url"
                 value={openClawEndpoint}
                 onChange={(e) => setOpenClawEndpoint(e.target.value)}
-                placeholder="http://openclaw-host.local:8765/meetings/completed"
+                placeholder="https://your-openclaw-host/meetings/completed"
                 className="mt-1"
               />
             </div>
@@ -1766,7 +1766,7 @@ export function ModelSettingsModal({
                 type="url"
                 value={openClawModelEndpoint}
                 onChange={(e) => setOpenClawModelEndpoint(e.target.value)}
-                placeholder="http://openclaw-host.local:8765/v1/chat/completions"
+                placeholder="https://your-openclaw-host/v1/chat/completions"
                 className="mt-1"
               />
             </div>
