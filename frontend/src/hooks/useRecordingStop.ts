@@ -8,6 +8,7 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
+import { getPendingCalendar, setMeetingCalendar, clearPendingCalendar } from '@/lib/meetingCalendar';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -263,6 +264,19 @@ export function useRecordingStop(
           if (!meetingId) {
             console.error('No meeting_id in response:', responseData);
             throw new Error('No meeting ID received from save operation');
+          }
+
+          // Bind any pending calendar selection to THIS saved meeting now that
+          // the real id is known, then clear it — so attendees can't later
+          // attach to a different recording (the prior lazy binding could).
+          try {
+            const pendingCal = getPendingCalendar();
+            if (pendingCal) {
+              setMeetingCalendar(meetingId, pendingCal);
+              clearPendingCalendar();
+            }
+          } catch (error) {
+            console.warn('Failed to bind calendar selection to meeting:', error);
           }
 
           let shouldDetectSummaryLanguage = false;

@@ -1,64 +1,91 @@
 "use client";
 
 // Links a recording to a Microsoft calendar event (title + invited attendees),
-// for title prefill and attendee context in summaries. Persisted in
-// localStorage (UI association, not meeting content — no DB column), mirroring
-// meetingContext.ts.
+// for title prefill and attendee context in summaries. UI association, not
+// meeting content — no DB column.
 //
 // Two slots:
-//  - a single "pending" selection chosen for the *next* recording, and
-//  - a per-meeting binding keyed by meeting id (consumed from pending on the
-//    first summary, since the final meeting id isn't known at record-start).
+//  - a "pending" selection for the *next* recording, in sessionStorage so it is
+//    ephemeral (cleared when the app closes), and
+//  - a per-meeting binding in localStorage, keyed by the saved meeting id. The
+//    binding is created at record-save (when the real meeting id is known), NOT
+//    lazily at summary time, so attendees can't attach to the wrong recording.
+//
+// Privacy: only the minimal title + invited-attendee names/emails are stored
+// (no Teams join URL), and everything is cleared on Microsoft sign-out.
 
 export interface MeetingCalendarLink {
   eventId: string;
   subject: string | null;
   attendees: { name: string | null; email: string | null }[];
-  joinUrl: string | null;
 }
 
 const MEETING_PREFIX = "clawscribe.meetingCalendar.";
 const PENDING_KEY = "clawscribe.pendingCalendar";
 
-function read(key: string): MeetingCalendarLink | null {
-  if (typeof window === "undefined") return null;
+function read(store: Storage | undefined, key: string): MeetingCalendarLink | null {
   try {
-    const raw = window.localStorage.getItem(key);
+    const raw = store?.getItem(key);
     return raw ? (JSON.parse(raw) as MeetingCalendarLink) : null;
   } catch {
     return null;
   }
 }
 
-function write(key: string, link: MeetingCalendarLink | null): void {
-  if (typeof window === "undefined") return;
+function write(store: Storage | undefined, key: string, link: MeetingCalendarLink | null): void {
   try {
-    if (link) window.localStorage.setItem(key, JSON.stringify(link));
-    else window.localStorage.removeItem(key);
+    if (!store) return;
+    if (link) store.setItem(key, JSON.stringify(link));
+    else store.removeItem(key);
   } catch {
     // Best-effort; the app works without the association.
   }
 }
 
+const session = (): Storage | undefined =>
+  typeof window === "undefined" ? undefined : window.sessionStorage;
+const local = (): Storage | undefined =>
+  typeof window === "undefined" ? undefined : window.localStorage;
+
 /** The calendar event chosen for the next recording (title prefill source). */
 export function getPendingCalendar(): MeetingCalendarLink | null {
-  return read(PENDING_KEY);
+  return read(session(), PENDING_KEY);
 }
 export function setPendingCalendar(link: MeetingCalendarLink | null): void {
-  write(PENDING_KEY, link);
+  write(session(), PENDING_KEY, link);
+}
+export function clearPendingCalendar(): void {
+  write(session(), PENDING_KEY, null);
 }
 
-/** The calendar event bound to a specific meeting. */
+/** The calendar event bound to a specific saved meeting. */
 export function getMeetingCalendar(meetingId: string): MeetingCalendarLink | null {
   if (!meetingId) return null;
-  return read(MEETING_PREFIX + meetingId);
+  return read(local(), MEETING_PREFIX + meetingId);
 }
 export function setMeetingCalendar(
   meetingId: string,
   link: MeetingCalendarLink | null,
 ): void {
   if (!meetingId) return;
-  write(MEETING_PREFIX + meetingId, link);
+  write(local(), MEETING_PREFIX + meetingId, link);
+}
+
+/** Drop all calendar associations + the pending selection (on MS sign-out). */
+export function clearAllCalendarLinks(): void {
+  clearPendingCalendar();
+  const store = local();
+  if (!store) return;
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < store.length; i++) {
+      const k = store.key(i);
+      if (k && k.startsWith(MEETING_PREFIX)) keys.push(k);
+    }
+    keys.forEach((k) => store.removeItem(k));
+  } catch {
+    // best-effort
+  }
 }
 
 /** Human-readable attendee list for prompts/UI, capped for length. */

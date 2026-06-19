@@ -11,6 +11,7 @@ import {
   type BucketInfo,
   type CalendarEvent,
 } from "@/services/microsoftExportService";
+import { clearAllCalendarLinks } from "@/lib/meetingCalendar";
 
 export function useMicrosoftExport() {
   const [connection, setConnection] = useState<MicrosoftConnectionInfo>({
@@ -107,6 +108,8 @@ export function useMicrosoftExport() {
       setBuckets([]);
       setCalendarEvents([]);
       setCurrentMeeting(null);
+      // Drop any stored calendar associations (attendee PII) on sign-out.
+      clearAllCalendarLinks();
       // Broadcast so the OTHER hook instances (OneNote / Planner panels, which
       // each call this hook separately) also reset and don't show stale data.
       // Sign-in already broadcasts this event from the backend.

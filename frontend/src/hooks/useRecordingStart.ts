@@ -50,6 +50,13 @@ export function useRecordingStart(
     return `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
   }, []);
 
+  // Title every recording (home button, sidebar auto/direct) from the calendar
+  // event chosen for the next recording, if any; else the generated title.
+  const resolveMeetingTitle = useCallback(
+    () => getPendingCalendar()?.subject?.trim() || generateMeetingTitle(),
+    [generateMeetingTitle],
+  );
+
   // Check if Parakeet transcription model is ready
   const checkParakeetReady = useCallback(async (): Promise<boolean> => {
     try {
@@ -109,10 +116,7 @@ export function useRecordingStart(
 
       console.log('Parakeet ready - setting up meeting title and state');
 
-      // Prefer the calendar event chosen for the next recording (Settings →
-      // Add-ons → Calendar → "Use for next recording"); else a generated title.
-      const pendingCal = getPendingCalendar();
-      const randomTitle = pendingCal?.subject?.trim() || generateMeetingTitle();
+      const randomTitle = resolveMeetingTitle();
       setMeetingTitle(randomTitle);
 
       // Set STARTING status before initiating backend recording
@@ -145,7 +149,7 @@ export function useRecordingStart(
       // Re-throw so RecordingControls can handle device-specific errors
       throw error;
     }
-  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, checkParakeetReady, checkIfModelDownloading, selectedDevices, showModal, setStatus]);
+  }, [resolveMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, checkParakeetReady, checkIfModelDownloading, selectedDevices, showModal, setStatus]);
 
   // Check for autoStartRecording flag and start recording automatically
   useEffect(() => {
@@ -182,8 +186,8 @@ export function useRecordingStart(
 
           // Start the actual backend recording
           try {
-            // Generate meeting title
-            const generatedMeetingTitle = generateMeetingTitle();
+            // Generate meeting title (calendar event if one was chosen)
+            const generatedMeetingTitle = resolveMeetingTitle();
 
             // Set STARTING status before initiating backend recording
             setStatus(RecordingStatus.STARTING, 'Initializing recording...');
@@ -223,7 +227,7 @@ export function useRecordingStart(
     isRecording,
     isAutoStarting,
     selectedDevices,
-    generateMeetingTitle,
+    resolveMeetingTitle,
     setMeetingTitle,
     setIsRecording,
     clearTranscripts,
@@ -269,8 +273,8 @@ export function useRecordingStart(
       }
 
       try {
-        // Generate meeting title
-        const generatedMeetingTitle = generateMeetingTitle();
+        // Generate meeting title (calendar event if one was chosen)
+        const generatedMeetingTitle = resolveMeetingTitle();
 
         // Set STARTING status before initiating backend recording
         setStatus(RecordingStatus.STARTING, 'Initializing recording...');
@@ -312,7 +316,7 @@ export function useRecordingStart(
     isRecording,
     isAutoStarting,
     selectedDevices,
-    generateMeetingTitle,
+    resolveMeetingTitle,
     setMeetingTitle,
     setIsRecording,
     clearTranscripts,

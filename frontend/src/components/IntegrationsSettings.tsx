@@ -1234,7 +1234,6 @@ function CalendarPanel() {
                     eventId: current.id,
                     subject: current.subject,
                     attendees: current.attendees,
-                    joinUrl: current.joinUrl,
                   });
                   setUsedForNext(true);
                 }}
