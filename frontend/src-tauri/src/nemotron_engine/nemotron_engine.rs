@@ -18,39 +18,93 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
-/// The Nemotron model id. fp16, not int8: DirectML silently miscomputed the
-/// int8 ConvInteger encoder (output collapsed ~35x -> always blank), and the CPU
-/// EP could not run that ConvInteger export. fp16 has no ConvInteger and is
-/// verified on CPU; DirectML is attempted and self-tested at load time, with CPU
-/// fallback when the encoder output collapses.
-pub const NEMOTRON_MODEL: &str = "nemotron-streaming-0.6b-fp16";
+/// A downloadable Nemotron export. Two ship: fp16 (default, CPU-capable) and
+/// int8 (smaller, GPU-only). They share the streaming RNN-T interface but differ
+/// in repo, file layout, and — critically — whether the encoder can run on CPU.
+pub struct NemotronVariant {
+    pub id: &'static str,
+    base_url: &'static str,
+    /// Files to download with exact sizes (for resume/skip + a min-size sanity
+    /// check). Each fp16 .onnx has a sibling .onnx.data; the int8 encoder is a
+    /// single inline file with no .data.
+    files: &'static [(&'static str, u64)],
+    /// Files that must exist (and clear a min size) for the model to be Available.
+    required: &'static [(&'static str, u64)],
+    pub size_mb: u32,
+    speed: &'static str,
+    description: &'static str,
+    /// fp16 runs correctly on the CPU EP, so it gets a CPU baseline, a
+    /// CPU-vs-DirectML self-test, and CPU fallback. The int8 encoder uses
+    /// `ConvInteger`, which has no Rust CPU kernel — it is DirectML(GPU)-only,
+    /// validated by output magnitude instead, with no CPU fallback.
+    pub cpu_capable: bool,
+}
 
-const BASE_URL: &str =
-    "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-FP16/resolve/main";
+const FP16: NemotronVariant = NemotronVariant {
+    id: "nemotron-streaming-0.6b-fp16",
+    base_url: "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-FP16/resolve/main",
+    files: &[
+        ("encoder.onnx", 22_131_503),
+        ("encoder.onnx.data", 1_236_396_032),
+        ("decoder.onnx", 7_040),
+        ("decoder.onnx.data", 29_880_320),
+        ("joint.onnx", 3_207),
+        ("joint.onnx.data", 18_911_296),
+        ("vocab.json", 236_127),
+        ("config.json", 602),
+        ("languages.json", 2_020),
+    ],
+    required: &[
+        ("encoder.onnx", 10_000_000),
+        ("encoder.onnx.data", 1_100_000_000),
+        ("decoder.onnx.data", 25_000_000),
+        ("joint.onnx.data", 15_000_000),
+        ("vocab.json", 50_000),
+        ("languages.json", 500),
+    ],
+    size_mb: 1310,
+    speed: "Streaming (FP16)",
+    description:
+        "NVIDIA Nemotron 3.5 ASR — streaming, multilingual (incl. German). FP16; tries DirectML GPU and falls back to CPU if the encoder self-test fails. Beta.",
+    cpu_capable: true,
+};
 
-/// Files to download (sizes from the fp16 repo). Each .onnx graph has a sibling
-/// .onnx.data external-weights file that must sit next to it (ort loads it).
-const MODEL_FILES: &[(&str, u64)] = &[
-    ("encoder.onnx", 22_131_503),
-    ("encoder.onnx.data", 1_236_396_032),
-    ("decoder.onnx", 7_040),
-    ("decoder.onnx.data", 29_880_320),
-    ("joint.onnx", 3_207),
-    ("joint.onnx.data", 18_911_296),
-    ("vocab.json", 236_127),
-    ("config.json", 602),
-    ("languages.json", 2_020),
-];
+const INT8: NemotronVariant = NemotronVariant {
+    id: "nemotron-streaming-0.6b-int8",
+    base_url: "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main",
+    files: &[
+        ("encoder.onnx", 657_558_932),
+        ("decoder.onnx", 4_345),
+        ("decoder.onnx.data", 59_760_640),
+        ("joint.onnx", 2_023),
+        ("joint.onnx.data", 37_822_592),
+        ("vocab.json", 236_127),
+        ("config.json", 602),
+        ("languages.json", 2_020),
+    ],
+    required: &[
+        ("encoder.onnx", 500_000_000),
+        ("decoder.onnx.data", 50_000_000),
+        ("joint.onnx.data", 30_000_000),
+        ("vocab.json", 50_000),
+        ("languages.json", 500),
+    ],
+    size_mb: 755,
+    speed: "Streaming (INT8, GPU-only)",
+    description:
+        "NVIDIA Nemotron 3.5 ASR — streaming, multilingual (incl. German). INT8; smaller and GPU-only (DirectML), no CPU fallback. Beta.",
+    cpu_capable: false,
+};
 
-/// Files that must exist (and pass a min-size check) for a model to be Available.
-const REQUIRED_FILES: &[(&str, u64)] = &[
-    ("encoder.onnx", 10_000_000),
-    ("encoder.onnx.data", 1_100_000_000),
-    ("decoder.onnx.data", 25_000_000),
-    ("joint.onnx.data", 15_000_000),
-    ("vocab.json", 50_000),
-    ("languages.json", 500),
-];
+/// Every selectable variant, in display order (fp16 first as the default).
+pub const VARIANTS: &[NemotronVariant] = &[FP16, INT8];
+
+/// Default model id when nothing is configured — fp16, which runs everywhere.
+pub const NEMOTRON_MODEL: &str = FP16.id;
+
+fn variant_for(id: &str) -> Option<&'static NemotronVariant> {
+    VARIANTS.iter().find(|v| v.id == id)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -106,41 +160,41 @@ impl NemotronEngine {
     }
 
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
-        let model_path = self.models_dir.join(NEMOTRON_MODEL);
         let active = self.active_downloads.read().await;
+        let mut infos = Vec::with_capacity(VARIANTS.len());
 
-        let status = if active.contains(NEMOTRON_MODEL) {
-            ModelStatus::Downloading { progress: 0 }
-        } else if model_path.exists() {
-            let all_ok = REQUIRED_FILES.iter().all(|(file, min)| {
-                std::fs::metadata(model_path.join(file))
-                    .map(|m| m.len() >= *min)
-                    .unwrap_or(false)
-            });
-            if all_ok {
+        for v in VARIANTS {
+            let model_path = self.models_dir.join(v.id);
+            let status = if active.contains(v.id) {
+                ModelStatus::Downloading { progress: 0 }
+            } else if model_path.exists()
+                && v.required.iter().all(|(file, min)| {
+                    std::fs::metadata(model_path.join(file))
+                        .map(|m| m.len() >= *min)
+                        .unwrap_or(false)
+                })
+            {
                 ModelStatus::Available
             } else {
                 ModelStatus::Missing
-            }
-        } else {
-            ModelStatus::Missing
-        };
+            };
 
-        let info = ModelInfo {
-            name: NEMOTRON_MODEL.to_string(),
-            path: model_path,
-            size_mb: 1310,
-            speed: "Streaming (FP16)".to_string(),
-            status,
-            description:
-                "NVIDIA Nemotron 3.5 ASR — streaming, multilingual (incl. German). FP16; tries DirectML GPU and falls back to CPU if the encoder self-test fails. Beta."
-                    .to_string(),
-        };
+            infos.push(ModelInfo {
+                name: v.id.to_string(),
+                path: model_path,
+                size_mb: v.size_mb,
+                speed: v.speed.to_string(),
+                status,
+                description: v.description.to_string(),
+            });
+        }
 
         let mut cache = self.available_models.write().await;
         cache.clear();
-        cache.insert(info.name.clone(), info.clone());
-        Ok(vec![info])
+        for info in &infos {
+            cache.insert(info.name.clone(), info.clone());
+        }
+        Ok(infos)
     }
 
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
@@ -163,8 +217,9 @@ impl NemotronEngine {
         self.unload_model().await;
 
         log::info!("Loading Nemotron model: {}", model_name);
-        // Always tries DirectML (GPU) then falls back to CPU automatically.
-        let model = NemotronModel::new(&path)
+        // fp16 tries DirectML then falls back to CPU; int8 is GPU-only.
+        let cpu_capable = variant_for(model_name).map(|v| v.cpu_capable).unwrap_or(true);
+        let model = NemotronModel::new(&path, cpu_capable)
             .map_err(|e| anyhow!("Failed to load Nemotron model {}: {}", model_name, e))?;
 
         *self.current_model.write().await = Some(model);
@@ -216,6 +271,8 @@ impl NemotronEngine {
         model_name: &str,
         progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
+        let variant = variant_for(model_name)
+            .ok_or_else(|| anyhow!("Unknown Nemotron model {}", model_name))?;
         {
             let active = self.active_downloads.read().await;
             if active.contains(model_name) {
@@ -251,9 +308,9 @@ impl NemotronEngine {
             .build()
             .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
 
-        let total_size_bytes: u64 = MODEL_FILES.iter().map(|(_, s)| *s).sum();
+        let total_size_bytes: u64 = variant.files.iter().map(|(_, s)| *s).sum();
         let mut already: u64 = 0;
-        for (filename, expected) in MODEL_FILES {
+        for (filename, expected) in variant.files {
             if let Ok(m) = fs::metadata(model_dir.join(filename)).await {
                 already += m.len().min(*expected);
             }
@@ -263,8 +320,8 @@ impl NemotronEngine {
         let mut last_report = Instant::now();
         let mut last_pct: u8 = 0;
 
-        for (filename, expected_size) in MODEL_FILES.iter() {
-            let file_url = format!("{}/{}", BASE_URL, filename);
+        for (filename, expected_size) in variant.files.iter() {
+            let file_url = format!("{}/{}", variant.base_url, filename);
             let file_path = model_dir.join(filename);
             let existing_size: u64 = fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
 

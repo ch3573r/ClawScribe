@@ -85,13 +85,13 @@ pub struct NemotronModel {
 }
 
 impl NemotronModel {
-    pub fn new<P: AsRef<Path>>(model_dir: P) -> Result<Self, NemotronError> {
+    pub fn new<P: AsRef<Path>>(model_dir: P, cpu_capable: bool) -> Result<Self, NemotronError> {
         let dir = model_dir.as_ref();
-        // The encoder is the heavy part. Try it on DirectML (graph optimizations
-        // disabled), compare a deterministic probe against CPU, and fall back if
-        // DML disagrees. decoder/joint are tiny and correct on CPU, so keep them
-        // there.
-        let encoder = Self::load_encoder(dir)?;
+        // The encoder is the heavy part. fp16 (cpu_capable) tries DirectML with a
+        // CPU-vs-DML self-test and CPU fallback; int8 is DirectML(GPU)-only. The
+        // decoder/joint are tiny and run on CPU for both (int8's are MatMul-based,
+        // not ConvInteger, so the CPU EP handles them).
+        let encoder = Self::load_encoder(dir, cpu_capable)?;
         let decoder = Self::init_session(dir, "decoder.onnx")?;
         let joint = Self::init_session(dir, "joint.onnx")?;
         let vocab = Self::load_vocab(dir)?;
@@ -135,18 +135,59 @@ impl NemotronModel {
     /// encoder on DML, but a lower level is usually both correct AND much faster
     /// than fully-disabled (fewer, fused kernels → real GPU utilization). Falls
     /// back to CPU if no level matches.
-    fn load_encoder(dir: &Path) -> Result<Session, NemotronError> {
-        let path = dir.join("encoder.onnx");
-        // Benchmark lever: NEMOTRON_FORCE_CPU=1 skips the DirectML probe so the
-        // same audio can be timed CPU-only vs GPU for an honest RTF comparison.
-        if std::env::var("NEMOTRON_FORCE_CPU").is_ok_and(|v| !v.is_empty() && v != "0") {
+    fn load_encoder(dir: &Path, cpu_capable: bool) -> Result<Session, NemotronError> {
+        // Benchmark lever (fp16 only): NEMOTRON_FORCE_CPU=1 skips the DirectML
+        // probe so the same audio can be timed CPU-only vs GPU for an honest RTF
+        // comparison. int8's ConvInteger encoder has no CPU kernel, so the lever
+        // doesn't apply to it.
+        if cpu_capable
+            && std::env::var("NEMOTRON_FORCE_CPU").is_ok_and(|v| !v.is_empty() && v != "0")
+        {
             log::info!("Nemotron encoder: NEMOTRON_FORCE_CPU set — forcing CPU execution");
             return Self::init_session(dir, "encoder.onnx");
         }
         #[cfg(feature = "directml")]
         {
-            let mut cpu_session = Self::init_session(dir, "encoder.onnx")?;
+            let path = dir.join("encoder.onnx");
             use GraphOptimizationLevel as G;
+            // int8: the ConvInteger encoder can't build on the CPU EP, so there's
+            // no CPU baseline to diff against and no CPU fallback. Probe DirectML
+            // graph-opt levels and accept the first whose ramp-probe output isn't
+            // collapsed — a correct encoder peaks ~8, the graph-opt fusion bug
+            // collapses it to ~0.3. GPU-only: error out if every level collapses.
+            if !cpu_capable {
+                for opt in [G::Level3, G::Level2, G::Level1, G::Disable] {
+                    let lvl = format!("{opt:?}");
+                    match Self::build_dml_session(&path, opt) {
+                        Ok(mut session) => match Self::encoder_probe_output(&mut session) {
+                            Ok(probe) => {
+                                let pmax = probe.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+                                if pmax > 2.0 {
+                                    log::info!(
+                                        "Nemotron encoder: DirectML (GPU) @ graph_opt={lvl}, probe |max|={pmax:.3} (int8, GPU-only)"
+                                    );
+                                    return Ok(session);
+                                }
+                                log::warn!(
+                                    "Nemotron encoder: DirectML @ graph_opt={lvl} probe collapsed (|max|={pmax:.3}); trying a lower level"
+                                );
+                            }
+                            Err(e) => log::warn!(
+                                "Nemotron encoder: DirectML probe @ graph_opt={lvl} failed ({e})"
+                            ),
+                        },
+                        Err(e) => log::warn!(
+                            "Nemotron encoder: DirectML init @ graph_opt={lvl} failed ({e})"
+                        ),
+                    }
+                }
+                log::error!("Nemotron int8 encoder: no DirectML graph_opt level produced valid output (int8 is GPU-only, no CPU fallback)");
+                return Err(NemotronError::CpuUnsupported);
+            }
+
+            // fp16: build a CPU baseline, then accept the first DirectML level
+            // whose output matches it; fall back to CPU if none do.
+            let mut cpu_session = Self::init_session(dir, "encoder.onnx")?;
             for opt in [G::Level3, G::Level2, G::Level1, G::Disable] {
                 let lvl = format!("{opt:?}");
                 match Self::build_dml_session(&path, opt) {
@@ -169,9 +210,16 @@ impl NemotronModel {
             log::warn!("Nemotron encoder: no DirectML graph_opt level matched CPU; using CPU");
             return Ok(cpu_session);
         }
-        let session = Self::init_session(dir, "encoder.onnx")?;
-        log::info!("Nemotron encoder: CPU");
-        Ok(session)
+        // Built without DirectML: fp16 runs on CPU; int8 cannot.
+        #[cfg(not(feature = "directml"))]
+        {
+            if !cpu_capable {
+                return Err(NemotronError::CpuUnsupported);
+            }
+            let session = Self::init_session(dir, "encoder.onnx")?;
+            log::info!("Nemotron encoder: CPU");
+            Ok(session)
+        }
     }
 
     /// Feed a deterministic mel-shaped probe through CPU and DML and require the
