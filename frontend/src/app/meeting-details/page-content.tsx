@@ -9,6 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
+import { MeetingChat } from '@/components/MeetingDetails/MeetingChat';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 
 // Custom hooks
@@ -245,6 +246,11 @@ export default function PageContent({
           onOpenModelSettings={handleRegisterModalOpen}
         />
       </div>
+      <MeetingChat
+        meetingId={meeting.id}
+        provider={modelConfig?.provider}
+        model={modelConfig?.model}
+      />
     </motion.div>
   );
 }

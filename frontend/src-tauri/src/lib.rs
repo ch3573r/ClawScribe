@@ -761,6 +761,10 @@ pub fn run() {
             // Summary commands
             summary::commands::api_process_transcript,
             summary::commands::polish_planner_tasks,
+            // Meeting chat (transcript-grounded)
+            summary::chat_commands::api_chat_send,
+            summary::chat_commands::api_chat_history,
+            summary::chat_commands::api_chat_clear,
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
             summary::commands::api_get_meeting_summary_language,

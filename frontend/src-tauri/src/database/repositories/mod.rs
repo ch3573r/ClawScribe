@@ -1,3 +1,4 @@
+pub mod ai_chat;
 pub mod meeting;
 pub mod setting;
 pub mod summary;

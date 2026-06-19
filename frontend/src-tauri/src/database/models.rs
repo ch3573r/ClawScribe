@@ -39,6 +39,17 @@ pub struct Transcript {
     pub speaker: Option<String>,
 }
 
+/// One turn of the transcript-grounded meeting chat. `role` is "user" or
+/// "assistant"; `created_at` is an RFC3339 string (matches the TEXT column).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct AiChatMessage {
+    pub id: String,
+    pub meeting_id: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SummaryProcess {
     pub meeting_id: String,

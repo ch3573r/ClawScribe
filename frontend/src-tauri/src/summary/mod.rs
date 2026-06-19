@@ -36,6 +36,7 @@ pub struct CustomOpenAIConfig {
     pub top_p: Option<f32>,
 }
 
+pub mod chat_commands;
 pub mod codex_provider;
 pub mod commands;
 pub(crate) mod language_detection;
