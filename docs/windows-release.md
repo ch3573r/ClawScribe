@@ -104,8 +104,8 @@ frontend\src-tauri\target\release\bundle\BUILD-METADATA.txt
 Expected artifact names currently look like:
 
 ```text
-ClawScribe_0.5.1-alpha.2_x64_en-US.msi
-ClawScribe_0.5.1-alpha.2_x64-setup.exe
+ClawScribe_0.5.2-alpha.1_x64_en-US.msi
+ClawScribe_0.5.2-alpha.1_x64-setup.exe
 SHA256SUMS.txt
 BUILD-METADATA.txt
 ```
@@ -116,7 +116,7 @@ package, source URL, and license.
 
 The release script generates `SHA256SUMS.txt` after a successful installer
 build. Checksum entries are relative to the bundle root, for example
-`msi/ClawScribe_0.5.1-alpha.2_x64_en-US.msi`, so this command verifies cleanly
+`msi/ClawScribe_0.5.2-alpha.1_x64_en-US.msi`, so this command verifies cleanly
 from `frontend\src-tauri\target\release\bundle`:
 
 ```powershell
