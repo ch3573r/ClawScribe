@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   Cloud,
   FileCheck2,
+  FileText,
   ListTodo,
   Loader2,
   LogIn,
@@ -746,6 +747,91 @@ function PlannerPanel() {
   );
 }
 
+function ConfluenceDraftPanel() {
+  const saved = getExportDestinations();
+  const [createUrl, setCreateUrl] = useState(saved.confluenceCreateUrl ?? "");
+  const [openAfterCopy, setOpenAfterCopy] = useState(
+    saved.confluenceOpenAfterCopy ?? true,
+  );
+  const trimmedUrl = createUrl.trim();
+
+  useEffect(() => {
+    setExportDestinations({
+      confluenceCreateUrl: trimmedUrl || undefined,
+      confluenceOpenAfterCopy: openAfterCopy,
+    });
+  }, [openAfterCopy, trimmedUrl]);
+
+  return (
+    <AddonPanel
+      icon={FileText}
+      title="Confluence draft export"
+      state="ready"
+      badgeLabel={trimmedUrl ? "Ready" : "Copy only"}
+      badgeClasses={
+        trimmedUrl
+          ? "border-transparent bg-emerald-600 text-white"
+          : "border-border bg-muted text-foreground"
+      }
+      detail="Copy a Confluence-ready meeting page draft and optionally open your create-page URL in the browser."
+    >
+      <div className="space-y-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-muted-foreground">
+            Create page URL
+          </label>
+          <input
+            type="url"
+            value={createUrl}
+            onChange={(e) => setCreateUrl(e.target.value)}
+            placeholder="https://example.com/confluence/pages/createpage.action?spaceKey=TEAM"
+            className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm text-foreground"
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            For Jira/Confluence behind SSO or App Proxy, this opens in your
+            browser session. No API token or REST call is used.
+          </p>
+        </div>
+
+        <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
+          <span>
+            <span className="block text-sm font-medium text-foreground">
+              Open Confluence after copying
+            </span>
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              The summary button copies rich text plus Markdown, then opens the
+              configured create-page URL so you can paste manually.
+            </span>
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={openAfterCopy}
+            onClick={() => setOpenAfterCopy((v) => !v)}
+            className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              openAfterCopy ? "bg-primary" : "bg-border"
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
+                openAfterCopy ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </label>
+
+        <div className="rounded-lg border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground">Export flow</p>
+          <p className="mt-1">
+            Meeting summary → Confluence button → clipboard → browser create
+            page. Paste into the editor and save under the space/page you want.
+          </p>
+        </div>
+      </div>
+    </AddonPanel>
+  );
+}
+
 type OpenClawSubmissionStatus = {
   state: string;
   updated_at: string;
@@ -1311,6 +1397,7 @@ export function IntegrationsSettings() {
       <MicrosoftSignInPanel />
       <OneNotePanel />
       <PlannerPanel />
+      <ConfluenceDraftPanel />
       <CalendarPanel />
     </div>
   );

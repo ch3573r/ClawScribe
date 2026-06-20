@@ -310,6 +310,7 @@ export function SummaryPanel({
               <MeetingExportButtons
                 meetingId={meeting.id}
                 meetingTitle={meetingTitle}
+                meetingCreatedAt={meeting.created_at}
                 getMarkdown={async () =>
                   (await summaryRef.current?.getMarkdown()) ?? ''
                 }

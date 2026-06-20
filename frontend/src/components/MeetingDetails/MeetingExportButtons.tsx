@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { NotebookTabs, ListTodo, Loader2 } from "lucide-react";
+import { FileText, NotebookTabs, ListTodo, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,6 +19,10 @@ import {
   type MicrosoftConnectionInfo,
 } from "@/services/microsoftExportService";
 import {
+  buildConfluenceDraftMarkdown,
+  writeConfluenceDraftToClipboard,
+} from "@/lib/confluenceDraft";
+import {
   getExportDestinations,
   hasOneNoteDestination,
   hasPlannerDestination,
@@ -28,11 +32,12 @@ import { PlannerExportPreview } from "./PlannerExportPreview";
 interface MeetingExportButtonsProps {
   meetingId: string;
   meetingTitle: string;
+  meetingCreatedAt?: string;
   /** Resolves the current summary as markdown. */
   getMarkdown: () => Promise<string>;
 }
 
-type Busy = "onenote" | "planner" | null;
+type Busy = "onenote" | "planner" | "confluence" | null;
 
 // OneNote section names reject ? * \ / : < > | & # ' % ~ " and must be < 50
 // chars (Graph 20153 / 20155). The backend sanitizes too, but we keep the
@@ -65,6 +70,7 @@ function defaultSectionName(title: string): string {
 export function MeetingExportButtons({
   meetingId,
   meetingTitle,
+  meetingCreatedAt,
   getMarkdown,
 }: MeetingExportButtonsProps) {
   const [connected, setConnected] = useState(false);
@@ -185,28 +191,68 @@ export function MeetingExportButtons({
     setPlannerOpen(true);
   }, []);
 
-  // Export requires a Microsoft connection; the Add-ons panel handles sign-in.
-  if (!connected) return null;
+  const exportConfluenceDraft = useCallback(async () => {
+    setBusy("confluence");
+    try {
+      const md = await getMarkdown();
+      if (!md.trim()) {
+        toast.info("Nothing to export yet — generate a summary first.");
+        return;
+      }
+
+      const draft = buildConfluenceDraftMarkdown({
+        meetingId,
+        meetingTitle,
+        meetingCreatedAt,
+        summaryMarkdown: md,
+      });
+      const mode = await writeConfluenceDraftToClipboard(draft);
+      const {
+        confluenceCreateUrl,
+        confluenceOpenAfterCopy = true,
+      } = getExportDestinations();
+      const url = confluenceCreateUrl?.trim();
+
+      if (url && confluenceOpenAfterCopy) {
+        window.open(url, "_blank");
+      }
+
+      toast.success("Confluence draft copied", {
+        description:
+          mode === "rich"
+            ? "Paste into the Confluence editor. Rich formatting was copied when supported."
+            : "Paste into the Confluence editor. Markdown was copied.",
+      });
+    } catch (e) {
+      toast.error("Confluence draft export failed", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [getMarkdown, meetingCreatedAt, meetingId, meetingTitle]);
 
   return (
     <div className="flex items-center gap-2">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={openOneNote}
-        disabled={busy !== null}
-        title="Export this meeting's summary to a new OneNote section"
-      >
-        {busy === "onenote" ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        ) : (
-          <NotebookTabs className="mr-2 h-4 w-4" />
-        )}
-        OneNote
-      </Button>
+      {connected && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={openOneNote}
+          disabled={busy !== null}
+          title="Export this meeting's summary to a new OneNote section"
+        >
+          {busy === "onenote" ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <NotebookTabs className="mr-2 h-4 w-4" />
+          )}
+          OneNote
+        </Button>
+      )}
 
-      {hasActionItems && (
+      {connected && hasActionItems && (
         <Button
           type="button"
           variant="outline"
@@ -223,6 +269,22 @@ export function MeetingExportButtons({
           Planner
         </Button>
       )}
+
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={exportConfluenceDraft}
+        disabled={busy !== null}
+        title="Copy a Confluence-ready draft and optionally open your configured create-page URL"
+      >
+        {busy === "confluence" ? (
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        ) : (
+          <FileText className="mr-2 h-4 w-4" />
+        )}
+        Confluence
+      </Button>
 
       <Dialog open={oneNoteOpen} onOpenChange={(o) => !busy && setOneNoteOpen(o)}>
         <DialogContent>
@@ -268,18 +330,20 @@ export function MeetingExportButtons({
         </DialogContent>
       </Dialog>
 
-      <PlannerExportPreview
-        open={plannerOpen}
-        onOpenChange={(o) => !busy && setPlannerOpen(o)}
-        meetingId={meetingId}
-        meetingTitle={meetingTitle}
-        planId={getExportDestinations().planId ?? ""}
-        planName={getExportDestinations().planName}
-        defaultBucketId={getExportDestinations().bucketId ?? ""}
-        defaultBucketName={getExportDestinations().bucketName}
-        getMarkdown={getMarkdown}
-        onReport={(report) => reportToast("Planner", report)}
-      />
+      {connected && (
+        <PlannerExportPreview
+          open={plannerOpen}
+          onOpenChange={(o) => !busy && setPlannerOpen(o)}
+          meetingId={meetingId}
+          meetingTitle={meetingTitle}
+          planId={getExportDestinations().planId ?? ""}
+          planName={getExportDestinations().planName}
+          defaultBucketId={getExportDestinations().bucketId ?? ""}
+          defaultBucketName={getExportDestinations().bucketName}
+          getMarkdown={getMarkdown}
+          onReport={(report) => reportToast("Planner", report)}
+        />
+      )}
     </div>
   );
 }

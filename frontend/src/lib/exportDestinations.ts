@@ -18,6 +18,10 @@ export interface ExportDestinations {
   bucketName?: string;
   /** AI-polish Planner task titles & notes before export (default off). */
   plannerAiPolish?: boolean;
+  /** Browser URL for creating a Confluence page draft. No REST call is made. */
+  confluenceCreateUrl?: string;
+  /** Open the configured Confluence page URL after copying the draft. */
+  confluenceOpenAfterCopy?: boolean;
 }
 
 export function getExportDestinations(): ExportDestinations {
@@ -49,4 +53,8 @@ export function hasOneNoteDestination(d: ExportDestinations = getExportDestinati
 
 export function hasPlannerDestination(d: ExportDestinations = getExportDestinations()): boolean {
   return !!d.planId && !!d.bucketId;
+}
+
+export function hasConfluenceDraftTarget(d: ExportDestinations = getExportDestinations()): boolean {
+  return !!d.confluenceCreateUrl?.trim();
 }
