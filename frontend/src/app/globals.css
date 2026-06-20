@@ -97,6 +97,14 @@
     --brand-cyan: 188 88% 52%;
     --brand-blue: 214 90% 56%;
     --brand-gradient: linear-gradient(145deg, hsl(var(--brand-cyan)), hsl(var(--brand-blue)));
+    /* Primary-action gradient, derived from the chosen accent so it follows the
+       accent picker (bold, but the switches still matter). color-mix needs a
+       modern webview — WebView2 / WKGTK both qualify. */
+    --accent-gradient: linear-gradient(
+      145deg,
+      color-mix(in oklab, hsl(var(--primary)), white 14%),
+      color-mix(in oklab, hsl(var(--primary)), black 16%)
+    );
 
     /* Light: a crisp cool-white instrument surface, not flat grey. The accent
        picker overrides --primary/--accent/--ring at runtime (default "claw"). */
@@ -311,6 +319,11 @@
      state, the logo, one hero moment. Not a general accent (that's --primary). */
   .bg-brand-gradient {
     background-image: var(--brand-gradient);
+  }
+
+  /* Primary actions — gradient that follows the accent (see --accent-gradient). */
+  .bg-accent-gradient {
+    background-image: var(--accent-gradient);
   }
 
   .text-brand-gradient {

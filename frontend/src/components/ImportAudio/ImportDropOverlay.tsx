@@ -15,12 +15,12 @@ export function ImportDropOverlay({ visible }: ImportDropOverlayProps) {
                  flex items-center justify-center pointer-events-none
                  transition-opacity duration-200"
     >
-      <div className="border-2 border-dashed border-blue-400 rounded-2xl
-                      p-12 text-center bg-blue-950/50 shadow-2xl
+      <div className="border-2 border-dashed border-primary rounded-2xl
+                      p-12 text-center bg-primary/50 shadow-2xl
                       transform scale-100 transition-transform">
-        <Upload className="h-16 w-16 text-blue-400 mx-auto mb-4" />
+        <Upload className="h-16 w-16 text-primary mx-auto mb-4" />
         <p className="text-xl font-medium text-white">Drop audio file to import</p>
-        <p className="text-sm text-blue-300 mt-2">{getAudioFormatsDisplayList()}</p>
+        <p className="text-sm text-primary mt-2">{getAudioFormatsDisplayList()}</p>
       </div>
     </div>
   );

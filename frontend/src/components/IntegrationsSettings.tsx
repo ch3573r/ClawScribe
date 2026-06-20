@@ -78,9 +78,9 @@ function stateClasses(state: AddonState) {
       return "border-transparent bg-emerald-600 text-white";
     case "connecting":
     case "signin":
-      return "border-transparent bg-blue-600 text-white";
+      return "border-transparent bg-primary text-white";
     case "prompt":
-      return "border-transparent bg-blue-600 text-white";
+      return "border-transparent bg-primary text-white";
     case "provider":
       return "border-primary/30 bg-primary/15 text-primary";
     case "advanced":
@@ -286,8 +286,8 @@ function MicrosoftSignInPanel() {
         )}
 
         {(ms.connection.state === "connecting" || ms.signingIn) && (
-          <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950/40">
-            <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-200">
+          <div className="rounded-lg border border-primary bg-primary/10 p-4 dark:border-blue-900 dark:bg-primary/40">
+            <div className="flex items-center gap-2 text-sm text-primary dark:text-primary">
               <Loader2 className="h-4 w-4 animate-spin" />
               <span>
                 Complete sign-in in your browser, then return to ClawScribe.
@@ -919,8 +919,8 @@ function TeamsAutoStartPanel() {
         ? {
             label: "Prompt",
             // Solid pill + white text: readable in both modes and immune to the
-            // globals.css `.dark .bg-blue-100` override.
-            classes: "border-transparent bg-blue-600 text-white",
+            // globals.css `.dark .bg-primary/15` override.
+            classes: "border-transparent bg-primary text-white",
           }
         : {
             label: "Auto-record",
@@ -1216,7 +1216,7 @@ function CalendarPanel() {
                   {current.subject || "(no title)"}
                 </span>
                 {current.isOnlineMeeting && (
-                  <span className="shrink-0 rounded-full border border-transparent bg-blue-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                  <span className="shrink-0 rounded-full border border-transparent bg-primary px-2 py-0.5 text-[10px] font-medium text-white">
                     Online
                   </span>
                 )}

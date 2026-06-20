@@ -68,7 +68,7 @@ export function SetupOverviewStep() {
                             <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                <button className="text-gray-400 hover:text-muted-foreground">
+                                <button className="text-muted-foreground hover:text-muted-foreground">
                                     <Info className="w-4 h-4" />
                                 </button>
                                 </TooltipTrigger>
@@ -92,7 +92,7 @@ export function SetupOverviewStep() {
         <div className="w-full max-w-xs space-y-4">
           <Button
             onClick={handleContinue}
-            className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white"
+            className="w-full h-11 bg-accent-gradient hover:brightness-110 text-primary-foreground"
           >
             Let's Go
           </Button>

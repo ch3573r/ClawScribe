@@ -20,7 +20,7 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
       className={cn(
         'flex items-center justify-between rounded-2xl border px-6 py-5',
         'transition-all duration-200',
-        isAuthorized ? 'border-gray-900 bg-muted' : isDenied ? 'border-red-300 bg-red-50' : 'bg-card border-neutral-200'
+        isAuthorized ? 'border-primary bg-muted' : isDenied ? 'border-red-300 bg-red-50' : 'bg-card border-neutral-200'
       )}
     >
       {/* Left side: Icon + Info */}
@@ -29,7 +29,7 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
         <div
           className={cn(
             'flex size-10 items-center justify-center rounded-full flex-shrink-0',
-            isAuthorized ? 'bg-gray-200' : isDenied ? 'bg-red-100' : 'bg-neutral-50'
+            isAuthorized ? 'bg-secondary' : isDenied ? 'bg-red-100' : 'bg-neutral-50'
           )}
         >
           <div className={cn(isAuthorized ? 'text-foreground' : isDenied ? 'text-red-500' : 'text-neutral-500')}>{icon}</div>

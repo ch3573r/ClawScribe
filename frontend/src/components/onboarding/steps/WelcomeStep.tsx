@@ -31,7 +31,7 @@ export function WelcomeStep() {
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Divider */}
-        <div className="w-16 h-px bg-gray-300" />
+        <div className="w-16 h-px bg-secondary" />
 
         {/* Features Card */}
         <div className="w-full max-w-md bg-card rounded-lg border border-border shadow-sm p-6 space-y-4">
@@ -54,7 +54,7 @@ export function WelcomeStep() {
         <div className="w-full max-w-xs space-y-3">
           <Button
             onClick={goNext}
-            className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white"
+            className="w-full h-11 bg-accent-gradient hover:brightness-110 text-primary-foreground"
           >
             Get Started
           </Button>
