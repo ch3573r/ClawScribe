@@ -19,6 +19,26 @@ use super::vad::ContinuousVadProcessor;
 
 /// Ring buffer for synchronized audio mixing
 /// Accumulates samples from mic and system streams until we have aligned windows
+/// Live VAD max-segment cap (ms). Set per active transcription provider at
+/// recording start; the pipeline reads it when creating the VAD. Lower = lower
+/// live latency. Default 6s (Parakeet/Whisper).
+static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
+
+/// Choose the live VAD segment cap for the active transcription provider.
+/// Nemotron transcribes each VAD segment offline at only ~2.5x realtime, so a 6s
+/// cap can leave continuous speech several seconds behind; cap its live segments
+/// shorter (3s) to cut perceived latency. Other providers keep the 6s default.
+/// Import/retranscription is unaffected — it uses silence-aware splitting, not
+/// this cap.
+pub fn set_live_max_segment_ms_for_provider(provider: &str) {
+    let ms = if provider.eq_ignore_ascii_case("nemotron") {
+        3_000
+    } else {
+        6_000
+    };
+    LIVE_MAX_SEGMENT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 struct AudioMixerRingBuffer {
     mic_buffer: VecDeque<f32>,
     system_buffer: VecDeque<f32>,
@@ -786,17 +806,18 @@ impl AudioPipeline {
         // For mac os core audio, 900ms, for windows 400ms seems good
 
         let redemption_time = if cfg!(target_os = "macos") { 400 } else { 400 };
-        const LIVE_MAX_SEGMENT_MS: u32 = 6_000;
+        // Per-provider live cap, set at recording start (shorter for Nemotron).
+        let live_max_segment_ms = LIVE_MAX_SEGMENT_MS.load(std::sync::atomic::Ordering::Relaxed);
 
         let vad_processor = match ContinuousVadProcessor::new_with_max_segment_duration(
             sample_rate,
             redemption_time,
-            Some(LIVE_MAX_SEGMENT_MS),
+            Some(live_max_segment_ms),
         ) {
             Ok(processor) => {
                 info!(
                     "VAD-driven pipeline: live speech segments capped at {}ms for lower latency",
-                    LIVE_MAX_SEGMENT_MS
+                    live_max_segment_ms
                 );
                 processor
             }

@@ -240,6 +240,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Record which transcription engine + model this session uses.
     let (tp, tm) = resolve_transcription_info(&app).await;
+    // Provider-specific live VAD cap: Nemotron is slower per segment, so cap its
+    // live segments shorter to reduce perceived latency; others keep the default.
+    crate::audio::pipeline::set_live_max_segment_ms_for_provider(tp.as_deref().unwrap_or(""));
     manager.set_transcription_info(tp, tm);
 
     // Set up error callback
@@ -436,6 +439,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Record which transcription engine + model this session uses.
     let (tp, tm) = resolve_transcription_info(&app).await;
+    // Provider-specific live VAD cap: Nemotron is slower per segment, so cap its
+    // live segments shorter to reduce perceived latency; others keep the default.
+    crate::audio::pipeline::set_live_max_segment_ms_for_provider(tp.as_deref().unwrap_or(""));
     manager.set_transcription_info(tp, tm);
 
     // Set up error callback
