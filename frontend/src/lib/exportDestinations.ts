@@ -7,6 +7,8 @@
 
 const STORAGE_KEY = "clawscribe.exportDestinations.v1";
 
+export type ConfluenceExportMode = "draft" | "rest";
+
 export interface ExportDestinations {
   notebookId?: string;
   notebookName?: string;
@@ -18,10 +20,18 @@ export interface ExportDestinations {
   bucketName?: string;
   /** AI-polish Planner task titles & notes before export (default off). */
   plannerAiPolish?: boolean;
+  /** Confluence export mode. Draft is clipboard/browser only; REST uses a saved PAT. */
+  confluenceMode?: ConfluenceExportMode;
   /** Browser URL for creating a Confluence page draft. No REST call is made. */
   confluenceCreateUrl?: string;
   /** Open the configured Confluence page URL after copying the draft. */
   confluenceOpenAfterCopy?: boolean;
+  /** Self-hosted Confluence base URL for REST export. Non-sensitive. */
+  confluenceBaseUrl?: string;
+  /** Target Confluence space key for REST export. Non-sensitive. */
+  confluenceSpaceKey?: string;
+  /** Optional parent page id for REST export. Non-sensitive. */
+  confluenceParentId?: string;
 }
 
 export function getExportDestinations(): ExportDestinations {

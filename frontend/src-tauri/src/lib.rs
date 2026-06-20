@@ -874,6 +874,10 @@ pub fn run() {
             exports::commands::current_or_next_meeting,
             exports::commands::preview_planner_tasks,
             exports::commands::export_selected_planner_tasks,
+            exports::confluence::confluence_save_pat,
+            exports::confluence::confluence_clear_pat,
+            exports::confluence::confluence_connection_status,
+            exports::confluence::confluence_export_page,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

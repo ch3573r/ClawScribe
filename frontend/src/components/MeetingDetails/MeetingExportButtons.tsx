@@ -20,6 +20,7 @@ import {
 } from "@/services/microsoftExportService";
 import {
   buildConfluenceDraftMarkdown,
+  markdownToConfluenceHtml,
   writeConfluenceDraftToClipboard,
 } from "@/lib/confluenceDraft";
 import {
@@ -27,6 +28,7 @@ import {
   hasOneNoteDestination,
   hasPlannerDestination,
 } from "@/lib/exportDestinations";
+import { confluenceExportService } from "@/services/confluenceExportService";
 import { PlannerExportPreview } from "./PlannerExportPreview";
 
 interface MeetingExportButtonsProps {
@@ -58,6 +60,19 @@ function defaultSectionName(title: string): string {
   const date = new Date().toISOString().slice(0, 10);
   const clean = (title || "Untitled meeting").trim();
   return sanitizeSectionName(`${date} ${clean}`);
+}
+
+function defaultConfluencePageTitle(title: string, createdAt?: string): string {
+  const date = createdAt ? new Date(createdAt) : new Date();
+  const stamp = Number.isNaN(date.getTime())
+    ? new Date().toISOString().slice(0, 10)
+    : date.toISOString().slice(0, 10);
+  const clean = (title || "Untitled meeting").trim();
+  return `${stamp} ${clean}`.slice(0, 240).trim();
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -191,7 +206,7 @@ export function MeetingExportButtons({
     setPlannerOpen(true);
   }, []);
 
-  const exportConfluenceDraft = useCallback(async () => {
+  const exportConfluence = useCallback(async () => {
     setBusy("confluence");
     try {
       const md = await getMarkdown();
@@ -206,13 +221,59 @@ export function MeetingExportButtons({
         meetingCreatedAt,
         summaryMarkdown: md,
       });
-      const mode = await writeConfluenceDraftToClipboard(draft);
+      const destinations = getExportDestinations();
       const {
+        confluenceMode = "draft",
         confluenceCreateUrl,
         confluenceOpenAfterCopy = true,
-      } = getExportDestinations();
+        confluenceBaseUrl,
+        confluenceSpaceKey,
+        confluenceParentId,
+      } = destinations;
       const url = confluenceCreateUrl?.trim();
 
+      if (confluenceMode === "rest") {
+        const baseUrl = confluenceBaseUrl?.trim();
+        const spaceKey = confluenceSpaceKey?.trim();
+        if (!baseUrl || !spaceKey) {
+          toast.info("Finish Confluence REST setup first", {
+            description: "Settings → Add-ons → Confluence export.",
+          });
+          return;
+        }
+
+        try {
+          const report = await confluenceExportService.exportPage({
+            baseUrl,
+            spaceKey,
+            parentId: confluenceParentId?.trim() || null,
+            title: defaultConfluencePageTitle(meetingTitle, meetingCreatedAt),
+            bodyStorage: markdownToConfluenceHtml(draft),
+          });
+
+          toast.success("Confluence export complete", {
+            description: report.webUrl ? "Page created in Confluence." : report.title,
+            action: report.webUrl
+              ? { label: "Open", onClick: () => window.open(report.webUrl!, "_blank") }
+              : undefined,
+          });
+          return;
+        } catch (restError) {
+          const copyMode = await writeConfluenceDraftToClipboard(draft);
+          if (url && confluenceOpenAfterCopy) {
+            window.open(url, "_blank");
+          }
+          toast.error("Confluence REST export failed", {
+            description:
+              copyMode === "rich"
+                ? `${errorText(restError)} Draft copied with rich formatting instead.`
+                : `${errorText(restError)} Markdown draft copied instead.`,
+          });
+          return;
+        }
+      }
+
+      const mode = await writeConfluenceDraftToClipboard(draft);
       if (url && confluenceOpenAfterCopy) {
         window.open(url, "_blank");
       }
@@ -224,8 +285,8 @@ export function MeetingExportButtons({
             : "Paste into the Confluence editor. Markdown was copied.",
       });
     } catch (e) {
-      toast.error("Confluence draft export failed", {
-        description: e instanceof Error ? e.message : String(e),
+      toast.error("Confluence export failed", {
+        description: errorText(e),
       });
     } finally {
       setBusy(null);
@@ -274,9 +335,9 @@ export function MeetingExportButtons({
         type="button"
         variant="outline"
         size="sm"
-        onClick={exportConfluenceDraft}
+        onClick={exportConfluence}
         disabled={busy !== null}
-        title="Copy a Confluence-ready draft and optionally open your configured create-page URL"
+        title="Export using your configured Confluence settings"
       >
         {busy === "confluence" ? (
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />

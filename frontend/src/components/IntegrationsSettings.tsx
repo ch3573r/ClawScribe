@@ -31,7 +31,12 @@ import { setPendingCalendar } from "@/lib/meetingCalendar";
 import {
   getExportDestinations,
   setExportDestinations,
+  type ConfluenceExportMode,
 } from "@/lib/exportDestinations";
+import {
+  confluenceExportService,
+  type ConfluenceConnectionStatus,
+} from "@/services/confluenceExportService";
 import {
   getTeamsDetectionMode,
   setTeamsDetectionMode,
@@ -747,84 +752,379 @@ function PlannerPanel() {
   );
 }
 
-function ConfluenceDraftPanel() {
+function ConfluencePanel() {
   const saved = getExportDestinations();
+  const [mode, setMode] = useState<ConfluenceExportMode>(
+    saved.confluenceMode ?? "draft",
+  );
   const [createUrl, setCreateUrl] = useState(saved.confluenceCreateUrl ?? "");
   const [openAfterCopy, setOpenAfterCopy] = useState(
     saved.confluenceOpenAfterCopy ?? true,
   );
+  const [baseUrl, setBaseUrl] = useState(saved.confluenceBaseUrl ?? "");
+  const [spaceKey, setSpaceKey] = useState(saved.confluenceSpaceKey ?? "");
+  const [parentId, setParentId] = useState(saved.confluenceParentId ?? "");
+  const [patInput, setPatInput] = useState("");
+  const [status, setStatus] = useState<ConfluenceConnectionStatus | null>(null);
+  const [busy, setBusy] = useState<"save" | "clear" | "test" | null>(null);
   const trimmedUrl = createUrl.trim();
+  const trimmedBaseUrl = baseUrl.trim();
+  const trimmedSpaceKey = spaceKey.trim();
+  const trimmedParentId = parentId.trim();
 
   useEffect(() => {
     setExportDestinations({
+      confluenceMode: mode,
       confluenceCreateUrl: trimmedUrl || undefined,
       confluenceOpenAfterCopy: openAfterCopy,
+      confluenceBaseUrl: trimmedBaseUrl || undefined,
+      confluenceSpaceKey: trimmedSpaceKey || undefined,
+      confluenceParentId: trimmedParentId || undefined,
     });
-  }, [openAfterCopy, trimmedUrl]);
+  }, [
+    mode,
+    openAfterCopy,
+    trimmedBaseUrl,
+    trimmedParentId,
+    trimmedSpaceKey,
+    trimmedUrl,
+  ]);
+
+  const testConnection = useCallback(async () => {
+    if (!trimmedBaseUrl) {
+      setStatus({
+        tokenConfigured: false,
+        reachable: false,
+        userDisplayName: null,
+        message: "Enter a Confluence base URL first.",
+      });
+      return;
+    }
+
+    setBusy("test");
+    try {
+      setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
+    } catch (e) {
+      setStatus({
+        tokenConfigured: true,
+        reachable: false,
+        userDisplayName: null,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [trimmedBaseUrl]);
+
+  const savePat = useCallback(async () => {
+    const pat = patInput.trim();
+    if (!pat) {
+      setStatus({
+        tokenConfigured: false,
+        reachable: false,
+        userDisplayName: null,
+        message: "Paste a Confluence personal access token first.",
+      });
+      return;
+    }
+
+    setBusy("save");
+    try {
+      await confluenceExportService.savePat(pat);
+      setPatInput("");
+      if (trimmedBaseUrl) {
+        setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
+      } else {
+        setStatus({
+          tokenConfigured: true,
+          reachable: false,
+          userDisplayName: null,
+          message: "PAT saved. Add a base URL, then test the connection.",
+        });
+      }
+    } catch (e) {
+      setStatus({
+        tokenConfigured: false,
+        reachable: false,
+        userDisplayName: null,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [patInput, trimmedBaseUrl]);
+
+  const clearPat = useCallback(async () => {
+    setBusy("clear");
+    try {
+      await confluenceExportService.clearPat();
+      setPatInput("");
+      setStatus({
+        tokenConfigured: false,
+        reachable: false,
+        userDisplayName: null,
+        message: "Saved Confluence PAT cleared.",
+      });
+    } catch (e) {
+      setStatus({
+        tokenConfigured: true,
+        reachable: false,
+        userDisplayName: null,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  const restDestinationConfigured = !!trimmedBaseUrl && !!trimmedSpaceKey;
+  const restReady = restDestinationConfigured && !!status?.reachable;
+  const badgeLabel =
+    mode === "draft"
+      ? trimmedUrl
+        ? "Draft ready"
+        : "Copy only"
+      : restReady
+        ? "Ready"
+        : status?.tokenConfigured
+          ? "PAT saved"
+          : "Needs setup";
+  const badgeClasses =
+    mode === "draft"
+      ? trimmedUrl
+        ? "border-transparent bg-emerald-600 text-white"
+        : "border-border bg-muted text-foreground"
+      : restReady
+        ? "border-transparent bg-emerald-600 text-white"
+        : "border-transparent bg-amber-600 text-white";
 
   return (
     <AddonPanel
       icon={FileText}
-      title="Confluence draft export"
-      state="ready"
-      badgeLabel={trimmedUrl ? "Ready" : "Copy only"}
-      badgeClasses={
-        trimmedUrl
-          ? "border-transparent bg-emerald-600 text-white"
-          : "border-border bg-muted text-foreground"
-      }
-      detail="Copy a Confluence-ready meeting page draft and optionally open your create-page URL in the browser."
+      title="Confluence export"
+      state={mode === "draft" ? "prompt" : restReady ? "ready" : "advanced"}
+      badgeLabel={badgeLabel}
+      badgeClasses={badgeClasses}
+      detail="Export meeting summaries as a browser draft, or create pages directly on self-hosted Confluence with a PAT."
     >
       <div className="space-y-3">
-        <div>
-          <label className="mb-1 block text-xs font-medium text-muted-foreground">
-            Create page URL
-          </label>
-          <input
-            type="url"
-            value={createUrl}
-            onChange={(e) => setCreateUrl(e.target.value)}
-            placeholder="https://example.com/confluence/pages/createpage.action?spaceKey=TEAM"
-            className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm text-foreground"
-          />
-          <p className="mt-1 text-xs text-muted-foreground">
-            For Jira/Confluence behind SSO or App Proxy, this opens in your
-            browser session. No API token or REST call is used.
-          </p>
-        </div>
-
-        <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
-          <span>
-            <span className="block text-sm font-medium text-foreground">
-              Open Confluence after copying
-            </span>
-            <span className="mt-0.5 block text-xs text-muted-foreground">
-              The summary button copies rich text plus Markdown, then opens the
-              configured create-page URL so you can paste manually.
-            </span>
-          </span>
+        <div className="grid gap-2 sm:grid-cols-2">
           <button
             type="button"
-            role="switch"
-            aria-checked={openAfterCopy}
-            onClick={() => setOpenAfterCopy((v) => !v)}
-            className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-              openAfterCopy ? "bg-primary" : "bg-border"
+            onClick={() => setMode("draft")}
+            className={`rounded-md border p-3 text-left transition-colors ${
+              mode === "draft"
+                ? "border-primary bg-primary/10"
+                : "border-border bg-muted hover:bg-muted/80"
             }`}
           >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
-                openAfterCopy ? "translate-x-5" : "translate-x-0.5"
-              }`}
-            />
+            <span className="block text-sm font-medium text-foreground">
+              Browser draft
+            </span>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Copy rich text and open Confluence in your existing browser
+              session. No API token is used.
+            </span>
           </button>
-        </label>
+          <button
+            type="button"
+            onClick={() => setMode("rest")}
+            className={`rounded-md border p-3 text-left transition-colors ${
+              mode === "rest"
+                ? "border-primary bg-primary/10"
+                : "border-border bg-muted hover:bg-muted/80"
+            }`}
+          >
+            <span className="block text-sm font-medium text-foreground">
+              Direct REST
+            </span>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Create pages through a reachable self-hosted Confluence Server or
+              Data Center instance.
+            </span>
+          </button>
+        </div>
+
+        {mode === "draft" ? (
+          <>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                Create page URL
+              </label>
+              <input
+                type="url"
+                value={createUrl}
+                onChange={(e) => setCreateUrl(e.target.value)}
+                placeholder="https://confluence.example.com/confluence/pages/createpage.action?spaceKey=TEAM"
+                className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                For Jira/Confluence behind SSO or App Proxy, this opens in your
+                browser session. No API token or REST call is used.
+              </p>
+            </div>
+
+            <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
+              <span>
+                <span className="block text-sm font-medium text-foreground">
+                  Open Confluence after copying
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  The summary button copies rich text plus Markdown, then opens
+                  the configured create-page URL so you can paste manually.
+                </span>
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={openAfterCopy}
+                onClick={() => setOpenAfterCopy((v) => !v)}
+                className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                  openAfterCopy ? "bg-primary" : "bg-border"
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
+                    openAfterCopy ? "translate-x-5" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+            </label>
+          </>
+        ) : (
+          <div className="space-y-3">
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">
+                Direct REST requirements
+              </p>
+              <p className="mt-1">
+                Use this for self-hosted Confluence Server or Data Center when
+                the instance is reachable from this device, for example through
+                your corporate VPN. It requires a Confluence personal access
+                token with permission to create pages in the target space.
+              </p>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Base URL
+                </label>
+                <input
+                  type="url"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="https://confluence.example.com/confluence"
+                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Space key
+                </label>
+                <input
+                  value={spaceKey}
+                  onChange={(e) => setSpaceKey(e.target.value)}
+                  placeholder="TEAM"
+                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Parent page ID optional
+                </label>
+                <input
+                  value={parentId}
+                  onChange={(e) => setParentId(e.target.value)}
+                  placeholder="123456789"
+                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                Personal access token
+              </label>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="password"
+                  value={patInput}
+                  onChange={(e) => setPatInput(e.target.value)}
+                  placeholder="Paste PAT to save in OS credentials"
+                  className="min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={savePat}
+                  disabled={busy !== null || !patInput.trim()}
+                >
+                  {busy === "save" && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  Save PAT
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={clearPat}
+                  disabled={busy !== null}
+                >
+                  {busy === "clear" && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  Clear
+                </Button>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                The token is stored in the OS credential store. It is not saved
+                in localStorage or written into exported meeting content.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={testConnection}
+                disabled={busy !== null || !trimmedBaseUrl}
+              >
+                {busy === "test" && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                Test connection
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Direct export also needs the base URL and space key above.
+              </p>
+            </div>
+
+            {status && (
+              <div
+                className={`flex items-start gap-2 rounded-md border p-3 text-sm ${
+                  status.reachable
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    : "border-border bg-muted text-muted-foreground"
+                }`}
+              >
+                {status.reachable ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                ) : (
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                )}
+                <span>{status.message}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="rounded-lg border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
           <p className="font-medium text-foreground">Export flow</p>
           <p className="mt-1">
-            Meeting summary → Confluence button → clipboard → browser create
-            page. Paste into the editor and save under the space/page you want.
+            {mode === "draft"
+              ? "Meeting summary -> Confluence button -> clipboard -> browser create page. Paste into the editor and save under the space/page you want."
+              : "Meeting summary -> Confluence button -> REST API page create. If the API call fails, ClawScribe copies the browser draft instead."}
           </p>
         </div>
       </div>
@@ -1397,7 +1697,7 @@ export function IntegrationsSettings() {
       <MicrosoftSignInPanel />
       <OneNotePanel />
       <PlannerPanel />
-      <ConfluenceDraftPanel />
+      <ConfluencePanel />
       <CalendarPanel />
     </div>
   );
