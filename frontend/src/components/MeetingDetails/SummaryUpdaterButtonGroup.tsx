@@ -1,8 +1,13 @@
 "use client";
 
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, Save, Loader2, Search, FolderOpen } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Copy, Save, Loader2, FolderOpen, MoreHorizontal } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 
 interface SummaryUpdaterButtonGroupProps {
@@ -15,75 +20,61 @@ interface SummaryUpdaterButtonGroupProps {
   hasSummary: boolean;
 }
 
+// Save stays a first-class button (highlighted when there are unsaved edits);
+// the secondary actions (copy, open folder) live behind a ⋯ menu so the meeting
+// toolbar isn't a wall of buttons.
 export function SummaryUpdaterButtonGroup({
   isSaving,
   isDirty,
   onSave,
   onCopy,
-  onFind,
   onOpenFolder,
-  hasSummary
+  hasSummary,
 }: SummaryUpdaterButtonGroupProps) {
   return (
-    <ButtonGroup>
-      {/* Save button */}
+    <div className="flex items-center gap-2">
       <Button
         variant="outline"
         size="sm"
-        className={`${isDirty ? 'bg-green-200' : ""}`}
-        title={isSaving ? "Saving" : "Save Changes"}
+        className={isDirty ? 'border-primary/40 text-primary' : ''}
+        title={isSaving ? 'Saving…' : isDirty ? 'Save changes' : 'All changes saved'}
         onClick={() => {
           Analytics.trackButtonClick('save_changes', 'meeting_details');
           onSave();
         }}
         disabled={isSaving}
       >
-        {isSaving ? (
-          <>
-            <Loader2 className="animate-spin" />
-            <span className="hidden lg:inline">Saving...</span>
-          </>
-        ) : (
-          <>
-            <Save />
-            <span className="hidden lg:inline">Save</span>
-          </>
-        )}
+        {isSaving ? <Loader2 className="animate-spin" /> : <Save />}
+        <span className="hidden lg:inline">{isSaving ? 'Saving…' : 'Save'}</span>
       </Button>
 
-      {/* Copy button */}
-      <Button
-        variant="outline"
-        size="sm"
-        title="Copy Summary"
-        onClick={() => {
-          Analytics.trackButtonClick('copy_summary', 'meeting_details');
-          onCopy();
-        }}
-        disabled={!hasSummary}
-        className="cursor-pointer"
-      >
-        <Copy />
-        <span className="hidden lg:inline">Copy</span>
-      </Button>
-
-      {/* Find button */}
-      {/* {onFind && (
-        <Button
-          variant="outline"
-          size="sm"
-          title="Find in Summary"
-          onClick={() => {
-            Analytics.trackButtonClick('find_in_summary', 'meeting_details');
-            onFind();
-          }}
-          disabled={!hasSummary}
-          className="cursor-pointer"
-        >
-          <Search />
-          <span className="hidden lg:inline">Find</span>
-        </Button>
-      )} */}
-    </ButtonGroup>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" disabled={!hasSummary} title="More actions">
+            <MoreHorizontal />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuItem
+            onClick={() => {
+              Analytics.trackButtonClick('copy_summary', 'meeting_details');
+              onCopy();
+            }}
+          >
+            <Copy className="mr-2 h-4 w-4" />
+            Copy summary
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => {
+              Analytics.trackButtonClick('open_folder', 'meeting_details');
+              onOpenFolder();
+            }}
+          >
+            <FolderOpen className="mr-2 h-4 w-4" />
+            Open meeting folder
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }
