@@ -13,6 +13,7 @@ import {
   Upload,
 } from "lucide-react";
 import { RecordingControls } from "@/components/RecordingControls";
+import { UpcomingMeetings } from "@/components/UpcomingMeetings";
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useConfig } from "@/contexts/ConfigContext";
@@ -44,7 +45,7 @@ export function HomeDashboard({
   onStopInitiated,
   onTranscriptionError,
 }: HomeDashboardProps) {
-  const { meetings, serverAddress } = useSidebar();
+  const { meetings } = useSidebar();
   const { selectedDevices, betaFeatures } = useConfig();
   const { openImportDialog } = useImportDialog();
   const recordingState = useRecordingState();
@@ -192,6 +193,8 @@ export function HomeDashboard({
           </div>
         </div>
 
+        <UpcomingMeetings />
+
         <div className="grid gap-5 xl:grid-cols-[1.25fr_0.9fr]">
           <section className="rounded-lg border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between border-b border-border px-6 py-5">
@@ -291,15 +294,6 @@ export function HomeDashboard({
           </section>
         </div>
 
-        <footer className="grid gap-4 rounded-lg border border-border bg-card px-6 py-4 text-sm text-muted-foreground shadow-sm lg:grid-cols-[1fr_auto] lg:items-center">
-          <div className="flex items-center gap-3 font-medium text-foreground">
-            <span className={`h-2.5 w-2.5 rounded-full ${appStatus.dot}`} />
-            {appStatus.label}
-          </div>
-          <div className="flex items-center gap-2">
-            Backend endpoint {serverAddress || "http://localhost:5167"}
-          </div>
-        </footer>
       </div>
     </div>
   );

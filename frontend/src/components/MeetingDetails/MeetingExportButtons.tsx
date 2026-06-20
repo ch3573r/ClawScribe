@@ -2,8 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { NotebookTabs, ListTodo, Loader2 } from "lucide-react";
+import { NotebookTabs, ListTodo, Loader2, Upload, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -190,39 +197,32 @@ export function MeetingExportButtons({
 
   return (
     <div className="flex items-center gap-2">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={openOneNote}
-        disabled={busy !== null}
-        title="Export this meeting's summary to a new OneNote section"
-      >
-        {busy === "onenote" ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        ) : (
-          <NotebookTabs className="mr-2 h-4 w-4" />
-        )}
-        OneNote
-      </Button>
-
-      {hasActionItems && (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={openPlanner}
-          disabled={busy !== null}
-          title="Review and export action items to Planner"
-        >
-          {busy === "planner" ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <ListTodo className="mr-2 h-4 w-4" />
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button type="button" variant="outline" size="sm" disabled={busy !== null}>
+            {busy !== null ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Upload className="mr-2 h-4 w-4" />
+            )}
+            Export
+            <ChevronDown className="ml-1.5 h-3.5 w-3.5 opacity-70" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuLabel>Export summary to</DropdownMenuLabel>
+          <DropdownMenuItem onClick={openOneNote}>
+            <NotebookTabs className="mr-2 h-4 w-4" />
+            OneNote
+          </DropdownMenuItem>
+          {hasActionItems && (
+            <DropdownMenuItem onClick={openPlanner}>
+              <ListTodo className="mr-2 h-4 w-4" />
+              Planner action items
+            </DropdownMenuItem>
           )}
-          Planner
-        </Button>
-      )}
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       <Dialog open={oneNoteOpen} onOpenChange={(o) => !busy && setOneNoteOpen(o)}>
         <DialogContent>
