@@ -94,11 +94,11 @@ impl NemotronModel {
         let encoder = Self::load_encoder(dir, cpu_capable)?;
         // Variant-aware decoder/joint CPU threading. The joint is a large
         // 640x13088 matmul called hundreds of times per segment: int8 weights run
-        // fast single-threaded, but fp16 weights upconvert to fp32 and a single
-        // thread serializes the matmul. So int8 keeps the lean 1-thread session;
-        // fp16 uses ORT's default (auto) intra-op threads. Override either with
+        // fast single-threaded, but fp16 weights upconvert to fp32 and need a
+        // small CPU thread pool. On the 7900X3D, ORT auto oversubscribes this
+        // path; 4 threads is the measured knee. Override either variant with
         // NEMOTRON_DECODE_THREADS=auto|1|2|4|8.
-        let default_decode_threads = if cpu_capable { None } else { Some(1) };
+        let default_decode_threads = if cpu_capable { Some(4) } else { Some(1) };
         let decode_threads: Option<usize> =
             match std::env::var("NEMOTRON_DECODE_THREADS").ok().as_deref() {
                 Some("auto") => None,
