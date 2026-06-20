@@ -570,6 +570,7 @@ const Sidebar: React.FC = () => {
               <div className="relative">
                 <InputGroup className="rounded-md border-sidebar-border bg-background/60 text-sidebar-foreground shadow-none">
                   <InputGroupInput
+                    id="meeting-search"
                     placeholder="Search meetings..."
                     value={searchQuery}
                     onChange={(e) => handleSearchChange(e.target.value)}

@@ -27,6 +27,7 @@ import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { installTeamsDetectionDebugBridge } from '@/services/teamsDetectionService'
 import { ThemeInitializer } from '@/components/ThemeSettings'
+import { AppShortcuts } from '@/components/AppShortcuts'
 import { TeamsAutoRecord } from '@/components/TeamsAutoRecord'
 
 
@@ -275,6 +276,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${sourceSans3.variable} ${plexMono.variable} font-sans antialiased`}>
         <ThemeInitializer />
+        <AppShortcuts />
         <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>

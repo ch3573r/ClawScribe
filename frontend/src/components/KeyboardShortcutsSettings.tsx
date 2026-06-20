@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 interface ShortcutBindings {
   startStop: string;
   pauseResume: string;
+  toggleWindow: string;
 }
 interface ShortcutApplyResult {
   bindings: ShortcutBindings;
@@ -20,11 +21,13 @@ type ActionKey = keyof ShortcutBindings;
 const ACTIONS: { key: ActionKey; label: string; description: string }[] = [
   { key: "startStop", label: "Start / stop recording", description: "Toggles recording from anywhere." },
   { key: "pauseResume", label: "Pause / resume recording", description: "Pauses or resumes the active recording." },
+  { key: "toggleWindow", label: "Show / hide ClawScribe", description: "Brings the window to the front, or hides it." },
 ];
 
 const DEFAULT_BINDINGS: ShortcutBindings = {
   startStop: "Ctrl+Shift+F9",
   pauseResume: "Ctrl+Shift+F10",
+  toggleWindow: "Ctrl+Shift+F11",
 };
 
 // Combos Windows or common apps reserve — warn (the OS won't let us own these).

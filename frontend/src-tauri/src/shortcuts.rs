@@ -9,13 +9,18 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutAction {
     StartStop,
     PauseResume,
+    ToggleWindow,
+}
+
+fn default_toggle_window() -> String {
+    "Ctrl+Shift+F11".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +28,10 @@ pub enum ShortcutAction {
 pub struct ShortcutBindings {
     pub start_stop: String,
     pub pause_resume: String,
+    // serde default so a shortcuts.json written before this field existed still
+    // loads (with the default binding) instead of resetting every shortcut.
+    #[serde(default = "default_toggle_window")]
+    pub toggle_window: String,
 }
 
 impl Default for ShortcutBindings {
@@ -32,6 +41,7 @@ impl Default for ShortcutBindings {
         ShortcutBindings {
             start_stop: "Ctrl+Shift+F9".to_string(),
             pause_resume: "Ctrl+Shift+F10".to_string(),
+            toggle_window: default_toggle_window(),
         }
     }
 }
@@ -100,6 +110,16 @@ pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: S
                 }
             });
         }
+        ShortcutAction::ToggleWindow => {
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
     }
 }
 
@@ -121,6 +141,7 @@ pub fn apply_bindings<R: Runtime>(
     for (key, accel, action) in [
         ("startStop", bindings.start_stop.as_str(), ShortcutAction::StartStop),
         ("pauseResume", bindings.pause_resume.as_str(), ShortcutAction::PauseResume),
+        ("toggleWindow", bindings.toggle_window.as_str(), ShortcutAction::ToggleWindow),
     ] {
         match Shortcut::from_str(accel) {
             Ok(shortcut) => match gs.register(shortcut) {

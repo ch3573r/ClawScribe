@@ -157,6 +157,17 @@ export default function PageContent({
     Analytics.trackPageView('meeting_details');
   }, []);
 
+  // Ctrl/⌘+G — generate / regenerate the summary (dispatched by AppShortcuts).
+  useEffect(() => {
+    const onGenerate = () => {
+      if (meetingData.transcripts.length > 0) {
+        void summaryGeneration.handleGenerateSummary('');
+      }
+    };
+    window.addEventListener('shortcut:generate-summary', onGenerate);
+    return () => window.removeEventListener('shortcut:generate-summary', onGenerate);
+  }, [meetingData.transcripts.length, summaryGeneration]);
+
   // Auto-generate summary when flag is set
   useEffect(() => {
     let cancelled = false;
