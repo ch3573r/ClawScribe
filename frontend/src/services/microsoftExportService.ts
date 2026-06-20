@@ -71,6 +71,10 @@ export interface PlannerTaskPreview {
 }
 
 export interface PlannerTaskInput {
+  // Stable id from the preview (PlannerTaskPreview.localId). Sent back so the
+  // backend dedupe key survives reordering/deselection and re-exports don't
+  // create duplicate tasks.
+  localId: string;
   title: string;
   owner: string | null;
   dueDate: string | null;

@@ -7,7 +7,7 @@ and long-form audio. It captures microphone and system audio from the user
 session, transcribes speech locally, and turns transcripts into useful notes,
 summaries, follow-ups, and exports.
 
-Current version: `0.5.2-alpha.2`
+Current version: `0.5.3-alpha.2`
 
 ClawScribe is based on Meetily Community Edition `0.4.0`. Upstream attribution
 and license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),

@@ -464,7 +464,10 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
 
-    let section = discovery::create_section(&client, &token, &notebook_id, &section_name).await?;
+    // Reuse an existing same-named section instead of creating a fresh one each
+    // time: the section id feeds the OneNote dedupe key, so a new section per
+    // export would defeat the idempotency ledger and duplicate the page.
+    let section = discovery::ensure_section(&client, &token, &notebook_id, &section_name).await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
         &meeting_id,
@@ -592,6 +595,12 @@ pub async fn preview_planner_tasks(
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannerTaskInput {
+    /// The preview's stable `local_id` for this task, carried back from
+    /// `preview_planner_tasks`. It feeds the Planner dedupe key, so it must
+    /// survive reordering/deselection; regenerating it per bucket would shift
+    /// the key and create duplicate tasks on re-export.
+    #[serde(default)]
+    pub local_id: String,
     pub title: String,
     pub owner: Option<String>,
     pub due_date: Option<String>,
@@ -648,13 +657,17 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         let mut action_items: Vec<crate::exports::model::ExportActionItem> = group
             .into_iter()
             .map(|t| crate::exports::model::ExportActionItem {
-                local_action_id: String::new(),
+                // Preserve the preview's local id so the dedupe key is stable
+                // across reordering/deselection; do not regenerate per bucket.
+                local_action_id: t.local_id,
                 task: t.title,
                 owner: t.owner,
                 due_date: t.due_date,
                 details: t.details,
             })
             .collect();
+        // Fallback only: fills ids for any task that arrived without one (older
+        // clients); preserves the preview ids set above.
         crate::exports::planner::ensure_local_action_ids(&mut action_items);
 
         let meeting_export = crate::exports::model::MeetingExport {

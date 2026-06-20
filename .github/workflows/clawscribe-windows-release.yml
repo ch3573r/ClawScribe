@@ -94,6 +94,41 @@ jobs:
           "CLAWSCRIBE_SOURCE_VERSION=$sourceVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CLAWSCRIBE_INSTALLER_VERSION=$installerVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Guard against updater-invisible version
+        # The MSI/runtime version cannot carry prerelease metadata, so a
+        # `-alpha.N` source version is stripped to a bare X.Y.Z and the updater
+        # manifest advertises that stripped number. Two prereleases that strip to
+        # the same number (0.5.2-alpha.1 and 0.5.2-alpha.2 -> 0.5.2) are invisible
+        # to Tauri's default `new > current` comparison, so installed clients
+        # never see the update. Fail fast — before the long build — when a
+        # prerelease publish would not advance the stripped updater version past
+        # what's already published.
+        if: ${{ inputs.publish && !inputs['check-only'] }}
+        shell: pwsh
+        run: |
+          $sourceVersion = $env:CLAWSCRIBE_SOURCE_VERSION
+          $installerVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
+          if ($sourceVersion -eq $installerVersion) {
+            Write-Host "No prerelease suffix on $sourceVersion; updater-version guard not applicable."
+            exit 0
+          }
+          $manifestUrl = "https://github.com/ch3573r/ClawScribe/releases/latest/download/latest.json"
+          try {
+            $published = Invoke-RestMethod -Uri $manifestUrl -Headers @{ "User-Agent" = "clawscribe-release-guard" } -ErrorAction Stop
+          } catch {
+            Write-Host "No published updater manifest at $manifestUrl (first release?). Skipping guard."
+            exit 0
+          }
+          $publishedVersion = "$($published.version)".Trim()
+          if (-not $publishedVersion) {
+            Write-Host "Published manifest carried no version field; skipping guard."
+            exit 0
+          }
+          if ([version]$installerVersion -le [version]$publishedVersion) {
+            throw "Updater guard failed: this publish strips to runtime version $installerVersion (from $sourceVersion), which is not greater than the currently published updater version $publishedVersion. A prerelease bump that strips to the same-or-lower X.Y.Z is invisible to the default Tauri updater and installed clients would never see it. Bump the numeric version (e.g. patch: $installerVersion -> next) so the stripped installer version advances."
+          }
+          Write-Host "Updater guard OK: $installerVersion > published $publishedVersion."
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

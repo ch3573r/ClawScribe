@@ -162,6 +162,7 @@ export function PlannerExportPreview({
     const tasks = rows
       .filter((r) => r.include && r.title.trim())
       .map((r) => ({
+        localId: r.localId,
         title: r.title.trim(),
         owner: r.owner,
         dueDate: r.dueDate,

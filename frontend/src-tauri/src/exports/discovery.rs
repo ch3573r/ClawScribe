@@ -126,6 +126,28 @@ pub async fn create_section<T: GraphTransport, S: Sleeper>(
     }
 }
 
+/// Reuse the notebook's existing section with this display name if one exists,
+/// otherwise create it. Creating a fresh section on every export would mint a
+/// new section id each time, and since the OneNote dedupe key includes the
+/// section id, that defeats the idempotency ledger and produces a duplicate
+/// page (in a duplicate section) on every re-export. Matching the section by
+/// name keeps the id — and therefore the dedupe key — stable across runs.
+pub async fn ensure_section<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    notebook_id: &str,
+    display_name: &str,
+) -> Result<SectionInfo, String> {
+    let sections = list_sections(client, token, notebook_id).await?;
+    if let Some(existing) = sections
+        .into_iter()
+        .find(|s| s.display_name.trim().eq_ignore_ascii_case(display_name.trim()))
+    {
+        return Ok(existing);
+    }
+    create_section(client, token, notebook_id, display_name).await
+}
+
 /// Create a new OneNote notebook and return it. Requires the `Notes.Create`
 /// (or `Notes.ReadWrite`) scope, which this app already requests.
 pub async fn create_notebook<T: GraphTransport, S: Sleeper>(

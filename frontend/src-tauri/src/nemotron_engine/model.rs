@@ -196,32 +196,38 @@ impl NemotronModel {
                             // The self-test only proves the DML output is correct,
                             // not that the heavy work runs on the GPU: ORT silently
                             // places unsupported nodes on the CPU EP, so a "passing"
-                            // DML session can still be mostly CPU. Time it against
-                            // the CPU baseline so the log reflects real acceleration
-                            // rather than just provider registration.
+                            // DML session can still be mostly CPU. A correct session
+                            // is not enough — require a measured speedup over the CPU
+                            // baseline before trusting DirectML, otherwise the DML
+                            // session only adds overhead over the CPU one we already
+                            // have. Below threshold (or an inconclusive probe), keep
+                            // probing lower graph-opt levels and fall back to CPU.
                             match Self::encoder_speed_ratio(&mut session, &mut cpu_session) {
-                                Some(ratio) if ratio >= 1.15 => log::info!(
-                                    "Nemotron encoder: DirectML GPU-accelerated @ graph_opt={lvl} (self-test passed, ~{ratio:.2}x CPU)"
-                                ),
+                                Some(ratio) if ratio >= 1.15 => {
+                                    log::info!(
+                                        "Nemotron encoder: DirectML GPU-accelerated @ graph_opt={lvl} (self-test passed, ~{ratio:.2}x CPU)"
+                                    );
+                                    return Ok(session);
+                                }
                                 Some(ratio) => log::warn!(
-                                    "Nemotron encoder: DirectML @ graph_opt={lvl} self-test passed but only ~{ratio:.2}x CPU — likely running mostly on CPU (ORT fell unsupported ops back to the CPU EP); using it anyway"
+                                    "Nemotron encoder: DirectML @ graph_opt={lvl} self-test passed but only ~{ratio:.2}x CPU — ORT likely placed the heavy ops on the CPU EP; not using DirectML at this level"
                                 ),
-                                None => log::info!(
-                                    "Nemotron encoder: DirectML @ graph_opt={lvl}, self-test passed (speed probe unavailable)"
+                                None => log::warn!(
+                                    "Nemotron encoder: DirectML @ graph_opt={lvl} self-test passed but the speed probe was inconclusive; can't confirm GPU acceleration, not using DirectML at this level"
                                 ),
                             }
-                            return Ok(session);
+                        } else {
+                            log::warn!(
+                                "Nemotron encoder: DirectML @ graph_opt={lvl} mismatched CPU; trying a lower level"
+                            );
                         }
-                        log::warn!(
-                            "Nemotron encoder: DirectML @ graph_opt={lvl} mismatched CPU; trying a lower level"
-                        );
                     }
                     Err(e) => {
                         log::warn!("Nemotron encoder: DirectML init @ graph_opt={lvl} failed ({e})")
                     }
                 }
             }
-            log::warn!("Nemotron encoder: no DirectML graph_opt level matched CPU; using CPU");
+            log::warn!("Nemotron encoder: no DirectML graph_opt level was both correct and measurably GPU-accelerated; using CPU");
             return Ok(cpu_session);
         }
         // Built without DirectML: fp16 runs on CPU; int8 cannot.
