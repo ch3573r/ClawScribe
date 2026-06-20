@@ -91,9 +91,9 @@ impl NemotronModel {
         // CPU-vs-DML self-test and CPU fallback; int8 is DirectML(GPU)-only. The
         // decoder/joint default to CPU for both variants (int8's are MatMul-based,
         // not ConvInteger, so the CPU EP handles them). fp16 can opt into a
-        // DirectML decoder/joint probe with NEMOTRON_DECODE_EP=dml; CPU remains
-        // the default and fallback because the RNN-T loop makes hundreds of tiny
-        // session calls where GPU dispatch overhead can dominate.
+        // DirectML decoder/joint probe by default on fp16 DirectML builds. The
+        // self-test keeps CPU as the correctness fallback, and
+        // NEMOTRON_DECODE_EP=cpu remains the opt-out for benchmarking.
         let encoder = Self::load_encoder(dir, cpu_capable)?;
         // Variant-aware decoder/joint CPU threading. The joint is a large
         // 640x13088 matmul called hundreds of times per segment: int8 weights run
@@ -468,7 +468,7 @@ impl NemotronModel {
         let joint_path = dir.join("joint.onnx");
         let variant = if cpu_capable { "fp16" } else { "int8" };
         let decode_ep = std::env::var("NEMOTRON_DECODE_EP")
-            .unwrap_or_else(|_| "cpu".to_string())
+            .unwrap_or_else(|_| Self::default_decode_ep(cpu_capable))
             .to_ascii_lowercase();
 
         #[cfg(feature = "directml")]
@@ -540,6 +540,19 @@ impl NemotronModel {
         let decoder = Self::build_decode_session(&decoder_path, threads)?;
         let joint = Self::build_decode_session(&joint_path, threads)?;
         Ok((decoder, joint))
+    }
+
+    fn default_decode_ep(cpu_capable: bool) -> String {
+        if std::env::var("NEMOTRON_FORCE_CPU").is_ok_and(|v| !v.is_empty() && v != "0") {
+            return "cpu".to_string();
+        }
+        #[cfg(feature = "directml")]
+        {
+            if cpu_capable {
+                return "dml".to_string();
+            }
+        }
+        "cpu".to_string()
     }
 
     #[cfg(feature = "directml")]
