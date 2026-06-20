@@ -84,23 +84,26 @@ export interface AccentColor {
   foreground: string
 }
 
-export const DEFAULT_ACCENT_ID = "blue"
+export const DEFAULT_ACCENT_ID = "claw"
 
 // Each swatch is an explicit accent applied in BOTH light and dark, so the
 // choice always shows (no falling back to a theme default). Values are tuned to
-// read on light and dark backgrounds with the given foreground.
+// read on light and dark backgrounds with the given foreground. "claw" is the
+// ClawScribe brand accent (the electric cyan-azure of the mark) and the default;
+// the rest stay so the accent picker keeps its full range.
 export const accentColors: AccentColor[] = [
-  { id: "blue", name: "Blue", primary: "203 100% 42%", foreground: "0 0% 100%" },
-  { id: "teal", name: "Teal", primary: "166 55% 42%", foreground: "0 0% 100%" },
-  { id: "sky", name: "Sky", primary: "199 89% 48%", foreground: "0 0% 100%" },
-  { id: "violet", name: "Violet", primary: "262 60% 58%", foreground: "0 0% 100%" },
-  { id: "magenta", name: "Magenta", primary: "329 75% 52%", foreground: "0 0% 100%" },
-  { id: "emerald", name: "Emerald", primary: "152 55% 42%", foreground: "0 0% 100%" },
-  { id: "amber", name: "Amber", primary: "38 92% 50%", foreground: "0 0% 10%" },
-  { id: "red", name: "Red", primary: "2 72% 51%", foreground: "0 0% 100%" },
-  { id: "orange", name: "Orange", primary: "24 90% 50%", foreground: "0 0% 100%" },
-  { id: "indigo", name: "Indigo", primary: "244 55% 58%", foreground: "0 0% 100%" },
-  { id: "lime", name: "Lime", primary: "96 50% 40%", foreground: "0 0% 100%" },
+  { id: "claw", name: "Claw", primary: "193 90% 46%", foreground: "205 45% 9%" },
+  { id: "blue", name: "Blue", primary: "214 92% 54%", foreground: "0 0% 100%" },
+  { id: "teal", name: "Teal", primary: "172 72% 40%", foreground: "0 0% 100%" },
+  { id: "sky", name: "Sky", primary: "199 90% 50%", foreground: "0 0% 100%" },
+  { id: "violet", name: "Violet", primary: "258 78% 64%", foreground: "0 0% 100%" },
+  { id: "magenta", name: "Magenta", primary: "326 80% 56%", foreground: "0 0% 100%" },
+  { id: "emerald", name: "Emerald", primary: "158 68% 40%", foreground: "0 0% 100%" },
+  { id: "amber", name: "Amber", primary: "40 95% 52%", foreground: "30 45% 10%" },
+  { id: "red", name: "Red", primary: "353 80% 56%", foreground: "0 0% 100%" },
+  { id: "orange", name: "Orange", primary: "22 92% 54%", foreground: "0 0% 100%" },
+  { id: "indigo", name: "Indigo", primary: "243 74% 64%", foreground: "0 0% 100%" },
+  { id: "lime", name: "Lime", primary: "88 60% 42%", foreground: "84 50% 8%" },
 ]
 
 export function getStoredAccentId(): string {

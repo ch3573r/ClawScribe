@@ -1,7 +1,7 @@
 'use client'
 
 import './globals.css'
-import { Source_Sans_3 } from 'next/font/google'
+import { Source_Sans_3, IBM_Plex_Mono } from 'next/font/google'
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
@@ -34,6 +34,14 @@ const sourceSans3 = Source_Sans_3({
   subsets: ['latin'],
   weight: ['400', '500', '600', '700'],
   variable: '--font-source-sans-3',
+})
+
+// Utility/data face: timestamps, durations, speaker labels, model ids, paths,
+// shortcuts. Transcription is data, so its values read as data.
+const plexMono = IBM_Plex_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  variable: '--font-plex-mono',
 })
 
 // Module-level component — stable reference across RootLayout re-renders.
@@ -265,7 +273,7 @@ export default function RootLayout({
 
   return (
     <html lang="en">
-      <body className={`${sourceSans3.variable} font-sans antialiased`}>
+      <body className={`${sourceSans3.variable} ${plexMono.variable} font-sans antialiased`}>
         <ThemeInitializer />
         <AnalyticsProvider>
           <RecordingStateProvider>

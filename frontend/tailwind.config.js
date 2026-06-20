@@ -13,6 +13,13 @@ module.exports = {
       fontFamily: {
         sans: [
           'var(--font-source-sans-3)'
+        ],
+        mono: [
+          'var(--font-plex-mono)',
+          'ui-monospace',
+          'SFMono-Regular',
+          'Menlo',
+          'monospace'
         ]
       },
       colors: {
