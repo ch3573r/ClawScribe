@@ -95,7 +95,26 @@ impl NemotronModel {
         let decoder = Self::init_session(dir, "decoder.onnx")?;
         let joint = Self::init_session(dir, "joint.onnx")?;
         let vocab = Self::load_vocab(dir)?;
-        let lang_slots = Self::load_lang_slots(dir).unwrap_or_default();
+        // Degrading to an empty slot map is survivable (every language falls back
+        // to DEFAULT_LANG_SLOT), but it silently ignores the user's language
+        // selection — so make the failure visible rather than swallowing it.
+        let lang_slots = match Self::load_lang_slots(dir) {
+            Ok(slots) if !slots.is_empty() => slots,
+            Ok(_) => {
+                log::warn!(
+                    "Nemotron: languages.json had no usable promptDictionary entries; \
+                     language selection will be ignored (all audio uses default slot {DEFAULT_LANG_SLOT})"
+                );
+                HashMap::new()
+            }
+            Err(e) => {
+                log::warn!(
+                    "Nemotron: failed to load languages.json ({e}); language selection \
+                     will be ignored (all audio uses default slot {DEFAULT_LANG_SLOT})"
+                );
+                HashMap::new()
+            }
+        };
         log::info!(
             "Loaded Nemotron: {} vocab tokens, {} language slots, blank_id={}",
             vocab.len(),

@@ -114,6 +114,11 @@ pub struct ModelInfo {
     pub speed: String,
     pub status: ModelStatus,
     pub description: String,
+    /// True for the int8 variant, whose encoder ops only have a DirectML (GPU)
+    /// implementation. On a build without the DirectML EP it isn't listed at
+    /// all; on a DirectML build it's listed but still requires an actual GPU at
+    /// load time — the UI can use this to badge/disable it.
+    pub requires_gpu: bool,
 }
 
 pub struct NemotronEngine {
@@ -164,6 +169,14 @@ impl NemotronEngine {
         let mut infos = Vec::with_capacity(VARIANTS.len());
 
         for v in VARIANTS {
+            // The int8 encoder's ops only have a DirectML (GPU) kernel. On a
+            // build compiled without the DirectML EP it can never load, so don't
+            // even offer it; otherwise it's selectable but fails at load with a
+            // confusing error. On a DirectML build it stays listed (still GPU-
+            // gated at load) and is flagged via `requires_gpu`.
+            if !v.cpu_capable && !cfg!(feature = "directml") {
+                continue;
+            }
             let model_path = self.models_dir.join(v.id);
             let status = if active.contains(v.id) {
                 ModelStatus::Downloading { progress: 0 }
@@ -186,6 +199,7 @@ impl NemotronEngine {
                 speed: v.speed.to_string(),
                 status,
                 description: v.description.to_string(),
+                requires_gpu: !v.cpu_capable,
             });
         }
 

@@ -19,6 +19,12 @@ pub const RISMONDO_TENANT_ID: &str = "d0627577-cabb-4909-8ea1-c5d86abfd204";
 /// is unavailable for personal accounts.)
 pub const DEFAULT_AUTHORITY: &str = "organizations";
 
+// Least-privilege: every scope here must map to an endpoint the app actually
+// calls. OneNote export -> Notes.*; Planner export -> Tasks.ReadWrite; calendar
+// add-on -> Calendars.Read; sign-in -> User.Read; token refresh ->
+// offline_access. Teams meeting detection is local (window/process scanning),
+// so it needs no Graph scope. Don't add OnlineMeetings/Presence/Files unless a
+// code path calls /me/onlineMeetings, /me/presence, or /me/drive respectively.
 pub const DEFAULT_SCOPES: &[&str] = &[
     "User.Read",
     "Notes.ReadWrite",
@@ -28,9 +34,6 @@ pub const DEFAULT_SCOPES: &[&str] = &[
     "Notes.ReadWrite.All",
     "Tasks.ReadWrite",
     "Calendars.Read",
-    "OnlineMeetings.Read",
-    "Presence.Read",
-    "Files.ReadWrite",
     "offline_access",
 ];
 

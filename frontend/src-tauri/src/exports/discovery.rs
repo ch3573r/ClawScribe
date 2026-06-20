@@ -132,20 +132,51 @@ pub async fn create_section<T: GraphTransport, S: Sleeper>(
 /// section id, that defeats the idempotency ledger and produces a duplicate
 /// page (in a duplicate section) on every re-export. Matching the section by
 /// name keeps the id — and therefore the dedupe key — stable across runs.
+///
+/// Returns `(section, created_now)`: `created_now` is true only when this call
+/// created the section, so the caller can clean it up if the subsequent export
+/// fails without touching a pre-existing section it merely reused.
 pub async fn ensure_section<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     token: &str,
     notebook_id: &str,
     display_name: &str,
-) -> Result<SectionInfo, String> {
+) -> Result<(SectionInfo, bool), String> {
     let sections = list_sections(client, token, notebook_id).await?;
     if let Some(existing) = sections
         .into_iter()
         .find(|s| s.display_name.trim().eq_ignore_ascii_case(display_name.trim()))
     {
-        return Ok(existing);
+        return Ok((existing, false));
     }
-    create_section(client, token, notebook_id, display_name).await
+    let created = create_section(client, token, notebook_id, display_name).await?;
+    Ok((created, true))
+}
+
+/// Delete a OneNote section by id. Used to remove a section we just created when
+/// the page export then failed, so a failed export doesn't leave an empty orphan
+/// section behind.
+pub async fn delete_section<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    section_id: &str,
+) -> Result<(), String> {
+    let request = GraphRequest {
+        method: "DELETE".into(),
+        url: format!("{GRAPH_BASE}/me/onenote/sections/{section_id}"),
+        content_type: "application/json".into(),
+        body: String::new(),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: Vec::new(),
+    };
+    match client.execute(&request, token).await {
+        GraphOutcome::Success(_) => Ok(()),
+        GraphOutcome::Failed(kind, detail) => Err(match detail {
+            Some(d) => format!("Graph error ({}): {d}", kind.code()),
+            None => format!("Graph error: {}", kind.code()),
+        }),
+        GraphOutcome::Unknown(msg) => Err(format!("Network error: {msg}")),
+    }
 }
 
 /// Create a new OneNote notebook and return it. Requires the `Notes.Create`

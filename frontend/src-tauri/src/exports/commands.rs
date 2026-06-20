@@ -467,7 +467,8 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     // Reuse an existing same-named section instead of creating a fresh one each
     // time: the section id feeds the OneNote dedupe key, so a new section per
     // export would defeat the idempotency ledger and duplicate the page.
-    let section = discovery::ensure_section(&client, &token, &notebook_id, &section_name).await?;
+    let (section, section_created) =
+        discovery::ensure_section(&client, &token, &notebook_id, &section_name).await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
         &meeting_id,
@@ -487,11 +488,23 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
         &client,
         &mut ledger,
         &meeting_export,
-        &OneNoteTarget { section_id: section.id },
+        &OneNoteTarget { section_id: section.id.clone() },
         &ctx,
     )
     .await;
     save_ledger(&app, &meeting_id, &ledger);
+
+    // If we created the section just now and no page landed in it, delete it so a
+    // failed export doesn't leave an empty orphan section behind. Only ever
+    // delete a section we created this call — never a pre-existing one we reused.
+    if section_created && !report.items.iter().any(|i| i.status.is_terminal_success()) {
+        if let Err(e) = discovery::delete_section(&client, &token, &section.id).await {
+            log::warn!(
+                "OneNote: couldn't clean up empty section {} after a failed export: {e}",
+                section.id
+            );
+        }
+    }
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
         let mut inner = state.inner.write().await;
