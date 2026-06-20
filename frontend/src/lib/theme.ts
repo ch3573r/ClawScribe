@@ -92,10 +92,10 @@ export const DEFAULT_ACCENT_ID = "claw"
 // ClawScribe brand accent (the electric cyan-azure of the mark) and the default;
 // the rest stay so the accent picker keeps its full range.
 export const accentColors: AccentColor[] = [
-  { id: "claw", name: "Claw", primary: "193 90% 46%", foreground: "205 45% 9%" },
-  { id: "blue", name: "Blue", primary: "214 92% 54%", foreground: "0 0% 100%" },
-  { id: "teal", name: "Teal", primary: "172 72% 40%", foreground: "0 0% 100%" },
-  { id: "sky", name: "Sky", primary: "199 90% 50%", foreground: "0 0% 100%" },
+  { id: "claw", name: "Claw", primary: "186 96% 50%", foreground: "195 70% 8%" },
+  { id: "blue", name: "Blue", primary: "218 92% 56%", foreground: "0 0% 100%" },
+  { id: "teal", name: "Teal", primary: "168 74% 38%", foreground: "0 0% 100%" },
+  { id: "sky", name: "Sky", primary: "204 90% 54%", foreground: "0 0% 100%" },
   { id: "violet", name: "Violet", primary: "258 78% 64%", foreground: "0 0% 100%" },
   { id: "magenta", name: "Magenta", primary: "326 80% 56%", foreground: "0 0% 100%" },
   { id: "emerald", name: "Emerald", primary: "158 68% 40%", foreground: "0 0% 100%" },
