@@ -92,10 +92,34 @@ impl NemotronModel {
         // decoder/joint are tiny and run on CPU for both (int8's are MatMul-based,
         // not ConvInteger, so the CPU EP handles them).
         let encoder = Self::load_encoder(dir, cpu_capable)?;
-        // decoder/joint are tiny and called many times per segment — use the
-        // sequential single-thread CPU session rather than the parallel one.
-        let decoder = Self::build_small_cpu_session(&dir.join("decoder.onnx"))?;
-        let joint = Self::build_small_cpu_session(&dir.join("joint.onnx"))?;
+        // Variant-aware decoder/joint CPU threading. The joint is a large
+        // 640x13088 matmul called hundreds of times per segment: int8 weights run
+        // fast single-threaded, but fp16 weights upconvert to fp32 and a single
+        // thread serializes the matmul. So int8 keeps the lean 1-thread session;
+        // fp16 uses ORT's default (auto) intra-op threads. Override either with
+        // NEMOTRON_DECODE_THREADS=auto|1|2|4|8.
+        let default_decode_threads = if cpu_capable { None } else { Some(1) };
+        let decode_threads: Option<usize> =
+            match std::env::var("NEMOTRON_DECODE_THREADS").ok().as_deref() {
+                Some("auto") => None,
+                Some(n) => n
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&t| t >= 1)
+                    .or(default_decode_threads),
+                None => default_decode_threads,
+            };
+        let decode_mode = match decode_threads {
+            None => "auto threads".to_string(),
+            Some(1) => "1 thread".to_string(),
+            Some(n) => format!("{n} threads"),
+        };
+        log::info!(
+            "Nemotron decoder/joint: CPU {decode_mode} ({})",
+            if cpu_capable { "fp16" } else { "int8" }
+        );
+        let decoder = Self::build_decode_session(&dir.join("decoder.onnx"), decode_threads)?;
+        let joint = Self::build_decode_session(&dir.join("joint.onnx"), decode_threads)?;
         let vocab = Self::load_vocab(dir)?;
         // Degrading to an empty slot map is survivable (every language falls back
         // to DEFAULT_LANG_SLOT), but it silently ignores the user's language
@@ -412,18 +436,21 @@ impl NemotronModel {
         Ok(builder.commit_from_file(path)?)
     }
 
-    /// CPU session tuned for the tiny decoder/joint graphs, which are called many
-    /// times per segment (once per encoder frame / emitted token). Their per-call
-    /// work is small, so the general session's parallel dispatch + threadpool
-    /// overhead costs more than it saves; use sequential execution on a single
-    /// intra-op thread instead.
-    fn build_small_cpu_session(path: &Path) -> Result<Session, NemotronError> {
-        let builder = Session::builder()?
+    /// CPU session for the decoder/joint graphs with a caller-chosen thread count.
+    /// `None` leaves ORT's defaults (auto ≈ cores), which the large fp16 joint
+    /// matmul needs (fp16 weights upconvert to fp32 on CPU, so a single thread
+    /// serializes it); `Some(n)` pins intra/inter threads (int8 uses 1 — its
+    /// weights run fast single-threaded via Zen VNNI/AVX). Sequential execution
+    /// either way — the graphs are linear, so inter-op parallelism only adds
+    /// overhead.
+    fn build_decode_session(path: &Path, threads: Option<usize>) -> Result<Session, NemotronError> {
+        let mut builder = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers([CPUExecutionProvider::default().build()])?
-            .with_parallel_execution(false)?
-            .with_intra_threads(1)?
-            .with_inter_threads(1)?;
+            .with_parallel_execution(false)?;
+        if let Some(t) = threads {
+            builder = builder.with_intra_threads(t)?.with_inter_threads(t)?;
+        }
         Ok(builder.commit_from_file(path)?)
     }
 
