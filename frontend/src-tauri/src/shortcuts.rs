@@ -112,9 +112,16 @@ pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: S
         }
         ShortcutAction::ToggleWindow => {
             if let Some(window) = app.get_webview_window("main") {
-                if window.is_visible().unwrap_or(false) {
+                // Hide only when genuinely visible AND not minimized. Windows
+                // still reports a minimized window as "visible", so without the
+                // is_minimized check the hotkey would hide a minimized window
+                // instead of restoring it to the front.
+                if window.is_visible().unwrap_or(false)
+                    && !window.is_minimized().unwrap_or(false)
+                {
                     let _ = window.hide();
                 } else {
+                    let _ = window.unminimize();
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
