@@ -8,7 +8,7 @@ import Analytics from '@/lib/analytics';
 import { isOllamaNotInstalledError } from '@/lib/utils';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
 import { getMeetingContext } from '@/lib/meetingContext';
-import { getMeetingCalendar, attendeeNames } from '@/lib/meetingCalendar';
+import { getMeetingCalendar, attendeeChecklist } from '@/lib/meetingCalendar';
 import {
   detectAndCacheSummaryLanguage,
   readMeetingSummaryLanguage,
@@ -459,17 +459,24 @@ export function useSummaryGeneration({
     };
   }, []);
 
-  // Append the bound calendar event's invited attendees to the summary context.
+  // Prepend the bound calendar event's invited attendees to the summary context.
   // The binding is created at record-save (useRecordingStop), keyed by the real
   // meeting id, so this only reads — it never consumes a global pending value
   // (which could otherwise attach the wrong recording's attendees).
   const withCalendarContext = useCallback((base: string): string => {
     const link = getMeetingCalendar(meeting.id);
     if (link) {
-      const names = attendeeNames(link);
-      if (names.length > 0) {
-        const suffix = `Invited attendees (from the calendar invite): ${names.join(', ')}.`;
-        return base.trim() ? `${base}\n\n${suffix}` : suffix;
+      const checklist = attendeeChecklist(link);
+      if (checklist.length > 0) {
+        const prefix = [
+          'Put this section at the top of the meeting summary:',
+          '',
+          '## Invited attendees',
+          ...checklist,
+          '',
+          'Checked people attended. Unchecked people were invited but did not attend.',
+        ].join('\n');
+        return base.trim() ? `${prefix}\n\n${base.trim()}` : prefix;
       }
     }
     return base;

@@ -329,11 +329,6 @@ function sanitizeNotebookName(raw: string): string {
   return raw.replace(NOTEBOOK_FORBIDDEN, " ").replace(/\s+/g, " ").trimStart().slice(0, 128);
 }
 
-const SECTION_FORBIDDEN = /[?*\\/:<>|&#'%~"]/g;
-function sanitizeSectionName(raw: string): string {
-  return raw.replace(SECTION_FORBIDDEN, " ").replace(/\s+/g, " ").trimStart().slice(0, 49);
-}
-
 const NEW_OPTION = "__new__";
 
 function OneNotePanel() {
@@ -342,15 +337,9 @@ function OneNotePanel() {
   const [selectedNotebook, setSelectedNotebook] = useState<string>(
     saved.notebookId ?? "",
   );
-  const [selectedSection, setSelectedSection] = useState<string>(
-    saved.sectionId ?? "",
-  );
   const [creatingNotebook, setCreatingNotebook] = useState(false);
-  const [creatingSection, setCreatingSection] = useState(false);
   const [newNotebookName, setNewNotebookName] = useState("");
-  const [newSectionName, setNewSectionName] = useState("");
   const [savingNotebook, setSavingNotebook] = useState(false);
-  const [savingSection, setSavingSection] = useState(false);
 
   const submitNewNotebook = async () => {
     const name = sanitizeNotebookName(newNotebookName).trim();
@@ -360,23 +349,8 @@ function OneNotePanel() {
     setSavingNotebook(false);
     if (nb) {
       setSelectedNotebook(nb.id);
-      setSelectedSection("");
       setCreatingNotebook(false);
       setNewNotebookName("");
-      void ms.loadSections(nb.id);
-    }
-  };
-
-  const submitNewSection = async () => {
-    const name = sanitizeSectionName(newSectionName).trim();
-    if (!name || !selectedNotebook) return;
-    setSavingSection(true);
-    const section = await ms.createSection(selectedNotebook, name);
-    setSavingSection(false);
-    if (section) {
-      setSelectedSection(section.id);
-      setCreatingSection(false);
-      setNewSectionName("");
     }
   };
 
@@ -388,56 +362,26 @@ function OneNotePanel() {
     }
   }, [isConnected]);
 
-  useEffect(() => {
-    if (isConnected && selectedNotebook) {
-      void ms.loadSections(selectedNotebook);
-    }
-  }, [isConnected, selectedNotebook]);
-
-  useEffect(() => {
-    if (
-      isConnected &&
-      selectedNotebook &&
-      ms.oneNoteSectionListingLimited &&
-      !selectedSection &&
-      !creatingSection
-    ) {
-      setCreatingSection(true);
-      setNewSectionName((prev) => prev || "Meeting notes");
-    }
-  }, [
-    creatingSection,
-    isConnected,
-    ms.oneNoteSectionListingLimited,
-    selectedNotebook,
-    selectedSection,
-  ]);
-
-  // Persist the explicit destination. Notebook-only is allowed as a partial
-  // setup state, but exporting requires a selected section.
+  // Persist the notebook destination. Exports create a fresh dated section in
+  // this notebook, so Settings never lists or stores section ids.
   useEffect(() => {
     if (!selectedNotebook) return;
     const notebookName = ms.notebooks.find((n) => n.id === selectedNotebook)
       ?.displayName;
-    const sectionName = selectedSection
-      ? ms.sections.find((s) => s.id === selectedSection)?.displayName
-      : undefined;
     setExportDestinations({
       notebookId: selectedNotebook,
       notebookName,
-      sectionId: selectedSection || undefined,
-      sectionName,
+      sectionId: undefined,
+      sectionName: undefined,
     });
-  }, [selectedNotebook, selectedSection, ms.notebooks, ms.sections]);
+  }, [selectedNotebook, ms.notebooks]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
-    ? "Pick the notebook and section where meeting pages should be created."
+    ? "Pick the notebook where exports create a fresh dated section for each meeting."
     : "Sign in with Microsoft above to enable OneNote export.";
   const selectedNotebookMissing =
     !!selectedNotebook && !ms.notebooks.some((nb) => nb.id === selectedNotebook);
-  const selectedSectionMissing =
-    !!selectedSection && !ms.sections.some((section) => section.id === selectedSection);
 
   return (
     <AddonPanel
@@ -474,8 +418,6 @@ function OneNotePanel() {
                 } else {
                   setCreatingNotebook(false);
                   setSelectedNotebook(e.target.value);
-                  setSelectedSection("");
-                  setCreatingSection(false);
                 }
               }}
               disabled={ms.loadingNotebooks}
@@ -553,117 +495,6 @@ function OneNotePanel() {
             </div>
           )}
 
-          <div>
-            <div className="mb-1 flex items-center justify-between">
-              <label className="block text-xs font-medium text-muted-foreground">
-                Section
-              </label>
-              <button
-                type="button"
-                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-                onClick={() => selectedNotebook && void ms.loadSections(selectedNotebook)}
-                disabled={!selectedNotebook || ms.loadingSections}
-              >
-                <RefreshCw
-                  className={`h-3 w-3 ${ms.loadingSections ? "animate-spin" : ""}`}
-                />
-                Reload
-              </button>
-            </div>
-            <select
-              className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-              value={creatingSection ? NEW_OPTION : selectedSection}
-              onChange={(e) => {
-                if (e.target.value === NEW_OPTION) {
-                  setCreatingSection(true);
-                } else {
-                  setCreatingSection(false);
-                  setSelectedSection(e.target.value);
-                }
-              }}
-              disabled={!selectedNotebook || ms.loadingSections}
-            >
-              <option value="">
-                {!selectedNotebook
-                  ? "Select a notebook first"
-                  : ms.loadingSections
-                    ? "Loading…"
-                    : "Select a section"}
-              </option>
-              {ms.sections.map((section) => (
-                <option key={section.id} value={section.id}>
-                  {section.displayName}
-                </option>
-              ))}
-              {selectedSectionMissing && (
-                <option value={selectedSection}>
-                  {saved.sectionName ?? "Saved section"}
-                </option>
-              )}
-              {selectedNotebook && <option value={NEW_OPTION}>+ New section…</option>}
-            </select>
-          </div>
-
-          {ms.oneNoteSectionListingLimited && selectedNotebook && (
-            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
-              Microsoft Graph cannot list existing sections because the backing
-              OneDrive/SharePoint library hit Graph's OneNote query limit. The
-              selected notebook can still have only a few sections. Create a new
-              section here, or keep using the saved section if one is already
-              selected.
-            </p>
-          )}
-
-          {creatingSection && (
-            <div className="space-y-2 rounded-lg border border-border bg-muted p-3">
-              <label className="block text-xs font-medium text-muted-foreground">
-                New section name
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  autoFocus
-                  value={newSectionName}
-                  onChange={(e) =>
-                    setNewSectionName(sanitizeSectionName(e.target.value))
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void submitNewSection();
-                    if (e.key === "Escape") setCreatingSection(false);
-                  }}
-                  placeholder="e.g. Meeting notes"
-                  maxLength={49}
-                  className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                />
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => void submitNewSection()}
-                  disabled={savingSection || !newSectionName.trim()}
-                >
-                  {savingSection ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    "Create"
-                  )}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setCreatingSection(false)}
-                  disabled={savingSection}
-                >
-                  Cancel
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Can&apos;t contain {"? * \\ / : < > | & # ' % ~ \""} — those
-                are removed automatically. Max 49 characters.
-              </p>
-            </div>
-          )}
-
           {ms.error && (
             <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -678,18 +509,11 @@ function OneNotePanel() {
               Reload.
             </p>
           )}
-          {selectedNotebook && !selectedSection && (
-            <p className="rounded-lg border border-border bg-muted p-3 text-sm text-muted-foreground">
-              Choose an existing section or create one before exporting to
-              OneNote.
-            </p>
-          )}
-          {selectedNotebook && selectedSection && (
+          {selectedNotebook && (
             <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
               <CheckCircle2 className="h-4 w-4" />
               <span>
-                OneNote destination ready. Export from a meeting&apos;s summary
-                panel.
+                OneNote notebook ready. Each export creates a new dated section.
               </span>
             </div>
           )}
@@ -1733,24 +1557,40 @@ function attendeeLabel(a: { name: string | null; email: string | null }): string
   return a.name?.trim() || a.email?.trim() || "Unknown";
 }
 
+function attendeeKey(a: { name: string | null; email: string | null }, index: number): string {
+  return `${a.email ?? ""}|${a.name ?? ""}|${index}`;
+}
+
+const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
+
 // Read-only calendar view: current/next meeting and the next 24h, with the
-// invited attendees ("attendance"). Sign-in-gated; reloads on auth changes.
+// invited attendees. Sign-in-gated; reloads on auth changes.
 function CalendarPanel() {
   const ms = useMicrosoftExport();
   const isConnected = ms.connection.state === "connected";
   const [usedForNext, setUsedForNext] = useState(false);
+  const [attendeeIncluded, setAttendeeIncluded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    if (
-      isConnected &&
-      ms.calendarEvents.length === 0 &&
-      !ms.currentMeeting &&
-      !ms.loadingCalendar
-    ) {
-      void ms.loadCalendar();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnected]);
+    if (!isConnected) return;
+    let cancelled = false;
+    const refresh = () => {
+      if (!cancelled) void ms.loadCalendar();
+    };
+    refresh();
+    const interval = window.setInterval(refresh, CALENDAR_REFRESH_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [isConnected, ms.loadCalendar]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
@@ -1764,6 +1604,14 @@ function CalendarPanel() {
   useEffect(() => {
     setUsedForNext(false);
   }, [current?.id]);
+
+  useEffect(() => {
+    const next: Record<string, boolean> = {};
+    current?.attendees.forEach((attendee, index) => {
+      next[attendeeKey(attendee, index)] = true;
+    });
+    setAttendeeIncluded(next);
+  }, [current?.id, current?.attendees]);
 
   return (
     <AddonPanel icon={CalendarClock} title="Calendar" state={panelState} detail={detail}>
@@ -1800,13 +1648,40 @@ function CalendarPanel() {
                 {formatEventTime(current.start, current.end)}
               </p>
               {current.attendees.length > 0 && (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  <span className="font-medium">Attendees:</span>{" "}
-                  {current.attendees.slice(0, 8).map(attendeeLabel).join(", ")}
-                  {current.attendees.length > 8
-                    ? ` +${current.attendees.length - 8} more`
-                    : ""}
-                </p>
+                <div className="mt-2 space-y-1">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Invited attendees
+                  </span>
+                  <div className="max-h-36 space-y-1 overflow-auto rounded-md border border-border bg-background/60 p-2">
+                    {current.attendees.map((attendee, index) => {
+                      const key = attendeeKey(attendee, index);
+                      const included = attendeeIncluded[key] !== false;
+                      return (
+                        <label
+                          key={key}
+                          className={`flex items-center gap-2 text-xs ${
+                            included
+                              ? "text-foreground"
+                              : "text-muted-foreground line-through"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 accent-primary"
+                            checked={included}
+                            onChange={(e) =>
+                              setAttendeeIncluded((prev) => ({
+                                ...prev,
+                                [key]: e.target.checked,
+                              }))
+                            }
+                          />
+                          <span className="truncate">{attendeeLabel(attendee)}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
               <button
                 type="button"
@@ -1815,11 +1690,14 @@ function CalendarPanel() {
                   setPendingCalendar({
                     eventId: current.id,
                     subject: current.subject,
-                    attendees: current.attendees,
+                    attendees: current.attendees.map((attendee, index) => ({
+                      ...attendee,
+                      included: attendeeIncluded[attendeeKey(attendee, index)] !== false,
+                    })),
                   });
                   setUsedForNext(true);
                 }}
-                title="Title your next recording from this event and add its attendees to the summary"
+                title="Title your next recording from this event and add its invited attendees to the summary"
               >
                 {usedForNext
                   ? "✓ Set for your next recording"

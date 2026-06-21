@@ -27,7 +27,6 @@ import {
   microsoftExportService,
   type MicrosoftConnectionInfo,
   type NotebookInfo,
-  type SectionInfo,
 } from "@/services/microsoftExportService";
 import {
   buildConfluenceDraftMarkdown,
@@ -78,9 +77,15 @@ function sanitizeSectionName(raw: string): string {
 
 function defaultDatedTitle(title: string, createdAt?: string): string {
   const date = createdAt ? new Date(createdAt) : new Date();
-  const stamp = Number.isNaN(date.getTime())
-    ? new Date().toISOString().slice(0, 10)
-    : date.toISOString().slice(0, 10);
+  const d = Number.isNaN(date.getTime()) ? new Date() : date;
+  const stamp = [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, "0"),
+    String(d.getDate()).padStart(2, "0"),
+  ].join("-") + " " + [
+    String(d.getHours()).padStart(2, "0"),
+    String(d.getMinutes()).padStart(2, "0"),
+  ].join("-");
   const clean = (title || "Untitled meeting").trim();
   return `${stamp} ${clean}`.slice(0, 240).trim();
 }
@@ -112,22 +117,15 @@ export function MeetingExportButtons({
   const [oneNoteOpen, setOneNoteOpen] = useState(false);
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [oneNoteNotebooks, setOneNoteNotebooks] = useState<NotebookInfo[]>([]);
-  const [oneNoteSections, setOneNoteSections] = useState<SectionInfo[]>([]);
   const [oneNoteNotebookId, setOneNoteNotebookId] = useState("");
-  const [oneNoteSectionId, setOneNoteSectionId] = useState("");
   const [oneNoteSavedNotebookName, setOneNoteSavedNotebookName] = useState<string | null>(null);
-  const [oneNoteSavedSectionName, setOneNoteSavedSectionName] = useState<string | null>(null);
+  const [oneNoteSectionName, setOneNoteSectionName] = useState("");
   const [oneNotePageTitle, setOneNotePageTitle] = useState("");
   const [loadingOneNoteNotebooks, setLoadingOneNoteNotebooks] = useState(false);
-  const [loadingOneNoteSections, setLoadingOneNoteSections] = useState(false);
   const [oneNoteNotebookListingLimited, setOneNoteNotebookListingLimited] = useState(false);
-  const [oneNoteSectionListingLimited, setOneNoteSectionListingLimited] = useState(false);
   const [creatingNotebook, setCreatingNotebook] = useState(false);
-  const [creatingSection, setCreatingSection] = useState(false);
   const [newNotebookName, setNewNotebookName] = useState("");
-  const [newSectionName, setNewSectionName] = useState("");
   const [savingNotebook, setSavingNotebook] = useState(false);
-  const [savingSection, setSavingSection] = useState(false);
 
   const loadOneNoteNotebooks = useCallback(async () => {
     setLoadingOneNoteNotebooks(true);
@@ -145,29 +143,6 @@ export function MeetingExportButtons({
       }
     } finally {
       setLoadingOneNoteNotebooks(false);
-    }
-  }, []);
-
-  const loadOneNoteSections = useCallback(async (notebookId: string) => {
-    if (!notebookId) {
-      setOneNoteSections([]);
-      return;
-    }
-    setLoadingOneNoteSections(true);
-    try {
-      setOneNoteSections(await microsoftExportService.listSections(notebookId));
-      setOneNoteSectionListingLimited(false);
-    } catch (e) {
-      setOneNoteSections([]);
-      if (isOneNoteLargeLibraryError(e)) {
-        setOneNoteSectionListingLimited(true);
-      } else {
-        toast.error("Could not load OneNote sections", {
-          description: errorText(e),
-        });
-      }
-    } finally {
-      setLoadingOneNoteSections(false);
     }
   }, []);
 
@@ -230,34 +205,6 @@ export function MeetingExportButtons({
     void loadOneNoteNotebooks();
   }, [connected, loadOneNoteNotebooks, oneNoteOpen]);
 
-  useEffect(() => {
-    if (!oneNoteOpen || !oneNoteNotebookId) return;
-    void loadOneNoteSections(oneNoteNotebookId);
-  }, [loadOneNoteSections, oneNoteNotebookId, oneNoteOpen]);
-
-  useEffect(() => {
-    if (
-      oneNoteOpen &&
-      oneNoteNotebookId &&
-      oneNoteSectionListingLimited &&
-      !oneNoteSectionId &&
-      !creatingSection
-    ) {
-      setCreatingSection(true);
-      setNewSectionName((prev) =>
-        prev || sanitizeSectionName(defaultDatedTitle(meetingTitle, meetingCreatedAt)),
-      );
-    }
-  }, [
-    creatingSection,
-    meetingCreatedAt,
-    meetingTitle,
-    oneNoteNotebookId,
-    oneNoteOpen,
-    oneNoteSectionId,
-    oneNoteSectionListingLimited,
-  ]);
-
   const submitNewNotebook = useCallback(async () => {
     const name = sanitizeNotebookName(newNotebookName).trim();
     if (!name) return;
@@ -269,13 +216,9 @@ export function MeetingExportButtons({
       );
       setOneNoteNotebookId(notebook.id);
       setOneNoteSavedNotebookName(notebook.displayName);
-      setOneNoteSectionId("");
-      setOneNoteSavedSectionName(null);
       setOneNoteNotebookListingLimited(false);
-      setOneNoteSectionListingLimited(false);
       setCreatingNotebook(false);
       setNewNotebookName("");
-      setOneNoteSections([]);
     } catch (e) {
       toast.error("Could not create OneNote notebook", {
         description: errorText(e),
@@ -285,58 +228,30 @@ export function MeetingExportButtons({
     }
   }, [newNotebookName]);
 
-  const submitNewSection = useCallback(async () => {
-    const name = sanitizeSectionName(newSectionName).trim();
-    if (!name || !oneNoteNotebookId) return;
-    setSavingSection(true);
-    try {
-      const section = await microsoftExportService.createSection(
-        oneNoteNotebookId,
-        name,
-      );
-      setOneNoteSections((prev) =>
-        prev.some((s) => s.id === section.id) ? prev : [...prev, section],
-      );
-      setOneNoteSectionId(section.id);
-      setOneNoteSavedSectionName(section.displayName);
-      setOneNoteSectionListingLimited(false);
-      setCreatingSection(false);
-      setNewSectionName("");
-    } catch (e) {
-      toast.error("Could not create OneNote section", {
-        description: errorText(e),
-      });
-    } finally {
-      setSavingSection(false);
-    }
-  }, [newSectionName, oneNoteNotebookId]);
-
   // Opening the OneNote dialog: load the saved destination if present, then let
   // the user override it or create a notebook/section inline.
   const openOneNote = useCallback(() => {
     const saved = getExportDestinations();
+    const generatedTitle = defaultDatedTitle(meetingTitle, meetingCreatedAt);
     setOneNoteNotebookId(saved.notebookId ?? "");
-    setOneNoteSectionId(saved.sectionId ?? "");
     setOneNoteSavedNotebookName(saved.notebookName ?? null);
-    setOneNoteSavedSectionName(saved.sectionName ?? null);
-    setOneNotePageTitle(defaultDatedTitle(meetingTitle, meetingCreatedAt));
+    setOneNoteSectionName(sanitizeSectionName(generatedTitle));
+    setOneNotePageTitle(generatedTitle);
     setOneNoteNotebookListingLimited(false);
-    setOneNoteSectionListingLimited(false);
     setCreatingNotebook(false);
-    setCreatingSection(false);
     setNewNotebookName("");
-    setNewSectionName("");
     setOneNoteOpen(true);
   }, [meetingCreatedAt, meetingTitle]);
 
   const confirmOneNote = useCallback(async () => {
     const pageTitle = oneNotePageTitle.trim() || defaultDatedTitle(meetingTitle, meetingCreatedAt);
+    const sectionName = sanitizeSectionName(oneNoteSectionName).trim();
     if (!oneNoteNotebookId) {
       toast.info("Choose a OneNote notebook.");
       return;
     }
-    if (!oneNoteSectionId) {
-      toast.info("Choose or create a OneNote section.");
+    if (!sectionName) {
+      toast.info("Enter a OneNote section name.");
       return;
     }
     setBusy("onenote");
@@ -350,21 +265,18 @@ export function MeetingExportButtons({
         oneNoteNotebooks.find((n) => n.id === oneNoteNotebookId)?.displayName ??
         oneNoteSavedNotebookName ??
         undefined;
-      const sectionName =
-        oneNoteSections.find((s) => s.id === oneNoteSectionId)?.displayName ??
-        oneNoteSavedSectionName ??
-        undefined;
       setExportDestinations({
         notebookId: oneNoteNotebookId,
         notebookName,
-        sectionId: oneNoteSectionId,
-        sectionName,
+        sectionId: undefined,
+        sectionName: undefined,
       });
-      const report = await microsoftExportService.exportMeetingMarkdownToOneNote(
+      const report = await microsoftExportService.exportMeetingToOneNoteSection(
         meetingId,
         pageTitle,
         md,
-        oneNoteSectionId,
+        oneNoteNotebookId,
+        sectionName,
       );
       reportToast("OneNote", report);
       setOneNoteOpen(false);
@@ -383,17 +295,13 @@ export function MeetingExportButtons({
     oneNoteNotebookId,
     oneNoteNotebooks,
     oneNoteSavedNotebookName,
-    oneNoteSavedSectionName,
     oneNotePageTitle,
-    oneNoteSectionId,
-    oneNoteSections,
+    oneNoteSectionName,
     reportToast,
   ]);
 
   const selectedNotebookMissing =
     !!oneNoteNotebookId && !oneNoteNotebooks.some((n) => n.id === oneNoteNotebookId);
-  const selectedSectionMissing =
-    !!oneNoteSectionId && !oneNoteSections.some((s) => s.id === oneNoteSectionId);
 
   // Planner export opens a review dialog (pick/edit/route action items) rather
   // than creating tasks immediately.
@@ -534,8 +442,8 @@ export function MeetingExportButtons({
           <DialogHeader>
             <DialogTitle>Export to OneNote</DialogTitle>
             <DialogDescription>
-              Create a new page in an existing section, or create a notebook or
-              section before exporting.
+              Create a new dated section in the selected notebook, then export
+              the meeting page into it.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -563,10 +471,6 @@ export function MeetingExportButtons({
                   setCreatingNotebook(false);
                   setOneNoteNotebookId(e.target.value);
                   setOneNoteSavedNotebookName(null);
-                  setOneNoteSectionId("");
-                  setOneNoteSavedSectionName(null);
-                  setOneNoteSectionListingLimited(false);
-                  setCreatingSection(false);
                 }}
                 disabled={loadingOneNoteNotebooks || busy === "onenote"}
               >
@@ -621,89 +525,24 @@ export function MeetingExportButtons({
             )}
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="onenote-section">Section</Label>
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-                  onClick={() => oneNoteNotebookId && void loadOneNoteSections(oneNoteNotebookId)}
-                  disabled={!oneNoteNotebookId || loadingOneNoteSections || busy === "onenote"}
-                >
-                  {loadingOneNoteSections ? "Loading..." : "Reload"}
-                </button>
-              </div>
-              <select
-                id="onenote-section"
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                value={creatingSection ? "__new__" : oneNoteSectionId}
-                onChange={(e) => {
-                  if (e.target.value === "__new__") {
-                    setCreatingSection(true);
-                    return;
+              <Label htmlFor="onenote-section-name">New section name</Label>
+              <Input
+                id="onenote-section-name"
+                value={oneNoteSectionName}
+                onChange={(e) => setOneNoteSectionName(sanitizeSectionName(e.target.value))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionName.trim()) {
+                    void confirmOneNote();
                   }
-                  setCreatingSection(false);
-                  setOneNoteSectionId(e.target.value);
-                  setOneNoteSavedSectionName(null);
                 }}
-                disabled={!oneNoteNotebookId || loadingOneNoteSections || busy === "onenote"}
-              >
-                <option value="">
-                  {!oneNoteNotebookId
-                    ? "Select a notebook first"
-                    : loadingOneNoteSections
-                      ? "Loading..."
-                      : "Select a section"}
-                </option>
-                {oneNoteSections.map((section) => (
-                  <option key={section.id} value={section.id}>
-                    {section.displayName}
-                  </option>
-                ))}
-                {selectedSectionMissing && (
-                  <option value={oneNoteSectionId}>
-                    {oneNoteSavedSectionName ?? "Saved section"}
-                  </option>
-                )}
-                {oneNoteNotebookId && <option value="__new__">+ New section...</option>}
-              </select>
-            </div>
-
-            {oneNoteSectionListingLimited && oneNoteNotebookId && (
-              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
-                Microsoft Graph cannot list existing sections because the
-                backing OneDrive/SharePoint library hit Graph's OneNote query
-                limit. The selected notebook can still have only a few sections.
-                Create a new section here, or export to the saved section if one
-                is already selected.
+                maxLength={ONENOTE_SECTION_MAX}
+                disabled={busy === "onenote"}
+              />
+              <p className="text-xs text-muted-foreground">
+                A fresh OneNote section is created for this export. Invalid
+                OneNote characters are removed automatically. Max 49 characters.
               </p>
-            )}
-
-            {creatingSection && (
-              <div className="space-y-2 rounded-lg border border-border bg-muted p-3">
-                <Label htmlFor="onenote-new-section">New section name</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="onenote-new-section"
-                    value={newSectionName}
-                    onChange={(e) => setNewSectionName(sanitizeSectionName(e.target.value))}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void submitNewSection();
-                      if (e.key === "Escape") setCreatingSection(false);
-                    }}
-                    maxLength={ONENOTE_SECTION_MAX}
-                    autoFocus
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => void submitNewSection()}
-                    disabled={savingSection || !newSectionName.trim()}
-                  >
-                    {savingSection ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
-                  </Button>
-                </div>
-              </div>
-            )}
+            </div>
 
             <div className="space-y-2">
               <Label htmlFor="onenote-page-title">Page title</Label>
@@ -712,7 +551,7 @@ export function MeetingExportButtons({
                 value={oneNotePageTitle}
                 onChange={(e) => setOneNotePageTitle(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionId) {
+                  if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionName.trim()) {
                     void confirmOneNote();
                   }
                 }}
@@ -729,7 +568,11 @@ export function MeetingExportButtons({
             >
               Cancel
             </Button>
-            <Button type="button" onClick={confirmOneNote} disabled={busy === "onenote"}>
+            <Button
+              type="button"
+              onClick={confirmOneNote}
+              disabled={busy === "onenote" || !oneNoteNotebookId || !oneNoteSectionName.trim()}
+            >
               {busy === "onenote" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Export page
             </Button>

@@ -464,11 +464,10 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
 
-    // Reuse an existing same-named section instead of creating a fresh one each
-    // time: the section id feeds the OneNote dedupe key, so a new section per
-    // export would defeat the idempotency ledger and duplicate the page.
-    let (section, section_created) =
-        discovery::ensure_section(&client, &token, &notebook_id, &section_name).await?;
+    // Do not enumerate sections here. Some OneDrive/SharePoint libraries trip
+    // Graph's OneNote 10008 scan limit even when the selected notebook is small.
+    // Creating a new dated section directly is the reliable export path.
+    let section = discovery::create_section(&client, &token, &notebook_id, &section_name).await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
         &meeting_id,
@@ -494,10 +493,9 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     .await;
     save_ledger(&app, &meeting_id, &ledger);
 
-    // If we created the section just now and no page landed in it, delete it so a
-    // failed export doesn't leave an empty orphan section behind. Only ever
-    // delete a section we created this call — never a pre-existing one we reused.
-    if section_created && !report.items.iter().any(|i| i.status.is_terminal_success()) {
+    // If no page landed in the section we just created, delete it so a failed
+    // export doesn't leave an empty orphan section behind.
+    if !report.items.iter().any(|i| i.status.is_terminal_success()) {
         if let Err(e) = discovery::delete_section(&client, &token, &section.id).await {
             log::warn!(
                 "OneNote: couldn't clean up empty section {} after a failed export: {e}",
@@ -769,7 +767,7 @@ pub async fn list_calendar_events(
     calendar::list_calendar_events(&client, &token, &start_iso, &end_iso).await
 }
 
-/// The meeting happening now, else the next one within ~12h (with attendees).
+/// The meeting happening now, else the next one within ~12h (with invited attendees).
 #[tauri::command]
 pub async fn current_or_next_meeting(
     state: tauri::State<'_, MicrosoftAuthState>,

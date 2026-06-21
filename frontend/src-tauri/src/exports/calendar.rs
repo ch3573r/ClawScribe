@@ -1,5 +1,5 @@
 //! Graph calendar: upcoming events and the current/next meeting, including the
-//! event's invited attendees ("attendance"). Read-only; uses the existing
+//! event's invited attendees. Read-only; uses the existing
 //! `Calendars.Read` scope.
 //!
 //! Times are requested in UTC (`Prefer: outlook.timezone="UTC"`) so current/next
@@ -14,8 +14,7 @@ use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
-const EVENT_SELECT: &str =
-    "id,subject,isOnlineMeeting,onlineMeeting,start,end,organizer,attendees";
+const EVENT_SELECT: &str = "id,subject,isOnlineMeeting,onlineMeeting,start,end,organizer,attendees";
 
 /// A person invited to a calendar event.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,7 +17,14 @@
 export interface MeetingCalendarLink {
   eventId: string;
   subject: string | null;
-  attendees: { name: string | null; email: string | null }[];
+  attendees: MeetingCalendarAttendee[];
+}
+
+export interface MeetingCalendarAttendee {
+  name: string | null;
+  email: string | null;
+  /** True when the user wants this invitee included in the meeting summary. */
+  included: boolean;
 }
 
 const MEETING_PREFIX = "clawscribe.meetingCalendar.";
@@ -27,10 +34,22 @@ const ACTIVE_KEY = "clawscribe.activeRecordingCalendar";
 function read(store: Storage | undefined, key: string): MeetingCalendarLink | null {
   try {
     const raw = store?.getItem(key);
-    return raw ? (JSON.parse(raw) as MeetingCalendarLink) : null;
+    return raw ? normalizeLink(JSON.parse(raw) as MeetingCalendarLink) : null;
   } catch {
     return null;
   }
+}
+
+function normalizeLink(link: MeetingCalendarLink): MeetingCalendarLink {
+  return {
+    eventId: link.eventId,
+    subject: link.subject ?? null,
+    attendees: (link.attendees ?? []).map((a) => ({
+      name: a.name ?? null,
+      email: a.email ?? null,
+      included: a.included !== false,
+    })),
+  };
 }
 
 function write(store: Storage | undefined, key: string, link: MeetingCalendarLink | null): void {
@@ -117,7 +136,20 @@ export function clearAllCalendarLinks(): void {
 /** Human-readable attendee list for prompts/UI, capped for length. */
 export function attendeeNames(link: MeetingCalendarLink, max = 25): string[] {
   return link.attendees
+    .filter((a) => a.included !== false)
     .map((a) => (a.name?.trim() || a.email?.trim() || "").trim())
     .filter((s) => s.length > 0)
     .slice(0, max);
+}
+
+/** Markdown checklist for summary prompts, preserving checked-off absences. */
+export function attendeeChecklist(link: MeetingCalendarLink, max = 25): string[] {
+  return link.attendees
+    .map((a) => ({
+      label: (a.name?.trim() || a.email?.trim() || "").trim(),
+      included: a.included !== false,
+    }))
+    .filter((a) => a.label.length > 0)
+    .slice(0, max)
+    .map((a) => `- [${a.included ? "x" : " "}] ${a.label}`);
 }

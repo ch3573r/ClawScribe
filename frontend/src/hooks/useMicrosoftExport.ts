@@ -7,7 +7,6 @@ import {
   microsoftExportService,
   type MicrosoftConnectionInfo,
   type NotebookInfo,
-  type SectionInfo,
   type PlanInfo,
   type BucketInfo,
   type CalendarEvent,
@@ -24,14 +23,11 @@ export function useMicrosoftExport() {
   const [error, setError] = useState<string | null>(null);
 
   const [notebooks, setNotebooks] = useState<NotebookInfo[]>([]);
-  const [sections, setSections] = useState<SectionInfo[]>([]);
   const [plans, setPlans] = useState<PlanInfo[]>([]);
   const [buckets, setBuckets] = useState<BucketInfo[]>([]);
   const [oneNoteNotebookListingLimited, setOneNoteNotebookListingLimited] = useState(false);
-  const [oneNoteSectionListingLimited, setOneNoteSectionListingLimited] = useState(false);
 
   const [loadingNotebooks, setLoadingNotebooks] = useState(false);
-  const [loadingSections, setLoadingSections] = useState(false);
   const [loadingPlans, setLoadingPlans] = useState(false);
   const [loadingBuckets, setLoadingBuckets] = useState(false);
 
@@ -70,11 +66,9 @@ export function useMicrosoftExport() {
         // previously-loaded discovery data. Clear it everywhere so each panel
         // re-fetches fresh and never shows the prior account's notebooks/plans.
         setNotebooks([]);
-        setSections([]);
         setPlans([]);
         setBuckets([]);
         setOneNoteNotebookListingLimited(false);
-        setOneNoteSectionListingLimited(false);
         setCalendarEvents([]);
         setCurrentMeeting(null);
       },
@@ -108,11 +102,9 @@ export function useMicrosoftExport() {
         userEmail: null,
       });
       setNotebooks([]);
-      setSections([]);
       setPlans([]);
       setBuckets([]);
       setOneNoteNotebookListingLimited(false);
-      setOneNoteSectionListingLimited(false);
       setCalendarEvents([]);
       setCurrentMeeting(null);
       // Drop any stored calendar associations (attendee PII) on sign-out.
@@ -145,25 +137,6 @@ export function useMicrosoftExport() {
     }
   }, []);
 
-  const loadSections = useCallback(async (notebookId: string) => {
-    setLoadingSections(true);
-    try {
-      setSections(await microsoftExportService.listSections(notebookId));
-      setOneNoteSectionListingLimited(false);
-      setError(null);
-    } catch (e) {
-      setSections([]);
-      if (isOneNoteLargeLibraryError(e)) {
-        setOneNoteSectionListingLimited(true);
-        setError(null);
-      } else {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    } finally {
-      setLoadingSections(false);
-    }
-  }, []);
-
   const loadPlans = useCallback(async () => {
     setLoadingPlans(true);
     try {
@@ -186,7 +159,7 @@ export function useMicrosoftExport() {
     }
   }, []);
 
-  // Current/next meeting + the next 24h of events (with attendees).
+  // Current/next meeting + the next 24h of events (with invited attendees).
   const loadCalendar = useCallback(async () => {
     setLoadingCalendar(true);
     try {
@@ -228,27 +201,6 @@ export function useMicrosoftExport() {
     [],
   );
 
-  const createSection = useCallback(
-    async (notebookId: string, displayName: string): Promise<SectionInfo | null> => {
-      setError(null);
-      try {
-        const section = await microsoftExportService.createSection(
-          notebookId,
-          displayName,
-        );
-        setSections((prev) =>
-          prev.some((s) => s.id === section.id) ? prev : [...prev, section],
-        );
-        setOneNoteSectionListingLimited(false);
-        return section;
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return null;
-      }
-    },
-    [],
-  );
-
   const createBucket = useCallback(
     async (planId: string, name: string): Promise<BucketInfo | null> => {
       setError(null);
@@ -273,21 +225,16 @@ export function useMicrosoftExport() {
     signIn,
     signOut,
     notebooks,
-    sections,
     plans,
     buckets,
     loadingNotebooks,
-    loadingSections,
     oneNoteNotebookListingLimited,
-    oneNoteSectionListingLimited,
     loadingPlans,
     loadingBuckets,
     loadNotebooks,
-    loadSections,
     loadPlans,
     loadBuckets,
     createNotebook,
-    createSection,
     createBucket,
     refreshStatus,
     calendarEvents,

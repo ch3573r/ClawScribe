@@ -34,10 +34,6 @@ export interface NotebookInfo {
   id: string;
   displayName: string;
 }
-export interface SectionInfo {
-  id: string;
-  displayName: string;
-}
 export interface PlanInfo {
   id: string;
   title: string;
@@ -88,7 +84,7 @@ export interface PolishedPlannerTask {
 }
 
 export const ONENOTE_LARGE_LIBRARY_MESSAGE =
-  "Microsoft Graph cannot list OneNote notebooks or sections because the backing OneDrive/SharePoint document library has too many OneNote items. The selected notebook may still be small. Use a saved destination or create a new notebook/section; export can still write to a known section.";
+  "Microsoft Graph cannot list OneNote notebooks because the backing OneDrive/SharePoint document library has too many OneNote items. Exports avoid section listing and create a fresh dated section in the selected notebook.";
 
 export function isOneNoteLargeLibraryError(error: unknown): boolean {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
@@ -200,10 +196,6 @@ export const microsoftExportService = {
     return invoke<NotebookInfo[]>("list_onenote_notebooks");
   },
 
-  async listSections(notebookId: string): Promise<SectionInfo[]> {
-    return invoke<SectionInfo[]>("list_onenote_sections", { notebookId });
-  },
-
   async listPlans(): Promise<PlanInfo[]> {
     return invoke<PlanInfo[]>("list_planner_plans");
   },
@@ -214,16 +206,6 @@ export const microsoftExportService = {
 
   async createNotebook(displayName: string): Promise<NotebookInfo> {
     return invoke<NotebookInfo>("create_onenote_notebook", { displayName });
-  },
-
-  async createSection(
-    notebookId: string,
-    displayName: string,
-  ): Promise<SectionInfo> {
-    return invoke<SectionInfo>("create_onenote_section", {
-      notebookId,
-      displayName,
-    });
   },
 
   async listCalendarEvents(

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, Video } from "lucide-react";
 import {
   microsoftExportService,
   type CalendarEvent,
 } from "@/services/microsoftExportService";
+
+const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
 
 function formatWhen(iso: string | null): string {
   if (!iso) return "";
@@ -27,27 +29,40 @@ function formatWhen(iso: string | null): string {
 export function UpcomingMeetings() {
   const [events, setEvents] = useState<CalendarEvent[] | null>(null);
 
+  const refresh = useCallback(async (cancelled: () => boolean) => {
+    try {
+      const now = new Date();
+      const end = new Date(now);
+      end.setDate(now.getDate() + 7);
+      const list = await microsoftExportService.listCalendarEvents(
+        now.toISOString(),
+        end.toISOString(),
+      );
+      if (!cancelled()) setEvents(list.slice(0, 5));
+    } catch {
+      // Not connected / no calendar permission — just stay hidden.
+      if (!cancelled()) setEvents([]);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const now = new Date();
-        const end = new Date(now);
-        end.setDate(now.getDate() + 7);
-        const list = await microsoftExportService.listCalendarEvents(
-          now.toISOString(),
-          end.toISOString(),
-        );
-        if (!cancelled) setEvents(list.slice(0, 5));
-      } catch {
-        // Not connected / no calendar permission — just stay hidden.
-        if (!cancelled) setEvents([]);
-      }
-    })();
+    const isCancelled = () => cancelled;
+    const run = () => void refresh(isCancelled);
+    run();
+    const interval = window.setInterval(run, CALENDAR_REFRESH_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") run();
+    };
+    window.addEventListener("focus", run);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", run);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, []);
+  }, [refresh]);
 
   if (!events || events.length === 0) return null;
 

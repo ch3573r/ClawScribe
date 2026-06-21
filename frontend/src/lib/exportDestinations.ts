@@ -1,6 +1,6 @@
 // Persisted Microsoft export destinations.
 //
-// The OneNote notebook/section and Planner plan/bucket chosen in
+// The OneNote notebook and Planner plan/bucket chosen in
 // Settings → Add-ons are saved here so the per-meeting export buttons in the
 // summary view know where to send. These are non-sensitive Graph IDs, stored
 // in localStorage.
@@ -12,6 +12,7 @@ export type ConfluenceExportMode = "draft" | "rest";
 export interface ExportDestinations {
   notebookId?: string;
   notebookName?: string;
+  /** Legacy, retained so older localStorage payloads parse. New exports create fresh sections. */
   sectionId?: string;
   sectionName?: string;
   planId?: string;
@@ -56,7 +57,7 @@ export function setExportDestinations(patch: Partial<ExportDestinations>): Expor
 }
 
 export function hasOneNoteDestination(d: ExportDestinations = getExportDestinations()): boolean {
-  return !!d.notebookId && !!d.sectionId;
+  return !!d.notebookId;
 }
 
 export function hasPlannerDestination(d: ExportDestinations = getExportDestinations()): boolean {
