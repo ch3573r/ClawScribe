@@ -2,7 +2,7 @@
 
 export type ThemePreference = "light" | "dark" | "system"
 export type ResolvedTheme = "light" | "dark"
-export type FontPreference = "source-sans" | "inter" | "manrope" | "ibm-plex-sans" | "system"
+export type FontPreference = "source-sans" | "atkinson" | "lexend" | "fira" | "plex" | "system"
 
 export const THEME_STORAGE_KEY = "clawscribe.theme"
 export const FONT_STORAGE_KEY = "clawscribe.font"
@@ -10,9 +10,10 @@ export const FONT_STORAGE_KEY = "clawscribe.font"
 export const themePreferences: ThemePreference[] = ["light", "dark", "system"]
 export const fontPreferences: FontPreference[] = [
   "source-sans",
-  "inter",
-  "manrope",
-  "ibm-plex-sans",
+  "atkinson",
+  "lexend",
+  "fira",
+  "plex",
   "system",
 ]
 
@@ -21,9 +22,10 @@ const isThemePreference = (value: string | null): value is ThemePreference =>
 
 const isFontPreference = (value: string | null): value is FontPreference =>
   value === "source-sans" ||
-  value === "inter" ||
-  value === "manrope" ||
-  value === "ibm-plex-sans" ||
+  value === "atkinson" ||
+  value === "lexend" ||
+  value === "fira" ||
+  value === "plex" ||
   value === "system"
 
 export function getStoredThemePreference(): ThemePreference {
@@ -86,13 +88,16 @@ export function setThemePreference(preference: ThemePreference): ResolvedTheme {
 
 // ── Interface font ─────────────────────────────────────────────────────────
 
-const FONT_STACKS: Record<FontPreference, string> = {
+export const fontStacks: Record<FontPreference, string> = {
   "source-sans": "var(--font-source-sans-3), ui-sans-serif, system-ui, sans-serif",
-  inter: "var(--font-inter), ui-sans-serif, system-ui, sans-serif",
-  manrope: "var(--font-manrope), ui-sans-serif, system-ui, sans-serif",
-  "ibm-plex-sans": "var(--font-ibm-plex-sans), ui-sans-serif, system-ui, sans-serif",
+  atkinson: "var(--font-atkinson), ui-sans-serif, system-ui, sans-serif",
+  lexend: "var(--font-lexend), ui-sans-serif, system-ui, sans-serif",
+  fira: "var(--font-fira-sans), ui-sans-serif, system-ui, sans-serif",
+  plex: "var(--font-ibm-plex-sans), ui-sans-serif, system-ui, sans-serif",
   system: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
 }
+
+const FONT_CLASSES = fontPreferences.map((preference) => `font-pref-${preference}`)
 
 export function getStoredFontPreference(): FontPreference {
   if (typeof window === "undefined") return "source-sans"
@@ -110,7 +115,15 @@ export function applyFontPreference(preference: FontPreference): void {
 
   const root = document.documentElement
   root.dataset.fontPreference = preference
-  root.style.setProperty("--font-app-sans", FONT_STACKS[preference])
+  root.classList.remove(...FONT_CLASSES)
+  root.classList.add(`font-pref-${preference}`)
+  root.style.setProperty("--font-app-sans", fontStacks[preference])
+
+  if (document.body) {
+    document.body.classList.remove(...FONT_CLASSES)
+    document.body.classList.add(`font-pref-${preference}`)
+    document.body.style.setProperty("--font-app-sans", fontStacks[preference])
+  }
 }
 
 export function setFontPreference(preference: FontPreference): void {

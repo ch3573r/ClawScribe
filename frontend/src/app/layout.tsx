@@ -1,7 +1,14 @@
 'use client'
 
 import './globals.css'
-import { IBM_Plex_Mono, IBM_Plex_Sans, Inter, Manrope, Source_Sans_3 } from 'next/font/google'
+import {
+  Atkinson_Hyperlegible,
+  Fira_Sans,
+  IBM_Plex_Mono,
+  IBM_Plex_Sans,
+  Lexend,
+  Source_Sans_3,
+} from 'next/font/google'
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
@@ -38,15 +45,22 @@ const sourceSans3 = Source_Sans_3({
   variable: '--font-source-sans-3',
 })
 
-const inter = Inter({
+const atkinson = Atkinson_Hyperlegible({
   subsets: ['latin'],
-  variable: '--font-inter',
+  weight: ['400', '700'],
+  variable: '--font-atkinson',
 })
 
-const manrope = Manrope({
+const lexend = Lexend({
   subsets: ['latin'],
   weight: ['400', '500', '600', '700'],
-  variable: '--font-manrope',
+  variable: '--font-lexend',
+})
+
+const firaSans = Fira_Sans({
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700'],
+  variable: '--font-fira-sans',
 })
 
 const ibmPlexSans = IBM_Plex_Sans({
@@ -292,7 +306,7 @@ export default function RootLayout({
 
   return (
     <html lang="en">
-      <body className={`${sourceSans3.variable} ${inter.variable} ${manrope.variable} ${ibmPlexSans.variable} ${plexMono.variable} font-sans antialiased`}>
+      <body className={`${sourceSans3.variable} ${atkinson.variable} ${lexend.variable} ${firaSans.variable} ${ibmPlexSans.variable} ${plexMono.variable} font-sans antialiased`}>
         <ThemeInitializer />
         <AppShortcuts />
         <AppTitlebar />

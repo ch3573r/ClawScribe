@@ -9,6 +9,7 @@ import {
   applyNativeThemePreference,
   applyThemePreference,
   fontPreferences,
+  fontStacks,
   getStoredAccentId,
   getStoredFontPreference,
   getStoredThemePreference,
@@ -20,13 +21,6 @@ import {
   type FontPreference,
   type ThemePreference,
 } from "@/lib/theme";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 
 const themeOptions: Record<
   ThemePreference,
@@ -56,19 +50,23 @@ const themeOptions: Record<
 const fontOptions: Record<FontPreference, { label: string; description: string }> = {
   "source-sans": {
     label: "Source Sans 3",
-    description: "Default. Compact and readable for dense notes.",
+    description: "Bundled default. Compact and readable for dense notes.",
   },
-  inter: {
-    label: "Inter",
-    description: "Neutral UI font with clear controls.",
+  atkinson: {
+    label: "Atkinson",
+    description: "Bundled. Highly legible, wider, and more open.",
   },
-  manrope: {
-    label: "Manrope",
-    description: "Softer geometric feel with wider forms.",
+  lexend: {
+    label: "Lexend",
+    description: "Bundled. Rounder and more spacious.",
   },
-  "ibm-plex-sans": {
+  fira: {
+    label: "Fira Sans",
+    description: "Bundled. Narrower with a stronger technical tone.",
+  },
+  plex: {
     label: "IBM Plex Sans",
-    description: "Technical, structured, and slightly narrower.",
+    description: "Bundled. Structured and editorial.",
   },
   system: {
     label: "System",
@@ -78,22 +76,22 @@ const fontOptions: Record<FontPreference, { label: string; description: string }
 
 export function ThemeInitializer() {
   useEffect(() => {
-    const applyStoredTheme = () => {
+    const applyStoredAppearance = () => {
       const storedPreference = getStoredThemePreference();
       applyThemePreference(storedPreference);
       void applyNativeThemePreference(storedPreference);
+      applyAccent(getStoredAccentId());
+      applyFontPreference(getStoredFontPreference());
     };
 
-    applyStoredTheme();
-    applyAccent(getStoredAccentId());
-    applyFontPreference(getStoredFontPreference());
+    applyStoredAppearance();
 
-    const unsubscribeSystemTheme = subscribeToSystemTheme(applyStoredTheme);
-    window.addEventListener("storage", applyStoredTheme);
+    const unsubscribeSystemTheme = subscribeToSystemTheme(applyStoredAppearance);
+    window.addEventListener("storage", applyStoredAppearance);
 
     return () => {
       unsubscribeSystemTheme();
-      window.removeEventListener("storage", applyStoredTheme);
+      window.removeEventListener("storage", applyStoredAppearance);
     };
   }, []);
 
@@ -120,6 +118,8 @@ export function ThemeSettings() {
       const storedPreference = getStoredThemePreference();
       setPreference(storedPreference);
       applyThemePreference(storedPreference);
+      setFontId(getStoredFontPreference());
+      applyFontPreference(getStoredFontPreference());
     };
 
     syncThemePreference();
@@ -234,36 +234,48 @@ export function ThemeSettings() {
           </div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(15rem,18rem)] sm:items-start">
-          <div className="rounded-md border border-border bg-background p-4">
-            <p className="text-sm font-semibold text-foreground">
-              Meeting notes stay readable at dense sizes.
-            </p>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              Review transcript text, action items, and export controls with the selected interface font.
-            </p>
-            <p className="mt-3 font-mono text-xs text-muted-foreground">
-              00:14 | Generate summary | Export to OneNote
-            </p>
-          </div>
+        <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Interface font">
+          {fontPreferences.map((font) => {
+            const isSelected = font === fontId;
+            const option = fontOptions[font];
 
-          <div>
-            <Select value={fontId} onValueChange={(value) => handleFontChange(value as FontPreference)}>
-              <SelectTrigger aria-label="Interface font">
-                <SelectValue placeholder="Choose font" />
-              </SelectTrigger>
-              <SelectContent>
-                {fontPreferences.map((font) => (
-                  <SelectItem key={font} value={font}>
-                    {fontOptions[font].label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              {fontOptions[fontId].description}
-            </p>
-          </div>
+            return (
+              <button
+                key={font}
+                type="button"
+                role="radio"
+                aria-checked={isSelected}
+                onClick={() => handleFontChange(font)}
+                className={`rounded-md border p-4 text-left transition-colors ${
+                  isSelected
+                    ? "border-primary/40 bg-primary/10 text-foreground ring-1 ring-primary/50"
+                    : "border-border bg-background text-muted-foreground hover:border-primary/60 hover:bg-muted"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{option.label}</p>
+                    <p className="mt-1 text-xs leading-5">{option.description}</p>
+                  </div>
+                  <span
+                    className={`mt-0.5 h-2.5 w-2.5 rounded-full border ${
+                      isSelected ? "border-primary bg-primary" : "border-muted-foreground/40"
+                    }`}
+                    aria-hidden="true"
+                  />
+                </div>
+                <div
+                  className="mt-4 rounded-md border border-border/70 bg-card px-3 py-2 text-foreground"
+                  style={{ fontFamily: fontStacks[font] }}
+                >
+                  <p className="text-[17px] font-semibold leading-6">Meeting notes</p>
+                  <p className="mt-1 text-sm leading-5 text-muted-foreground">
+                    00:14 | Generate summary | Export to OneNote
+                  </p>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </section>
     </div>
