@@ -59,17 +59,12 @@ export function AppTitlebar() {
 
   return (
     <header
-      className="fixed inset-x-0 top-0 z-[100] flex h-[var(--titlebar-height)] select-none items-center border-b border-sidebar-border bg-sidebar text-sidebar-foreground shadow-sm"
+      className="fixed inset-x-0 top-0 z-[100] flex h-[var(--titlebar-height)] select-none items-center border-b border-border bg-card text-foreground"
       onMouseDown={handleDrag}
       data-tauri-drag-region
     >
-      <div
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent"
-        aria-hidden="true"
-      />
-
       <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3" data-tauri-drag-region>
-        <div className="flex h-7 w-7 items-center justify-center rounded-md border border-primary/20 bg-brand-gradient shadow-sm">
+        <div className="flex h-7 w-7 items-center justify-center rounded-md border border-primary/25 bg-background shadow-sm">
           <Image
             src="/brand/clawscribe-icon-64.png"
             alt=""
@@ -79,12 +74,13 @@ export function AppTitlebar() {
             priority
           />
         </div>
-        <span className="flex min-w-0 items-baseline gap-2" data-tauri-drag-region>
-          <span className="truncate text-[13px] font-semibold tracking-tight text-sidebar-foreground" data-tauri-drag-region>
+        <span className="flex min-w-0 items-center gap-2" data-tauri-drag-region>
+          <span className="truncate text-[12px] font-semibold tracking-tight text-foreground" data-tauri-drag-region>
             ClawScribe
           </span>
+          <span className="h-3 w-px bg-border" aria-hidden="true" data-tauri-drag-region />
           <span
-            className="hidden font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-primary/75 sm:inline"
+            className="hidden font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-primary sm:inline"
             data-tauri-drag-region
           >
             Meeting AI
@@ -93,12 +89,12 @@ export function AppTitlebar() {
       </div>
 
       <div
-        className="no-drag mr-2 flex items-center gap-1 rounded-md border border-sidebar-border bg-background/55 p-1 shadow-inner"
+        className="no-drag flex h-full items-stretch border-l border-border"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <button
           type="button"
-          className="flex h-7 w-8 items-center justify-center rounded-[4px] text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+          className="flex h-full w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           onClick={handleMinimize}
           aria-label="Minimize"
           title="Minimize"
@@ -107,7 +103,7 @@ export function AppTitlebar() {
         </button>
         <button
           type="button"
-          className="flex h-7 w-8 items-center justify-center rounded-[4px] text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+          className="flex h-full w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           onClick={handleMaximize}
           aria-label="Maximize or restore"
           title="Maximize or restore"
@@ -116,7 +112,7 @@ export function AppTitlebar() {
         </button>
         <button
           type="button"
-          className="flex h-7 w-8 items-center justify-center rounded-[4px] text-muted-foreground transition hover:bg-destructive hover:text-destructive-foreground"
+          className="flex h-full w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
           onClick={handleClose}
           aria-label="Close"
           title="Close"
