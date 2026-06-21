@@ -6,20 +6,22 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
   AlertTriangle,
-  CalendarClock,
   CheckCircle2,
-  Cloud,
-  FileCheck2,
-  FileText,
-  ListTodo,
   Loader2,
   LogIn,
   LogOut,
-  NotebookTabs,
   RefreshCw,
-  User,
-  Video,
 } from "lucide-react";
+import {
+  CodexIcon,
+  ConfluenceIcon,
+  Microsoft365Icon,
+  OneNoteIcon,
+  OpenClawIcon,
+  OutlookCalendarIcon,
+  PlannerIcon,
+  TeamsIcon,
+} from "@/components/IntegrationIcons";
 import { Button } from "@/components/ui/button";
 import {
   teamsDetectionService,
@@ -124,8 +126,8 @@ function AddonPanel({
     <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
-          <div className="rounded-lg border border-border bg-muted p-2">
-            <Icon className="h-5 w-5 text-primary" />
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-primary shadow-sm">
+            <Icon className="h-5 w-5" />
           </div>
           <div className="min-w-0">
             <h3 className="text-base font-semibold text-foreground">{title}</h3>
@@ -244,7 +246,7 @@ function MicrosoftSignInPanel() {
 
   return (
     <AddonPanel
-      icon={User}
+      icon={Microsoft365Icon}
       title="Microsoft account"
       state={panelState}
       detail={detail}
@@ -389,7 +391,7 @@ function OneNotePanel() {
 
   return (
     <AddonPanel
-      icon={NotebookTabs}
+      icon={OneNoteIcon}
       title="OneNote export"
       state={panelState}
       detail={detail}
@@ -590,7 +592,7 @@ function PlannerPanel() {
 
   return (
     <AddonPanel
-      icon={ListTodo}
+      icon={PlannerIcon}
       title="Planner task export"
       state={panelState}
       detail={detail}
@@ -919,7 +921,7 @@ function ConfluencePanel() {
 
   return (
     <AddonPanel
-      icon={FileText}
+      icon={ConfluenceIcon}
       title="Confluence export"
       state={mode === "draft" ? "prompt" : restReady ? "ready" : "advanced"}
       badgeLabel={badgeLabel}
@@ -1199,7 +1201,7 @@ function OpenClawPanel() {
 
   return (
     <AddonPanel
-      icon={Cloud}
+      icon={OpenClawIcon}
       title="OpenClaw handoff"
       state={panelState}
       detail="Send finished meetings to your OpenClaw workspace. Configured as the OpenClaw provider under Summary; this shows its live status."
@@ -1333,7 +1335,7 @@ function TeamsAutoStartPanel() {
           };
   return (
     <AddonPanel
-      icon={Video}
+      icon={TeamsIcon}
       title="Teams meeting detection"
       state={mode === "off" ? "planned" : "ready"}
       badgeLabel={modeBadge.label}
@@ -1425,7 +1427,7 @@ function TeamsDetectionPanel() {
 
   return (
     <AddonPanel
-      icon={Video}
+      icon={TeamsIcon}
       title="Teams meeting detection"
       state={teamsState}
       badgeLabel={teamsBadgeLabel}
@@ -1498,7 +1500,7 @@ function CodexPanel() {
 
   return (
     <AddonPanel
-      icon={FileCheck2}
+      icon={CodexIcon}
       title="Codex app-server"
       state={panelState}
       detail="Bundled local Codex app-server runtime. Configured under Summary → Codex app-server."
@@ -1621,7 +1623,7 @@ function CalendarPanel() {
 
   return (
     <AddonPanel
-      icon={CalendarClock}
+      icon={OutlookCalendarIcon}
       title="Calendar"
       state={panelState}
       detail={detail}
@@ -1754,22 +1756,10 @@ function CalendarPanel() {
   );
 }
 
-// The Microsoft four-square mark — instantly reads as "your work account".
-function MicrosoftLogo({ className = "h-5 w-5" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
-      <rect x="1" y="1" width="10" height="10" fill="#F25022" />
-      <rect x="13" y="1" width="10" height="10" fill="#7FBA00" />
-      <rect x="1" y="13" width="10" height="10" fill="#00A4EF" />
-      <rect x="13" y="13" width="10" height="10" fill="#FFB900" />
-    </svg>
-  );
-}
-
 function GroupHeader({ icon, title, desc }: { icon: ReactNode; title: string; desc: string }) {
   return (
     <div className="flex items-start gap-3 border-b border-border pb-3">
-      <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted">
+      <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-primary shadow-sm">
         {icon}
       </span>
       <div>
@@ -1786,7 +1776,7 @@ export function IntegrationsSettings() {
       {/* Microsoft 365 — sign-in is the gateway, exports depend on it. */}
       <section className="space-y-4">
         <GroupHeader
-          icon={<MicrosoftLogo />}
+          icon={<Microsoft365Icon />}
           title="Microsoft 365"
           desc="Sign in with your work account to export meetings to OneNote and Planner, and pull in calendar events."
         />
@@ -1800,7 +1790,7 @@ export function IntegrationsSettings() {
 
       <section className="space-y-4">
         <GroupHeader
-          icon={<FileText className="h-5 w-5 text-primary" />}
+          icon={<ConfluenceIcon />}
           title="Confluence"
           desc="Copy a Confluence-ready draft or publish directly with your configured REST endpoint."
         />
@@ -1810,7 +1800,7 @@ export function IntegrationsSettings() {
       {/* Meeting detection — a recording trigger, not an export destination. */}
       <section className="space-y-4">
         <GroupHeader
-          icon={<Video className="h-5 w-5 text-primary" />}
+          icon={<TeamsIcon />}
           title="Meeting detection"
           desc="Auto-start recording when a Teams meeting is detected. Live status is under Diagnostics."
         />

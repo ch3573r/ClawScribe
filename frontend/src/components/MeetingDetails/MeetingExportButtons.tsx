@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { FileText, NotebookTabs, ListTodo, Loader2, Upload, ChevronDown } from "lucide-react";
+import { Loader2, Upload, ChevronDown } from "lucide-react";
+import {
+  ConfluenceIcon,
+  OneNoteIcon,
+  PlannerIcon,
+} from "@/components/IntegrationIcons";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -420,18 +425,18 @@ export function MeetingExportButtons({
           <DropdownMenuLabel>Export summary to</DropdownMenuLabel>
           {connected && (
             <DropdownMenuItem onClick={openOneNote}>
-              <NotebookTabs className="mr-2 h-4 w-4" />
+              <OneNoteIcon className="mr-2 h-4 w-4" />
               OneNote
             </DropdownMenuItem>
           )}
           {connected && hasActionItems && (
             <DropdownMenuItem onClick={openPlanner}>
-              <ListTodo className="mr-2 h-4 w-4" />
+              <PlannerIcon className="mr-2 h-4 w-4" />
               Planner action items
             </DropdownMenuItem>
           )}
           <DropdownMenuItem onClick={exportConfluence}>
-            <FileText className="mr-2 h-4 w-4" />
+            <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence
           </DropdownMenuItem>
         </DropdownMenuContent>

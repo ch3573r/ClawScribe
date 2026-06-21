@@ -99,7 +99,7 @@
     --brand-gradient: linear-gradient(145deg, hsl(var(--brand-cyan)), hsl(var(--brand-blue)));
     --brand-gradient-v: linear-gradient(to bottom, hsl(var(--brand-cyan)), hsl(var(--brand-blue)));
     --font-app-sans: var(--font-source-sans-3), ui-sans-serif, system-ui, sans-serif;
-    --titlebar-height: 40px;
+    --titlebar-height: 26px;
     /* Primary-action gradient, derived from the chosen accent so it follows the
        accent picker (bold, but the switches still matter). color-mix needs a
        modern webview — WebView2 / WKGTK both qualify. */
@@ -132,7 +132,7 @@
     --border: 214 24% 88%;
     --input: 214 24% 88%;
     --ring: 193 90% 46%;
-    --radius: 0.5rem;
+    --radius: 0.25rem;
     --chart-1: var(--kontron-primary);
     --chart-2: var(--kontron-accent);
     --chart-3: var(--kontron-blue);

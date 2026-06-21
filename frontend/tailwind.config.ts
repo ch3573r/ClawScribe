@@ -104,6 +104,14 @@ export default {
         'small': ['14px', { lineHeight: '1.5', fontWeight: '400' }],
         'caption': ['12px', { lineHeight: '1.4', fontWeight: '400' }],
       },
+      borderRadius: {
+        DEFAULT: '3px',
+        sm: '2px',
+        md: '3px',
+        lg: 'var(--radius)',
+        xl: 'calc(var(--radius) + 2px)',
+        '2xl': 'calc(var(--radius) + 4px)',
+      },
     },
   },
   plugins: [
