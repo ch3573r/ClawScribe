@@ -176,4 +176,4 @@ Key configuration:
 - `build-windows.yml` - Windows-specific builds with signing
 - `build-linux.yml` - Linux-specific builds with signing
 - `build-test.yml` - All platforms with signing (pre-release)
-- `release.yml` - Production release workflow
+- `clawscribe-windows-release.yml` - ClawScribe Windows release and updater workflow

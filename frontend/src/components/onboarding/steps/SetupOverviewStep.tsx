@@ -98,12 +98,12 @@ export function SetupOverviewStep() {
           </Button>
           <div className="text-center">
             <a
-              href="https://github.com/Zackriya-Solutions/meeting-minutes"
+              href="https://github.com/ch3573r/ClawScribe"
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-muted-foreground hover:underline"
             >
-              View upstream project on GitHub
+              View ClawScribe on GitHub
             </a>
           </div>
         </div>

@@ -75,13 +75,17 @@ If you do not have a Windows build machine, use GitHub Actions instead:
 2. Open **Actions**.
 3. Run **ClawScribe Windows Release** manually.
 4. Use `cpu` for the first build unless you explicitly need GPU acceleration.
-5. Download the `clawscribe-windows-<feature>` artifact from the completed run.
+5. Leave `publish=false` for a test artifact, or set `publish=true` only when
+   the version, release notes, and updater behavior are ready.
+6. For non-publish runs, download the `clawscribe-windows-<feature>` artifact
+   from the completed run. For publish runs, use the GitHub Release assets.
 
-The workflow builds on GitHub's `windows-latest` runner, stages the
+The workflow builds on the self-hosted Windows ClawScribe runner, stages the
 `llama-helper-x86_64-pc-windows-msvc.exe` sidecar, stages the pinned Codex
 app-server runtime, runs `frontend\scripts\build-windows-release.ps1`, and
-uploads the generated MSI and NSIS installers. The artifacts are unsigned unless
-Windows signing secrets are added in a future release workflow.
+uploads or publishes the generated MSI and NSIS installers. Non-publish runs
+use 7-day GitHub Actions artifacts. Publish runs upload installer assets,
+`latest.json`, `SHA256SUMS.txt`, and `BUILD-METADATA.txt` to the GitHub Release.
 
 The default build uses the `vulkan` feature for the Windows meeting recorder
 target. Override when needed:
@@ -153,8 +157,8 @@ bundle step produced one:
 
 Authenticode signing is optional. Set `DIGICERT_KEYPAIR_ALIAS` in the build
 environment to enable `frontend/src-tauri/scripts/sign-windows.ps1`; leave it
-unset for unsigned local artifacts. Updater artifacts are intentionally disabled
-until a ClawScribe release feed and signing key are provisioned.
+unset for unsigned local artifacts. Tauri updater signatures are generated only
+when `TAURI_SIGNING_PRIVATE_KEY` is available to the release workflow.
 
 Unsigned artifacts will show an unknown-publisher / SmartScreen warning on
 Windows. That is expected for private test builds. Public-friendly installs

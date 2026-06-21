@@ -122,45 +122,46 @@ This document provides a quick overview of all available CI/CD workflows in this
 **Key Features:**
 - Reusable workflow (called by others)
 - Highly configurable inputs
-- Used by `build-test.yml` and `release.yml`
+- Used by older cross-platform test/build workflows
 
 **Not directly triggered** - used as a building block
 
 ---
 
-### 7. **release.yml** - Production Release
-**Purpose:** Create official releases with signed binaries
+### 7. **clawscribe-windows-release.yml** - ClawScribe Windows Release
+**Purpose:** Build Windows installers and optionally publish the updater release
 
 **Key Features:**
-- Signing REQUIRED
-- Creates GitHub Release (draft)
-- Version tags from `tauri.conf.json`
-- Uploads release assets
-- **macOS and Windows only** (Linux excluded from production releases)
-- Auto-generates `latest.json` for Tauri updater
-- **Auto-increment versioning**: If tag exists, auto-increments (e.g., `0.1.1` -> `0.1.1.1` -> `0.1.1.2`, up to `.100`)
+- Runs on the self-hosted Windows ClawScribe runner
+- Builds the Windows MSI and NSIS setup installers
+- Stages `llama-helper` and the pinned Codex app-server runtime
+- Verifies branded icons
+- Supports CPU, Vulkan, CUDA, OpenBLAS, and optional DirectML builds
+- Generates `SHA256SUMS.txt`, `BUILD-METADATA.txt`, and `latest.json`
+- Publishes directly to a GitHub Release when `publish=true`
+- Guards against updater-invisible prerelease versions
 
 **Triggers:**
 - Manual dispatch only
 
 **Use When:**
-- Ready to publish a new version
-- Creating official release artifacts
+- Producing a Windows installer artifact for testing
+- Publishing the updater-facing GitHub Release
+- Validating a release with `check-only=true`
 
 **Outputs:**
-- GitHub Release (draft)
-- macOS: DMG installer, app.tar.gz (updater), .sig
-- Windows: MSI installer (signed), NSIS installer (signed), .sig files
-- Updater manifest: latest.json
-- Release notes auto-generated
+- GitHub Actions artifact for non-publish builds
+- GitHub Release assets for publish builds:
+  - `ClawScribe_<version>_x64-setup.exe`
+  - `ClawScribe_<version>_x64_en-US.msi`
+  - `latest.json`
+  - `SHA256SUMS.txt`
+  - `BUILD-METADATA.txt`
 
-**Version Behavior:**
-- If `v0.1.1` tag doesn't exist: creates `v0.1.1`
-- If `v0.1.1` exists: creates `v0.1.1.1`
-- If `v0.1.1.1` exists: creates `v0.1.1.2`
-- Maximum: `v0.1.1.100` (then update `tauri.conf.json`)
-
-**Note:** Linux builds are not included in releases. Use `build-linux.yml` for Linux testing.
+**Note:** The old cross-platform `release.yml` workflow was removed. The
+updater uses `/releases/latest/download/latest.json`, so release publishing must
+go through the ClawScribe Windows Release workflow while Windows is the active
+distribution channel.
 
 ---
 
@@ -223,10 +224,10 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Full verification
 
 ### "I'm ready to release..."
-- **Use `release.yml`** (manual dispatch)
-- Creates GitHub Release
-- All platforms, fully signed
-- Production-ready artifacts
+- **Use `clawscribe-windows-release.yml`** (manual dispatch)
+- Select the intended feature set and DirectML option
+- Set `publish=true` only when the release notes and updater version are ready
+- Produces Windows installers and updater metadata
 
 ---
 
@@ -235,9 +236,9 @@ This document provides a quick overview of all available CI/CD workflows in this
 ```
 build.yml (reusable)
     |-- build-test.yml (calls build.yml)
-    |-- release.yml (calls build.yml)
 
 Standalone (don't use build.yml):
+    |-- clawscribe-windows-release.yml (release/updater path)
     |-- build-macos.yml
     |-- build-windows.yml
     |-- build-linux.yml
@@ -256,7 +257,7 @@ Standalone (don't use build.yml):
 | `build-windows.yml` | Windows | Optional | Medium | 30 days | Windows dev |
 | `build-linux.yml` | Linux | Optional | Medium | 30 days | Linux dev |
 | `build-test.yml` | All | ON | Slow | 30 days | Pre-release |
-| `release.yml` | macOS + Windows | REQUIRED | Slow | Permanent | Release |
+| `clawscribe-windows-release.yml` | Windows | Optional updater signing | Medium | Release assets / 7-day dev artifacts | Release |
 
 ---
 
