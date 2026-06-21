@@ -606,12 +606,11 @@ function OneNotePanel() {
 
           {ms.oneNoteSectionListingLimited && selectedNotebook && (
             <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
-              Microsoft Graph blocked section discovery for this notebook, even
-              after retrying through the notebook metadata fallback. The
-              notebook can still have only a few sections; this is caused by the
-              backing OneDrive/SharePoint library hitting Graph's OneNote query
-              limit. Create a new section here, or keep using the saved section
-              if one is already selected.
+              Microsoft Graph cannot list existing sections because the backing
+              OneDrive/SharePoint library hit Graph's OneNote query limit. The
+              selected notebook can still have only a few sections. Create a new
+              section here, or keep using the saved section if one is already
+              selected.
             </p>
           )}
 
