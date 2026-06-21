@@ -1,19 +1,12 @@
-//! Microsoft Graph export foundation (OneNote + Planner).
+//! Microsoft Graph export integration (calendar + OneNote + Planner).
 //!
-//! This module implements the **credential-free** portion of the Microsoft
-//! Graph export design: page/task builders, sanitized error mapping, the
-//! `exports.json` idempotency ledger, and a retrying Graph client tested
-//! against a mock transport. It deliberately does **not** include live
-//! Microsoft sign-in, MSAL token storage, or a real reqwest transport — those
-//! require a test tenant and credentials and are the explicit next phase. See:
+//! This module owns delegated Microsoft sign-in, token storage, Graph request
+//! transport, calendar lookup, OneNote export, Planner export, sanitized error
+//! mapping, and local duplicate-protection metadata. See:
 //!
-//! - `docs/integrations/microsoft-graph-evaluation.md`
+//! - `docs/integrations/microsoft-graph.md`
 //! - `docs/integrations/onenote-export.md`
 //! - `docs/integrations/planner-export.md`
-//! - `docs/productization/microsoft-export-test-plan.md`
-//!
-//! Until live sign-in lands, the Settings → Add-ons panels for OneNote and
-//! Planner should remain labeled "Not implemented".
 
 pub mod auth;
 pub mod client;

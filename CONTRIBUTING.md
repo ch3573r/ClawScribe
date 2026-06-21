@@ -1,152 +1,212 @@
-# Contributing to Meeting Minutes Updates
+# Contributing To ClawScribe
 
-Thank you for your interest in contributing to Meetily! This document provides guidelines and instructions for contributing to this project.
+ClawScribe is a Windows-first, local-first meeting recorder and transcription
+app built with Tauri, Rust, Next.js, and local/optional AI providers. It is based
+on Meetily Community Edition, but this repository is no longer the upstream
+community app. Keep new contribution docs, issues, branches, and PRs oriented
+around ClawScribe.
 
-## Development Workflow
+## Branches And Pull Requests
 
-### Branch Strategy
+- `main` is the active development and release branch.
+- Create feature branches from the latest `main`.
+- Open pull requests back into `main` unless a maintainer explicitly asks for a
+  different target.
+- Keep PRs focused. Avoid bundling unrelated UI, export, model, release, and
+  cleanup work into one commit.
+- Rebase or merge latest `main` before asking for review when the branch has
+  drifted.
 
-- `main` - Production branch
-- `devtest` - Development and testing branch
-- Feature branches should be created from `devtest`
+## Local Setup
 
-### Getting Started
+Required tools for normal Windows development:
 
-1. Fork the repository
-2. Clone your fork:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/meeting-minutes.git
-   ```
-3. Add the original repository as upstream:
-   ```bash
-   git remote add upstream https://github.com/Zackriya-Solutions/meeting-minutes.git
-   ```
-4. Create a new branch from `devtest`:
-   ```bash
-   git checkout devtest
-   git pull upstream devtest
-   git checkout -b feature/your-feature-name
-   ```
+- Git
+- Rust stable, MSVC toolchain
+- Node.js
+- pnpm
+- PowerShell
+- WebView2 runtime
+- Windows SDK / build tools when producing installers
 
-### Development Process
+Install dependencies:
 
-1. Always start your work from the `devtest` branch
-2. Create a new branch for each feature/fix
-3. Make your changes
-4. Write or update tests as needed
-5. Ensure all tests pass
-6. Update documentation if necessary
+```powershell
+cd frontend
+pnpm install
+```
 
-### Issue Creation
+Run the Tauri desktop app:
 
-Before starting work on a new feature or bug fix:
+```powershell
+cd frontend
+pnpm run tauri:dev
+```
 
-1. Check if an issue already exists
-2. If not, create a new issue with:
-   - Clear title
-   - Detailed description
-   - Steps to reproduce (for bugs)
-   - Expected behavior
-   - Screenshots (if applicable)
-   - Labels (bug, enhancement, etc.)
+Run the web UI only:
 
-### Pull Request Process
+```powershell
+cd frontend
+pnpm run dev
+```
 
-1. Create a PR from your feature branch to `devtest`
-2. Link the PR to the related issue using the issue number (e.g., "Fixes #123")
-3. Fill out the PR template completely
-4. Ensure CI checks pass
-5. Request review from at least one maintainer
-6. Address any review comments
-7. Once approved, the PR will be merged into `devtest`
+## Validation
 
-### PR Template
+Run the smallest validation set that matches your change. For broad changes,
+run more than one layer.
+
+Frontend:
+
+```powershell
+cd frontend
+pnpm run lint
+pnpm run build
+```
+
+Rust workspace:
+
+```powershell
+cargo check
+```
+
+Tauri app:
+
+```powershell
+cd frontend
+pnpm run tauri:build
+```
+
+Windows release smoke checks:
+
+```powershell
+cd frontend
+.\scripts\build-windows-release.ps1 -CheckOnly
+pnpm run verify:icons
+```
+
+Targeted Rust tests are acceptable for focused export/model changes, for
+example:
+
+```powershell
+cargo test --lib exports::
+```
+
+## Areas That Need Extra Care
+
+### Recording And Transcription
+
+- Preserve the difference between live recording and import workflows unless a
+  change explicitly intends to alter both.
+- Keep local transcription local by default.
+- For Parakeet and Nemotron changes, document model variant behavior, execution
+  provider behavior, and fallback behavior in logs and user-facing text.
+- Do not assume DirectML correctness without a self-test or measured hardware
+  run.
+
+### Microsoft 365
+
+- Keep Microsoft auth separate from OpenAI, OpenClaw, Codex, and other summary
+  provider auth.
+- Request only the Graph scopes used by the code.
+- OneNote section listing can fail on large OneDrive/SharePoint libraries due
+  to Graph's 5,000-item limit. The reliable export path is creating a fresh
+  dated section or using a previously known section ID.
+- Planner exports should stay review-first. Never create tasks silently from an
+  AI summary without user review.
+
+### Atlassian And Proxied Services
+
+- Direct Confluence/Jira API access depends on tenant reachability and auth. A
+  browser session, PAT, SSO cookie, and Entra App Proxy token are not
+  interchangeable.
+- Keep the browser-draft Confluence path available for hosted/proxied instances
+  where direct REST calls are blocked.
+
+### UI And Product
+
+- Respect both dark and light themes.
+- Respect the user's selected accent color.
+- Keep text and controls responsive across narrow and wide app layouts.
+- Avoid reintroducing stale Meetily branding except where compatibility paths or
+  upstream attribution require it.
+
+## Documentation
+
+- Update `README.md` when user-facing features, supported providers, exports,
+  model variants, install behavior, or release/update behavior changes.
+- Update targeted docs under `docs/` when implementation details change.
+- Remove or archive stale docs instead of leaving contradictory guidance.
+- Use `ClawScribe` for product-facing language. Use `Meetily` only for upstream
+  attribution or compatibility storage paths.
+
+## Release Notes
+
+Every GitHub Release must include descriptive release notes. Do not publish a
+release that only contains binaries or generic build metadata.
+
+Release notes should cover:
+
+- User-facing features
+- Fixed bugs
+- Export/model/update behavior changes
+- Known caveats
+- Whether the updater metadata points to the intended installer
+
+Keep updater-facing notes and release notes aligned.
+
+## Security And Secrets
+
+Never commit:
+
+- `.env` files
+- API keys, bearer tokens, PATs, refresh tokens, session cookies, certificates,
+  or private keys
+- Local auth stores
+- App logs
+- Local databases
+- Generated installers or build artifacts
+- Machine-specific paths unless they are clearly examples
+
+Use placeholders such as `example.com`, `openclaw.local`, or
+`<redacted-token>` in docs and tests. Store real secrets in the OS credential
+store, environment variables, or local ignored config only.
+
+## Commit Messages
+
+Use short, descriptive commit messages. Conventional prefixes are helpful but
+not mandatory:
+
+```text
+feat(scope): add calendar attendance checklist
+fix(exports): avoid OneNote section listing on large libraries
+docs(readme): refresh feature set
+chore(release): update Windows signing metadata
+```
+
+## Pull Request Checklist
+
+Use this as the minimum review checklist:
 
 ```markdown
-## Description
-[Describe your changes here]
-
-## Related Issue
-[Link to the issue this PR addresses]
-
-## Type of Change
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Documentation update
-- [ ] Performance improvement
-- [ ] Code refactoring
-- [ ] Other (please describe)
+## Summary
+- Summary of the change
 
 ## Testing
-- [ ] Unit tests added/updated
-- [ ] Manual testing performed
-- [ ] All tests pass
+- [ ] Frontend validation
+- [ ] Rust validation
+- [ ] Manual app check, if relevant
+- [ ] Release/update check, if relevant
 
-## Documentation
-- [ ] Documentation updated
-- [ ] No documentation needed
-
-## Checklist
-- [ ] Code follows project style
-- [ ] Self-reviewed the code
-- [ ] Added comments for complex code
-- [ ] Updated README if needed
+## Risk
+- [ ] Recording/transcription behavior considered
+- [ ] Export/auth scopes considered
+- [ ] Dark/light theme checked for UI changes
+- [ ] README/docs updated or not needed
+- [ ] No secrets, logs, installers, or local machine artifacts committed
 ```
-
-## Code Style
-
-- Follow the existing code style
-- Use meaningful variable and function names
-- Add comments for complex logic
-- Keep functions small and focused
-- Write clear commit messages
-
-## Commit Message Format
-
-```
-<type>(<scope>): <subject>
-
-<body>
-
-<footer>
-```
-
-Types:
-- feat: New feature
-- fix: Bug fix
-- docs: Documentation changes
-- style: Code style changes
-- refactor: Code refactoring
-- test: Adding/updating tests
-- chore: Maintenance tasks
-
-## Testing
-
-- Write unit tests for new features
-- Update existing tests when modifying code
-- Ensure all tests pass before submitting PR
-- Include integration tests for complex features
-
-## Documentation
-
-- Update documentation for new features
-- Keep README up to date
-- Document API changes
-- Add comments for complex code
-
-## Review Process
-
-1. PRs require at least one review
-2. Address all review comments
-3. Keep the PR up to date with `devtest`
-4. Squash commits if requested
-
-## Getting Help
-
-- Create an issue for questions
-- Join our community chat
-- Contact maintainers
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the project's MIT License. 
+By contributing, you agree that your contributions are licensed under the MIT
+License used by this repository. Upstream Meetily attribution is maintained in
+`UPSTREAM.md`, `NOTICE.md`, and `LICENSE.md`.

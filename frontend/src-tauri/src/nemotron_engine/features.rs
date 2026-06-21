@@ -11,9 +11,8 @@
 //   center true  log = ln(x + 1e-10)  normalize "NA" (none)
 //
 // This mirrors NeMo's FilterbankFeatures / librosa mel (htk=false, slaney norm)
-// and torch.stft(center=true) reflect padding. Exact numerical parity against a
-// NeMo reference vector is still pending (see NEMOTRON_IMPLEMENTATION_PLAN.md
-// §6) but the shape/scale are correct and unit-tested.
+// and torch.stft(center=true) reflect padding. The extractor is unit-tested and
+// feeds the runtime validation described in docs/GPU_ACCELERATION.md.
 
 use realfft::RealFftPlanner;
 

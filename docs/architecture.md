@@ -1,41 +1,72 @@
-# System Architecture
+# ClawScribe Architecture
 
-Meetily is a self-contained desktop application built with [Tauri](https://tauri.app/). It combines a Rust-based backend with a Next.js frontend into a single, efficient, and cross-platform application.
+ClawScribe is a local-first desktop meeting recorder built with Tauri 2, Rust,
+Next.js, and local model runtimes. The supported product runtime is the Tauri
+desktop app under `frontend/`. The legacy `backend/` directory remains in the
+repository for upstream Meetily history and migration reference, not as the
+normal production backend.
 
-## High-Level Architecture Diagram
+## Runtime Shape
 
-```mermaid
-graph TD
-    subgraph User Interface
-        A[Next.js Frontend]
-    end
-
-    subgraph "Core Logic (Rust)"
-        B[Tauri Core]
-        C[Audio Engine]
-        D[Transcription Engine]
-        E[Database]
-        F[Summary Engine]
-    end
-
-    A -- Tauri Commands --> B
-    B -- Manages --> C
-    B -- Manages --> D
-    B -- Manages --> E
-    B -- Manages --> F
+```text
+Next.js / React UI
+        |
+        | Tauri commands and events
+        v
+Rust app core
+  - recording and import pipeline
+  - local transcription engines
+  - summary providers
+  - Microsoft / Atlassian exports
+  - updater, tray, settings, and credential storage
+        |
+        v
+Local files, SQLite/settings, OS credential store, optional external providers
 ```
 
-## Component Details
+The app records from the local user session. It does not join meetings as a bot.
+Meeting data is stored locally in a Meetily-compatible folder layout so older
+recordings and migration paths continue to work.
 
-### Frontend (Next.js)
+## Main Modules
 
-*   Provides the user interface for managing meetings, displaying transcriptions, and configuring the application.
-*   Communicates with the Rust core through Tauri's command system.
+- `frontend/src/`: React UI, settings, meeting detail views, export dialogs,
+  update UI, Teams/calendar panels, and client-side state.
+- `frontend/src-tauri/src/audio/`: recording, import, audio conversion, device
+  handling, and live transcription orchestration.
+- `frontend/src-tauri/src/parakeet_engine/`: Parakeet ONNX model catalog,
+  downloads, validation, and inference.
+- `frontend/src-tauri/src/nemotron_engine/`: Nemotron 3.5 ASR streaming ONNX
+  model catalog, feature extraction, DirectML/CPU loading, and RNN-T decoding.
+- `frontend/src-tauri/src/summary/`: summary generation providers, including
+  built-in/local, API-based, OpenClaw, and Codex app-server paths.
+- `frontend/src-tauri/src/exports/`: Microsoft Graph auth, calendar lookup,
+  OneNote export, Planner export, idempotency, and testable Graph transport.
+- `frontend/src-tauri/src/exports/confluence.rs`: Confluence direct publish and
+  credential handling.
+- `frontend/src-tauri/src/teams_detection.rs`: local Windows Teams meeting
+  detection using process/window evidence.
+- `llama-helper/`: local summary sidecar helper used by built-in/local paths.
 
-### Backend (Rust Core)
+## Data Boundaries
 
-*   **Tauri Core:** The heart of the application, responsible for managing the window, handling events, and exposing the Rust core to the frontend.
-*   **Audio Engine:** Captures audio from the microphone and system, processes it, and prepares it for transcription.
-*   **Transcription Engine:** Uses local speech-to-text models (Whisper or Parakeet) to transcribe the captured audio. It can be accelerated with a GPU.
-*   **Database:** A local SQLite database that stores meeting metadata, transcripts, and summaries.
-*   **Summary Engine:** Generates meeting summaries using various Large Language Models (LLMs), including local models via Ollama.
+- Transcription is local unless a user explicitly selects a cloud transcription
+  provider.
+- Summary generation can be local or external depending on the configured
+  provider.
+- Microsoft Graph is used only after Microsoft sign-in and only for calendar,
+  OneNote, and Planner workflows.
+- Confluence direct publish uses the configured server URL and PAT. Browser
+  draft export remains available when SSO, proxy, or tenant policy blocks REST.
+- OpenClaw handoff is optional and sends completed recording artifacts only to
+  the configured operator endpoint.
+
+## Compatibility Boundaries
+
+Some internal names, folders, and environment variables still use Meetily names.
+That is intentional compatibility debt for existing recordings and deployments,
+not product branding.
+
+Windows is the primary release target. Linux/macOS build paths may exist because
+of the upstream Tauri app and model libraries, but release validation currently
+focuses on Windows installers and GPU paths.

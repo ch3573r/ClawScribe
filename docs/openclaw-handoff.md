@@ -50,16 +50,13 @@ Keep the bearer token out of committed files. On Windows, prefer setting
 `MEETILY_OPENCLAW_BEARER_TOKEN` as a user environment variable and leaving the
 JSON `bearer_token` blank or placeholder-only in any copied example.
 
-## OpenClaw Ingest Endpoint
+## OpenClaw Ingestion Point Setup
 
-The live OpenClaw-side ingest service is in:
+The ingestion point is an operator-run OpenClaw service that accepts completed
+meeting payloads from ClawScribe. It is not bundled into the ClawScribe desktop
+installer; configure it on the host that should receive completed meetings.
 
-```text
-/path/to/openclaw-ingest
-```
-
-For LAN intake, the service environment should be shaped like this on the
-OpenClaw host:
+For LAN intake, configure the ingest service environment on the OpenClaw host:
 
 ```ini
 MEETING_OPENCLAW_INGEST_HOST=0.0.0.0
@@ -76,7 +73,7 @@ Use `127.0.0.1` instead of `0.0.0.0` for loopback-only testing. If binding to
 LAN, restrict source access at the host firewall or upstream firewall to the
 Windows recorder subnet or host.
 
-Install or update the ingest systemd service from the ingest repo:
+Install or update the ingest systemd service from the ingest repository:
 
 ```bash
 cd /path/to/openclaw-ingest
@@ -92,6 +89,11 @@ handoff:
 ```powershell
 Invoke-RestMethod http://openclaw.local:8765/readyz
 ```
+
+Then configure the same host and bearer token in ClawScribe Settings. The
+handoff endpoint should end with `/meetings/completed`; the optional model
+endpoint should expose an OpenAI-compatible `/v1/chat/completions` route when
+using `OpenClaw managed auth` as a summary provider.
 
 ## Behavior
 

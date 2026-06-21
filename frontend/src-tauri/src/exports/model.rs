@@ -3,14 +3,14 @@
 //! These are deliberately decoupled from the summary providers: an exporter
 //! consumes a [`MeetingExport`] (which can be built from any summary source)
 //! rather than a provider-specific output struct. See
-//! `docs/integrations/microsoft-graph-evaluation.md` for the design.
+//! `docs/integrations/microsoft-graph.md` for the design.
 
 use serde::{Deserialize, Serialize};
 
 /// Connection state for the (separate) Microsoft account used for export.
 ///
 /// This is independent from OpenAI / OpenClaw / Codex auth. Mirrors the states
-/// documented in `microsoft-graph-evaluation.md`.
+/// documented in `microsoft-graph.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MicrosoftConnectionState {

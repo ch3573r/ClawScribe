@@ -1,16 +1,53 @@
-# OneNote Export Design
+# OneNote Export
 
-Date: 2026-06-15
-Product: ClawScribe
+ClawScribe exports meeting notes to OneNote through Microsoft Graph delegated
+auth. The current product path intentionally avoids depending on section
+listing because Microsoft Graph can fail section enumeration on large
+OneDrive/SharePoint libraries.
 
-## Feasibility
+## Current UX
 
-OneNote export is feasible through Microsoft Graph delegated permissions. The
-least-privileged scope for creating pages is `Notes.Create`; ClawScribe should
-also request `User.Read` for Microsoft sign-in and `offline_access` only if
-background retry needs refresh-token behavior.
+1. User signs in to Microsoft.
+2. User selects an existing notebook or creates a notebook.
+3. Export creates a fresh dated section for the meeting.
+4. ClawScribe writes editable OneNote pages into that section.
+5. Local export metadata prevents accidental duplicate exports.
 
-The preferred endpoint is a user-scoped OneNote page create call:
+The section name is generated from the meeting title/date and sanitized for
+OneNote constraints. This keeps exports predictable without requiring a section
+picker.
+
+## Why Section Listing Is Avoided
+
+Graph can return:
+
+```text
+access_denied 10008:
+One or more of the document libraries ... contains more than 5,000 OneNote items
+```
+
+That limit applies to the backing document library scan. A notebook with only a
+few visible sections can still fail if the library contains too many OneNote
+items overall. Filtering or `$expand=sections` does not reliably bypass the
+scan.
+
+Reliable operations:
+
+- create a section in a known notebook
+- create pages in a known section
+- reuse a previously known section ID
+
+Unreliable on over-limit libraries:
+
+- list all sections for a notebook
+- require section listing before export
+
+## Graph Shape
+
+Notebook discovery/creation and section/page creation use Microsoft Graph under
+the signed-in user's delegated permissions.
+
+Representative page create call:
 
 ```http
 POST https://graph.microsoft.com/v1.0/me/onenote/sections/{section-id}/pages
@@ -18,137 +55,61 @@ Content-Type: application/xhtml+xml
 Authorization: Bearer <access-token>
 ```
 
-For a simpler first configuration, ClawScribe can use:
+The payload is editable XHTML, not an image snapshot. That keeps exported notes
+usable in OneNote.
 
-```http
-POST https://graph.microsoft.com/v1.0/me/onenote/pages?sectionName=ClawScribe
-```
+## Page Content
 
-That route targets the signed-in user's default notebook and creates the
-top-level section if it does not exist. It is convenient for a default, but a
-stored `sectionId` is more predictable for enterprise use.
+The notes page should include:
 
-Sources:
+- meeting title
+- created/exported metadata
+- invited-attendee checklist when available
+- summary
+- decisions
+- action items
+- transcript pages or transcript chunks when needed
 
-- Create OneNote pages:
-  https://learn.microsoft.com/graph/onenote-create-page
-- Add images and files to OneNote pages:
-  https://learn.microsoft.com/graph/onenote-images-files
-- Microsoft Graph permissions reference:
-  https://learn.microsoft.com/graph/permissions-reference
+OneNote HTML constraints:
 
-## Content Strategy
-
-Use editable XHTML for the first pass. Avoid binary attachments and page
-snapshots until live Graph validation exists.
-
-Suggested page structure:
-
-```html
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>Weekly sync - 2026-06-15</title>
-    <meta name="created" content="2026-06-15T10:00:00Z" />
-  </head>
-  <body>
-    <h1>Weekly sync</h1>
-    <p><b>Recorded by:</b> ClawScribe</p>
-    <h2>Summary</h2>
-    <p>Short summary text...</p>
-    <h2>Decisions</h2>
-    <ul>
-      <li>Decision text...</li>
-    </ul>
-    <h2>Action Items</h2>
-    <ul>
-      <li>Owner - action item text</li>
-    </ul>
-    <h2>Transcript</h2>
-    <pre>Timestamped transcript excerpt...</pre>
-  </body>
-</html>
-```
-
-OneNote Graph input HTML requirements that matter for ClawScribe:
-
-- UTF-8 encoded and well-formed XHTML.
-- Use supported semantic elements: headings, paragraphs, lists, tables, `pre`,
-  bold, and italic.
-- Do not rely on JavaScript, forms, included CSS, or unsupported HTML.
-- Prefer direct editable text over `data-render-src` snapshots because users
-  should be able to edit the exported meeting notes.
-- Use a multipart library only when binary parts are added later.
-
-## Size Strategy
-
-ClawScribe should keep the first export payload below 4 MB because the Microsoft
-Graph REST API request limit applies before the underlying OneNote API's larger
-limits. This points to a text-first export:
-
-- Include title, metadata, summary, decisions, action items, and a transcript
-  excerpt by default.
-- For long transcripts, include a compact transcript section with speaker and
-  timestamp summaries, then attach or link local artifacts only in a later phase.
-- If raw transcript export is requested, split across multiple pages using a
-  deterministic page series title.
-- Avoid audio attachments in Graph OneNote export. Local audio paths can be
-  sensitive and are not useful once uploaded from another user's machine.
-
-Page splitting recommendation:
-
-```text
-Weekly sync - Notes
-Weekly sync - Transcript 1
-Weekly sync - Transcript 2
-```
-
-Each page should have its own idempotency entry in `exports.json`.
+- UTF-8 encoded XHTML
+- supported semantic HTML only
+- no JavaScript/forms
+- no private local file paths unless explicitly intended
+- transcript split across pages when payload size requires it
 
 ## Idempotency
 
-OneNote page creation is not naturally idempotent. ClawScribe should use a local
-`exports.json` ledger in the recording folder.
+OneNote page creation is not naturally idempotent. ClawScribe uses local export
+metadata so retries do not blindly create duplicates.
 
-Recommended dedupe key:
+The ledger may store:
 
-```text
-onenote:{tenantId}:{userId}:{sectionId}:{meetingArtifactHash}:{pageKind}:{pageIndex}
-```
+- destination IDs
+- page IDs / URLs
+- sanitized error codes
+- dedupe keys
+- timestamps
 
-Before creating a page:
-
-1. Load `exports.json`.
-2. If the dedupe key is `succeeded`, show the existing OneNote URL or ask the
-   user whether to create another copy.
-3. If the key is `pending` and fresh, block duplicate in-flight export.
-4. If the key is `pending` and stale, retry only after marking a new attempt.
-5. If the key failed with a retriable status, retry with the same dedupe key.
-
-Because Graph does not support a client-provided idempotency key for OneNote
-page creation, a network timeout after a successful create can produce an
-unknown state. The safe default is to mark `unknown_after_submit` and ask before
-creating another page.
+It must not store access tokens, refresh tokens, auth codes, or raw auth URLs.
 
 ## Error Handling
 
-- `401`: token expired or invalid. Mark Microsoft connection `expired` and ask
-  the user to reconnect.
-- `403`: consent missing, tenant policy blocked, or user lacks access to the
-  target notebook/section. Show access denied and keep local artifacts intact.
-- `404`: stored `sectionId` no longer exists or is not visible. Offer to pick a
-  new section or use the default `sectionName=ClawScribe` route.
-- `413`: page payload too large. Split transcript pages or export summary-only.
-- `429`: follow `Retry-After` if present. If missing, use bounded exponential
-  backoff. Do not create duplicate pages while retrying.
-- `507`: section page limit reached. Offer another section rather than retrying
-  the same section.
+- `401`: token expired or invalid; prompt reconnect.
+- `403`: consent missing, tenant blocked, or access denied.
+- `404`: notebook/section/page destination no longer visible.
+- `413`: split pages or export summary-only.
+- `429`: respect `Retry-After` and avoid duplicate page creation.
+- `507`: target section is full; create/use another section.
+- `10008`: do not retry section listing; use create-new/saved-ID flow.
 
-## Safe Defaults
+Graph failures must leave local meeting artifacts intact.
 
-- Export only after explicit user action until live behavior is proven.
-- Create summary/action pages first; keep raw full transcript optional.
-- Never include bearer tokens or auth URLs in logs.
-- Store only OneNote page IDs, URLs, destination IDs, dedupe keys, and sanitized
-  errors in `exports.json`.
-- Keep Microsoft export independent from OpenAI and OpenClaw provider settings.
+## Review Rules
+
+- Do not reintroduce required section listing.
+- Do not silently export without user action.
+- Do not log tokens or full auth callback URLs.
+- Keep Microsoft auth independent from summary-provider auth.
+- Keep notebook creation optional; exporting to an existing notebook must remain
+  the normal path.
