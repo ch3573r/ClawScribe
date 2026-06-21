@@ -2,9 +2,8 @@
 
 ClawScribe is a local-first desktop meeting recorder built with Tauri 2, Rust,
 Next.js, and local model runtimes. The supported product runtime is the Tauri
-desktop app under `frontend/`. The legacy `backend/` directory remains in the
-repository for upstream Meetily history and migration reference, not as the
-normal production backend.
+desktop app under `frontend/`. The legacy Python/FastAPI backend is no longer
+part of the repository.
 
 ## Runtime Shape
 

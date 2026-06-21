@@ -17,9 +17,8 @@ on Meetily Community Edition and is currently focused on the Tauri desktop app:
 - Optional Microsoft Graph exports and optional OpenClaw/OpenAI-compatible
   integrations configured by the user
 
-The historical Python/FastAPI backend under `backend/` is legacy reference
-material. Do not add new supported runtime behavior there unless the project
-explicitly reintroduces that backend.
+The historical Python/FastAPI backend has been removed. Do not reintroduce a
+separate backend runtime unless the project explicitly chooses that direction.
 
 ## Development Commands
 

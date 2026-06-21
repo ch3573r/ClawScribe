@@ -1120,6 +1120,33 @@ pub async fn is_import_in_progress_command() -> bool {
 mod tests {
     use super::*;
 
+    fn write_test_wav(path: &Path) {
+        let sample_rate = 16_000u32;
+        let sample_count = sample_rate / 10;
+        let data_len = sample_count * 2;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+
+        for _ in 0..sample_count {
+            bytes.extend_from_slice(&0i16.to_le_bytes());
+        }
+
+        std::fs::write(path, bytes).expect("write test wav");
+    }
+
     #[test]
     fn test_audio_extensions() {
         assert!(AUDIO_EXTENSIONS.contains(&"mp4"));
@@ -1162,45 +1189,34 @@ mod tests {
 
     #[test]
     fn test_extract_duration_from_metadata_wav() {
-        // Test with sample WAV file if available
-        let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.wav");
-        if test_path.exists() {
-            let result = extract_duration_from_metadata(test_path);
-            // Should succeed and return a reasonable duration
-            assert!(result.is_ok());
-            let duration = result.unwrap();
-            assert!(
-                duration > 0.0 && duration < 60.0,
-                "Duration {} seems unreasonable",
-                duration
-            );
-        }
-    }
+        let test_path = std::env::temp_dir().join("clawscribe-test-metadata.wav");
+        write_test_wav(&test_path);
 
-    #[test]
-    fn test_extract_duration_from_metadata_mp3() {
-        // Test with sample MP3 file if available
-        let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.mp3");
-        if test_path.exists() {
-            let result = extract_duration_from_metadata(test_path);
-            // MP3 files may not have n_frames metadata, so fallback is expected
-            // We just verify it doesn't panic
-            let _ = result;
-        }
+        let result = extract_duration_from_metadata(&test_path);
+        let _ = std::fs::remove_file(&test_path);
+
+        assert!(result.is_ok());
+        let duration = result.unwrap();
+        assert!(
+            duration > 0.0 && duration < 1.0,
+            "Duration {} seems unreasonable",
+            duration
+        );
     }
 
     #[test]
     fn test_validate_audio_file_with_metadata() {
-        // Test validation with actual audio file
-        let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.wav");
-        if test_path.exists() {
-            let result = validate_audio_file(test_path);
-            assert!(result.is_ok());
-            let info = result.unwrap();
-            assert_eq!(info.format, "WAV");
-            assert!(info.duration_seconds > 0.0);
-            assert!(info.size_bytes > 0);
-        }
+        let test_path = std::env::temp_dir().join("clawscribe-test-validation.wav");
+        write_test_wav(&test_path);
+
+        let result = validate_audio_file(&test_path);
+        let _ = std::fs::remove_file(&test_path);
+
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.format, "WAV");
+        assert!(info.duration_seconds > 0.0);
+        assert!(info.size_bytes > 0);
     }
 
     #[test]

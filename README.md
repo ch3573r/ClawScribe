@@ -118,8 +118,8 @@ ClawScribe supports two Confluence paths:
 ## Product Status
 
 ClawScribe is in active pre-RC development. The Tauri desktop app is the
-supported runtime. The legacy Python/FastAPI backend under `backend/` remains in
-the repository as historical reference and migration context.
+supported runtime. The legacy Python/FastAPI backend has been removed from this
+repository; current runtime work lives in the Tauri desktop app.
 
 Current boundaries:
 
@@ -137,7 +137,6 @@ Current boundaries:
 frontend/                  Next.js UI and Tauri desktop app
 frontend/src-tauri/src/    Rust app core, audio, transcription, exports, summary
 frontend/src/              React components, hooks, services, and app routes
-backend/                   Legacy backend archive, not the supported runtime
 docs/                      Product, build, verification, and integration notes
 llama-helper/              Local summary sidecar helper
 scripts/                   Repository utility scripts
