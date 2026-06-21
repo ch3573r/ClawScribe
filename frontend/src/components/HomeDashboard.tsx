@@ -46,7 +46,7 @@ export function HomeDashboard({
   onTranscriptionError,
 }: HomeDashboardProps) {
   const { meetings } = useSidebar();
-  const { selectedDevices, betaFeatures } = useConfig();
+  const { selectedDevices } = useConfig();
   const { openImportDialog } = useImportDialog();
   const recordingState = useRecordingState();
   const router = useRouter();
@@ -290,7 +290,7 @@ export function HomeDashboard({
                 {
                   icon: Upload,
                   label: "Import Audio/Video",
-                  enabled: betaFeatures.importAndRetranscribe,
+                  enabled: true,
                   onClick: () => openImportDialog(),
                 },
                 {

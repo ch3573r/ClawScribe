@@ -134,12 +134,18 @@ export function ImportAudioDialog({
     toast.error('Import failed', { description: error });
   }, []);
 
+  const handleImportCancelled = useCallback(() => {
+    toast.info('Import cancelled');
+    onOpenChange(false);
+  }, [onOpenChange]);
+
   const {
     status,
     fileInfo,
     progress,
     error,
     isProcessing,
+    isCancelling,
     isBusy,
     selectFile,
     validateFile,
@@ -149,6 +155,7 @@ export function ImportAudioDialog({
   } = useImportAudio({
     onComplete: handleImportComplete,
     onError: handleImportError,
+    onCancelled: handleImportCancelled,
   });
 
   // Reset state only when dialog transitions from closed to open
@@ -253,27 +260,27 @@ export function ImportAudioDialog({
   const handleCancel = async () => {
     if (isProcessing) {
       await cancelImport();
-      toast.info('Import cancelled');
+      return;
     }
     onOpenChange(false);
   };
 
   // Prevent closing during processing
   const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && isProcessing) {
+    if (!newOpen && (isProcessing || isCancelling)) {
       return;
     }
     onOpenChange(newOpen);
   };
 
   const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isProcessing) {
+    if (isProcessing || isCancelling) {
       event.preventDefault();
     }
   };
 
   const handleInteractOutside = (event: Event) => {
-    if (isProcessing) {
+    if (isProcessing || isCancelling) {
       event.preventDefault();
     }
   };
@@ -287,7 +294,12 @@ export function ImportAudioDialog({
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {isProcessing ? (
+            {isCancelling ? (
+              <>
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                Cancelling Import...
+              </>
+            ) : isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
                 Importing Audio...
@@ -310,7 +322,9 @@ export function ImportAudioDialog({
             )}
           </DialogTitle>
           <DialogDescription>
-            {isProcessing
+            {isCancelling
+              ? 'Stopping after the current processing step finishes.'
+              : isProcessing
               ? progress?.message || 'Processing audio...'
               : error
               ? 'An error occurred during import'
@@ -322,7 +336,7 @@ export function ImportAudioDialog({
 
         <div className="min-w-0 space-y-4 py-4">
           {/* File selection / info */}
-          {!isProcessing && !error && status !== 'complete' && (
+          {!isProcessing && !isCancelling && !error && status !== 'complete' && (
             <>
               {fileInfo ? (
                 <div className="bg-muted rounded-lg p-4 space-y-3">
@@ -466,7 +480,7 @@ export function ImportAudioDialog({
           )}
 
           {/* Progress display */}
-          {isProcessing && progress && (
+          {(isProcessing || isCancelling) && progress && (
             <div className="space-y-2">
               <div className="relative">
                 <div className="w-full bg-muted rounded-full h-3">
@@ -541,7 +555,7 @@ export function ImportAudioDialog({
         </div>
 
         <DialogFooter>
-          {!isProcessing && !error && status !== 'complete' && (
+          {!isProcessing && !isCancelling && !error && status !== 'complete' && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
@@ -566,10 +580,14 @@ export function ImportAudioDialog({
               </Button>
             </>
           )}
-          {isProcessing && (
-            <Button variant="outline" onClick={handleCancel}>
-              <X className="h-4 w-4 mr-2" />
-              Cancel
+          {(isProcessing || isCancelling) && (
+            <Button variant="outline" onClick={handleCancel} disabled={isCancelling}>
+              {isCancelling ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <X className="h-4 w-4 mr-2" />
+              )}
+              {isCancelling ? 'Cancelling...' : 'Cancel'}
             </Button>
           )}
           {error && (

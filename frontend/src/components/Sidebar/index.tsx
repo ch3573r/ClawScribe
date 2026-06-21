@@ -33,7 +33,6 @@ import {
 import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
-import { useConfig } from "@/contexts/ConfigContext";
 
 import {
   Dialog,
@@ -88,7 +87,6 @@ const Sidebar: React.FC = () => {
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording, isPaused } = useRecordingState();
   const { openImportDialog } = useImportDialog();
-  const { betaFeatures } = useConfig();
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
@@ -416,22 +414,20 @@ const Sidebar: React.FC = () => {
               </TooltipContent>
             </Tooltip>
 
-            {betaFeatures.importAndRetranscribe && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => openImportDialog()}
-                    className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
-                    aria-label="Import audio"
-                  >
-                    <Upload className="h-5 w-5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="right">
-                  <p>Import Audio</p>
-                </TooltipContent>
-              </Tooltip>
-            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => openImportDialog()}
+                  className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                  aria-label="Import audio"
+                >
+                  <Upload className="h-5 w-5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p>Import Audio</p>
+              </TooltipContent>
+            </Tooltip>
           </div>
 
           <Tooltip>
@@ -718,20 +714,14 @@ const Sidebar: React.FC = () => {
                 </span>
               </button>
 
-              <div
-                className={`grid gap-2 ${
-                  betaFeatures.importAndRetranscribe ? "grid-cols-2" : "grid-cols-1"
-                }`}
-              >
-                {betaFeatures.importAndRetranscribe && (
-                  <button
-                    onClick={() => openImportDialog()}
-                    className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
-                  >
-                    <Upload className="h-4 w-4 shrink-0" />
-                    <span className="truncate">Import</span>
-                  </button>
-                )}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => openImportDialog()}
+                  className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
+                >
+                  <Upload className="h-4 w-4 shrink-0" />
+                  <span className="truncate">Import</span>
+                </button>
 
                 <button
                   onClick={() => router.push("/settings")}

@@ -922,9 +922,9 @@ async fn get_or_init_nemotron<R: Runtime>(
                 if let Err(err) = e.discover_models().await {
                     warn!("Nemotron model discovery error (continuing): {}", err);
                 }
-                e.load_model(&target_model)
-                    .await
-                    .map_err(|err| anyhow!("Failed to load Nemotron model '{}': {}", target_model, err))?;
+                e.load_model(&target_model).await.map_err(|err| {
+                    anyhow!("Failed to load Nemotron model '{}': {}", target_model, err)
+                })?;
             }
             Ok(e)
         }
@@ -1062,7 +1062,7 @@ pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, 
     validate_audio_file(Path::new(&path)).map_err(|e| e.to_string())
 }
 
-/// Start importing an audio file (Beta gated using configContext.betaFeatures)
+/// Start importing an audio file.
 #[tauri::command]
 pub async fn start_import_audio_command<R: Runtime>(
     app: AppHandle<R>,

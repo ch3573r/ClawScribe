@@ -819,10 +819,17 @@ async fn get_or_init_nemotron<R: Runtime>(
             let current_model = e.get_current_model().await;
             if current_model.as_deref() != Some(target_model.as_str()) {
                 if let Err(discover_err) = e.discover_models().await {
-                    warn!("Nemotron model discovery error (continuing): {}", discover_err);
+                    warn!(
+                        "Nemotron model discovery error (continuing): {}",
+                        discover_err
+                    );
                 }
                 e.load_model(&target_model).await.map_err(|load_err| {
-                    anyhow!("Failed to load Nemotron model '{}': {}", target_model, load_err)
+                    anyhow!(
+                        "Failed to load Nemotron model '{}': {}",
+                        target_model,
+                        load_err
+                    )
                 })?;
             }
             Ok(e)
@@ -930,7 +937,7 @@ pub struct RetranscriptionStarted {
     pub message: String,
 }
 
-// Start retranscription (Beta gated using configContext.betaFeatures)
+// Start retranscription.
 #[tauri::command]
 pub async fn start_retranscription_command<R: Runtime>(
     app: AppHandle<R>,
@@ -1168,5 +1175,68 @@ mod tests {
         // Non-audio formats
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));
+    }
+
+    #[test]
+    fn test_write_retranscription_metadata_preserves_existing_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.json");
+        std::fs::write(
+            &metadata_path,
+            serde_json::json!({
+                "version": "1.0",
+                "meeting_id": "meeting-123",
+                "meeting_name": "Planning Review",
+                "created_at": "2026-01-01T00:00:00Z",
+                "duration_seconds": 120.0,
+                "audio_file": "audio.mp4",
+                "detected_summary_language": "en",
+                "custom_field": "keep-me"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = write_retranscription_metadata(dir.path(), "meeting-123", 240.0, "audio.wav");
+        assert!(
+            result.is_ok(),
+            "write_retranscription_metadata failed: {:?}",
+            result
+        );
+
+        let content = std::fs::read_to_string(&metadata_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(parsed["meeting_id"], "meeting-123");
+        assert_eq!(parsed["meeting_name"], "Planning Review");
+        assert_eq!(parsed["custom_field"], "keep-me");
+        assert_eq!(parsed["status"], "completed");
+        assert_eq!(parsed["transcript_file"], "transcripts.json");
+        assert!(parsed.get("retranscribed_at").is_some());
+        assert!(parsed.get("detected_summary_language").is_none());
+        assert!(!dir.path().join(".metadata.json.tmp").exists());
+    }
+
+    #[test]
+    fn test_write_retranscription_metadata_creates_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = write_retranscription_metadata(dir.path(), "meeting-456", 300.0, "audio.flac");
+        assert!(
+            result.is_ok(),
+            "write_retranscription_metadata failed: {:?}",
+            result
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(parsed["version"], "1.0");
+        assert_eq!(parsed["meeting_id"], "meeting-456");
+        assert_eq!(parsed["duration_seconds"], 300.0);
+        assert_eq!(parsed["audio_file"], "audio.flac");
+        assert_eq!(parsed["transcript_file"], "transcripts.json");
+        assert_eq!(parsed["source"], "retranscription");
+        assert!(parsed.get("retranscribed_at").is_some());
     }
 }

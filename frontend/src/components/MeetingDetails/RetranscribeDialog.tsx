@@ -60,6 +60,7 @@ export function RetranscribeDialog({
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig } = useConfig();
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
@@ -77,8 +78,10 @@ export function RetranscribeDialog({
   // Stable refs for callbacks to avoid listener re-registration
   const onCompleteRef = useRef(onComplete);
   const onOpenChangeRef = useRef(onOpenChange);
+  const isCancellingRef = useRef(false);
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
   useEffect(() => { onOpenChangeRef.current = onOpenChange; }, [onOpenChange]);
+  useEffect(() => { isCancellingRef.current = isCancelling; }, [isCancelling]);
 
   // Track previous open state to only reset on closed→open transition
   const prevOpenRef = useRef(false);
@@ -109,6 +112,7 @@ export function RetranscribeDialog({
     if (open && !wasOpen) {
       resetSelection();
       setIsProcessing(false);
+      setIsCancelling(false);
       setProgress(null);
       setError(null);
       setSelectedLang(selectedLanguage || 'auto');
@@ -153,6 +157,7 @@ export function RetranscribeDialog({
             });
 
             setIsProcessing(false);
+            setIsCancelling(false);
             toast.success(
               `Retranscription complete! ${event.payload.segments_count} segments created.`
             );
@@ -173,9 +178,21 @@ export function RetranscribeDialog({
         'retranscription-error',
         async (event) => {
           if (event.payload.meeting_id === meetingId) {
+            const isCancellation = event.payload.error.toLowerCase().includes('cancelled');
+            if (isCancellingRef.current && isCancellation) {
+              setIsProcessing(false);
+              setIsCancelling(false);
+              setProgress(null);
+              setError(null);
+              toast.info('Retranscription cancelled');
+              onOpenChangeRef.current(false);
+              return;
+            }
+
             await Analytics.trackError('enhance_transcript_failed', event.payload.error);
 
             setIsProcessing(false);
+            setIsCancelling(false);
             setError(event.payload.error);
           }
         }
@@ -203,6 +220,7 @@ export function RetranscribeDialog({
     }
 
     setIsProcessing(true);
+    setIsCancelling(false);
     setError(null);
     setProgress(null);
 
@@ -223,6 +241,7 @@ export function RetranscribeDialog({
       });
     } catch (err: any) {
       setIsProcessing(false);
+      setIsCancelling(false);
       const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
       setError(errorMsg);
 
@@ -231,35 +250,40 @@ export function RetranscribeDialog({
   };
 
   const handleCancel = async () => {
-    if (isProcessing) {
+    if (isProcessing && !isCancelling) {
+      setIsCancelling(true);
+      setProgress((current) => ({
+        meeting_id: meetingId,
+        stage: 'cancelling',
+        progress_percentage: current?.progress_percentage ?? 0,
+        message: 'Cancelling retranscription...'
+      }));
       try {
         await invoke('cancel_retranscription_command');
-        setIsProcessing(false);
-        setProgress(null);
-        toast.info('Retranscription cancelled');
       } catch (err) {
+        setIsCancelling(false);
+        setError(err instanceof Error ? err.message : String(err));
         console.error('Failed to cancel retranscription:', err);
       }
     }
-    onOpenChange(false);
   };
 
   // Prevent closing during processing
   const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && isProcessing) {
+    if (!newOpen && (isProcessing || isCancelling)) {
       return;
     }
     onOpenChange(newOpen);
   };
 
   const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isProcessing) {
+    if (isProcessing || isCancelling) {
       event.preventDefault();
     }
   };
 
   const handleInteractOutside = (event: Event) => {
-    if (isProcessing) {
+    if (isProcessing || isCancelling) {
       event.preventDefault();
     }
   };
@@ -273,7 +297,12 @@ export function RetranscribeDialog({
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {isProcessing ? (
+            {isCancelling ? (
+              <>
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                Cancelling Retranscription...
+              </>
+            ) : isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
                 Retranscribing...
@@ -291,16 +320,33 @@ export function RetranscribeDialog({
             )}
           </DialogTitle>
           <DialogDescription>
-            {isProcessing
+            {isCancelling
+              ? 'Stopping after the current processing step finishes.'
+              : isProcessing
               ? progress?.message || 'Processing audio...'
               : error
                 ? 'An error occurred during retranscription'
-                : 'Re-process the audio with different language settings'}
+                : 'Replace the current transcript using the saved audio'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {!isProcessing && !error && (
+          {!isProcessing && !isCancelling && !error && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-100">
+              <div className="flex gap-2">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">Retranscription replaces the current transcript.</p>
+                  <p className="mt-1 text-xs leading-5">
+                    The existing transcript remains available until the replacement
+                    finishes successfully. Meeting audio, notes, and summaries are not deleted.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!isProcessing && !isCancelling && !error && (
             !isParakeetModel ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
@@ -336,7 +382,7 @@ export function RetranscribeDialog({
             )
           )}
 
-          {!isProcessing && !error && availableModels.length > 0 && (
+          {!isProcessing && !isCancelling && !error && availableModels.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-muted-foreground" />
@@ -360,7 +406,7 @@ export function RetranscribeDialog({
             </div>
           )}
 
-          {isProcessing && progress && (
+          {(isProcessing || isCancelling) && progress && (
             <div className="space-y-2">
               <div className="relative">
                 <div className="w-full bg-secondary rounded-full h-3">
@@ -388,7 +434,7 @@ export function RetranscribeDialog({
         </div>
 
         <DialogFooter>
-          {!isProcessing && !error && (
+          {!isProcessing && !isCancelling && !error && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
@@ -399,14 +445,18 @@ export function RetranscribeDialog({
                 disabled={!meetingFolderPath}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Start Retranscription
+                Replace Transcript
               </Button>
             </>
           )}
-          {isProcessing && (
-            <Button variant="outline" onClick={handleCancel}>
-              <X className="h-4 w-4 mr-2" />
-              Cancel
+          {(isProcessing || isCancelling) && (
+            <Button variant="outline" onClick={handleCancel} disabled={isCancelling}>
+              {isCancelling ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <X className="h-4 w-4 mr-2" />
+              )}
+              {isCancelling ? 'Cancelling...' : 'Cancel'}
             </Button>
           )}
           {error && (

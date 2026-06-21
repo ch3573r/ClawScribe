@@ -30,11 +30,12 @@ export interface ImportError {
   error: string;
 }
 
-export type ImportStatus = 'idle' | 'validating' | 'processing' | 'complete' | 'error';
+export type ImportStatus = 'idle' | 'validating' | 'processing' | 'cancelling' | 'complete' | 'error';
 
 export interface UseImportAudioOptions {
   onComplete?: (result: ImportResult) => void;
   onError?: (error: string) => void;
+  onCancelled?: () => void;
 }
 
 export interface UseImportAudioReturn {
@@ -43,6 +44,7 @@ export interface UseImportAudioReturn {
   progress: ImportProgress | null;
   error: string | null;
   isProcessing: boolean;
+  isCancelling: boolean;
   isBusy: boolean;
   selectFile: () => Promise<AudioFileInfo | null>;
   validateFile: (path: string) => Promise<AudioFileInfo | null>;
@@ -60,6 +62,7 @@ export interface UseImportAudioReturn {
 export function useImportAudio({
   onComplete,
   onError,
+  onCancelled,
 }: UseImportAudioOptions = {}): UseImportAudioReturn {
   const [status, setStatus] = useState<ImportStatus>('idle');
   const [fileInfo, setFileInfo] = useState<AudioFileInfo | null>(null);
@@ -69,8 +72,10 @@ export function useImportAudio({
   // Stable refs for callbacks to avoid listener re-registration on every render
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
+  const onCancelledRef = useRef(onCancelled);
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => { onCancelledRef.current = onCancelled; }, [onCancelled]);
 
   // Cancellation guard: prevents late events from updating state after cancel
   const isCancelledRef = useRef(false);
@@ -100,7 +105,7 @@ export function useImportAudio({
       const unlistenComplete = await listen<ImportResult>(
         'import-complete',
         async (event) => {
-          if (isCancelledRef.current) return;
+          isCancelledRef.current = false;
 
           await Analytics.track('import_audio_completed', {
             success: 'true',
@@ -132,7 +137,20 @@ export function useImportAudio({
       const unlistenError = await listen<ImportError>(
         'import-error',
         async (event) => {
-          if (isCancelledRef.current) return;
+          const wasCancelling = isCancelledRef.current;
+          const isCancellation = event.payload.error.toLowerCase().includes('cancelled');
+
+          if (wasCancelling && isCancellation) {
+            isCancelledRef.current = false;
+            setStatus('idle');
+            setProgress(null);
+            setError(null);
+            await Analytics.track('import_audio_cancelled', { success: 'true' });
+            onCancelledRef.current?.();
+            return;
+          }
+
+          isCancelledRef.current = false;
 
           await Analytics.trackError('import_audio_failed', event.payload.error);
 
@@ -249,11 +267,21 @@ export function useImportAudio({
   // Cancel ongoing import
   const cancelImport = useCallback(async () => {
     isCancelledRef.current = true;
+    setStatus('cancelling');
+    setError(null);
+    setProgress((current) => ({
+      stage: 'cancelling',
+      progress_percentage: current?.progress_percentage ?? 0,
+      message: 'Cancelling import...'
+    }));
     try {
       await invoke('cancel_import_command');
-      setStatus('idle');
-      setProgress(null);
     } catch (err: any) {
+      isCancelledRef.current = false;
+      setStatus('error');
+      setProgress(null);
+      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err) || 'Failed to cancel import');
+      setError(errorMsg);
       console.error('Failed to cancel import:', err);
     }
   }, []);
@@ -273,7 +301,8 @@ export function useImportAudio({
     progress,
     error,
     isProcessing: status === 'processing',
-    isBusy: status === 'processing' || status === 'validating',
+    isCancelling: status === 'cancelling',
+    isBusy: status === 'processing' || status === 'validating' || status === 'cancelling',
     selectFile,
     validateFile,
     startImport,
