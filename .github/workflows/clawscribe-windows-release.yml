@@ -362,10 +362,10 @@ jobs:
             "",
             "### SHA-256 checksums",
             "",
-            "```text"
+            '```text'
           )
           $lines += (Get-Content -LiteralPath (Join-Path $bundleRoot "SHA256SUMS.txt"))
-          $lines += "```"
+          $lines += '```'
           $lines | Set-Content -LiteralPath (Join-Path $bundleRoot "RELEASE-NOTES.md") -Encoding utf8
 
       - name: Generate updater manifest (latest.json)
