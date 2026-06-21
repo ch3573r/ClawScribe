@@ -312,98 +312,143 @@ const Sidebar: React.FC = () => {
 
     const isHomePage = pathname === "/";
     const isMeetingPage = pathname?.includes("/meeting-details");
+    const isMeetingsPage = pathname === "/meetings";
     const isSettingsPage = pathname === "/settings";
+    const collapsedNavItems = [
+      {
+        label: "Home",
+        icon: Home,
+        active: isHomePage,
+        onClick: () => router.push("/"),
+      },
+      {
+        label: "Meetings",
+        icon: NotebookPen,
+        active: isMeetingsPage || isMeetingPage,
+        onClick: goToMeetings,
+      },
+      {
+        label: "Settings",
+        icon: Settings,
+        active: isSettingsPage && !onAddons,
+        onClick: () => openSettingsTab("general"),
+      },
+      {
+        label: "Add-ons",
+        icon: Plug,
+        active: onAddons,
+        onClick: () => openSettingsTab("integrations"),
+      },
+    ];
+    const statusDot = isRecording
+      ? isPaused
+        ? "bg-amber-500"
+        : "bg-red-500 animate-pulse"
+      : "bg-emerald-500";
+    const statusLabel = isRecording
+      ? isPaused
+        ? "Paused"
+        : "Recording"
+      : "Ready";
 
     return (
       <TooltipProvider>
-        <div className="flex flex-col items-center gap-3 pt-4">
-          <Logo isCollapsed={isCollapsed} />
+        <div className="flex h-full flex-col items-center px-2 py-4">
+          <div className="shrink-0">
+            <Logo isCollapsed={true} />
+          </div>
 
-          {[
-            {
-              label: "Home",
-              icon: Home,
-              active: isHomePage,
-              onClick: () => router.push("/"),
-            },
-            {
-              label: "Meeting Notes",
-              icon: NotebookPen,
-              active: isMeetingPage,
-              onClick: goToMeetingNotes,
-            },
-            {
-              label: "Settings",
-              icon: Settings,
-              active: isSettingsPage,
-              onClick: () => router.push("/settings?tab=general"),
-            },
-          ].map((item) => {
-            const Icon = item.icon;
-            return (
-              <Tooltip key={item.label}>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={item.onClick}
-                    className={`flex h-10 w-10 items-center justify-center rounded-md transition ${
-                      item.active
-                        ? "bg-primary/10 text-primary ring-1 ring-primary/20"
-                        : "text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
-                    }`}
-                  >
-                    <Icon className="h-5 w-5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="right">
-                  <p>{item.label}</p>
-                </TooltipContent>
-              </Tooltip>
-            );
-          })}
+          <nav className="mt-6 flex flex-col items-center gap-2" aria-label="Primary">
+            {collapsedNavItems.map((item) => {
+              const Icon = item.icon;
+              return (
+                <Tooltip key={item.label}>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={item.onClick}
+                      className={`flex h-10 w-10 items-center justify-center rounded-md transition ${
+                        item.active
+                          ? "bg-primary/10 text-primary ring-1 ring-primary/20"
+                          : "text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                      }`}
+                      aria-label={item.label}
+                    >
+                      <Icon className="h-5 w-5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    <p>{item.label}</p>
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </nav>
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={handleRecordingToggle}
-                className={`flex h-10 w-10 items-center justify-center rounded-md shadow-sm transition ${
-                  isRecording
-                    ? "bg-red-500 text-white hover:bg-red-600"
-                    : "bg-primary text-primary-foreground shadow-primary/20 hover:bg-primary/90"
-                }`}
-              >
-                {isRecording ? (
-                  <Square className="h-5 w-5" />
-                ) : (
-                  <Mic className="h-5 w-5" />
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              <p>
-                {isRecording
-                  ? isPaused
-                    ? "Paused — click to stop"
-                    : "Recording — click to stop"
-                  : "Start Recording"}
-              </p>
-            </TooltipContent>
-          </Tooltip>
+          <div className="flex-1" />
 
-          {betaFeatures.importAndRetranscribe && (
+          <div className="flex flex-col items-center gap-2">
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  onClick={() => openImportDialog()}
-                  className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                  onClick={handleRecordingToggle}
+                  className={`flex h-11 w-11 items-center justify-center rounded-lg shadow-sm transition ${
+                    isRecording
+                      ? "bg-red-500 text-white hover:bg-red-600"
+                      : "bg-primary text-primary-foreground shadow-primary/20 hover:bg-primary/90"
+                  }`}
+                  aria-label={isRecording ? "Stop recording" : "Start recording"}
                 >
-                  <Upload className="h-5 w-5" />
+                  {isRecording ? (
+                    <Square className="h-5 w-5" />
+                  ) : (
+                    <Mic className="h-5 w-5" />
+                  )}
                 </button>
               </TooltipTrigger>
               <TooltipContent side="right">
-                <p>Import Audio</p>
+                <p>
+                  {isRecording
+                    ? isPaused
+                      ? "Paused — click to stop"
+                      : "Recording — click to stop"
+                    : "Start Recording"}
+                </p>
               </TooltipContent>
             </Tooltip>
-          )}
+
+            {betaFeatures.importAndRetranscribe && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => openImportDialog()}
+                    className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                    aria-label="Import audio"
+                  >
+                    <Upload className="h-5 w-5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  <p>Import Audio</p>
+                </TooltipContent>
+              </Tooltip>
+            )}
+          </div>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="mt-4 flex w-full flex-col items-center gap-2 border-t border-sidebar-border pt-3">
+                <span className={`h-2.5 w-2.5 rounded-full ${statusDot}`} />
+                {appVersion ? (
+                  <span className="max-w-11 truncate text-[10px] leading-none text-muted-foreground">
+                    v{appVersion}
+                  </span>
+                ) : null}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>{statusLabel}</p>
+            </TooltipContent>
+          </Tooltip>
         </div>
       </TooltipProvider>
     );
@@ -500,12 +545,8 @@ const Sidebar: React.FC = () => {
   const onAddons = onSettings && settingsTab === "integrations";
   const isEffectivelyCollapsed = isCollapsed || onSettings;
 
-  const goToMeetingNotes = () => {
-    // Only open a real, loadable meeting; otherwise go home (the meetings list),
-    // never the placeholder "intro-call" (which 404s the details page).
-    const id = currentMeeting?.id;
-    const isReal = !!id && id !== "intro-call" && meetings?.some((m) => m.id === id);
-    router.push(isReal ? `/meeting-details?id=${id}` : "/");
+  const goToMeetings = () => {
+    router.push("/meetings");
   };
   const openSettingsTab = (tab: string) => {
     setSettingsTab(tab); // optimistic so the highlight swaps on query-only nav
@@ -523,10 +564,10 @@ const Sidebar: React.FC = () => {
       onClick: () => router.push("/"),
     },
     {
-      label: "Meeting Notes",
+      label: "Meetings",
       icon: NotebookPen,
-      active: pathname?.includes("/meeting-details"),
-      onClick: goToMeetingNotes,
+      active: pathname === "/meetings" || pathname?.includes("/meeting-details"),
+      onClick: goToMeetings,
     },
     {
       label: "Settings",
