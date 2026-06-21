@@ -54,6 +54,7 @@ pub struct DeviceInfo {
 /// New recording saver using incremental saving strategy
 pub struct RecordingSaver {
     incremental_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
+    base_recordings_folder: Option<PathBuf>,
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
     metadata: Option<MeetingMetadata>,
@@ -68,6 +69,7 @@ impl RecordingSaver {
     pub fn new() -> Self {
         Self {
             incremental_saver: None,
+            base_recordings_folder: None,
             meeting_folder: None,
             meeting_name: None,
             metadata: None,
@@ -89,6 +91,11 @@ impl RecordingSaver {
     /// Set the meeting name for this recording session
     pub fn set_meeting_name(&mut self, name: Option<String>) {
         self.meeting_name = name;
+    }
+
+    /// Set the base folder where meeting folders should be created.
+    pub fn set_recordings_folder(&mut self, folder: PathBuf) {
+        self.base_recordings_folder = Some(folder);
     }
 
     /// Set device information in metadata
@@ -267,8 +274,10 @@ impl RecordingSaver {
         meeting_name: &str,
         create_checkpoints: bool,
     ) -> Result<()> {
-        // Load preferences to get base recordings folder
-        let base_folder = super::recording_preferences::get_default_recordings_folder();
+        let base_folder = self
+            .base_recordings_folder
+            .clone()
+            .unwrap_or_else(super::recording_preferences::get_default_recordings_folder);
 
         // Create meeting folder structure (with or without .checkpoints/ subdirectory)
         let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;

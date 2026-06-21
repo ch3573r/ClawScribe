@@ -115,16 +115,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name) =
+    // Load recording preferences to get save path, auto_save, and device preferences.
+    let (auto_save, preferred_mic_name, preferred_system_name, save_folder) =
         match super::recording_preferences::load_recording_preferences(&app).await {
             Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
+                info!("📋 Loaded recording preferences: save_folder={:?}, auto_save={}, preferred_mic={:?}, preferred_system={:?}",
+                      prefs.save_folder, prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
                 (
                     prefs.auto_save,
                     prefs.preferred_mic_device,
                     prefs.preferred_system_device,
+                    prefs.save_folder,
                 )
             }
             Err(e) => {
@@ -132,7 +133,12 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                     "Failed to load recording preferences, using defaults: {}",
                     e
                 );
-                (true, None, None)
+                (
+                    true,
+                    None,
+                    None,
+                    super::recording_preferences::get_default_recordings_folder(),
+                )
             }
         };
 
@@ -243,6 +249,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
     });
     manager.set_meeting_name(Some(effective_meeting_name));
+    manager.set_recordings_folder(save_folder);
 
     // Record which transcription engine + model this session uses.
     let (tp, tm) = resolve_transcription_info(&app).await;
@@ -431,23 +438,27 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to check auto_save setting
-    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
-        Ok(prefs) => {
-            info!(
-                "📋 Loaded recording preferences: auto_save={}",
-                prefs.auto_save
-            );
-            prefs.auto_save
-        }
-        Err(e) => {
-            warn!(
-                "Failed to load recording preferences, defaulting to auto_save=true: {}",
-                e
-            );
-            true // Default to saving if preferences can't be loaded
-        }
-    };
+    // Load recording preferences to check save path and auto_save setting.
+    let (auto_save, save_folder) =
+        match super::recording_preferences::load_recording_preferences(&app).await {
+            Ok(prefs) => {
+                info!(
+                    "📋 Loaded recording preferences: save_folder={:?}, auto_save={}",
+                    prefs.save_folder, prefs.auto_save
+                );
+                (prefs.auto_save, prefs.save_folder)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load recording preferences, defaulting to auto_save=true: {}",
+                    e
+                );
+                (
+                    true,
+                    super::recording_preferences::get_default_recordings_folder(),
+                ) // Default to saving if preferences can't be loaded
+            }
+        };
 
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
@@ -455,6 +466,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
     });
     manager.set_meeting_name(Some(effective_meeting_name));
+    manager.set_recordings_folder(save_folder);
 
     // Record which transcription engine + model this session uses.
     let (tp, tm) = resolve_transcription_info(&app).await;

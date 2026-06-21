@@ -124,8 +124,8 @@ the repository as historical reference and migration context.
 Current boundaries:
 
 - Windows is the primary release target.
-- Some compatibility names, environment variables, and local folders still use
-  Meetily naming to preserve existing data.
+- Some compatibility names and environment variables still use Meetily naming
+  to preserve existing data and integrations.
 - Nemotron remains labeled beta while the DirectML and model-variant behavior is
   still being validated across hardware.
 - Optional cloud AI and export providers must be configured by the user or

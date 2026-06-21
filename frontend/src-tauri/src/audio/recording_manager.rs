@@ -1,5 +1,6 @@
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -476,10 +477,14 @@ impl RecordingManager {
         self.recording_saver.set_meeting_name(name);
     }
 
+    /// Set the base folder where new recording meeting folders are created.
+    pub fn set_recordings_folder(&mut self, folder: PathBuf) {
+        self.recording_saver.set_recordings_folder(folder);
+    }
+
     /// Record which transcription engine + model this session uses.
     pub fn set_transcription_info(&mut self, provider: Option<String>, model: Option<String>) {
-        self.recording_saver
-            .set_transcription_info(provider, model);
+        self.recording_saver.set_transcription_info(provider, model);
     }
 
     /// Add a structured transcript segment to be saved later

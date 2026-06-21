@@ -181,7 +181,7 @@ ClawScribe build first.
 3. Launch `ClawScribe`, select the local transcription model, and start a short
    recording that captures both microphone and system audio.
 4. Stop the recording and confirm a new folder appears under
-   `%USERPROFILE%\Music\meetily-recordings` with `metadata.json`,
+   `%USERPROFILE%\Music\ClawScribe` with `metadata.json`,
    `transcripts.json`, and audio artifacts.
 5. In model settings, select a standalone summary provider first. Recommended
    release smoke path: `Custom OpenAI` with an OpenAI-compatible endpoint,

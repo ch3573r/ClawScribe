@@ -11,7 +11,7 @@ The productized fork keeps the ClawScribe name for user-visible product surfaces
 
 Compatibility references intentionally retained for now include:
 
-- `meetily-recordings` default recording folders
+- legacy `meetily-recordings` folder migration behavior
 - `meetily-json-v1` artifact layout names
 - `openclaw.meetily-submission*.v1` handoff marker schemas
 - `MEETILY_OPENCLAW_*` and `MEETILY_LLAMA_HELPER` environment variables

@@ -2,6 +2,7 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Runtime};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_store::StoreExt;
 
 use anyhow::Result;
@@ -10,6 +11,9 @@ use log::error;
 
 #[cfg(target_os = "macos")]
 use crate::audio::capture::AudioCaptureBackend;
+
+const DEFAULT_RECORDINGS_FOLDER_NAME: &str = "ClawScribe";
+const LEGACY_RECORDINGS_FOLDER_NAME: &str = "meetily-recordings";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RecordingPreferences {
@@ -39,41 +43,84 @@ impl Default for RecordingPreferences {
     }
 }
 
-/// Get the default recordings folder based on platform
-pub fn get_default_recordings_folder() -> PathBuf {
+fn platform_recordings_folder(folder_name: &str) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        // Windows: %USERPROFILE%\Music\meetily-recordings
+        // Windows: %USERPROFILE%\Music\<folder_name>
         if let Some(music_dir) = dirs::audio_dir() {
-            music_dir.join("meetily-recordings")
+            music_dir.join(folder_name)
         } else {
             // Fallback to Documents if Music folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join(folder_name)
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: ~/Movies/meetily-recordings
+        // macOS: ~/Movies/<folder_name>
         if let Some(movies_dir) = dirs::video_dir() {
-            movies_dir.join("meetily-recordings")
+            movies_dir.join(folder_name)
         } else {
             // Fallback to Documents if Movies folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join(folder_name)
         }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // Linux/Others: ~/Documents/meetily-recordings
+        // Linux/Others: ~/Documents/<folder_name>
         dirs::document_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("meetily-recordings")
+            .join(folder_name)
     }
+}
+
+/// Get the default recordings folder based on platform.
+pub fn get_default_recordings_folder() -> PathBuf {
+    platform_recordings_folder(DEFAULT_RECORDINGS_FOLDER_NAME)
+}
+
+fn get_legacy_default_recordings_folder() -> PathBuf {
+    platform_recordings_folder(LEGACY_RECORDINGS_FOLDER_NAME)
+}
+
+fn paths_match(a: &PathBuf, b: &PathBuf) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        a == b
+    }
+}
+
+fn migrate_legacy_recordings_folder(preferences: &mut RecordingPreferences) -> bool {
+    let legacy_default = get_legacy_default_recordings_folder();
+    if paths_match(&preferences.save_folder, &legacy_default) {
+        preferences.save_folder = get_default_recordings_folder();
+        return true;
+    }
+
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_platform_preferences(mut preferences: RecordingPreferences) -> RecordingPreferences {
+    let backend = crate::audio::capture::get_current_backend();
+    preferences.system_audio_backend = Some(backend.to_string());
+    preferences
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_platform_preferences(preferences: RecordingPreferences) -> RecordingPreferences {
+    preferences
 }
 
 /// Ensure the recordings directory exists
@@ -106,17 +153,11 @@ pub async fn load_recording_preferences<R: Runtime>(
     };
 
     // Try to get the preferences from store
-    let prefs = if let Some(value) = store.get("preferences") {
+    let mut prefs = if let Some(value) = store.get("preferences") {
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
-            Ok(mut p) => {
+            Ok(p) => {
                 info!("Loaded recording preferences from store");
-                // Update macOS backend to current value if needed
-                #[cfg(target_os = "macos")]
-                {
-                    let backend = crate::audio::capture::get_current_backend();
-                    p.system_audio_backend = Some(backend.to_string());
-                }
-                p
+                normalize_platform_preferences(p)
             }
             Err(e) => {
                 warn!("Failed to deserialize preferences: {}, using defaults", e);
@@ -127,6 +168,23 @@ pub async fn load_recording_preferences<R: Runtime>(
         info!("No stored preferences found, using defaults");
         RecordingPreferences::default()
     };
+
+    if migrate_legacy_recordings_folder(&mut prefs) {
+        info!(
+            "Migrated legacy default recordings folder to {:?}",
+            prefs.save_folder
+        );
+
+        match serde_json::to_value(&prefs) {
+            Ok(prefs_value) => {
+                store.set("preferences", prefs_value);
+                if let Err(e) = store.save() {
+                    warn!("Failed to persist migrated recording preferences: {}", e);
+                }
+            }
+            Err(e) => warn!("Failed to serialize migrated preferences: {}", e),
+        }
+    }
 
     info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
           prefs.save_folder, prefs.auto_save, prefs.file_format,
@@ -245,13 +303,26 @@ pub async fn open_recordings_folder<R: Runtime>(app: AppHandle<R>) -> Result<(),
 
 #[tauri::command]
 pub async fn select_recording_folder<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    // Use Tauri's dialog to select folder
-    // For now, return None - this would need to be implemented with tauri-plugin-dialog
-    // when it's available in the Cargo.toml
-    warn!("Folder selection not yet implemented - using dialog plugin");
-    Ok(None)
+    let app_clone = app.clone();
+    let folder_path =
+        tokio::task::spawn_blocking(move || app_clone.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|e| format!("Folder dialog task failed: {}", e))?;
+
+    if let Some(path) = folder_path {
+        let folder_path = path.to_string();
+        let folder = PathBuf::from(&folder_path);
+        ensure_recordings_directory(&folder)
+            .map_err(|e| format!("Failed to create selected recordings folder: {}", e))?;
+
+        info!("User selected recordings folder: {}", folder_path);
+        Ok(Some(folder_path))
+    } else {
+        info!("User cancelled recordings folder selection");
+        Ok(None)
+    }
 }
 
 // Backend selection commands

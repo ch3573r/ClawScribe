@@ -71,7 +71,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const handleAutoSaveToggle = async (enabled: boolean) => {
     const newPreferences = { ...preferences, auto_save: enabled };
     setPreferences(newPreferences);
-    await savePreferences(newPreferences);
+    await savePreferences(newPreferences, {
+      successTitle: enabled ? 'Audio saving enabled' : 'Audio saving disabled'
+    });
 
     // Track auto-save setting change
     await Analytics.track('auto_save_recording_toggled', {
@@ -86,7 +88,12 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       preferred_system_device: devices.systemDevice
     };
     setPreferences(newPreferences);
-    await savePreferences(newPreferences);
+    const micDevice = newPreferences.preferred_mic_device || 'Default';
+    const systemDevice = newPreferences.preferred_system_device || 'Default';
+    await savePreferences(newPreferences, {
+      successTitle: 'Device preferences saved',
+      successDescription: `Microphone: ${micDevice}, System Audio: ${systemDevice}`
+    });
 
     // Track default device preference changes
     // Note: Individual device selection analytics are tracked in DeviceSelection component
@@ -101,6 +108,29 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await invoke('open_recordings_folder');
     } catch (error) {
       console.error('Failed to open recordings folder:', error);
+    }
+  };
+
+  const handleChooseFolder = async () => {
+    try {
+      const selectedFolder = await invoke<string | null>('select_recording_folder');
+      if (!selectedFolder) {
+        return;
+      }
+
+      const newPreferences = { ...preferences, save_folder: selectedFolder };
+      setPreferences(newPreferences);
+      await savePreferences(newPreferences, {
+        successTitle: 'Save location updated',
+        successDescription: selectedFolder
+      });
+
+      await Analytics.track('recording_save_folder_changed');
+    } catch (error) {
+      console.error('Failed to choose recordings folder:', error);
+      toast.error('Failed to choose recordings folder', {
+        description: error instanceof Error ? error.message : String(error)
+      });
     }
   };
 
@@ -121,21 +151,25 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
   };
 
-  const savePreferences = async (prefs: RecordingPreferences) => {
+  const savePreferences = async (
+    prefs: RecordingPreferences,
+    toastOptions?: {
+      successTitle?: string;
+      successDescription?: string;
+      errorTitle?: string;
+    }
+  ) => {
     setSaving(true);
     try {
       await invoke('set_recording_preferences', { preferences: prefs });
       onSave?.(prefs);
 
-      // Show success toast with device details
-      const micDevice = prefs.preferred_mic_device || 'Default';
-      const systemDevice = prefs.preferred_system_device || 'Default';
-      toast.success("Device preferences saved", {
-        description: `Microphone: ${micDevice}, System Audio: ${systemDevice}`
+      toast.success(toastOptions?.successTitle || "Recording preferences saved", {
+        description: toastOptions?.successDescription
       });
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
-      toast.error("Failed to save device preferences", {
+      toast.error(toastOptions?.errorTitle || "Failed to save recording preferences", {
         description: error instanceof Error ? error.message : String(error)
       });
     } finally {
@@ -184,13 +218,23 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             <div className="text-sm text-muted-foreground mb-3 break-all">
               {preferences.save_folder || 'Default folder'}
             </div>
-            <button
-              onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-input rounded-md hover:bg-background transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleChooseFolder}
+                disabled={saving}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-input rounded-md hover:bg-background transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Choose Folder
+              </button>
+              <button
+                onClick={handleOpenFolder}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-input rounded-md hover:bg-background transition-colors"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Open Folder
+              </button>
+            </div>
           </div>
 
           <div className="p-4 border rounded-lg bg-secondary">
