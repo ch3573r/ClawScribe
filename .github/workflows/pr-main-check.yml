@@ -75,6 +75,10 @@ jobs:
         working-directory: frontend
         run: pnpm typecheck
 
+      - name: Test frontend helpers
+        working-directory: frontend
+        run: pnpm test
+
       - name: Generate validation summary
         run: |
           echo "## Validation Check Summary" >> $GITHUB_STEP_SUMMARY
@@ -85,6 +89,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Checks" >> $GITHUB_STEP_SUMMARY
           echo "- Frontend typecheck completed" >> $GITHUB_STEP_SUMMARY
+          echo "- Frontend helper tests completed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

@@ -28,6 +28,7 @@
         "release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1",
         "verify:icons": "powershell -ExecutionPolicy Bypass -File scripts/verify-brand-icons.ps1",
         "lint": "next lint",
+        "test": "node --test tests/lib/blocknote-markdown.test.mjs tests/lib/onboarding-summary-model.test.mjs tests/lib/summary-language-preferences.test.mjs",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
