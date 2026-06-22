@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.12
+
+- Added Microsoft To Do export for reviewed personal action items, including
+  To Do list selection, editable task titles and notes, and duplicate
+  protection.
+- Improved Planner export review so task notes are editable and export stays
+  disabled until candidate tasks are loaded.
+- Added speaker-label review for saved meeting transcripts, with per-row
+  edits, custom labels, and apply-to-matching-row updates that feed copied
+  transcripts and regenerated summaries.
+- Preserved speaker attribution as structured metadata in new recording
+  artifacts and OpenClaw transcript markdown instead of baking labels into
+  transcript text.
+- Polished the Meetings archive with saved timestamps and newest, oldest, and
+  title sorting.
+- Removed stale beta-page copy now that Import Audio and Retranscribe are
+  production workflows.
+- `latest.json` advertises runtime version `0.5.12`, so installed `0.5.11`
+  clients can discover this update.
+
 ## 0.5.11
 
 - Refined the Windows chrome and app shell with a thinner custom top bar,
