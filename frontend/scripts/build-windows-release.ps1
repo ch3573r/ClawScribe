@@ -68,6 +68,7 @@ Assert-Command "cargo"
 Assert-VulkanSdk
 
 & (Join-Path $PSScriptRoot "verify-brand-icons.ps1") -FrontendRoot $frontendRoot
+& (Join-Path $PSScriptRoot "stage-sherpa-runtime.ps1") -TauriRoot $tauriRoot
 
 $windowsTarget = "x86_64-pc-windows-msvc"
 $llamaHelperBinary = Join-Path $tauriRoot "binaries\llama-helper-$windowsTarget.exe"

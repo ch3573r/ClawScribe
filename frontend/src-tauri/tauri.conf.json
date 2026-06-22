@@ -83,11 +83,12 @@
             "icons/app_icon.icns",
             "icons/app_icon.ico"
         ],
-        "resources": [
-            "templates/*.json",
-            "binaries/codex-app-server-runtime.json",
-            "binaries/codex-app-server-runtime/**/*"
-        ],
+        "resources": {
+            "templates/": "templates/",
+            "binaries/codex-app-server-runtime.json": "binaries/codex-app-server-runtime.json",
+            "binaries/codex-app-server-runtime/": "binaries/codex-app-server-runtime/",
+            "binaries/sherpa-onnx/*.dll": ""
+        },
         "externalBin": [
             "binaries/llama-helper",
             "binaries/codex-app-server",

@@ -218,6 +218,7 @@ jobs:
             $featureList += "directml"
           }
           $features = ($featureList | Select-Object -Unique) -join ","
+          .\frontend\scripts\stage-sherpa-runtime.ps1 -TauriRoot "frontend\src-tauri"
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\msi" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\nsis" -Recurse -Force -ErrorAction SilentlyContinue
           cd frontend
