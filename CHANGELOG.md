@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.19
+
+- Added crash-safe recording checkpoints that flush every 10 seconds, write via
+  atomic temp files, and recover from the ordered checkpoint files that actually
+  exist on disk.
+- Added audio device hot-swap handling so an unplugged or disconnected input
+  enters a reconnecting state instead of killing the active recording session.
+- Added transcript word-anchor persistence as a playback foundation. Current
+  anchors are estimated from segment timing and text weight, not exact ASR word
+  alignment, so they are intended for navigation/highlighting rather than
+  quote-boundary certification.
+- Added a speaker-lane waveform timeline and click-to-seek playback from both
+  the timeline and transcript rows.
+- Smoothed diarization transcript labels so adjacent fragments with the same
+  speaker read more naturally after speaker-turn processing.
+- Restricted meeting audio resolution to folders already registered in the
+  local meetings database before scanning for playable files.
+- `latest.json` advertises runtime version `0.5.19`, so installed `0.5.18`
+  clients can discover this update.
+
 ## 0.5.18
 
 - Added OneDrive and SharePoint file export for meeting summaries, producing a
