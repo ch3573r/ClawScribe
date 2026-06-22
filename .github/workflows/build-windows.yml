@@ -504,7 +504,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          key: windows-x64-vulkan-v2
+          key: windows-x64-windows-gpu-v1
 
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
@@ -642,7 +642,7 @@ jobs:
         run: |
           # Build llama-helper without GPU features (CPU-only)
           # Note: Vulkan build has CMake race condition issues with llama-cpp-sys-2
-          # The Tauri app itself uses whisper-rs with Vulkan for transcription
+          # The Tauri app itself uses the windows-gpu feature alias for GPU paths
           # llama-helper is for LLM inference and works fine on CPU
           Write-Host "Building llama-helper sidecar (CPU-only)..."
 
@@ -680,7 +680,7 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         with:
           projectPath: frontend
-          args: --target x86_64-pc-windows-msvc --features vulkan ${{ steps.build-profile.outputs.args }}
+          args: --target x86_64-pc-windows-msvc --features windows-gpu ${{ steps.build-profile.outputs.args }}
 
       - name: Verify build artifacts
         shell: bash

@@ -34,10 +34,16 @@ fn detect_and_report_gpu_capabilities() {
             println!("cargo:warning=✅ CoreML acceleration ENABLED");
         }
         "windows" => {
-            if cfg!(feature = "cuda") {
+            if cfg!(feature = "vulkan") && cfg!(feature = "directml") {
+                println!(
+                    "cargo:warning=✅ Windows: Vulkan + DirectML GPU acceleration ENABLED"
+                );
+            } else if cfg!(feature = "cuda") {
                 println!("cargo:warning=✅ Windows: CUDA GPU acceleration ENABLED");
             } else if cfg!(feature = "vulkan") {
                 println!("cargo:warning=✅ Windows: Vulkan GPU acceleration ENABLED");
+            } else if cfg!(feature = "directml") {
+                println!("cargo:warning=✅ Windows: DirectML GPU acceleration ENABLED");
             } else if cfg!(feature = "openblas") {
                 println!("cargo:warning=✅ Windows: OpenBLAS CPU optimization ENABLED");
             } else {
@@ -47,6 +53,9 @@ fn detect_and_report_gpu_capabilities() {
                 println!("cargo:warning=💡 For NVIDIA GPU: cargo build --release --features cuda");
                 println!(
                     "cargo:warning=💡 For AMD/Intel GPU: cargo build --release --features vulkan"
+                );
+                println!(
+                    "cargo:warning=💡 For Windows GPU artifact: cargo build --release --features windows-gpu"
                 );
                 println!("cargo:warning=💡 For CPU optimization: cargo build --release --features openblas");
 
@@ -96,6 +105,7 @@ fn detect_and_report_gpu_capabilities() {
     if !cfg!(feature = "cuda")
         && !cfg!(feature = "vulkan")
         && !cfg!(feature = "hipblas")
+        && !cfg!(feature = "directml")
         && !cfg!(feature = "openblas")
         && target_os != "macos"
     {

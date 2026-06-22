@@ -47,7 +47,8 @@ coreml = ["whisper-rs/coreml"]     # macOS: Apple CoreML acceleration
 cuda = ["whisper-rs/cuda"]         # Windows/Linux: NVIDIA CUDA GPU
 vulkan = ["whisper-rs/vulkan"]     # Windows/Linux: AMD/Intel Vulkan GPU
 hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
-directml = ["ort/directml"]        # Windows: DirectML GPU for Parakeet (experimental, opt-in)
+directml = ["ort/directml"]        # Windows: DirectML EP for ort-backed ONNX paths (not sherpa-onnx)
+windows-gpu = ["vulkan", "directml"] # Windows: Whisper Vulkan + ONNX Runtime DirectML build alias
 
 # CPU optimizations (fallback for systems without GPU)
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
@@ -177,6 +178,7 @@ core-graphics = "0.23"
 cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["av"] }
 dasp = "0.11.0"
 futures-channel = "0.3.31"
+sherpa-onnx = "1.13.3"
 
 # PERFORMANCE: Enable Metal GPU + CoreML acceleration automatically on macOS
 # CoreML provides additional acceleration for Apple Silicon chips
@@ -191,6 +193,9 @@ whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.13.2", features = ["raw-api"] }
 futures-channel = "0.3.31"
+# Shared CPU build avoids MSVC static/dynamic runtime conflicts with existing native deps.
+# sherpa-onnx 1.13.3 exposes only static/shared Cargo features; no DirectML/Vulkan feature exists.
+sherpa-onnx = { version = "1.13.3", default-features = false, features = ["shared"] }
 
 # Linux-specific dependencies
 # Default: CPU-only build (no BLAS)
@@ -202,6 +207,7 @@ futures-channel = "0.3.31"
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.13.2", features = ["raw-api"] }
 futures-channel = "0.3.31"
+sherpa-onnx = "1.13.3"
 
 [dev-dependencies]
 tempfile = "3.3.0"

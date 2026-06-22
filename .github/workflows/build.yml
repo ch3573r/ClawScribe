@@ -111,7 +111,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          key: ${{ inputs.platform }}-${{ inputs.target }}-vulkan-v2
+          key: ${{ inputs.platform }}-${{ inputs.target }}-windows-gpu-v1
 
       - name: install dependencies (ubuntu 24.04)
         if: contains(inputs.platform, 'ubuntu-24.04')
@@ -486,10 +486,10 @@ jobs:
         run: |
           FEATURES=""
 
-          # Windows: Use Vulkan for GPU acceleration
+          # Windows: Use Vulkan plus DirectML-capable ONNX Runtime builds
           if [[ "${{ inputs.platform }}" == *"windows"* ]]; then
-            FEATURES="--features vulkan"
-            echo "Windows build with Vulkan GPU acceleration"
+            FEATURES="--features windows-gpu"
+            echo "Windows build with Vulkan + DirectML-capable GPU acceleration"
           fi
 
           # Linux: Use OpenBLAS for optimized CPU performance
@@ -511,7 +511,7 @@ jobs:
         run: |
           # Build llama-helper without GPU features (CPU-only)
           # Note: Vulkan build has CMake race condition issues with llama-cpp-sys-2
-          # The Tauri app itself uses whisper-rs with Vulkan for transcription
+          # The Tauri app itself uses the windows-gpu feature alias for GPU paths
           # llama-helper is for LLM inference and works fine on CPU
           Write-Host "Building llama-helper sidecar (CPU-only)..."
 

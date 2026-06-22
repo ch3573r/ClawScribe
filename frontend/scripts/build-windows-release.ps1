@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("cpu", "vulkan", "cuda", "openblas")]
-    [string]$Feature = "vulkan",
+    [ValidateSet("cpu", "vulkan", "directml", "windows-gpu", "cuda", "openblas")]
+    [string]$Feature = "windows-gpu",
 
     [switch]$CheckOnly,
     [switch]$SkipInstall
@@ -38,6 +38,23 @@ function Assert-File {
     }
 }
 
+function Assert-VulkanSdk {
+    if ($Feature -notin @("vulkan", "windows-gpu")) {
+        return
+    }
+
+    if (-not $env:VULKAN_SDK -or -not (Test-Path -LiteralPath $env:VULKAN_SDK -PathType Container)) {
+        throw "Feature '$Feature' requires the Vulkan SDK. Install it and make sure VULKAN_SDK points to the SDK root."
+    }
+
+    foreach ($relativePath in @("Bin", "Lib", "Include")) {
+        $path = Join-Path $env:VULKAN_SDK $relativePath
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+            throw "Feature '$Feature' requires Vulkan SDK path '$path'."
+        }
+    }
+}
+
 $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
 )
@@ -48,6 +65,7 @@ if (-not $isWindowsHost) {
 Assert-Command "node"
 Assert-Command "pnpm"
 Assert-Command "cargo"
+Assert-VulkanSdk
 
 & (Join-Path $PSScriptRoot "verify-brand-icons.ps1") -FrontendRoot $frontendRoot
 

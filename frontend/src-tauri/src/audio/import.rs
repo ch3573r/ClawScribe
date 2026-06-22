@@ -785,8 +785,8 @@ async fn create_meeting_with_transcripts(
     // Insert transcripts
     for segment in segments {
         sqlx::query(
-            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&segment.id)
         .bind(&meeting_id)
@@ -795,6 +795,7 @@ async fn create_meeting_with_transcripts(
         .bind(segment.audio_start_time)
         .bind(segment.audio_end_time)
         .bind(segment.duration)
+        .bind(&segment.speaker)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -1325,7 +1326,7 @@ mod tests {
                 audio_start_time: Some(0.0),
                 audio_end_time: Some(1.5),
                 duration: Some(1.5),
-                speaker: None,
+                speaker: Some("Participants".to_string()),
             },
             TranscriptSegment {
                 id: "t-2".to_string(),
@@ -1355,11 +1356,76 @@ mod tests {
         assert_eq!(parsed["version"], "1.0");
         assert_eq!(parsed["segments"][0]["text"], "Hello world");
         assert_eq!(parsed["segments"][1]["text"], "Second segment");
+        assert_eq!(parsed["segments"][0]["speaker"], "Participants");
+        assert!(parsed["segments"][1]["speaker"].is_null());
         assert_eq!(parsed["segments"][0]["sequence_id"], 0);
         assert_eq!(parsed["segments"][1]["sequence_id"], 1);
 
         // Verify temp file was cleaned up
         assert!(!dir.path().join(".transcripts.json.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn test_create_meeting_with_transcripts_persists_speaker() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE meetings (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                folder_path TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE transcripts (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                audio_start_time REAL,
+                audio_end_time REAL,
+                duration REAL,
+                speaker TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let segments = vec![TranscriptSegment {
+            id: "t-speaker".to_string(),
+            text: "Hello from system audio".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            audio_start_time: Some(0.0),
+            audio_end_time: Some(1.5),
+            duration: Some(1.5),
+            speaker: Some("Participants".to_string()),
+        }];
+
+        let meeting_id = create_meeting_with_transcripts(
+            &pool,
+            "Speaker Persistence",
+            &segments,
+            "C:\\recordings\\speaker-persistence".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let speaker: Option<String> =
+            sqlx::query_scalar("SELECT speaker FROM transcripts WHERE meeting_id = ? AND id = ?")
+                .bind(&meeting_id)
+                .bind("t-speaker")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(speaker.as_deref(), Some("Participants"));
     }
 
     #[test]

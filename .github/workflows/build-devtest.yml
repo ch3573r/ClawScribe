@@ -317,10 +317,10 @@ jobs:
         run: |
           FEATURES=""
 
-          # Windows: Use Vulkan for GPU acceleration
+          # Windows: Use Vulkan plus DirectML-capable ONNX Runtime builds
           if [[ "${{ matrix.platform }}" == *"windows"* ]]; then
-            FEATURES="--features vulkan"
-            echo "Windows build with Vulkan GPU acceleration"
+            FEATURES="--features windows-gpu"
+            echo "Windows build with Vulkan + DirectML-capable GPU acceleration"
           fi
 
           # Linux: Use OpenBLAS for optimized CPU performance

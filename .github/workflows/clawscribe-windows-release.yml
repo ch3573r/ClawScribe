@@ -4,13 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       feature:
-        description: Build acceleration feature
+        description: Build acceleration feature set
         required: true
         type: choice
-        default: cpu
+        default: windows-gpu
         options:
           - cpu
+          - windows-gpu
           - vulkan
+          - directml
           - cuda
           - openblas
       check-only:
@@ -24,10 +26,10 @@ on:
         type: string
         default: ""
       directml:
-        description: Include the DirectML EP (GPU transcription for Parakeet/Nemotron). On by default; toggle-gated at runtime (defaults off). Set false to exclude.
+        description: Add the DirectML EP to feature sets that do not already include it.
         required: false
         type: boolean
-        default: true
+        default: false
       publish:
         description: Publish the installers to a GitHub Release (tag = v<package.json version>). Release assets don't count against the Actions-artifact quota.
         required: false
@@ -150,6 +152,34 @@ jobs:
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PATH=$llvmBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Install Vulkan SDK
+        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Verify and Configure Vulkan SDK
+        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
+        shell: pwsh
+        run: |
+          $vulkanSdk = $env:VULKAN_SDK
+          Write-Host "VULKAN_SDK: $vulkanSdk"
+          if (-not $vulkanSdk -or -not (Test-Path $vulkanSdk)) {
+            throw "VULKAN_SDK not set or path does not exist"
+          }
+          $binDir = Join-Path $vulkanSdk "Bin"
+          $libDir = Join-Path $vulkanSdk "Lib"
+          $includeDir = Join-Path $vulkanSdk "Include"
+          foreach ($path in @($binDir, $libDir, $includeDir)) {
+            if (-not (Test-Path $path)) {
+              throw "Required Vulkan SDK path missing: $path"
+            }
+          }
+          "PATH=$binDir;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Vulkan_LIBRARY=$libDir\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Vulkan_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build llama-helper sidecar
         shell: pwsh
         run: |
@@ -180,10 +210,14 @@ jobs:
         run: |
           $feature = "${{ inputs.feature }}"
           # cpu is the implicit default (no GPU feature); others map 1:1.
-          $features = if ($feature -eq "cpu") { "" } else { $feature }
-          if ("${{ inputs.directml }}" -eq "true") {
-            $features = if ($features) { "$features,directml" } else { "directml" }
+          $featureList = @()
+          if ($feature -ne "cpu") {
+            $featureList += $feature
           }
+          if ("${{ inputs.directml }}" -eq "true" -and -not ($featureList -contains "directml") -and -not ($featureList -contains "windows-gpu")) {
+            $featureList += "directml"
+          }
+          $features = ($featureList | Select-Object -Unique) -join ","
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\msi" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\nsis" -Recurse -Force -ErrorAction SilentlyContinue
           cd frontend
@@ -294,7 +328,7 @@ jobs:
           # blocked uploads ("Artifact storage quota has been hit"). The commit
           # sha stays traceable via the run page and the bundled
           # BUILD-METADATA.txt.
-          name: clawscribe-windows-${{ inputs.feature }}${{ inputs.directml && '-directml' || '' }}
+          name: clawscribe-windows-${{ inputs.feature }}${{ inputs.directml && inputs.feature != 'windows-gpu' && inputs.feature != 'directml' && '-directml' || '' }}
           path: |
             frontend/src-tauri/target/release/bundle/msi/*.msi
             frontend/src-tauri/target/release/bundle/nsis/*.exe
@@ -340,7 +374,7 @@ jobs:
           }
           # Built line-by-line (no backticks) to avoid PowerShell here-string escaping.
           $lines = @(
-            "ClawScribe $version ($short) - ${{ inputs.feature }} build (DirectML: ${{ inputs.directml }}).",
+            "ClawScribe $version ($short) - ${{ inputs.feature }} build (DirectML: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'directml' || inputs.directml }}).",
             "",
             "> Unsigned installer. ClawScribe is not yet code-signed, so Windows",
             "> SmartScreen may warn on first run: click More info -> Run anyway to",
