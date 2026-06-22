@@ -38,7 +38,8 @@ const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
 const SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES: f64 = 10.0;
 const SHORT_CLIP_OVERCLUSTERED_SPEAKERS: usize = 4;
-const SHORT_CLIP_RETRY_NUM_SPEAKERS: i32 = 2;
+const SHORT_CLIP_RETRY_MIN_SECONDS: f64 = 6.0;
+const SHORT_CLIP_RETRY_DOMINANT_SHARE: f64 = 0.06;
 const DIRECTML_PROBE_SECONDS: usize = 5;
 const DIRECTML_REQUIRED_SPEEDUP: f64 = 1.10;
 const SHERPA_RUNTIME_DLLS: &[&str] = &[
@@ -610,14 +611,47 @@ fn speaker_count_from_turns(turns: &[DiarizationTurn]) -> usize {
         .len()
 }
 
-fn should_retry_short_clip_with_two_speakers(
+fn short_clip_retry_speaker_count(
     sample_count: usize,
     turns: &[DiarizationTurn],
     explicit_num_speakers: Option<i32>,
-) -> bool {
-    explicit_num_speakers.is_none()
-        && audio_duration_minutes(sample_count) <= SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES
-        && speaker_count_from_turns(turns) > SHORT_CLIP_OVERCLUSTERED_SPEAKERS
+) -> Option<i32> {
+    if explicit_num_speakers.is_some()
+        || audio_duration_minutes(sample_count) > SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES
+    {
+        return None;
+    }
+
+    let detected_speakers = speaker_count_from_turns(turns);
+    if detected_speakers <= SHORT_CLIP_OVERCLUSTERED_SPEAKERS {
+        return None;
+    }
+
+    let mut durations = BTreeMap::<usize, f64>::new();
+    for turn in turns {
+        let duration = (turn.end_time - turn.start_time).max(0.0);
+        if duration > 0.0 {
+            *durations.entry(turn.speaker).or_default() += duration;
+        }
+    }
+
+    let longest_speaker = durations.values().copied().fold(0.0, f64::max);
+    if longest_speaker <= 0.0 {
+        return None;
+    }
+
+    let meaningful_threshold =
+        (longest_speaker * SHORT_CLIP_RETRY_DOMINANT_SHARE).max(SHORT_CLIP_RETRY_MIN_SECONDS);
+    let meaningful_speakers = durations
+        .values()
+        .filter(|duration| **duration >= meaningful_threshold)
+        .count();
+
+    if meaningful_speakers == 0 || meaningful_speakers > SHORT_CLIP_OVERCLUSTERED_SPEAKERS {
+        return None;
+    }
+
+    (meaningful_speakers < detected_speakers).then_some(meaningful_speakers as i32)
 }
 
 fn ensure_model_file(path: &Path, model_name: &str) -> Result<()> {
@@ -892,18 +926,28 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         &mut profile,
     )
     .await?;
-    if should_retry_short_clip_with_two_speakers(sample_count, &turns, explicit_num_speakers) {
-        emit_progress(
-            &app,
-            &meeting_id,
-            "diarizing",
-            65,
-            "Auto speaker detection split this short clip into too many speakers; retrying with 2 speakers...",
+    if let Some(retry_speaker_count) =
+        short_clip_retry_speaker_count(sample_count, &turns, explicit_num_speakers)
+    {
+        let detected_speakers = speaker_count_from_turns(&turns);
+        let speaker_word = if retry_speaker_count == 1 {
+            "speaker"
+        } else {
+            "speakers"
+        };
+        let retry_message = format!(
+            "Auto speaker detection split this short clip into {detected_speakers} speakers; retrying with {retry_speaker_count} likely {speaker_word}..."
         );
+        log::info!(
+            "speaker_diarization_short_clip_retry detected_speakers={} retry_speakers={}",
+            detected_speakers,
+            retry_speaker_count
+        );
+        emit_progress(&app, &meeting_id, "diarizing", 65, &retry_message);
 
         let mut retry_config =
             diarization_config_for_provider(&model_paths, explicit_num_speakers, provider);
-        retry_config.num_clusters = Some(SHORT_CLIP_RETRY_NUM_SPEAKERS);
+        retry_config.num_clusters = Some(retry_speaker_count);
         turns = run_sherpa_diarization_with_fallback(
             &app,
             &meeting_id,
@@ -1874,7 +1918,11 @@ mod tests {
     }
 
     fn sample_count_for_minutes(minutes: usize) -> usize {
-        DIARIZATION_SAMPLE_RATE as usize * 60 * minutes
+        sample_count_for_seconds(60 * minutes)
+    }
+
+    fn sample_count_for_seconds(seconds: usize) -> usize {
+        DIARIZATION_SAMPLE_RATE as usize * seconds
     }
 
     #[test]
@@ -1893,35 +1941,83 @@ mod tests {
     }
 
     #[test]
-    fn retries_short_auto_runs_that_overcluster_speakers() {
+    fn estimates_short_clip_retry_count_from_meaningful_speaker_duration() {
         let turns = vec![
-            turn(0.0, 1.0, 0),
-            turn(1.0, 2.0, 1),
-            turn(2.0, 3.0, 2),
-            turn(3.0, 4.0, 3),
-            turn(4.0, 5.0, 4),
+            turn(0.0, 120.0, 0),
+            turn(120.0, 225.0, 1),
+            turn(225.0, 227.0, 2),
+            turn(227.0, 229.0, 3),
+            turn(229.0, 231.0, 4),
         ];
 
-        assert!(should_retry_short_clip_with_two_speakers(
-            sample_count_for_minutes(8),
-            &turns,
-            None,
-        ));
-        assert!(!should_retry_short_clip_with_two_speakers(
-            sample_count_for_minutes(8),
-            &turns,
-            Some(2),
-        ));
-        assert!(!should_retry_short_clip_with_two_speakers(
-            sample_count_for_minutes(20),
-            &turns,
-            None,
-        ));
-        assert!(!should_retry_short_clip_with_two_speakers(
-            sample_count_for_minutes(8),
-            &turns[..SHORT_CLIP_OVERCLUSTERED_SPEAKERS],
-            None,
-        ));
+        assert_eq!(
+            short_clip_retry_speaker_count(sample_count_for_minutes(8), &turns, None),
+            Some(2)
+        );
+        assert_eq!(
+            short_clip_retry_speaker_count(sample_count_for_minutes(8), &turns, Some(2)),
+            None
+        );
+        assert_eq!(
+            short_clip_retry_speaker_count(sample_count_for_minutes(20), &turns, None),
+            None
+        );
+        assert_eq!(
+            short_clip_retry_speaker_count(
+                sample_count_for_minutes(8),
+                &turns[..SHORT_CLIP_OVERCLUSTERED_SPEAKERS],
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn short_clip_retry_allows_one_speaker_when_fragments_are_noise() {
+        let turns = vec![
+            turn(0.0, 180.0, 0),
+            turn(180.0, 181.0, 1),
+            turn(181.0, 182.0, 2),
+            turn(182.0, 183.0, 3),
+            turn(183.0, 184.0, 4),
+        ];
+
+        assert_eq!(
+            short_clip_retry_speaker_count(sample_count_for_minutes(5), &turns, None),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn short_clip_retry_skips_genuine_multi_speaker_clips() {
+        let turns = vec![
+            turn(0.0, 60.0, 0),
+            turn(60.0, 120.0, 1),
+            turn(120.0, 180.0, 2),
+            turn(180.0, 240.0, 3),
+            turn(240.0, 300.0, 4),
+        ];
+
+        assert_eq!(
+            short_clip_retry_speaker_count(sample_count_for_seconds(300), &turns, None,),
+            None
+        );
+    }
+
+    #[test]
+    fn short_clip_retry_can_cap_to_four_meaningful_speakers() {
+        let turns = vec![
+            turn(0.0, 80.0, 0),
+            turn(80.0, 150.0, 1),
+            turn(150.0, 220.0, 2),
+            turn(220.0, 290.0, 3),
+            turn(290.0, 291.0, 4),
+        ];
+
+        assert_eq!(
+            short_clip_retry_speaker_count(sample_count_for_seconds(300), &turns, None,),
+            Some(4)
+        );
     }
 
     #[test]

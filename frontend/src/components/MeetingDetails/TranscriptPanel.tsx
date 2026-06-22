@@ -74,13 +74,13 @@ export function TranscriptPanel({
   return (
     <div className="hidden min-w-0 shrink-0 flex-col border-r border-border bg-card md:flex md:w-[32%] xl:w-[30rem] 2xl:w-[32rem]">
       {/* Title area */}
-      <div className="border-b border-border p-3">
-        <div className="mb-3 flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
-          <div className="min-w-0 flex-1 basis-24">
+      <div className="border-b border-border px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <div className="min-w-0 flex items-baseline gap-2">
             <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
+            <span className="text-xs text-muted-foreground">
               {usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)} segments
-            </p>
+            </span>
           </div>
           <TranscriptButtonGroup
             transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
