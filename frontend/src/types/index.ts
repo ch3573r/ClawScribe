@@ -17,6 +17,7 @@ export interface Transcript {
   audio_start_time?: number; // Seconds from recording start (e.g., 125.3)
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
   duration?: number;          // Segment duration in seconds (e.g., 3.3)
+  word_timestamps?: TranscriptWord[];
 }
 
 export interface TranscriptUpdate {
@@ -31,6 +32,15 @@ export interface TranscriptUpdate {
   audio_start_time: number; // Seconds from recording start
   audio_end_time: number;   // Seconds from recording start
   duration: number;          // Segment duration in seconds
+  word_timestamps?: TranscriptWord[];
+}
+
+export interface TranscriptWord {
+  text: string;
+  start: number;
+  end: number;
+  confidence?: number;
+  speaker?: string;
 }
 
 export interface Block {
@@ -109,4 +119,5 @@ export interface TranscriptSegmentData {
   text: string;
   confidence?: number;
   speaker?: string; // "Me" (microphone) or "Participants" (system audio)
+  word_timestamps?: TranscriptWord[];
 }

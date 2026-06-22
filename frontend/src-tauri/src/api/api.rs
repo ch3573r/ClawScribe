@@ -142,6 +142,8 @@ pub struct MeetingTranscript {
     // Audio source label: "Me" (microphone) or "Participants" (system audio).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_timestamps: Option<Vec<TranscriptWord>>,
 }
 
 /// Meeting metadata without transcripts (for pagination)
@@ -196,6 +198,19 @@ pub struct TranscriptSegment {
     // Audio source label: "Me" (microphone) or "Participants" (system audio).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_timestamps: Option<Vec<TranscriptWord>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TranscriptWord {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 fn normalize_speaker_label(speaker: Option<String>) -> Option<String> {
@@ -205,6 +220,10 @@ fn normalize_speaker_label(speaker: Option<String>) -> Option<String> {
     } else {
         Some(trimmed.chars().take(64).collect())
     }
+}
+
+fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
+    value.and_then(|json| serde_json::from_str::<Vec<TranscriptWord>>(json).ok())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -907,6 +926,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
                     speaker: t.speaker,
+                    word_timestamps: parse_word_timestamps(t.word_timestamps_json.as_deref()),
                 })
                 .collect::<Vec<_>>();
 

@@ -4,6 +4,7 @@
 
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
+use crate::api::TranscriptWord;
 use crate::audio::AudioChunk;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,8 @@ pub struct TranscriptUpdate {
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
     pub duration: f64,         // Segment duration in seconds (e.g., 3.3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_timestamps: Option<Vec<TranscriptWord>>,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -226,6 +229,17 @@ pub fn start_transcription_task<R: Runtime>(
                                             SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
+                                        let word_timestamps = estimate_word_timestamps(
+                                            &transcript,
+                                            audio_start_time,
+                                            audio_end_time,
+                                            confidence_opt,
+                                            if source_label.is_empty() {
+                                                None
+                                            } else {
+                                                Some(source_label)
+                                            },
+                                        );
 
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
@@ -248,6 +262,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            word_timestamps,
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)
@@ -621,6 +636,60 @@ fn format_current_timestamp() -> String {
     let seconds = now.as_secs() % 60;
 
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
+
+fn estimate_word_timestamps(
+    text: &str,
+    start_time: f64,
+    end_time: f64,
+    confidence: Option<f32>,
+    speaker: Option<&str>,
+) -> Option<Vec<TranscriptWord>> {
+    if !start_time.is_finite() || !end_time.is_finite() || end_time <= start_time {
+        return None;
+    }
+
+    let words = text
+        .split_whitespace()
+        .filter(|word| !word.trim().is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+
+    let total_weight = words
+        .iter()
+        .map(|word| word.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64)
+        .sum::<f64>()
+        .max(1.0);
+    let duration = end_time - start_time;
+    let mut cursor = start_time;
+    let speaker = speaker.map(str::to_string);
+
+    Some(
+        words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                let weight = word.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64;
+                let word_start = cursor;
+                let word_end = if index + 1 == words.len() {
+                    end_time
+                } else {
+                    (cursor + duration * (weight / total_weight)).min(end_time)
+                };
+                cursor = word_end;
+
+                TranscriptWord {
+                    text: (*word).to_string(),
+                    start: word_start,
+                    end: word_end.max(word_start),
+                    confidence,
+                    speaker: speaker.clone(),
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Format recording-relative time as [MM:SS]

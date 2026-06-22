@@ -1,4 +1,4 @@
-use crate::api::{MeetingDetails, MeetingTranscript};
+use crate::api::{MeetingDetails, MeetingTranscript, TranscriptWord};
 use crate::database::models::{MeetingModel, Transcript};
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqliteConnection, SqlitePool};
@@ -94,6 +94,7 @@ impl MeetingsRepository {
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
                     speaker: t.speaker,
+                    word_timestamps: parse_word_timestamps(t.word_timestamps_json.as_deref()),
                 })
                 .collect::<Vec<_>>();
 
@@ -229,6 +230,10 @@ impl MeetingsRepository {
         transaction.commit().await?;
         Ok(true)
     }
+}
+
+fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
+    value.and_then(|json| serde_json::from_str::<Vec<TranscriptWord>>(json).ok())
 }
 
 async fn delete_meeting_with_transaction(

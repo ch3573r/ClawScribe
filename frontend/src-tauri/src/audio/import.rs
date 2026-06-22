@@ -784,9 +784,15 @@ async fn create_meeting_with_transcripts(
 
     // Insert transcripts
     for segment in segments {
+        let word_timestamps_json = segment
+            .word_timestamps
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| anyhow!("Invalid word timestamps: {}", e))?;
         sqlx::query(
-            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&segment.id)
         .bind(&meeting_id)
@@ -796,6 +802,7 @@ async fn create_meeting_with_transcripts(
         .bind(segment.audio_end_time)
         .bind(segment.duration)
         .bind(&segment.speaker)
+        .bind(word_timestamps_json)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -1327,6 +1334,7 @@ mod tests {
                 audio_end_time: Some(1.5),
                 duration: Some(1.5),
                 speaker: Some("Participants".to_string()),
+                word_timestamps: None,
             },
             TranscriptSegment {
                 id: "t-2".to_string(),
@@ -1336,6 +1344,7 @@ mod tests {
                 audio_end_time: Some(3.5),
                 duration: Some(1.5),
                 speaker: None,
+                word_timestamps: None,
             },
         ];
 
@@ -1391,7 +1400,8 @@ mod tests {
                 audio_start_time REAL,
                 audio_end_time REAL,
                 duration REAL,
-                speaker TEXT
+                speaker TEXT,
+                word_timestamps_json TEXT
             )",
         )
         .execute(&pool)
@@ -1406,6 +1416,7 @@ mod tests {
             audio_end_time: Some(1.5),
             duration: Some(1.5),
             speaker: Some("Participants".to_string()),
+            word_timestamps: None,
         }];
 
         let meeting_id = create_meeting_with_transcripts(

@@ -37,6 +37,7 @@ pub struct Transcript {
     pub duration: Option<f64>,
     // Audio source label: "Me" (microphone) or "Participants" (system audio).
     pub speaker: Option<String>,
+    pub word_timestamps_json: Option<String>,
 }
 
 /// One turn of the transcript-grounded meeting chat. `role` is "user" or

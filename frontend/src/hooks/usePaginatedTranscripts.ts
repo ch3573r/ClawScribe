@@ -40,6 +40,7 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
         text: t.text,
         confidence: t.confidence,
         speaker: t.speaker,
+        word_timestamps: t.word_timestamps,
     }));
 }
 

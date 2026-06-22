@@ -316,6 +316,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             audio_start_time: update.audio_start_time,
             audio_end_time: update.audio_end_time,
             duration: update.duration,
+            word_timestamps: update.word_timestamps,
           };
 
           // Add to buffer

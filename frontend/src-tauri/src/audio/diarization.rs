@@ -1,4 +1,4 @@
-use crate::api::TranscriptSegment as ApiTranscriptSegment;
+use crate::api::{TranscriptSegment as ApiTranscriptSegment, TranscriptWord};
 use crate::audio::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
@@ -82,6 +82,8 @@ pub struct TranscriptSegment {
     pub audio_end_time: Option<f64>,
     pub duration: Option<f64>,
     pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_timestamps: Option<Vec<TranscriptWord>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -508,6 +510,7 @@ fn split_transcript_segment_by_speaker_spans(
                 span.end_time.min(segment_end)
             };
 
+            let speaker = speaker_label(span.speaker);
             TranscriptSegment {
                 id: if index == 0 {
                     segment.id.clone()
@@ -519,7 +522,13 @@ fn split_transcript_segment_by_speaker_spans(
                 audio_start_time: Some(audio_start_time),
                 audio_end_time: Some(audio_end_time),
                 duration: Some((audio_end_time - audio_start_time).max(0.0)),
-                speaker: Some(speaker_label(span.speaker)),
+                speaker: Some(speaker.clone()),
+                word_timestamps: word_timestamps_for_interval(
+                    &segment.word_timestamps,
+                    audio_start_time,
+                    audio_end_time,
+                    Some(&speaker),
+                ),
             }
         })
         .collect()
@@ -542,6 +551,11 @@ fn merge_adjacent_transcript_segments_by_speaker(
                 {
                     previous.duration = Some((end - start).max(0.0));
                 }
+                match (&mut previous.word_timestamps, segment.word_timestamps) {
+                    (Some(existing), Some(mut next)) => existing.append(&mut next),
+                    (None, Some(next)) => previous.word_timestamps = Some(next),
+                    _ => {}
+                }
                 continue;
             }
         }
@@ -550,6 +564,37 @@ fn merge_adjacent_transcript_segments_by_speaker(
     }
 
     merged
+}
+
+fn word_timestamps_for_interval(
+    word_timestamps: &Option<Vec<TranscriptWord>>,
+    start_time: f64,
+    end_time: f64,
+    speaker: Option<&str>,
+) -> Option<Vec<TranscriptWord>> {
+    let words = word_timestamps.as_ref()?;
+    let speaker = speaker.map(str::to_string);
+    let filtered = words
+        .iter()
+        .filter(|word| word.end > start_time + FLOAT_TIE_EPSILON && word.start < end_time)
+        .map(|word| TranscriptWord {
+            text: word.text.clone(),
+            start: word.start.max(start_time),
+            end: word.end.min(end_time).max(word.start.max(start_time)),
+            confidence: word.confidence,
+            speaker: speaker.clone().or_else(|| word.speaker.clone()),
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
+    value.and_then(|json| serde_json::from_str::<Vec<TranscriptWord>>(json).ok())
 }
 
 fn can_merge_transcript_segments(left: &TranscriptSegment, right: &TranscriptSegment) -> bool {
@@ -1334,6 +1379,7 @@ struct StoredTranscriptSegment {
     audio_end_time: Option<f64>,
     duration: Option<f64>,
     speaker: Option<String>,
+    word_timestamps_json: Option<String>,
 }
 
 struct DiarizationRunGuard;
@@ -1593,7 +1639,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     let pool = app_state.db_manager.pool().clone();
 
     let stored_segments = sqlx::query_as::<_, StoredTranscriptSegment>(
-        "SELECT id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker
+        "SELECT id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json
          FROM transcripts
          WHERE meeting_id = ?
          ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id",
@@ -1616,6 +1662,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             audio_end_time: segment.audio_end_time,
             duration: segment.duration,
             speaker: segment.speaker.clone(),
+            word_timestamps: parse_word_timestamps(segment.word_timestamps_json.as_deref()),
         })
         .collect();
 
@@ -1641,9 +1688,15 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             .await?;
 
         for mapped in &mapped_segments {
+            let word_timestamps_json = mapped
+                .word_timestamps
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| anyhow!("Invalid word timestamps: {}", e))?;
             sqlx::query(
-                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&mapped.id)
             .bind(&meeting_id)
@@ -1658,6 +1711,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             .bind(mapped.audio_end_time)
             .bind(mapped.duration)
             .bind(&mapped.speaker)
+            .bind(word_timestamps_json)
             .execute(&mut *tx)
             .await?;
         }
@@ -1684,6 +1738,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             audio_end_time: mapped.audio_end_time,
             duration: mapped.duration,
             speaker: mapped.speaker.clone(),
+            word_timestamps: mapped.word_timestamps.clone(),
         })
         .collect();
     super::common::write_transcripts_json(&folder_path, &transcript_file_segments)?;
@@ -2935,6 +2990,7 @@ mod tests {
             audio_end_time: end,
             duration: start.zip(end).map(|(start, end)| end - start),
             speaker: None,
+            word_timestamps: None,
         }
     }
 

@@ -75,6 +75,7 @@ pub(crate) fn create_transcript_segments(
                 audio_end_time: Some(end_seconds),
                 duration: Some(duration),
                 speaker: None,
+                word_timestamps: None,
             }
         })
         .collect()
@@ -98,7 +99,8 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
                 "audio_start_time": s.audio_start_time,
                 "audio_end_time": s.audio_end_time,
                 "duration": s.duration,
-                "sequence_id": i
+                "sequence_id": i,
+                "word_timestamps": s.word_timestamps.clone()
             })
         }).collect::<Vec<_>>()
     });
