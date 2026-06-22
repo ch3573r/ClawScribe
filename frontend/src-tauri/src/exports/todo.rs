@@ -43,7 +43,7 @@ fn normalize_title(raw: &str) -> String {
 
 pub fn build_task_request(
     destination: &ToDoDestination,
-    meeting: &MeetingExport,
+    _meeting: &MeetingExport,
     action: &ExportActionItem,
 ) -> Result<serde_json::Value, ToDoBuildError> {
     if destination.list_id.trim().is_empty() {
@@ -54,20 +54,31 @@ pub fn build_task_request(
         return Err(ToDoBuildError::EmptyTitle);
     }
 
-    let mut body = serde_json::json!({
-        "title": title,
+    Ok(serde_json::json!({ "title": title }))
+}
+
+pub fn build_task_body_patch(
+    meeting: &MeetingExport,
+    action: &ExportActionItem,
+) -> serde_json::Value {
+    serde_json::json!({
         "body": {
             "contentType": "text",
             "content": build_task_body(meeting, action),
         },
-    });
+    })
+}
+
+pub fn build_task_due_date_patch(action: &ExportActionItem) -> Option<serde_json::Value> {
     if let Some(due) = action.due_date.as_deref().and_then(to_due_date_time) {
-        body["dueDateTime"] = serde_json::json!({
-            "dateTime": due,
-            "timeZone": "UTC",
-        });
+        return Some(serde_json::json!({
+            "dueDateTime": {
+                "dateTime": due,
+                "timeZone": "UTC",
+            },
+        }));
     }
-    Ok(body)
+    None
 }
 
 fn to_due_date_time(date: &str) -> Option<String> {
@@ -83,12 +94,17 @@ fn to_due_date_time(date: &str) -> Option<String> {
                 c.is_ascii_digit()
             }
         });
-    looks_iso.then(|| format!("{date}T00:00:00"))
+    looks_iso.then(|| format!("{date}T00:00:00.0000000"))
 }
 
 pub fn build_task_body(meeting: &MeetingExport, action: &ExportActionItem) -> String {
     let mut lines: Vec<String> = Vec::new();
-    match action.details.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+    match action
+        .details
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
         Some(details) => lines.push(details.to_string()),
         None => lines.push(format!("Action item: {}", normalize_title(&action.task))),
     }
@@ -99,7 +115,9 @@ pub fn build_task_body(meeting: &MeetingExport, action: &ExportActionItem) -> St
         lines.push(format!("Due: {due}"));
     }
     let meeting_line = match meeting.created_at.as_deref() {
-        Some(when) if !when.trim().is_empty() => format!("From meeting: {} ({})", meeting.title, when),
+        Some(when) if !when.trim().is_empty() => {
+            format!("From meeting: {} ({})", meeting.title, when)
+        }
         _ => format!("From meeting: {}", meeting.title),
     };
     lines.push(meeting_line);
@@ -176,18 +194,41 @@ mod tests {
 
     #[test]
     fn builds_todo_task_request() {
-        let body = build_task_request(&dest(), &meeting(), &action("action-1", "Send  notes\nout")).unwrap();
+        let body = build_task_request(&dest(), &meeting(), &action("action-1", "Send  notes\nout"))
+            .unwrap();
         assert_eq!(body["title"], "Send notes out");
-        assert_eq!(body["body"]["contentType"], "text");
-        assert!(body["body"]["content"].as_str().unwrap().contains("Owner (suggested): Sam"));
-        assert_eq!(body["dueDateTime"]["dateTime"], "2026-07-01T00:00:00");
-        assert_eq!(body["dueDateTime"]["timeZone"], "UTC");
+        assert!(body.get("body").is_none());
+        assert!(body.get("dueDateTime").is_none());
+    }
+
+    #[test]
+    fn builds_todo_task_body_and_due_patches() {
+        let item = action("action-1", "Send notes");
+        let body_patch = build_task_body_patch(&meeting(), &item);
+        assert_eq!(body_patch["body"]["contentType"], "text");
+        assert!(body_patch["body"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Owner (suggested): Sam"));
+
+        let due_patch = build_task_due_date_patch(&item).unwrap();
+        assert_eq!(
+            due_patch["dueDateTime"]["dateTime"],
+            "2026-07-01T00:00:00.0000000"
+        );
+        assert_eq!(due_patch["dueDateTime"]["timeZone"], "UTC");
     }
 
     #[test]
     fn rejects_missing_destination_and_title() {
         assert_eq!(
-            build_task_request(&ToDoDestination { list_id: " ".into() }, &meeting(), &action("a", "x")),
+            build_task_request(
+                &ToDoDestination {
+                    list_id: " ".into()
+                },
+                &meeting(),
+                &action("a", "x")
+            ),
             Err(ToDoBuildError::MissingListId)
         );
         assert_eq!(

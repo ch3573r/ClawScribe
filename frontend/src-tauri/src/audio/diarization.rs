@@ -12,12 +12,13 @@ use sherpa_onnx::{
     SpeakerEmbeddingExtractorConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -38,9 +39,19 @@ const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
 const SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES: f64 = 10.0;
 const SHORT_CLIP_OVERCLUSTERED_SPEAKERS: usize = 4;
 const SHORT_CLIP_RETRY_NUM_SPEAKERS: i32 = 2;
+const DIRECTML_PROBE_SECONDS: usize = 5;
+const DIRECTML_REQUIRED_SPEEDUP: f64 = 1.10;
+const SHERPA_RUNTIME_DLLS: &[&str] = &[
+    "onnxruntime.dll",
+    "onnxruntime_providers_shared.dll",
+    "DirectML.dll",
+    "sherpa-onnx-c-api.dll",
+    "sherpa-onnx-cxx-api.dll",
+];
 
 static DIARIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static DIARIZATION_DIRECTML_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+static DIARIZATION_DIRECTML_SLOW: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiarizationTurn {
@@ -653,6 +664,38 @@ pub struct SpeakerDiarizationError {
     pub error: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DiarizationRuntimeDll {
+    name: String,
+    present: bool,
+    bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiarizationProfileEvent {
+    stage: String,
+    provider: String,
+    sample_count: usize,
+    elapsed_ms: Option<u64>,
+    turns: Option<usize>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiarizationProfile {
+    meeting_id: String,
+    audio_seconds: f64,
+    sample_count: usize,
+    num_threads: i32,
+    explicit_num_speakers: Option<i32>,
+    directml_feature: bool,
+    preferred_provider_before_probe: String,
+    selected_provider: Option<String>,
+    decision: Option<String>,
+    runtime_dlls: Vec<DiarizationRuntimeDll>,
+    events: Vec<DiarizationProfileEvent>,
+}
+
 #[derive(Debug, Clone)]
 struct DiarizationModelPaths {
     segmentation_model: PathBuf,
@@ -813,7 +856,18 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
 
     let sample_count = samples.len();
     let audio_minutes = audio_duration_minutes(sample_count);
-    let provider = preferred_diarization_provider();
+    let samples = Arc::new(samples);
+    let explicit_num_speakers = num_speakers.filter(|value| *value > 0);
+    let mut profile = DiarizationProfile::new(&meeting_id, sample_count, explicit_num_speakers);
+    let provider = select_diarization_provider(
+        &app,
+        &meeting_id,
+        &model_paths,
+        explicit_num_speakers,
+        Arc::clone(&samples),
+        &mut profile,
+    )
+    .await?;
     let diarization_message = if audio_minutes >= 1.0 {
         format!(
             "Detecting speaker turns in {:.1} min of audio{}...",
@@ -828,18 +882,16 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     };
     emit_progress(&app, &meeting_id, "diarizing", 45, &diarization_message);
 
-    let samples = Arc::new(samples);
-    let explicit_num_speakers = num_speakers.filter(|value| *value > 0);
-    let mut config = SherpaDiarizationConfig::new(
-        model_paths.segmentation_model.clone(),
-        model_paths.embedding_model.clone(),
-    );
-    config.num_threads = default_diarization_threads();
-    config.num_clusters = explicit_num_speakers;
+    let config = diarization_config_for_provider(&model_paths, explicit_num_speakers, provider);
 
-    let mut turns =
-        run_sherpa_diarization_with_fallback(&app, &meeting_id, config, Arc::clone(&samples))
-            .await?;
+    let mut turns = run_sherpa_diarization_with_fallback(
+        &app,
+        &meeting_id,
+        config,
+        Arc::clone(&samples),
+        &mut profile,
+    )
+    .await?;
     if should_retry_short_clip_with_two_speakers(sample_count, &turns, explicit_num_speakers) {
         emit_progress(
             &app,
@@ -849,17 +901,15 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             "Auto speaker detection split this short clip into too many speakers; retrying with 2 speakers...",
         );
 
-        let mut retry_config = SherpaDiarizationConfig::new(
-            model_paths.segmentation_model.clone(),
-            model_paths.embedding_model.clone(),
-        );
-        retry_config.num_threads = default_diarization_threads();
+        let mut retry_config =
+            diarization_config_for_provider(&model_paths, explicit_num_speakers, provider);
         retry_config.num_clusters = Some(SHORT_CLIP_RETRY_NUM_SPEAKERS);
         turns = run_sherpa_diarization_with_fallback(
             &app,
             &meeting_id,
             retry_config,
             Arc::clone(&samples),
+            &mut profile,
         )
         .await?;
     }
@@ -993,6 +1043,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         100,
         "Speaker labels applied.",
     );
+    write_diarization_profile(&app, &profile);
 
     Ok(SpeakerDiarizationComplete {
         meeting_id,
@@ -1032,6 +1083,373 @@ fn optional_seconds_equal(left: Option<f64>, right: Option<f64>) -> bool {
     }
 }
 
+impl DiarizationProfile {
+    fn new(meeting_id: &str, sample_count: usize, explicit_num_speakers: Option<i32>) -> Self {
+        let preferred_provider = preferred_diarization_provider().to_string();
+        let profile = Self {
+            meeting_id: meeting_id.to_string(),
+            audio_seconds: sample_count as f64 / DIARIZATION_SAMPLE_RATE as f64,
+            sample_count,
+            num_threads: default_diarization_threads(),
+            explicit_num_speakers,
+            directml_feature: cfg!(all(target_os = "windows", feature = "directml")),
+            preferred_provider_before_probe: preferred_provider,
+            selected_provider: None,
+            decision: None,
+            runtime_dlls: collect_sherpa_runtime_dlls(),
+            events: Vec::new(),
+        };
+        log_profile_snapshot("start", &profile);
+        profile
+    }
+
+    fn set_decision(&mut self, selected_provider: &str, decision: impl Into<String>) {
+        self.selected_provider = Some(selected_provider.to_string());
+        self.decision = Some(decision.into());
+        log_profile_snapshot("decision", self);
+    }
+
+    fn record_success(
+        &mut self,
+        stage: &str,
+        provider: &str,
+        sample_count: usize,
+        elapsed: Duration,
+        turns: usize,
+    ) {
+        self.record(DiarizationProfileEvent {
+            stage: stage.to_string(),
+            provider: provider.to_string(),
+            sample_count,
+            elapsed_ms: Some(duration_millis(elapsed)),
+            turns: Some(turns),
+            error: None,
+        });
+    }
+
+    fn record_error(
+        &mut self,
+        stage: &str,
+        provider: &str,
+        sample_count: usize,
+        elapsed: Duration,
+        error: &anyhow::Error,
+    ) {
+        self.record(DiarizationProfileEvent {
+            stage: stage.to_string(),
+            provider: provider.to_string(),
+            sample_count,
+            elapsed_ms: Some(duration_millis(elapsed)),
+            turns: None,
+            error: Some(error.to_string()),
+        });
+    }
+
+    fn record(&mut self, event: DiarizationProfileEvent) {
+        log_profile_event(&event);
+        self.events.push(event);
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn log_profile_snapshot(stage: &str, profile: &DiarizationProfile) {
+    match serde_json::to_string(profile) {
+        Ok(json) => log::info!("speaker_diarization_profile_snapshot stage={stage} {json}"),
+        Err(error) => log::warn!("Failed to serialize speaker diarization profile: {error}"),
+    }
+}
+
+fn log_profile_event(event: &DiarizationProfileEvent) {
+    match serde_json::to_string(event) {
+        Ok(json) => log::info!("speaker_diarization_profile_event {json}"),
+        Err(error) => log::warn!("Failed to serialize speaker diarization profile event: {error}"),
+    }
+}
+
+fn collect_sherpa_runtime_dlls() -> Vec<DiarizationRuntimeDll> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+
+    SHERPA_RUNTIME_DLLS
+        .iter()
+        .map(|name| {
+            let metadata = exe_dir
+                .as_ref()
+                .map(|dir| dir.join(name))
+                .and_then(|path| fs::metadata(path).ok());
+            DiarizationRuntimeDll {
+                name: (*name).to_string(),
+                present: metadata.is_some(),
+                bytes: metadata.map(|metadata| metadata.len()),
+            }
+        })
+        .collect()
+}
+
+fn write_diarization_profile<R: Runtime>(app: &AppHandle<R>, profile: &DiarizationProfile) {
+    let result = (|| -> Result<PathBuf> {
+        let profile_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| anyhow!("Failed to resolve app data directory: {error}"))?
+            .join("logs")
+            .join("diarization");
+        fs::create_dir_all(&profile_dir)?;
+        let safe_meeting_id = sanitize_profile_file_stem(&profile.meeting_id);
+        let file_name = format!(
+            "{}-{}.json",
+            safe_meeting_id,
+            Utc::now().format("%Y%m%dT%H%M%SZ")
+        );
+        let path = profile_dir.join(file_name);
+        fs::write(&path, serde_json::to_vec_pretty(profile)?)?;
+        Ok(path)
+    })();
+
+    match result {
+        Ok(path) => log::info!(
+            "speaker_diarization_profile_written path={}",
+            path.display()
+        ),
+        Err(error) => log::warn!("Failed to write speaker diarization profile: {error}"),
+    }
+}
+
+fn sanitize_profile_file_stem(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let sanitized = sanitized.trim_matches('-');
+    if sanitized.is_empty() {
+        "meeting".to_string()
+    } else {
+        sanitized.chars().take(96).collect()
+    }
+}
+
+async fn select_diarization_provider<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    model_paths: &DiarizationModelPaths,
+    explicit_num_speakers: Option<i32>,
+    samples: Arc<Vec<f32>>,
+    profile: &mut DiarizationProfile,
+) -> Result<&'static str> {
+    let provider = preferred_diarization_provider();
+    if provider != "directml" {
+        profile.set_decision(
+            provider,
+            "DirectML is not preferred for this build or app session",
+        );
+        return Ok(provider);
+    }
+
+    emit_progress(
+        app,
+        meeting_id,
+        "checking_directml",
+        40,
+        "Checking whether DirectML accelerates speaker detection...",
+    );
+
+    let probe_samples = Arc::new(diarization_probe_samples(samples.as_ref().as_slice()));
+    let directml_config =
+        diarization_config_for_provider(model_paths, explicit_num_speakers, "directml");
+    let directml_probe = time_sherpa_diarization(directml_config, Arc::clone(&probe_samples)).await;
+    let directml_sample_count = probe_samples.len();
+    let directml_result = match directml_probe {
+        Ok(result) => {
+            profile.record_success(
+                "probe",
+                "directml",
+                directml_sample_count,
+                result.elapsed,
+                result.turns.len(),
+            );
+            result
+        }
+        Err(directml_error) => {
+            profile.record_error(
+                "probe",
+                "directml",
+                directml_sample_count,
+                directml_error.elapsed,
+                &directml_error.error,
+            );
+            DIARIZATION_DIRECTML_UNAVAILABLE.store(true, Ordering::SeqCst);
+            log::warn!(
+                "DirectML speaker diarization probe failed; falling back to CPU: {}",
+                directml_error.error
+            );
+            emit_progress(
+                app,
+                meeting_id,
+                "checking_directml",
+                42,
+                "DirectML speaker detection is unavailable; using CPU...",
+            );
+            profile.set_decision("cpu", "DirectML probe failed");
+            return Ok("cpu");
+        }
+    };
+
+    let cpu_config = diarization_config_for_provider(model_paths, explicit_num_speakers, "cpu");
+    let cpu_probe = time_sherpa_diarization(cpu_config, probe_samples).await;
+    let cpu_result = match cpu_probe {
+        Ok(result) => {
+            profile.record_success(
+                "probe",
+                "cpu",
+                directml_sample_count,
+                result.elapsed,
+                result.turns.len(),
+            );
+            result
+        }
+        Err(cpu_error) => {
+            profile.record_error(
+                "probe",
+                "cpu",
+                directml_sample_count,
+                cpu_error.elapsed,
+                &cpu_error.error,
+            );
+            log::warn!(
+                "CPU speaker diarization probe failed; using DirectML probe result instead: {}",
+                cpu_error.error
+            );
+            profile.set_decision(
+                "directml",
+                "CPU probe failed after DirectML probe succeeded",
+            );
+            return Ok("directml");
+        }
+    };
+
+    if directml_is_fast_enough(cpu_result.elapsed, directml_result.elapsed) {
+        log::info!(
+            "DirectML speaker diarization selected: directml={:?} ({} turns), cpu={:?} ({} turns)",
+            directml_result.elapsed,
+            directml_result.turns.len(),
+            cpu_result.elapsed,
+            cpu_result.turns.len()
+        );
+        emit_progress(
+            app,
+            meeting_id,
+            "checking_directml",
+            42,
+            "DirectML speaker detection is faster on this machine; using DirectML...",
+        );
+        profile.set_decision("directml", "DirectML probe was faster than CPU");
+        return Ok("directml");
+    }
+
+    DIARIZATION_DIRECTML_SLOW.store(true, Ordering::SeqCst);
+    log::warn!(
+        "DirectML speaker diarization rejected as slower: directml={:?} ({} turns), cpu={:?} ({} turns)",
+        directml_result.elapsed,
+        directml_result.turns.len(),
+        cpu_result.elapsed,
+        cpu_result.turns.len()
+    );
+    emit_progress(
+        app,
+        meeting_id,
+        "checking_directml",
+        42,
+        "DirectML is slower for this diarization model on this machine; using CPU...",
+    );
+    profile.set_decision("cpu", "DirectML probe was not faster than CPU");
+    Ok("cpu")
+}
+
+fn diarization_config_for_provider(
+    model_paths: &DiarizationModelPaths,
+    explicit_num_speakers: Option<i32>,
+    provider: &str,
+) -> SherpaDiarizationConfig {
+    let mut config = SherpaDiarizationConfig::new(
+        model_paths.segmentation_model.clone(),
+        model_paths.embedding_model.clone(),
+    );
+    config.num_threads = default_diarization_threads();
+    config.num_clusters = explicit_num_speakers;
+    config.provider = provider.to_string();
+    config.debug = sherpa_diarization_debug_enabled(provider);
+    config
+}
+
+fn sherpa_diarization_debug_enabled(provider: &str) -> bool {
+    match std::env::var("CLAWSCRIBE_SHERPA_DIARIZATION_DEBUG") {
+        Ok(value) => matches_truthy(&value),
+        Err(_) => provider == "directml",
+    }
+}
+
+fn matches_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn diarization_probe_samples(samples: &[f32]) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let probe_sample_count = (DIARIZATION_SAMPLE_RATE as usize * DIRECTML_PROBE_SECONDS)
+        .min(samples.len())
+        .max(1);
+    samples[..probe_sample_count].to_vec()
+}
+
+struct TimedDiarizationRun {
+    elapsed: Duration,
+    turns: Vec<DiarizationTurn>,
+}
+
+struct TimedDiarizationError {
+    elapsed: Duration,
+    error: anyhow::Error,
+}
+
+async fn time_sherpa_diarization(
+    config: SherpaDiarizationConfig,
+    samples: Arc<Vec<f32>>,
+) -> std::result::Result<TimedDiarizationRun, TimedDiarizationError> {
+    let started = Instant::now();
+    match run_sherpa_diarization(config, samples).await {
+        Ok(turns) => Ok(TimedDiarizationRun {
+            elapsed: started.elapsed(),
+            turns,
+        }),
+        Err(error) => Err(TimedDiarizationError {
+            elapsed: started.elapsed(),
+            error,
+        }),
+    }
+}
+
+fn directml_is_fast_enough(cpu_elapsed: Duration, directml_elapsed: Duration) -> bool {
+    let cpu = cpu_elapsed.as_secs_f64();
+    let directml = directml_elapsed.as_secs_f64();
+    directml > 0.0 && cpu / directml >= DIRECTML_REQUIRED_SPEEDUP
+}
+
 async fn run_sherpa_diarization(
     config: SherpaDiarizationConfig,
     samples: Arc<Vec<f32>>,
@@ -1057,19 +1475,53 @@ async fn run_sherpa_diarization_with_fallback<R: Runtime>(
     meeting_id: &str,
     config: SherpaDiarizationConfig,
     samples: Arc<Vec<f32>>,
+    profile: &mut DiarizationProfile,
 ) -> Result<Vec<DiarizationTurn>> {
-    let provider = normalized_diarization_provider(&config.provider);
+    let provider = normalized_diarization_provider(&config.provider).to_string();
     if provider != "directml" {
-        return run_sherpa_diarization(config, samples).await;
+        let sample_count = samples.len();
+        return match time_sherpa_diarization(config, samples).await {
+            Ok(result) => {
+                profile.record_success(
+                    "full",
+                    &provider,
+                    sample_count,
+                    result.elapsed,
+                    result.turns.len(),
+                );
+                Ok(result.turns)
+            }
+            Err(error) => {
+                profile.record_error("full", &provider, sample_count, error.elapsed, &error.error);
+                Err(error.error)
+            }
+        };
     }
 
-    match run_sherpa_diarization(config.clone(), Arc::clone(&samples)).await {
-        Ok(turns) => Ok(turns),
+    let directml_sample_count = samples.len();
+    match time_sherpa_diarization(config.clone(), Arc::clone(&samples)).await {
+        Ok(result) => {
+            profile.record_success(
+                "full",
+                "directml",
+                directml_sample_count,
+                result.elapsed,
+                result.turns.len(),
+            );
+            Ok(result.turns)
+        }
         Err(directml_error) => {
+            profile.record_error(
+                "full",
+                "directml",
+                directml_sample_count,
+                directml_error.elapsed,
+                &directml_error.error,
+            );
             DIARIZATION_DIRECTML_UNAVAILABLE.store(true, Ordering::SeqCst);
             log::warn!(
                 "DirectML speaker diarization failed; falling back to CPU: {}",
-                directml_error
+                directml_error.error
             );
             emit_progress(
                 app,
@@ -1081,15 +1533,32 @@ async fn run_sherpa_diarization_with_fallback<R: Runtime>(
 
             let mut cpu_config = config;
             cpu_config.provider = "cpu".to_string();
-            run_sherpa_diarization(cpu_config, samples)
-                .await
-                .map_err(|cpu_error| {
-                    anyhow!(
+            match time_sherpa_diarization(cpu_config, samples).await {
+                Ok(result) => {
+                    profile.record_success(
+                        "fallback",
+                        "cpu",
+                        directml_sample_count,
+                        result.elapsed,
+                        result.turns.len(),
+                    );
+                    Ok(result.turns)
+                }
+                Err(cpu_error) => {
+                    profile.record_error(
+                        "fallback",
+                        "cpu",
+                        directml_sample_count,
+                        cpu_error.elapsed,
+                        &cpu_error.error,
+                    );
+                    Err(anyhow!(
                         "DirectML speaker diarization failed ({}); CPU fallback also failed ({})",
-                        directml_error,
-                        cpu_error
-                    )
-                })
+                        directml_error.error,
+                        cpu_error.error
+                    ))
+                }
+            }
         }
     }
 }
@@ -1121,6 +1590,7 @@ fn default_diarization_threads() -> i32 {
 fn preferred_diarization_provider() -> &'static str {
     if cfg!(all(target_os = "windows", feature = "directml"))
         && !DIARIZATION_DIRECTML_UNAVAILABLE.load(Ordering::SeqCst)
+        && !DIARIZATION_DIRECTML_SLOW.load(Ordering::SeqCst)
     {
         "directml"
     } else {
@@ -1452,6 +1922,55 @@ mod tests {
             &turns[..SHORT_CLIP_OVERCLUSTERED_SPEAKERS],
             None,
         ));
+    }
+
+    #[test]
+    fn directml_probe_uses_short_audio_slice() {
+        let samples = vec![0.0; DIARIZATION_SAMPLE_RATE as usize * (DIRECTML_PROBE_SECONDS + 3)];
+        let probe = diarization_probe_samples(&samples);
+
+        assert_eq!(
+            probe.len(),
+            DIARIZATION_SAMPLE_RATE as usize * DIRECTML_PROBE_SECONDS
+        );
+        assert!(diarization_probe_samples(&[]).is_empty());
+    }
+
+    #[test]
+    fn directml_probe_requires_measurable_speedup() {
+        assert!(directml_is_fast_enough(
+            Duration::from_millis(2200),
+            Duration::from_millis(1000),
+        ));
+        assert!(!directml_is_fast_enough(
+            Duration::from_millis(1000),
+            Duration::from_millis(950),
+        ));
+        assert!(!directml_is_fast_enough(
+            Duration::from_millis(1000),
+            Duration::from_millis(2000),
+        ));
+    }
+
+    #[test]
+    fn profile_file_stem_is_filesystem_safe() {
+        assert_eq!(
+            sanitize_profile_file_stem("meeting:abc/def?ghi"),
+            "meeting-abc-def-ghi"
+        );
+        assert_eq!(sanitize_profile_file_stem("???"), "meeting");
+        assert!(sanitize_profile_file_stem(&"a".repeat(150)).len() <= 96);
+    }
+
+    #[test]
+    fn truthy_debug_env_values_are_explicit() {
+        assert!(matches_truthy("1"));
+        assert!(matches_truthy(" true "));
+        assert!(matches_truthy("YES"));
+        assert!(matches_truthy("on"));
+        assert!(!matches_truthy("0"));
+        assert!(!matches_truthy("false"));
+        assert!(!matches_truthy("directml"));
     }
 
     #[test]

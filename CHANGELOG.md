@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.17
+
+- Added speaker-diarization profiling for DirectML builds: each run now logs
+  structured provider decisions, CPU vs DirectML probe timings, full-run
+  timings, turn counts, and bundled sherpa/ONNX runtime DLL presence.
+- Writes a per-run speaker-diarization profile JSON under the app data logs
+  directory so problematic runs can be inspected after the UI toast disappears.
+- Treats DirectML as an adaptive candidate for sherpa diarization instead of a
+  blind default: ClawScribe probes DirectML against CPU and only keeps DirectML
+  when it is measurably faster on the current machine.
+- Enables sherpa debug mode for DirectML diarization attempts by default, with
+  `CLAWSCRIBE_SHERPA_DIARIZATION_DEBUG` available as an override.
+- Hardened Microsoft To Do export by URL-encoding Graph list/task IDs, creating
+  tasks with the minimal title payload first, and patching notes/due dates
+  after the task exists.
+- `latest.json` advertises runtime version `0.5.17`, so installed `0.5.16`
+  clients can discover this update.
+
 ## 0.5.16
 
 - Added a DirectML speaker-diarization runtime for Windows GPU builds by

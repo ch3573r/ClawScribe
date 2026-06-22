@@ -15,6 +15,27 @@ use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
+fn graph_url_with_path_segments(segments: &[&str]) -> String {
+    let mut url = url::Url::parse(GRAPH_BASE).expect("Graph base URL is valid");
+    {
+        let mut path = url
+            .path_segments_mut()
+            .expect("Graph base URL supports path segments");
+        for segment in segments {
+            path.push(segment);
+        }
+    }
+    url.to_string()
+}
+
+fn todo_tasks_url(list_id: &str) -> String {
+    graph_url_with_path_segments(&["me", "todo", "lists", list_id, "tasks"])
+}
+
+fn todo_task_url(list_id: &str, task_id: &str) -> String {
+    graph_url_with_path_segments(&["me", "todo", "lists", list_id, "tasks", task_id])
+}
+
 /// Caller identity/token for an export run. Held only for the call's duration.
 pub struct ExportContext<'a> {
     pub tenant_id: &'a str,
@@ -78,7 +99,10 @@ fn parse_resource(body: &str) -> (Option<String>, Option<String>) {
 /// Reduce per-item results to an overall destination status.
 fn summarize(items: &[ItemResult]) -> (ExportStatus, Option<MicrosoftConnectionState>) {
     if items.iter().any(|i| i.status == ExportStatus::FailedAuth) {
-        return (ExportStatus::FailedAuth, Some(MicrosoftConnectionState::Expired));
+        return (
+            ExportStatus::FailedAuth,
+            Some(MicrosoftConnectionState::Expired),
+        );
     }
     let succeeded = items
         .iter()
@@ -139,7 +163,12 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
             if let Some(d) = &detail {
                 log::warn!("Graph export failed ({}): {d}", kind.code());
             }
-            ledger.record_failure(&dedupe_key, status, Some(kind.code().to_string()), now_rfc3339());
+            ledger.record_failure(
+                &dedupe_key,
+                status,
+                Some(kind.code().to_string()),
+                now_rfc3339(),
+            );
             let stop = kind == GraphErrorKind::Unauthorized;
             (
                 ItemResult {
@@ -200,7 +229,10 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
     target: &OneNoteTarget,
     ctx: &ExportContext<'_>,
 ) -> ExportReport {
-    let url = format!("{GRAPH_BASE}/me/onenote/sections/{}/pages", target.section_id);
+    let url = format!(
+        "{GRAPH_BASE}/me/onenote/sections/{}/pages",
+        target.section_id
+    );
     let pages = onenote::build_pages(meeting, DEFAULT_PAGE_BUDGET_BYTES);
     let meeting_hash = meeting.artifact_hash();
     let mut items = Vec::new();
@@ -230,8 +262,15 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
             correlation_id: uuid::Uuid::new_v4().to_string(),
             headers: Vec::new(),
         };
-        let (result, stop) =
-            run_item(client, ledger, ctx.bearer_token, dedupe_key, local_id, request).await;
+        let (result, stop) = run_item(
+            client,
+            ledger,
+            ctx.bearer_token,
+            dedupe_key,
+            local_id,
+            request,
+        )
+        .await;
         items.push(result);
         if stop {
             break;
@@ -258,7 +297,8 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
     let mut items = Vec::new();
 
     for action in &meeting.action_items {
-        let dedupe_key = planner::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action);
+        let dedupe_key =
+            planner::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action);
         let local_id = action.local_action_id.clone();
 
         if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
@@ -276,8 +316,15 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
             correlation_id: uuid::Uuid::new_v4().to_string(),
             headers: Vec::new(),
         };
-        let (result, stop) =
-            run_item(client, ledger, ctx.bearer_token, dedupe_key, local_id, request).await;
+        let (result, stop) = run_item(
+            client,
+            ledger,
+            ctx.bearer_token,
+            dedupe_key,
+            local_id,
+            request,
+        )
+        .await;
 
         // Best-effort: attach a description with context to the new task. The
         // task already exists, so a details failure must not fail the export.
@@ -310,7 +357,7 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
     destination: &ToDoDestination,
     ctx: &ExportContext<'_>,
 ) -> Result<ExportReport, todo::ToDoBuildError> {
-    let url = format!("{GRAPH_BASE}/me/todo/lists/{}/tasks", destination.list_id);
+    let url = todo_tasks_url(&destination.list_id);
     let mut items = Vec::new();
 
     for action in &meeting.action_items {
@@ -331,8 +378,39 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
             correlation_id: uuid::Uuid::new_v4().to_string(),
             headers: Vec::new(),
         };
-        let (result, stop) =
-            run_item(client, ledger, ctx.bearer_token, dedupe_key, local_id, request).await;
+        let (result, stop) = run_item(
+            client,
+            ledger,
+            ctx.bearer_token,
+            dedupe_key,
+            local_id,
+            request,
+        )
+        .await;
+        if result.status == ExportStatus::Succeeded {
+            if let Some(task_id) = result.resource_id.as_deref() {
+                patch_todo_task(
+                    client,
+                    ctx.bearer_token,
+                    &destination.list_id,
+                    task_id,
+                    todo::build_task_body_patch(meeting, action),
+                    "body",
+                )
+                .await;
+                if let Some(due_patch) = todo::build_task_due_date_patch(action) {
+                    patch_todo_task(
+                        client,
+                        ctx.bearer_token,
+                        &destination.list_id,
+                        task_id,
+                        due_patch,
+                        "due date",
+                    )
+                    .await;
+                }
+            }
+        }
         items.push(result);
         if stop {
             break;
@@ -345,6 +423,40 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
         connection_state,
         items,
     })
+}
+
+/// Best-effort: To Do accepts title-only creates reliably. Patch optional notes
+/// and due-date metadata after the task exists so optional-field validation
+/// quirks cannot prevent task creation.
+async fn patch_todo_task<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    list_id: &str,
+    task_id: &str,
+    body: serde_json::Value,
+    label: &str,
+) {
+    let request = GraphRequest {
+        method: "PATCH".into(),
+        url: todo_task_url(list_id, task_id),
+        content_type: "application/json".into(),
+        body: body.to_string(),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: Vec::new(),
+    };
+    match client.execute(&request, token).await {
+        GraphOutcome::Success(_) => {}
+        GraphOutcome::Failed(kind, detail) => {
+            let detail = detail.unwrap_or_else(|| kind.code().to_string());
+            log::warn!(
+                "Microsoft To Do {label} patch failed ({}): {detail}",
+                kind.code()
+            );
+        }
+        GraphOutcome::Unknown(msg) => {
+            log::warn!("Microsoft To Do {label} patch network failure: {msg}");
+        }
+    }
 }
 
 /// Best-effort: set a Planner task's description (its "notes"). Planner keeps
@@ -465,10 +577,12 @@ mod tests {
         }
     }
 
-    fn client(
-        transport: MockGraphTransport,
-    ) -> GraphClient<MockGraphTransport, RecordingSleeper> {
-        GraphClient::new(transport, RecordingSleeper::default(), RetryPolicy::default())
+    fn client(transport: MockGraphTransport) -> GraphClient<MockGraphTransport, RecordingSleeper> {
+        GraphClient::new(
+            transport,
+            RecordingSleeper::default(),
+            RetryPolicy::default(),
+        )
     }
 
     fn onenote_url() -> String {
@@ -497,13 +611,18 @@ mod tests {
             &client,
             &mut ledger,
             &meeting(),
-            &OneNoteTarget { section_id: "section-1".into() },
+            &OneNoteTarget {
+                section_id: "section-1".into(),
+            },
             &ctx(),
         )
         .await;
 
         assert_eq!(report.overall, ExportStatus::FailedAuth);
-        assert_eq!(report.connection_state, Some(MicrosoftConnectionState::Expired));
+        assert_eq!(
+            report.connection_state,
+            Some(MicrosoftConnectionState::Expired)
+        );
         // Notes-only meeting => single page => single call, no blind retry.
         assert_eq!(client.transport().calls_for(&onenote_url()), 1);
         assert_no_token_logged(client.transport(), ctx().bearer_token);
@@ -522,7 +641,9 @@ mod tests {
             &client,
             &mut ledger,
             &meeting(),
-            &OneNoteTarget { section_id: "section-1".into() },
+            &OneNoteTarget {
+                section_id: "section-1".into(),
+            },
             &ctx(),
         )
         .await;
@@ -542,7 +663,9 @@ mod tests {
             &client,
             &mut ledger,
             &meeting(),
-            &OneNoteTarget { section_id: "section-1".into() },
+            &OneNoteTarget {
+                section_id: "section-1".into(),
+            },
             &ctx(),
         )
         .await;
@@ -580,7 +703,10 @@ mod tests {
         assert_eq!(report.items[0].resource_id.as_deref(), Some("task-1"));
         // Two calls (throttled + success), one created task, attempt count == 2.
         assert_eq!(client.transport().calls_for(&planner_url()), 2);
-        assert_eq!(ledger.entry(&report.items[0].dedupe_key).unwrap().status, ExportStatus::Succeeded);
+        assert_eq!(
+            ledger.entry(&report.items[0].dedupe_key).unwrap().status,
+            ExportStatus::Succeeded
+        );
     }
 
     #[tokio::test]
@@ -594,7 +720,13 @@ mod tests {
         };
         let mut ledger = ExportLedger::new("m");
         // Pre-seed a succeeded entry for the only action's dedupe key.
-        let key = planner::dedupe_key(ctx().tenant_id, ctx().user_id, &dest, &m, &m.action_items[0]);
+        let key = planner::dedupe_key(
+            ctx().tenant_id,
+            ctx().user_id,
+            &dest,
+            &m,
+            &m.action_items[0],
+        );
         ledger.record_success(&key, Some("task-1".into()), Some("http://t".into()), None);
 
         let client = client(transport);
@@ -603,7 +735,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.overall, ExportStatus::Succeeded);
-        assert!(!report.items[0].graph_called, "must not call Graph for succeeded item");
+        assert!(
+            !report.items[0].graph_called,
+            "must not call Graph for succeeded item"
+        );
         assert_eq!(report.items[0].resource_id.as_deref(), Some("task-1"));
         assert_eq!(client.transport().calls_for(&planner_url()), 0);
     }
@@ -681,9 +816,10 @@ mod tests {
 
         // Second run: only item-2 is retried (Failed is retriable); queue a
         // success for it.
-        client
-            .transport()
-            .queue_for_url(&planner_url(), [GraphResponse::success(201, r#"{"id":"task-2"}"#)]);
+        client.transport().queue_for_url(
+            &planner_url(),
+            [GraphResponse::success(201, r#"{"id":"task-2"}"#)],
+        );
         let report2 = export_planner(&client, &mut ledger, &m, &dest, &ctx())
             .await
             .unwrap();
@@ -711,11 +847,16 @@ mod tests {
     #[tokio::test]
     async fn todo_exports_action_item() {
         let transport = MockGraphTransport::new();
-        transport.queue_default([GraphResponse::success(201, r#"{"id":"todo-1"}"#)]);
+        transport.queue_default([
+            GraphResponse::success(201, r#"{"id":"todo-1"}"#),
+            GraphResponse::success(200, r#"{"id":"todo-1"}"#),
+            GraphResponse::success(200, r#"{"id":"todo-1"}"#),
+        ]);
         let client = client(transport);
         let mut ledger = ExportLedger::new("m1");
         let mut m = meeting();
         m.action_items.truncate(1);
+        m.action_items[0].due_date = Some("2026-07-01".into());
         let dest = ToDoDestination {
             list_id: "list-1".into(),
         };
@@ -725,8 +866,28 @@ mod tests {
         assert_eq!(report.overall, ExportStatus::Succeeded);
         assert_eq!(report.items[0].resource_id.as_deref(), Some("todo-1"));
         assert_eq!(
-            client.transport().calls_for(&format!("{GRAPH_BASE}/me/todo/lists/list-1/tasks")),
+            client
+                .transport()
+                .calls_for(&format!("{GRAPH_BASE}/me/todo/lists/list-1/tasks")),
             1
+        );
+        assert_eq!(
+            client
+                .transport()
+                .calls_for(&format!("{GRAPH_BASE}/me/todo/lists/list-1/tasks/todo-1")),
+            2
+        );
+    }
+
+    #[test]
+    fn todo_urls_encode_graph_ids_as_path_segments() {
+        assert_eq!(
+            todo_tasks_url("list/with spaces"),
+            format!("{GRAPH_BASE}/me/todo/lists/list%2Fwith%20spaces/tasks")
+        );
+        assert_eq!(
+            todo_task_url("list/with/slash", "task/with/slash"),
+            format!("{GRAPH_BASE}/me/todo/lists/list%2Fwith%2Fslash/tasks/task%2Fwith%2Fslash")
         );
     }
 }
