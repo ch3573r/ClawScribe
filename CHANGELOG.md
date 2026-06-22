@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.18
+
+- Added OneDrive and SharePoint file export for meeting summaries, producing a
+  DOCX and optional PDF with transcript content included.
+- Added a OneDrive destination panel in Settings -> Add-ons with root-folder
+  selection, SharePoint/OneDrive folder-link resolution, subfolder creation,
+  PDF toggle, and optional organization-scoped sharing links.
+- Added pinned SHA-256 and byte-size validation for downloaded diarization
+  models, with invalid cached managed models quarantined before redownload.
+- Added a diarization embedding-model catalog for A/B checks against English
+  and multilingual speaker embeddings while preserving the current default.
+- Hardened Microsoft To Do list creation by reusing an existing normalized
+  list name and blocking duplicate create requests from rapid clicks.
+- Added Windows release build metrics so GPU release runs publish sherpa
+  runtime, cache hit/miss, sherpa staging time, and build elapsed time.
+- `latest.json` advertises runtime version `0.5.18`, so installed `0.5.17`
+  clients can discover this update.
+
 ## 0.5.17
 
 - Added speaker-diarization profiling for DirectML builds: each run now logs
