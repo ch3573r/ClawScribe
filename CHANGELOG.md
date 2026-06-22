@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.11
+
+- Refined the Windows chrome and app shell with a thinner custom top bar,
+  sharper corners, and a less rounded desktop layout.
+- Overhauled integration iconography so add-ons such as Microsoft 365,
+  Confluence, Jira, OpenClaw, OneNote, and Planner present as distinct
+  product destinations instead of generic placeholders.
+- Updated recording storage defaults and labels to use ClawScribe paths while
+  continuing to honor the configured recording location.
+- Cleaned out the unused legacy Python/FastAPI backend and removed stale
+  frontend filesystem access.
+- Added runtime cleanup guardrails, expanded frontend helper validation, and
+  kept the Windows Vulkan + DirectML artifact path working.
+- Resolved small meeting-workflow TODOs by adding system-audio capture state,
+  enabling microphone testing, and wiring summary search from the meeting
+  summary overflow menu.
+- `latest.json` advertises runtime version `0.5.11`, so installed `0.5.10`
+  clients can discover this update.
+
 ## 0.5.10
 
 - Reworked the custom Windows titlebar into a quiet app-shell drag region:
