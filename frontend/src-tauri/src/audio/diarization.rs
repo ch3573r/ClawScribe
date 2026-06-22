@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sherpa_onnx::{
     FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
@@ -13,6 +14,7 @@ use sherpa_onnx::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -28,8 +30,11 @@ const MIN_SPLIT_SPEAKER_OVERLAP_SECONDS: f64 = 0.25;
 const SAME_SPEAKER_MERGE_GAP_SECONDS: f64 = 0.25;
 const SPLIT_BOUNDARY_SEARCH_WORDS: usize = 8;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
+const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
+const DEFAULT_SEGMENTATION_MODEL_ID: &str = "pyannote-segmentation-3-0-int8";
+const DEFAULT_EMBEDDING_MODEL_ID: &str = "3dspeaker-eres2net-base-zh-cn";
 const SEGMENTATION_MODEL_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
-const EMBEDDING_MODEL_DIR: &str =
+const DEFAULT_EMBEDDING_MODEL_DIR: &str =
     "sherpa-onnx-3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k";
 const SEGMENTATION_MODEL_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
@@ -88,6 +93,168 @@ struct WordToken {
     start_byte: usize,
     end_byte: usize,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiarizationModelKind {
+    Segmentation,
+    Embedding,
+}
+
+impl DiarizationModelKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Segmentation => "segmentation",
+            Self::Embedding => "embedding",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiarizationModelDescriptor {
+    kind: DiarizationModelKind,
+    id: &'static str,
+    display_name: &'static str,
+    family: &'static str,
+    language: Option<&'static str>,
+    cache_dir: &'static str,
+    cache_file: &'static str,
+    source_file: &'static str,
+    download_url: &'static str,
+    expected_sha256: Option<&'static str>,
+    expected_bytes: Option<u64>,
+    is_default: bool,
+    legacy_flat_file: Option<&'static str>,
+}
+
+const SEGMENTATION_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Segmentation,
+        id: DEFAULT_SEGMENTATION_MODEL_ID,
+        display_name: "Pyannote segmentation 3.0 INT8",
+        family: "pyannote",
+        language: None,
+        cache_dir: SEGMENTATION_MODEL_DIR,
+        cache_file: "model.int8.onnx",
+        source_file: "model.int8.onnx",
+        download_url: SEGMENTATION_MODEL_URL,
+        expected_sha256: Some(
+            "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
+        ),
+        expected_bytes: Some(1_540_506),
+        is_default: true,
+        legacy_flat_file: None,
+    },
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Segmentation,
+        id: "pyannote-segmentation-3-0-fp32",
+        display_name: "Pyannote segmentation 3.0 FP32",
+        family: "pyannote",
+        language: None,
+        cache_dir: SEGMENTATION_MODEL_DIR,
+        cache_file: "model.onnx",
+        source_file: "model.onnx",
+        download_url:
+            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+        expected_sha256: Some(
+            "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+        ),
+        expected_bytes: Some(5_992_913),
+        is_default: false,
+        legacy_flat_file: None,
+    },
+];
+
+const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Embedding,
+        id: DEFAULT_EMBEDDING_MODEL_ID,
+        display_name: "3D-Speaker ERes2Net base zh-cn",
+        family: "3D-Speaker ERes2Net",
+        language: Some("zh-cn"),
+        cache_dir: DEFAULT_EMBEDDING_MODEL_DIR,
+        cache_file: "model.onnx",
+        source_file: "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        download_url: EMBEDDING_MODEL_URL,
+        expected_sha256: Some(
+            "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+        ),
+        expected_bytes: Some(39_593_761),
+        is_default: true,
+        legacy_flat_file: Some("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
+    },
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Embedding,
+        id: "3dspeaker-campplus-en",
+        display_name: "3D-Speaker CAM++ English VoxCeleb",
+        family: "3D-Speaker CAM++",
+        language: Some("en"),
+        cache_dir: "sherpa-onnx-3dspeaker_speech_campplus_sv_en_voxceleb_16k",
+        cache_file: "model.onnx",
+        source_file: "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+        download_url:
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+        expected_sha256: Some(
+            "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
+        ),
+        expected_bytes: Some(29_596_978),
+        is_default: false,
+        legacy_flat_file: None,
+    },
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Embedding,
+        id: "3dspeaker-eres2net-en",
+        display_name: "3D-Speaker ERes2Net English VoxCeleb",
+        family: "3D-Speaker ERes2Net",
+        language: Some("en"),
+        cache_dir: "sherpa-onnx-3dspeaker_speech_eres2net_sv_en_voxceleb_16k",
+        cache_file: "model.onnx",
+        source_file: "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        download_url:
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        expected_sha256: Some(
+            "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
+        ),
+        expected_bytes: Some(26_485_263),
+        is_default: false,
+        legacy_flat_file: None,
+    },
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Embedding,
+        id: "wespeaker-camplusplus-en",
+        display_name: "WeSpeaker CAM++ English VoxCeleb",
+        family: "WeSpeaker CAM++",
+        language: Some("en"),
+        cache_dir: "sherpa-onnx-wespeaker_en_voxceleb_CAMplusplus",
+        cache_file: "model.onnx",
+        source_file: "wespeaker_en_voxceleb_CAM++.onnx",
+        download_url:
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B.onnx",
+        expected_sha256: Some(
+            "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef",
+        ),
+        expected_bytes: Some(29_292_684),
+        is_default: false,
+        legacy_flat_file: None,
+    },
+    DiarizationModelDescriptor {
+        kind: DiarizationModelKind::Embedding,
+        id: "nemo-titanet-small-en",
+        display_name: "NeMo TitaNet small English",
+        family: "NeMo TitaNet",
+        language: Some("en"),
+        cache_dir: "sherpa-onnx-nemo_en_titanet_small",
+        cache_file: "model.onnx",
+        source_file: "nemo_en_titanet_small.onnx",
+        download_url:
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+        expected_sha256: Some(
+            "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+        ),
+        expected_bytes: Some(40_257_283),
+        is_default: false,
+        legacy_flat_file: None,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiarizationMappingMode {
@@ -496,7 +663,7 @@ impl SherpaDiarizationConfig {
             num_threads: 1,
             provider: preferred_diarization_provider().to_string(),
             num_clusters: None,
-            clustering_threshold: 0.5,
+            clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
             min_duration_on: 0.3,
             min_duration_off: 0.5,
             debug: false,
@@ -667,6 +834,118 @@ fn ensure_model_file(path: &Path, model_name: &str) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelFileValidation {
+    actual_sha256: String,
+    actual_bytes: u64,
+    sha256_matches: bool,
+    bytes_match: bool,
+}
+
+impl ModelFileValidation {
+    fn is_valid(&self) -> bool {
+        self.sha256_matches && self.bytes_match
+    }
+
+    fn error_message(&self, descriptor: &DiarizationModelDescriptor, path: &Path) -> String {
+        let mut errors = Vec::new();
+        if !self.sha256_matches {
+            errors.push(format!(
+                "expected sha256 {}, got {}",
+                descriptor.expected_sha256.unwrap_or("<not pinned>"),
+                self.actual_sha256
+            ));
+        }
+        if !self.bytes_match {
+            errors.push(format!(
+                "expected {} bytes, got {}",
+                descriptor
+                    .expected_bytes
+                    .map(|bytes| bytes.to_string())
+                    .unwrap_or_else(|| "<not pinned>".to_string()),
+                self.actual_bytes
+            ));
+        }
+
+        format!(
+            "{} diarization model failed validation at {} ({})",
+            descriptor.kind.as_str(),
+            path.display(),
+            errors.join("; ")
+        )
+    }
+}
+
+fn validate_model_file(
+    path: &Path,
+    descriptor: &DiarizationModelDescriptor,
+) -> Result<ModelFileValidation> {
+    ensure_model_file(path, descriptor.kind.as_str())?;
+    let actual_bytes = fs::metadata(path)?.len();
+    let actual_sha256 = sha256_file(path)?;
+    let sha256_matches = descriptor
+        .expected_sha256
+        .map(|expected| actual_sha256.eq_ignore_ascii_case(expected))
+        .unwrap_or(true);
+    let bytes_match = descriptor
+        .expected_bytes
+        .map(|expected| actual_bytes == expected)
+        .unwrap_or(true);
+
+    Ok(ModelFileValidation {
+        actual_sha256,
+        actual_bytes,
+        sha256_matches,
+        bytes_match,
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn quarantine_invalid_default_model(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("model");
+    let quarantine_name = format!(
+        "{}.invalid-{}",
+        file_name,
+        Utc::now().format("%Y%m%dT%H%M%SZ")
+    );
+    let quarantine_path = path.with_file_name(quarantine_name);
+
+    match fs::rename(path, &quarantine_path) {
+        Ok(()) => Ok(Some(quarantine_path)),
+        Err(rename_error) => {
+            log::warn!(
+                "Failed to quarantine invalid diarization model {}: {}; deleting it instead",
+                path.display(),
+                rename_error
+            );
+            fs::remove_file(path)?;
+            Ok(None)
+        }
+    }
+}
+
 fn path_to_string(path: &Path) -> Result<String> {
     path.to_str()
         .map(ToOwned::to_owned)
@@ -717,12 +996,31 @@ struct DiarizationProfileEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct DiarizationProfileModel {
+    kind: String,
+    id: Option<String>,
+    display_name: String,
+    family: Option<String>,
+    language: Option<String>,
+    path: String,
+    source_file: Option<String>,
+    download_url: Option<String>,
+    expected_sha256: Option<String>,
+    expected_bytes: Option<u64>,
+    is_default: bool,
+    custom_path: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DiarizationProfile {
     meeting_id: String,
     audio_seconds: f64,
     sample_count: usize,
     num_threads: i32,
     explicit_num_speakers: Option<i32>,
+    clustering_threshold: f32,
+    segmentation_model: DiarizationProfileModel,
+    embedding_model: DiarizationProfileModel,
     directml_feature: bool,
     preferred_provider_before_probe: String,
     selected_provider: Option<String>,
@@ -735,6 +1033,8 @@ struct DiarizationProfile {
 struct DiarizationModelPaths {
     segmentation_model: PathBuf,
     embedding_model: PathBuf,
+    segmentation_descriptor: Option<&'static DiarizationModelDescriptor>,
+    embedding_descriptor: Option<&'static DiarizationModelDescriptor>,
     can_download_segmentation: bool,
     can_download_embedding: bool,
 }
@@ -848,8 +1148,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         &app,
         &meeting_id,
         &model_paths.segmentation_model,
+        model_paths.segmentation_descriptor,
         "segmentation",
-        SEGMENTATION_MODEL_URL,
         model_paths.can_download_segmentation,
     )
     .await?;
@@ -857,8 +1157,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         &app,
         &meeting_id,
         &model_paths.embedding_model,
+        model_paths.embedding_descriptor,
         "embedding",
-        EMBEDDING_MODEL_URL,
         model_paths.can_download_embedding,
     )
     .await?;
@@ -893,12 +1193,20 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     let audio_minutes = audio_duration_minutes(sample_count);
     let samples = Arc::new(samples);
     let explicit_num_speakers = num_speakers.filter(|value| *value > 0);
-    let mut profile = DiarizationProfile::new(&meeting_id, sample_count, explicit_num_speakers);
+    let clustering_threshold = DEFAULT_CLUSTERING_THRESHOLD;
+    let mut profile = DiarizationProfile::new(
+        &meeting_id,
+        sample_count,
+        explicit_num_speakers,
+        clustering_threshold,
+        &model_paths,
+    );
     let provider = select_diarization_provider(
         &app,
         &meeting_id,
         &model_paths,
         explicit_num_speakers,
+        clustering_threshold,
         Arc::clone(&samples),
         &mut profile,
     )
@@ -917,7 +1225,12 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     };
     emit_progress(&app, &meeting_id, "diarizing", 45, &diarization_message);
 
-    let config = diarization_config_for_provider(&model_paths, explicit_num_speakers, provider);
+    let config = diarization_config_for_provider(
+        &model_paths,
+        explicit_num_speakers,
+        provider,
+        clustering_threshold,
+    );
 
     let mut turns = run_sherpa_diarization_with_fallback(
         &app,
@@ -946,8 +1259,12 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         );
         emit_progress(&app, &meeting_id, "diarizing", 65, &retry_message);
 
-        let mut retry_config =
-            diarization_config_for_provider(&model_paths, explicit_num_speakers, provider);
+        let mut retry_config = diarization_config_for_provider(
+            &model_paths,
+            explicit_num_speakers,
+            provider,
+            clustering_threshold,
+        );
         retry_config.num_clusters = Some(retry_speaker_count);
         turns = run_sherpa_diarization_with_fallback(
             &app,
@@ -1097,6 +1414,160 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     })
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct DiarizationEvaluationOptions {
+    pub meeting_id: String,
+    pub meeting_folder_path: String,
+    pub embedding_model_id: Option<String>,
+    pub clustering_threshold: Option<f32>,
+    pub num_speakers: Option<i32>,
+    pub output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct DiarizationEvaluationArtifacts {
+    pub profile_path: PathBuf,
+    pub turns_path: PathBuf,
+    pub speaker_count: usize,
+    pub turn_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiarizationEvaluationTurnsFile {
+    meeting_id: String,
+    created_at: String,
+    embedding_model_id: Option<String>,
+    clustering_threshold: f32,
+    num_speakers: Option<i32>,
+    speaker_count: usize,
+    turns: Vec<DiarizationTurn>,
+}
+
+#[allow(dead_code)]
+pub(crate) async fn run_speaker_diarization_evaluation<R: Runtime>(
+    app: AppHandle<R>,
+    options: DiarizationEvaluationOptions,
+) -> Result<DiarizationEvaluationArtifacts> {
+    let folder_path = PathBuf::from(&options.meeting_folder_path);
+    if !folder_path.is_dir() {
+        return Err(anyhow!(
+            "Meeting folder is not available: {}",
+            folder_path.display()
+        ));
+    }
+
+    let audio_path = find_audio_file(&folder_path)?;
+    let model_paths =
+        resolve_model_paths_for_embedding(&app, None, None, options.embedding_model_id.clone())?;
+
+    ensure_model_available(
+        &app,
+        &options.meeting_id,
+        &model_paths.segmentation_model,
+        model_paths.segmentation_descriptor,
+        "segmentation",
+        model_paths.can_download_segmentation,
+    )
+    .await?;
+    ensure_model_available(
+        &app,
+        &options.meeting_id,
+        &model_paths.embedding_model,
+        model_paths.embedding_descriptor,
+        "embedding",
+        model_paths.can_download_embedding,
+    )
+    .await?;
+
+    let decode_path = audio_path.clone();
+    let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&decode_path))
+        .await
+        .map_err(|e| anyhow!("Audio decode task failed: {}", e))??;
+    let samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
+        .await
+        .map_err(|e| anyhow!("Audio preparation task failed: {}", e))?;
+    if samples.is_empty() {
+        return Err(anyhow!("Meeting audio did not contain decodable samples"));
+    }
+
+    let sample_count = samples.len();
+    let samples = Arc::new(samples);
+    let explicit_num_speakers = options.num_speakers.filter(|value| *value > 0);
+    let clustering_threshold = options
+        .clustering_threshold
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_CLUSTERING_THRESHOLD);
+    let mut profile = DiarizationProfile::new(
+        &options.meeting_id,
+        sample_count,
+        explicit_num_speakers,
+        clustering_threshold,
+        &model_paths,
+    );
+
+    let provider = select_diarization_provider(
+        &app,
+        &options.meeting_id,
+        &model_paths,
+        explicit_num_speakers,
+        clustering_threshold,
+        Arc::clone(&samples),
+        &mut profile,
+    )
+    .await?;
+    let config = diarization_config_for_provider(
+        &model_paths,
+        explicit_num_speakers,
+        provider,
+        clustering_threshold,
+    );
+    let turns = run_sherpa_diarization_with_fallback(
+        &app,
+        &options.meeting_id,
+        config,
+        samples,
+        &mut profile,
+    )
+    .await?;
+
+    let output_dir = match options.output_dir {
+        Some(output_dir) => output_dir,
+        None => diarization_log_dir(&app)?,
+    };
+    fs::create_dir_all(&output_dir)?;
+    let safe_meeting_id = sanitize_profile_file_stem(&options.meeting_id);
+    let created_at = Utc::now();
+    let turns_path = output_dir.join(format!(
+        "{}-{}-turns.json",
+        safe_meeting_id,
+        created_at.format("%Y%m%dT%H%M%SZ")
+    ));
+    let speaker_count = speaker_count_from_turns(&turns);
+    let turn_count = turns.len();
+    let turns_file = DiarizationEvaluationTurnsFile {
+        meeting_id: options.meeting_id,
+        created_at: created_at.to_rfc3339(),
+        embedding_model_id: model_paths
+            .embedding_descriptor
+            .map(|descriptor| descriptor.id.to_string()),
+        clustering_threshold,
+        num_speakers: explicit_num_speakers,
+        speaker_count,
+        turns,
+    };
+    fs::write(&turns_path, serde_json::to_vec_pretty(&turns_file)?)?;
+    let profile_path = write_diarization_profile_to_dir(&output_dir, &profile)?;
+
+    Ok(DiarizationEvaluationArtifacts {
+        profile_path,
+        turns_path,
+        speaker_count,
+        turn_count,
+    })
+}
+
 fn count_changed_transcript_segments(
     stored_segments: &[StoredTranscriptSegment],
     mapped_segments: &[TranscriptSegment],
@@ -1128,8 +1599,52 @@ fn optional_seconds_equal(left: Option<f64>, right: Option<f64>) -> bool {
     }
 }
 
+fn profile_model_metadata(
+    path: &Path,
+    descriptor: Option<&DiarizationModelDescriptor>,
+    kind: DiarizationModelKind,
+    custom_path: bool,
+) -> DiarizationProfileModel {
+    match descriptor {
+        Some(descriptor) => DiarizationProfileModel {
+            kind: descriptor.kind.as_str().to_string(),
+            id: Some(descriptor.id.to_string()),
+            display_name: descriptor.display_name.to_string(),
+            family: Some(descriptor.family.to_string()),
+            language: descriptor.language.map(ToOwned::to_owned),
+            path: path.display().to_string(),
+            source_file: Some(descriptor.source_file.to_string()),
+            download_url: Some(descriptor.download_url.to_string()),
+            expected_sha256: descriptor.expected_sha256.map(ToOwned::to_owned),
+            expected_bytes: descriptor.expected_bytes,
+            is_default: descriptor.is_default,
+            custom_path,
+        },
+        None => DiarizationProfileModel {
+            kind: kind.as_str().to_string(),
+            id: None,
+            display_name: "Custom model path".to_string(),
+            family: None,
+            language: None,
+            path: path.display().to_string(),
+            source_file: None,
+            download_url: None,
+            expected_sha256: None,
+            expected_bytes: None,
+            is_default: false,
+            custom_path,
+        },
+    }
+}
+
 impl DiarizationProfile {
-    fn new(meeting_id: &str, sample_count: usize, explicit_num_speakers: Option<i32>) -> Self {
+    fn new(
+        meeting_id: &str,
+        sample_count: usize,
+        explicit_num_speakers: Option<i32>,
+        clustering_threshold: f32,
+        model_paths: &DiarizationModelPaths,
+    ) -> Self {
         let preferred_provider = preferred_diarization_provider().to_string();
         let profile = Self {
             meeting_id: meeting_id.to_string(),
@@ -1137,6 +1652,19 @@ impl DiarizationProfile {
             sample_count,
             num_threads: default_diarization_threads(),
             explicit_num_speakers,
+            clustering_threshold,
+            segmentation_model: profile_model_metadata(
+                &model_paths.segmentation_model,
+                model_paths.segmentation_descriptor,
+                DiarizationModelKind::Segmentation,
+                !model_paths.can_download_segmentation,
+            ),
+            embedding_model: profile_model_metadata(
+                &model_paths.embedding_model,
+                model_paths.embedding_descriptor,
+                DiarizationModelKind::Embedding,
+                !model_paths.can_download_embedding,
+            ),
             directml_feature: cfg!(all(target_os = "windows", feature = "directml")),
             preferred_provider_before_probe: preferred_provider,
             selected_provider: None,
@@ -1235,27 +1763,41 @@ fn collect_sherpa_runtime_dlls() -> Vec<DiarizationRuntimeDll> {
         .collect()
 }
 
-fn write_diarization_profile<R: Runtime>(app: &AppHandle<R>, profile: &DiarizationProfile) {
-    let result = (|| -> Result<PathBuf> {
-        let profile_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| anyhow!("Failed to resolve app data directory: {error}"))?
-            .join("logs")
-            .join("diarization");
-        fs::create_dir_all(&profile_dir)?;
-        let safe_meeting_id = sanitize_profile_file_stem(&profile.meeting_id);
-        let file_name = format!(
-            "{}-{}.json",
-            safe_meeting_id,
-            Utc::now().format("%Y%m%dT%H%M%SZ")
-        );
-        let path = profile_dir.join(file_name);
-        fs::write(&path, serde_json::to_vec_pretty(profile)?)?;
-        Ok(path)
-    })();
+fn diarization_log_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| anyhow!("Failed to resolve app data directory: {error}"))?
+        .join("logs")
+        .join("diarization"))
+}
 
-    match result {
+fn write_diarization_profile_result<R: Runtime>(
+    app: &AppHandle<R>,
+    profile: &DiarizationProfile,
+) -> Result<PathBuf> {
+    let profile_dir = diarization_log_dir(app)?;
+    write_diarization_profile_to_dir(&profile_dir, profile)
+}
+
+fn write_diarization_profile_to_dir(
+    profile_dir: &Path,
+    profile: &DiarizationProfile,
+) -> Result<PathBuf> {
+    fs::create_dir_all(profile_dir)?;
+    let safe_meeting_id = sanitize_profile_file_stem(&profile.meeting_id);
+    let file_name = format!(
+        "{}-{}.json",
+        safe_meeting_id,
+        Utc::now().format("%Y%m%dT%H%M%SZ")
+    );
+    let path = profile_dir.join(file_name);
+    fs::write(&path, serde_json::to_vec_pretty(profile)?)?;
+    Ok(path)
+}
+
+fn write_diarization_profile<R: Runtime>(app: &AppHandle<R>, profile: &DiarizationProfile) {
+    match write_diarization_profile_result(app, profile) {
         Ok(path) => log::info!(
             "speaker_diarization_profile_written path={}",
             path.display()
@@ -1289,6 +1831,7 @@ async fn select_diarization_provider<R: Runtime>(
     meeting_id: &str,
     model_paths: &DiarizationModelPaths,
     explicit_num_speakers: Option<i32>,
+    clustering_threshold: f32,
     samples: Arc<Vec<f32>>,
     profile: &mut DiarizationProfile,
 ) -> Result<&'static str> {
@@ -1318,8 +1861,12 @@ async fn select_diarization_provider<R: Runtime>(
     );
 
     let probe_samples = Arc::new(diarization_probe_samples(samples.as_ref().as_slice()));
-    let directml_config =
-        diarization_config_for_provider(model_paths, explicit_num_speakers, "directml");
+    let directml_config = diarization_config_for_provider(
+        model_paths,
+        explicit_num_speakers,
+        "directml",
+        clustering_threshold,
+    );
     let directml_probe = time_sherpa_diarization(directml_config, Arc::clone(&probe_samples)).await;
     let directml_sample_count = probe_samples.len();
     let directml_result = match directml_probe {
@@ -1359,7 +1906,12 @@ async fn select_diarization_provider<R: Runtime>(
         }
     };
 
-    let cpu_config = diarization_config_for_provider(model_paths, explicit_num_speakers, "cpu");
+    let cpu_config = diarization_config_for_provider(
+        model_paths,
+        explicit_num_speakers,
+        "cpu",
+        clustering_threshold,
+    );
     let cpu_probe = time_sherpa_diarization(cpu_config, probe_samples).await;
     let cpu_result = match cpu_probe {
         Ok(result) => {
@@ -1437,6 +1989,7 @@ fn diarization_config_for_provider(
     model_paths: &DiarizationModelPaths,
     explicit_num_speakers: Option<i32>,
     provider: &str,
+    clustering_threshold: f32,
 ) -> SherpaDiarizationConfig {
     let mut config = SherpaDiarizationConfig::new(
         model_paths.segmentation_model.clone(),
@@ -1444,6 +1997,7 @@ fn diarization_config_for_provider(
     );
     config.num_threads = default_diarization_threads();
     config.num_clusters = explicit_num_speakers;
+    config.clustering_threshold = clustering_threshold;
     config.provider = provider.to_string();
     config.debug = sherpa_diarization_debug_enabled(provider);
     config
@@ -1673,10 +2227,115 @@ fn diarization_provider_message_suffix(provider: &str) -> &'static str {
     }
 }
 
+fn default_model_descriptor(
+    catalog: &'static [DiarizationModelDescriptor],
+    kind: DiarizationModelKind,
+) -> &'static DiarizationModelDescriptor {
+    catalog
+        .iter()
+        .find(|descriptor| descriptor.is_default)
+        .unwrap_or_else(|| panic!("missing default {} diarization model", kind.as_str()))
+}
+
+fn model_descriptor_by_id(
+    catalog: &'static [DiarizationModelDescriptor],
+    id: &str,
+) -> Option<&'static DiarizationModelDescriptor> {
+    let id = id.trim();
+    catalog.iter().find(|descriptor| {
+        descriptor.id.eq_ignore_ascii_case(id)
+            || descriptor.source_file.eq_ignore_ascii_case(id)
+            || descriptor.display_name.eq_ignore_ascii_case(id)
+    })
+}
+
+fn resolve_embedding_model_descriptor(
+    embedding_model_id: Option<&str>,
+) -> Result<&'static DiarizationModelDescriptor> {
+    let Some(id) = embedding_model_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(default_model_descriptor(
+            EMBEDDING_MODEL_CATALOG,
+            DiarizationModelKind::Embedding,
+        ));
+    };
+
+    model_descriptor_by_id(EMBEDDING_MODEL_CATALOG, id).ok_or_else(|| {
+        anyhow!(
+            "Unknown diarization embedding model id '{}'. Available ids: {}",
+            id,
+            EMBEDDING_MODEL_CATALOG
+                .iter()
+                .map(|descriptor| descriptor.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+fn model_cache_path(models_dir: &Path, descriptor: &DiarizationModelDescriptor) -> PathBuf {
+    models_dir
+        .join(descriptor.cache_dir)
+        .join(descriptor.cache_file)
+}
+
+fn catalog_model_candidate_paths(
+    models_dir: &Path,
+    descriptor: &DiarizationModelDescriptor,
+) -> Vec<PathBuf> {
+    let mut paths = vec![model_cache_path(models_dir, descriptor)];
+    if let Some(legacy_flat_file) = descriptor.legacy_flat_file {
+        paths.push(models_dir.join(legacy_flat_file));
+    }
+    paths
+}
+
+fn first_existing_catalog_path(
+    models_dir: &Path,
+    descriptor: &'static DiarizationModelDescriptor,
+) -> Option<PathBuf> {
+    first_existing_path(&catalog_model_candidate_paths(models_dir, descriptor))
+}
+
+fn resolve_segmentation_catalog_path(
+    models_dir: &Path,
+) -> (PathBuf, &'static DiarizationModelDescriptor) {
+    for descriptor in SEGMENTATION_MODEL_CATALOG {
+        if let Some(path) = first_existing_catalog_path(models_dir, descriptor) {
+            return (path, descriptor);
+        }
+    }
+
+    let descriptor = default_model_descriptor(
+        SEGMENTATION_MODEL_CATALOG,
+        DiarizationModelKind::Segmentation,
+    );
+    (model_cache_path(models_dir, descriptor), descriptor)
+}
+
+fn resolve_embedding_catalog_path(
+    models_dir: &Path,
+    descriptor: &'static DiarizationModelDescriptor,
+) -> PathBuf {
+    first_existing_catalog_path(models_dir, descriptor)
+        .unwrap_or_else(|| model_cache_path(models_dir, descriptor))
+}
+
 fn resolve_model_paths<R: Runtime>(
     app: &AppHandle<R>,
     segmentation_model_path: Option<String>,
     embedding_model_path: Option<String>,
+) -> Result<DiarizationModelPaths> {
+    resolve_model_paths_for_embedding(app, segmentation_model_path, embedding_model_path, None)
+}
+
+fn resolve_model_paths_for_embedding<R: Runtime>(
+    app: &AppHandle<R>,
+    segmentation_model_path: Option<String>,
+    embedding_model_path: Option<String>,
+    embedding_model_id: Option<String>,
 ) -> Result<DiarizationModelPaths> {
     let models_dir = app
         .path()
@@ -1685,48 +2344,67 @@ fn resolve_model_paths<R: Runtime>(
         .join("models")
         .join("diarization");
 
-    let can_download_segmentation = segmentation_model_path
-        .as_deref()
-        .map(|path| path.trim().is_empty())
-        .unwrap_or(true);
-    let segmentation_model = match segmentation_model_path {
-        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
-        _ => first_existing_path(&[
-            models_dir
-                .join(SEGMENTATION_MODEL_DIR)
-                .join("model.int8.onnx"),
-            models_dir.join(SEGMENTATION_MODEL_DIR).join("model.onnx"),
-        ])
-        .unwrap_or_else(|| {
-            models_dir
-                .join(SEGMENTATION_MODEL_DIR)
-                .join("model.int8.onnx")
-        }),
+    resolve_model_paths_in_dir(
+        &models_dir,
+        segmentation_model_path.as_deref(),
+        embedding_model_path.as_deref(),
+        embedding_model_id.as_deref(),
+    )
+}
+
+fn resolve_model_paths_in_dir(
+    models_dir: &Path,
+    segmentation_model_path: Option<&str>,
+    embedding_model_path: Option<&str>,
+    embedding_model_id: Option<&str>,
+) -> Result<DiarizationModelPaths> {
+    let segmentation_custom_path = segmentation_model_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let (segmentation_model, segmentation_descriptor, can_download_segmentation): (
+        PathBuf,
+        Option<&'static DiarizationModelDescriptor>,
+        bool,
+    ) = match segmentation_custom_path {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            ensure_model_file(&path, "segmentation")?;
+            (path, None, false)
+        }
+        None => {
+            let (path, descriptor) = resolve_segmentation_catalog_path(models_dir);
+            (path, Some(descriptor), true)
+        }
     };
 
-    let can_download_embedding = embedding_model_path
-        .as_deref()
-        .map(|path| path.trim().is_empty())
-        .unwrap_or(true);
-    let embedding_model = match embedding_model_path {
-        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
-        _ => first_existing_path(&[
-            models_dir.join(EMBEDDING_MODEL_DIR).join("model.onnx"),
-            models_dir.join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
-        ])
-        .unwrap_or_else(|| models_dir.join(EMBEDDING_MODEL_DIR).join("model.onnx")),
+    let embedding_custom_path = embedding_model_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let (embedding_model, embedding_descriptor, can_download_embedding): (
+        PathBuf,
+        Option<&'static DiarizationModelDescriptor>,
+        bool,
+    ) = match embedding_custom_path {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            ensure_model_file(&path, "embedding")?;
+            (path, None, false)
+        }
+        None => {
+            let descriptor = resolve_embedding_model_descriptor(embedding_model_id)?;
+            (
+                resolve_embedding_catalog_path(models_dir, descriptor),
+                Some(descriptor),
+                true,
+            )
+        }
     };
-
-    if !can_download_segmentation {
-        ensure_model_file(&segmentation_model, "segmentation")?;
-    }
-    if !can_download_embedding {
-        ensure_model_file(&embedding_model, "embedding")?;
-    }
 
     Ok(DiarizationModelPaths {
         segmentation_model,
         embedding_model,
+        segmentation_descriptor,
+        embedding_descriptor,
         can_download_segmentation,
         can_download_embedding,
     })
@@ -1736,17 +2414,55 @@ async fn ensure_model_available<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
     model_path: &Path,
+    descriptor: Option<&DiarizationModelDescriptor>,
     model_name: &str,
-    download_url: &str,
     allow_download: bool,
 ) -> Result<()> {
     if model_path.is_file() {
-        return Ok(());
+        if !allow_download {
+            return Ok(());
+        }
+
+        let descriptor = descriptor.ok_or_else(|| {
+            anyhow!(
+                "{} diarization model has no descriptor for validation: {}",
+                model_name,
+                model_path.display()
+            )
+        })?;
+        let validation = validate_model_file(model_path, descriptor)?;
+        if validation.is_valid() {
+            return Ok(());
+        }
+
+        let validation_error = validation.error_message(descriptor, model_path);
+        log::warn!("{validation_error}");
+        match quarantine_invalid_default_model(model_path)? {
+            Some(quarantine_path) => log::warn!(
+                "Quarantined invalid {} diarization model at {}",
+                model_name,
+                quarantine_path.display()
+            ),
+            None => log::warn!(
+                "Deleted invalid {} diarization model at {}",
+                model_name,
+                model_path.display()
+            ),
+        }
     }
 
     if !allow_download {
         ensure_model_file(model_path, model_name)?;
     }
+
+    let descriptor = descriptor.ok_or_else(|| {
+        anyhow!(
+            "{} diarization model cannot be downloaded without a descriptor: {}",
+            model_name,
+            model_path.display()
+        )
+    })?;
+    let download_url = descriptor.download_url;
 
     emit_progress(
         app,
@@ -1837,12 +2553,25 @@ async fn ensure_model_available<R: Runtime>(
     }
 
     file.flush().await?;
+    drop(file);
 
     if downloaded_bytes == 0 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(anyhow!(
             "{} diarization model download was empty: {}",
             model_name,
             download_url
+        ));
+    }
+
+    let validation = validate_model_file(&temp_path, descriptor)?;
+    if !validation.is_valid() {
+        let validation_error = validation.error_message(descriptor, &temp_path);
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(anyhow!(
+            "Downloaded {} diarization model failed validation: {}",
+            model_name,
+            validation_error
         ));
     }
 
@@ -1937,6 +2666,220 @@ mod tests {
 
     fn sample_count_for_seconds(seconds: usize) -> usize {
         DIARIZATION_SAMPLE_RATE as usize * seconds
+    }
+
+    fn test_model_descriptor(
+        expected_sha256: Option<&'static str>,
+        expected_bytes: Option<u64>,
+    ) -> DiarizationModelDescriptor {
+        DiarizationModelDescriptor {
+            kind: DiarizationModelKind::Embedding,
+            id: "test-model",
+            display_name: "Test model",
+            family: "test",
+            language: Some("en"),
+            cache_dir: "test-model",
+            cache_file: "model.onnx",
+            source_file: "test-model.onnx",
+            download_url: "https://example.invalid/test-model.onnx",
+            expected_sha256,
+            expected_bytes,
+            is_default: false,
+            legacy_flat_file: None,
+        }
+    }
+
+    #[test]
+    fn sha256_file_hashes_known_bytes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("model.onnx");
+        std::fs::write(&path, b"clawscribe").unwrap();
+
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "9c497a187dfd743f242cfd7508a95f41ca8c943d08e8cd51a018822f18e89068"
+        );
+    }
+
+    #[test]
+    fn validates_model_sha256_and_expected_bytes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("model.onnx");
+        std::fs::write(&path, b"clawscribe").unwrap();
+        let descriptor = test_model_descriptor(
+            Some("9c497a187dfd743f242cfd7508a95f41ca8c943d08e8cd51a018822f18e89068"),
+            Some(10),
+        );
+
+        let validation = validate_model_file(&path, &descriptor).unwrap();
+        assert!(validation.is_valid());
+
+        let bad_sha = test_model_descriptor(
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            Some(10),
+        );
+        let validation = validate_model_file(&path, &bad_sha).unwrap();
+        assert!(!validation.sha256_matches);
+        assert!(validation.bytes_match);
+
+        let bad_bytes = test_model_descriptor(
+            Some("9c497a187dfd743f242cfd7508a95f41ca8c943d08e8cd51a018822f18e89068"),
+            Some(11),
+        );
+        let validation = validate_model_file(&path, &bad_bytes).unwrap();
+        assert!(validation.sha256_matches);
+        assert!(!validation.bytes_match);
+    }
+
+    #[test]
+    fn diarization_catalog_keeps_current_default_embedding() {
+        let descriptor = resolve_embedding_model_descriptor(None).unwrap();
+
+        assert_eq!(descriptor.id, DEFAULT_EMBEDDING_MODEL_ID);
+        assert_eq!(
+            descriptor.source_file,
+            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+        );
+        assert_eq!(
+            descriptor.expected_sha256,
+            Some("1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b")
+        );
+    }
+
+    #[test]
+    fn embedding_catalog_includes_ab_candidates_with_pinned_checksums() {
+        let expected = [
+            (
+                "3dspeaker-campplus-en",
+                "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+                "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
+                29_596_978u64,
+            ),
+            (
+                "3dspeaker-eres2net-en",
+                "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+                "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
+                26_485_263u64,
+            ),
+            (
+                "wespeaker-camplusplus-en",
+                "wespeaker_en_voxceleb_CAM++.onnx",
+                "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef",
+                29_292_684u64,
+            ),
+            (
+                "nemo-titanet-small-en",
+                "nemo_en_titanet_small.onnx",
+                "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+                40_257_283u64,
+            ),
+        ];
+
+        for (id, source_file, sha256, bytes) in expected {
+            let descriptor = resolve_embedding_model_descriptor(Some(id)).unwrap();
+            assert_eq!(descriptor.source_file, source_file);
+            assert_eq!(descriptor.expected_sha256, Some(sha256));
+            assert_eq!(descriptor.expected_bytes, Some(bytes));
+            assert!(!descriptor.is_default);
+        }
+    }
+
+    #[test]
+    fn default_catalog_resolution_keeps_existing_cache_layout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let paths = resolve_model_paths_in_dir(temp_dir.path(), None, None, None).unwrap();
+
+        assert_eq!(
+            paths.segmentation_model,
+            temp_dir
+                .path()
+                .join(SEGMENTATION_MODEL_DIR)
+                .join("model.int8.onnx")
+        );
+        assert_eq!(
+            paths.embedding_model,
+            temp_dir
+                .path()
+                .join(DEFAULT_EMBEDDING_MODEL_DIR)
+                .join("model.onnx")
+        );
+        assert_eq!(
+            paths
+                .segmentation_descriptor
+                .map(|descriptor| descriptor.id),
+            Some(DEFAULT_SEGMENTATION_MODEL_ID)
+        );
+        assert_eq!(
+            paths.embedding_descriptor.map(|descriptor| descriptor.id),
+            Some(DEFAULT_EMBEDDING_MODEL_ID)
+        );
+        assert!(paths.can_download_segmentation);
+        assert!(paths.can_download_embedding);
+    }
+
+    #[test]
+    fn catalog_resolution_preserves_legacy_default_embedding_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy_path = temp_dir
+            .path()
+            .join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx");
+        std::fs::write(&legacy_path, b"legacy").unwrap();
+
+        let paths = resolve_model_paths_in_dir(temp_dir.path(), None, None, None).unwrap();
+
+        assert_eq!(paths.embedding_model, legacy_path);
+        assert_eq!(
+            paths.embedding_descriptor.map(|descriptor| descriptor.id),
+            Some(DEFAULT_EMBEDDING_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn explicit_custom_paths_are_existence_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let segmentation_path = temp_dir.path().join("custom-segmentation.onnx");
+        let embedding_path = temp_dir.path().join("custom-embedding.onnx");
+        std::fs::write(&segmentation_path, b"not a pinned segmentation model").unwrap();
+        std::fs::write(&embedding_path, b"not a pinned embedding model").unwrap();
+
+        let paths = resolve_model_paths_in_dir(
+            temp_dir.path(),
+            Some(segmentation_path.to_str().unwrap()),
+            Some(embedding_path.to_str().unwrap()),
+            Some("wespeaker-camplusplus-en"),
+        )
+        .unwrap();
+
+        assert_eq!(paths.segmentation_model, segmentation_path);
+        assert_eq!(paths.embedding_model, embedding_path);
+        assert!(paths.segmentation_descriptor.is_none());
+        assert!(paths.embedding_descriptor.is_none());
+        assert!(!paths.can_download_segmentation);
+        assert!(!paths.can_download_embedding);
+    }
+
+    #[test]
+    fn invalid_default_cache_file_can_be_quarantined() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let model_dir = temp_dir.path().join(DEFAULT_EMBEDDING_MODEL_DIR);
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let model_path = model_dir.join("model.onnx");
+        std::fs::write(&model_path, b"bad model").unwrap();
+        let descriptor = resolve_embedding_model_descriptor(None).unwrap();
+        let validation = validate_model_file(&model_path, descriptor).unwrap();
+        assert!(!validation.is_valid());
+
+        let quarantine_path = quarantine_invalid_default_model(&model_path)
+            .unwrap()
+            .unwrap();
+
+        assert!(!model_path.exists());
+        assert!(quarantine_path.exists());
+        assert!(quarantine_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(".invalid-"));
     }
 
     #[test]
