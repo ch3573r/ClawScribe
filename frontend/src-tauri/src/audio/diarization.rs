@@ -34,13 +34,15 @@ const SPLIT_BOUNDARY_SEARCH_WORDS: usize = 8;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
 const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 const DEFAULT_SEGMENTATION_MODEL_ID: &str = "pyannote-segmentation-3-0-int8";
-const DEFAULT_EMBEDDING_MODEL_ID: &str = "3dspeaker-eres2net-base-zh-cn";
+const DEFAULT_EMBEDDING_MODEL_ID: &str = "wespeaker-camplusplus-en";
+const ZH_CN_EMBEDDING_MODEL_ID: &str = "3dspeaker-eres2net-base-zh-cn";
 const SEGMENTATION_MODEL_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
-const DEFAULT_EMBEDDING_MODEL_DIR: &str =
+const DEFAULT_EMBEDDING_MODEL_DIR: &str = "sherpa-onnx-wespeaker_en_voxceleb_CAMplusplus";
+const ZH_CN_EMBEDDING_MODEL_DIR: &str =
     "sherpa-onnx-3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k";
 const SEGMENTATION_MODEL_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
-const EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+const ZH_CN_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
 const DIRECTML_PROBE_SECONDS: usize = 5;
@@ -122,6 +124,7 @@ struct DiarizationModelDescriptor {
     download_url: &'static str,
     expected_sha256: Option<&'static str>,
     expected_bytes: Option<u64>,
+    default_clustering_threshold: f32,
     is_default: bool,
     legacy_flat_file: Option<&'static str>,
 }
@@ -141,6 +144,7 @@ const SEGMENTATION_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
         ),
         expected_bytes: Some(1_540_506),
+        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
         is_default: true,
         legacy_flat_file: None,
     },
@@ -159,6 +163,7 @@ const SEGMENTATION_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
         ),
         expected_bytes: Some(5_992_913),
+        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
         is_default: false,
         legacy_flat_file: None,
     },
@@ -167,19 +172,20 @@ const SEGMENTATION_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
 const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
     DiarizationModelDescriptor {
         kind: DiarizationModelKind::Embedding,
-        id: DEFAULT_EMBEDDING_MODEL_ID,
+        id: ZH_CN_EMBEDDING_MODEL_ID,
         display_name: "3D-Speaker ERes2Net base zh-cn",
         family: "3D-Speaker ERes2Net",
         language: Some("zh-cn"),
-        cache_dir: DEFAULT_EMBEDDING_MODEL_DIR,
+        cache_dir: ZH_CN_EMBEDDING_MODEL_DIR,
         cache_file: "model.onnx",
         source_file: "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
-        download_url: EMBEDDING_MODEL_URL,
+        download_url: ZH_CN_EMBEDDING_MODEL_URL,
         expected_sha256: Some(
             "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
         ),
         expected_bytes: Some(39_593_761),
-        is_default: true,
+        default_clustering_threshold: 0.90,
+        is_default: false,
         legacy_flat_file: Some("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
     },
     DiarizationModelDescriptor {
@@ -197,6 +203,7 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
         ),
         expected_bytes: Some(29_596_978),
+        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
         is_default: false,
         legacy_flat_file: None,
     },
@@ -215,16 +222,17 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
         ),
         expected_bytes: Some(26_485_263),
+        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
         is_default: false,
         legacy_flat_file: None,
     },
     DiarizationModelDescriptor {
         kind: DiarizationModelKind::Embedding,
-        id: "wespeaker-camplusplus-en",
+        id: DEFAULT_EMBEDDING_MODEL_ID,
         display_name: "WeSpeaker CAM++ English VoxCeleb",
         family: "WeSpeaker CAM++",
         language: Some("en"),
-        cache_dir: "sherpa-onnx-wespeaker_en_voxceleb_CAMplusplus",
+        cache_dir: DEFAULT_EMBEDDING_MODEL_DIR,
         cache_file: "model.onnx",
         source_file: "wespeaker_en_voxceleb_CAM++.onnx",
         download_url:
@@ -233,7 +241,8 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef",
         ),
         expected_bytes: Some(29_292_684),
-        is_default: false,
+        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+        is_default: true,
         legacy_flat_file: None,
     },
     DiarizationModelDescriptor {
@@ -251,6 +260,7 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
         ),
         expected_bytes: Some(40_257_283),
+        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
         is_default: false,
         legacy_flat_file: None,
     },
@@ -1189,6 +1199,7 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     meeting_folder_path: String,
     segmentation_model_path: Option<String>,
     embedding_model_path: Option<String>,
+    embedding_model_id: Option<String>,
     num_speakers: Option<i32>,
     preserve_existing_labels: Option<bool>,
 ) -> std::result::Result<SpeakerDiarizationStartResponse, String> {
@@ -1203,6 +1214,7 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
             meeting_folder_path,
             segmentation_model_path,
             embedding_model_path,
+            embedding_model_id,
             num_speakers,
             preserve_existing_labels.unwrap_or(true),
         )
@@ -1238,6 +1250,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     meeting_folder_path: String,
     segmentation_model_path: Option<String>,
     embedding_model_path: Option<String>,
+    embedding_model_id: Option<String>,
     num_speakers: Option<i32>,
     preserve_existing_labels: bool,
 ) -> Result<SpeakerDiarizationComplete> {
@@ -1257,7 +1270,12 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         "Finding meeting audio...",
     );
     let audio_path = find_audio_file(&folder_path)?;
-    let model_paths = resolve_model_paths(&app, segmentation_model_path, embedding_model_path)?;
+    let model_paths = resolve_model_paths_for_embedding(
+        &app,
+        segmentation_model_path,
+        embedding_model_path,
+        embedding_model_id,
+    )?;
 
     ensure_model_available(
         &app,
@@ -1308,7 +1326,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     let audio_minutes = audio_duration_minutes(sample_count);
     let samples = Arc::new(samples);
     let explicit_num_speakers = num_speakers.filter(|value| *value > 0);
-    let clustering_threshold = DEFAULT_CLUSTERING_THRESHOLD;
+    let clustering_threshold = default_clustering_threshold(&model_paths);
     let mut profile = DiarizationProfile::new(
         &meeting_id,
         sample_count,
@@ -1588,7 +1606,7 @@ pub(crate) async fn run_speaker_diarization_evaluation<R: Runtime>(
     let clustering_threshold = options
         .clustering_threshold
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(DEFAULT_CLUSTERING_THRESHOLD);
+        .unwrap_or_else(|| default_clustering_threshold(&model_paths));
     let mut profile = DiarizationProfile::new(
         &options.meeting_id,
         sample_count,
@@ -2365,6 +2383,13 @@ fn resolve_embedding_model_descriptor(
     })
 }
 
+fn default_clustering_threshold(model_paths: &DiarizationModelPaths) -> f32 {
+    model_paths
+        .embedding_descriptor
+        .map(|descriptor| descriptor.default_clustering_threshold)
+        .unwrap_or(DEFAULT_CLUSTERING_THRESHOLD)
+}
+
 fn model_cache_path(models_dir: &Path, descriptor: &DiarizationModelDescriptor) -> PathBuf {
     models_dir
         .join(descriptor.cache_dir)
@@ -2411,14 +2436,6 @@ fn resolve_embedding_catalog_path(
 ) -> PathBuf {
     first_existing_catalog_path(models_dir, descriptor)
         .unwrap_or_else(|| model_cache_path(models_dir, descriptor))
-}
-
-fn resolve_model_paths<R: Runtime>(
-    app: &AppHandle<R>,
-    segmentation_model_path: Option<String>,
-    embedding_model_path: Option<String>,
-) -> Result<DiarizationModelPaths> {
-    resolve_model_paths_for_embedding(app, segmentation_model_path, embedding_model_path, None)
 }
 
 fn resolve_model_paths_for_embedding<R: Runtime>(
@@ -2775,6 +2792,7 @@ mod tests {
             download_url: "https://example.invalid/test-model.onnx",
             expected_sha256,
             expected_bytes,
+            default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
             is_default: false,
             legacy_flat_file: None,
         }
@@ -2823,17 +2841,27 @@ mod tests {
     }
 
     #[test]
-    fn diarization_catalog_keeps_current_default_embedding() {
+    fn diarization_catalog_defaults_to_english_embedding() {
         let descriptor = resolve_embedding_model_descriptor(None).unwrap();
 
         assert_eq!(descriptor.id, DEFAULT_EMBEDDING_MODEL_ID);
+        assert!(descriptor.is_default);
         assert_eq!(
-            descriptor.source_file,
-            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+            EMBEDDING_MODEL_CATALOG
+                .iter()
+                .filter(|descriptor| descriptor.is_default)
+                .count(),
+            1
         );
+        assert_eq!(descriptor.language, Some("en"));
+        assert_eq!(descriptor.source_file, "wespeaker_en_voxceleb_CAM++.onnx");
         assert_eq!(
             descriptor.expected_sha256,
-            Some("1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b")
+            Some("c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef")
+        );
+        assert_eq!(
+            descriptor.default_clustering_threshold,
+            DEFAULT_CLUSTERING_THRESHOLD
         );
     }
 
@@ -2841,37 +2869,48 @@ mod tests {
     fn embedding_catalog_includes_ab_candidates_with_pinned_checksums() {
         let expected = [
             (
+                "3dspeaker-eres2net-base-zh-cn",
+                "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+                39_593_761u64,
+                0.90f32,
+            ),
+            (
                 "3dspeaker-campplus-en",
                 "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
                 "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
                 29_596_978u64,
+                DEFAULT_CLUSTERING_THRESHOLD,
             ),
             (
                 "3dspeaker-eres2net-en",
                 "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
                 "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
                 26_485_263u64,
+                DEFAULT_CLUSTERING_THRESHOLD,
             ),
             (
                 "wespeaker-camplusplus-en",
                 "wespeaker_en_voxceleb_CAM++.onnx",
                 "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef",
                 29_292_684u64,
+                DEFAULT_CLUSTERING_THRESHOLD,
             ),
             (
                 "nemo-titanet-small-en",
                 "nemo_en_titanet_small.onnx",
                 "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
                 40_257_283u64,
+                DEFAULT_CLUSTERING_THRESHOLD,
             ),
         ];
 
-        for (id, source_file, sha256, bytes) in expected {
+        for (id, source_file, sha256, bytes, threshold) in expected {
             let descriptor = resolve_embedding_model_descriptor(Some(id)).unwrap();
             assert_eq!(descriptor.source_file, source_file);
             assert_eq!(descriptor.expected_sha256, Some(sha256));
             assert_eq!(descriptor.expected_bytes, Some(bytes));
-            assert!(!descriptor.is_default);
+            assert_eq!(descriptor.default_clustering_threshold, threshold);
         }
     }
 
@@ -2904,25 +2943,32 @@ mod tests {
             paths.embedding_descriptor.map(|descriptor| descriptor.id),
             Some(DEFAULT_EMBEDDING_MODEL_ID)
         );
+        assert_eq!(
+            default_clustering_threshold(&paths),
+            DEFAULT_CLUSTERING_THRESHOLD
+        );
         assert!(paths.can_download_segmentation);
         assert!(paths.can_download_embedding);
     }
 
     #[test]
-    fn catalog_resolution_preserves_legacy_default_embedding_file() {
+    fn catalog_resolution_keeps_legacy_zh_cn_embedding_explicit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let legacy_path = temp_dir
             .path()
             .join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx");
         std::fs::write(&legacy_path, b"legacy").unwrap();
 
-        let paths = resolve_model_paths_in_dir(temp_dir.path(), None, None, None).unwrap();
+        let paths =
+            resolve_model_paths_in_dir(temp_dir.path(), None, None, Some(ZH_CN_EMBEDDING_MODEL_ID))
+                .unwrap();
 
         assert_eq!(paths.embedding_model, legacy_path);
         assert_eq!(
             paths.embedding_descriptor.map(|descriptor| descriptor.id),
-            Some(DEFAULT_EMBEDDING_MODEL_ID)
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
         );
+        assert_eq!(default_clustering_threshold(&paths), 0.90);
     }
 
     #[test]

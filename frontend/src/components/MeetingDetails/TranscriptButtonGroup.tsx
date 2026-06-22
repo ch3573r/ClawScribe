@@ -139,6 +139,7 @@ export function TranscriptButtonGroup({
         meetingFolderPath,
         segmentationModelPath: null,
         embeddingModelPath: null,
+        embeddingModelId: null,
         numSpeakers,
         preserveExistingLabels: false,
       });
