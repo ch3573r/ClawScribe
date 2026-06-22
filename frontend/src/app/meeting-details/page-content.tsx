@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingChat } from '@/components/MeetingDetails/MeetingChat';
+import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 
 // Custom hooks
@@ -207,6 +208,11 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex h-full flex-col bg-background"
     >
+      <SpeakerLaneTimeline
+        segments={segments ?? []}
+        totalCount={totalCount}
+        loadedCount={loadedCount}
+      />
       <div className="flex flex-1 overflow-hidden">
         <TranscriptPanel
           transcripts={meetingData.transcripts}
