@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.14
+
+- Fixed Meeting details toolbar wrapping at narrower desktop widths so action
+  buttons no longer overflow the meeting title or summary metadata.
+- Tightened meeting toolbar responsiveness by switching secondary labels to
+  icon-only buttons below wide desktop layouts while preserving tooltips.
+- Hardened speaker diarization for short imported clips by compacting sparse
+  sherpa cluster IDs before they become visible labels.
+- Added an automatic retry for short auto-diarization runs that split a clip
+  into too many speakers, using a two-speaker clustering hint for that fallback.
+- Improved speaker-detection feedback with persistent progress toasts, audio
+  duration-aware status text, streamed model-download progress, and download
+  timeouts.
+- `latest.json` advertises runtime version `0.5.14`, so installed `0.5.13`
+  clients can discover this update.
+
 ## 0.5.13
 
 - Added local speaker diarization for saved transcripts using `sherpa-onnx`
