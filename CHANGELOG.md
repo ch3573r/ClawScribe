@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.16
+
+- Added a DirectML speaker-diarization runtime for Windows GPU builds by
+  compiling the pinned `sherpa-onnx` runtime with DirectML enabled, while
+  keeping a CPU fallback when DirectML is unavailable.
+- Kept speaker diarization resilient across build variants with a
+  process-level DirectML-unavailable latch and per-run fallback messaging.
+- Refined speaker-turn splitting so transcript rows are split at sentence
+  boundaries instead of being cut through mid-sentence fragments.
+- Added Microsoft To Do list creation in Settings -> Add-ons, so users without
+  an existing To Do list can create and select one without leaving ClawScribe.
+- `latest.json` advertises runtime version `0.5.16`, so installed `0.5.15`
+  clients can discover this update.
+
 ## 0.5.15
 
 - Improved speaker diarization mapping so a single transcript row can be split
