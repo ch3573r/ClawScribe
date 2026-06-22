@@ -30,7 +30,6 @@ const MIN_SPLIT_SPEAKER_OVERLAP_SECONDS: f64 = 1.0;
 const MIN_SPLIT_PART_SECONDS: f64 = 1.25;
 const SAME_SPEAKER_MERGE_GAP_SECONDS: f64 = 0.25;
 const SAME_SPEAKER_TRANSCRIPT_MERGE_GAP_SECONDS: f64 = 1.0;
-const SHORT_TURN_SMOOTHING_SECONDS: f64 = 0.9;
 const SPLIT_BOUNDARY_SEARCH_WORDS: usize = 8;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
 const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
@@ -44,10 +43,6 @@ const SEGMENTATION_MODEL_URL: &str =
 const EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
-const SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES: f64 = 10.0;
-const SHORT_CLIP_OVERCLUSTERED_SPEAKERS: usize = 4;
-const SHORT_CLIP_RETRY_MIN_SECONDS: f64 = 6.0;
-const SHORT_CLIP_RETRY_DOMINANT_SHARE: f64 = 0.06;
 const DIRECTML_PROBE_SECONDS: usize = 5;
 const DIRECTML_REQUIRED_SPEEDUP: f64 = 1.10;
 const SHERPA_RUNTIME_DLLS: &[&str] = &[
@@ -885,9 +880,9 @@ fn compact_diarization_speakers(turns: Vec<DiarizationTurn>) -> Vec<DiarizationT
 }
 
 fn prepare_diarization_turns_for_mapping(
-    sample_count: usize,
+    _sample_count: usize,
     turns: &[DiarizationTurn],
-    explicit_num_speakers: Option<i32>,
+    _explicit_num_speakers: Option<i32>,
 ) -> Vec<DiarizationTurn> {
     let mut prepared = turns
         .iter()
@@ -906,182 +901,7 @@ fn prepare_diarization_turns_for_mapping(
             .then_with(|| a.speaker.cmp(&b.speaker))
     });
 
-    if explicit_num_speakers.is_none() {
-        if let Some(stable_speakers) = stable_auto_speakers_for_mapping(sample_count, &prepared) {
-            prepared = reassign_unstable_speakers(prepared, &stable_speakers);
-        }
-    }
-
-    prepared = smooth_short_diarization_turns(prepared);
     compact_diarization_speakers(collapse_adjacent_diarization_turns(prepared))
-}
-
-fn stable_auto_speakers_for_mapping(
-    sample_count: usize,
-    turns: &[DiarizationTurn],
-) -> Option<BTreeSet<usize>> {
-    let detected_speakers = speaker_count_from_turns(turns);
-    if detected_speakers <= 1 {
-        return None;
-    }
-
-    let durations = speaker_durations(turns);
-    let longest_speaker = durations.values().copied().fold(0.0, f64::max);
-    if longest_speaker <= 0.0 {
-        return None;
-    }
-
-    let is_short_clip =
-        audio_duration_minutes(sample_count) <= SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES;
-    let duration_threshold =
-        if is_short_clip && detected_speakers > SHORT_CLIP_OVERCLUSTERED_SPEAKERS {
-            (longest_speaker * SHORT_CLIP_RETRY_DOMINANT_SHARE).max(SHORT_CLIP_RETRY_MIN_SECONDS)
-        } else {
-            (longest_speaker * 0.02).max(2.0)
-        };
-
-    let mut stable: Vec<(usize, f64)> = durations
-        .iter()
-        .filter_map(|(speaker, duration)| {
-            (*duration >= duration_threshold).then_some((*speaker, *duration))
-        })
-        .collect();
-
-    if stable.is_empty() {
-        stable = durations
-            .iter()
-            .map(|(speaker, duration)| (*speaker, *duration))
-            .collect();
-        stable.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        stable.truncate(1);
-    } else if is_short_clip && stable.len() > SHORT_CLIP_OVERCLUSTERED_SPEAKERS {
-        stable.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        stable.truncate(SHORT_CLIP_OVERCLUSTERED_SPEAKERS);
-    }
-
-    let stable_speakers = stable
-        .into_iter()
-        .map(|(speaker, _)| speaker)
-        .collect::<BTreeSet<_>>();
-
-    (stable_speakers.len() < detected_speakers).then_some(stable_speakers)
-}
-
-fn speaker_durations(turns: &[DiarizationTurn]) -> BTreeMap<usize, f64> {
-    let mut durations = BTreeMap::<usize, f64>::new();
-    for turn in turns {
-        let duration = (turn.end_time - turn.start_time).max(0.0);
-        if duration > 0.0 {
-            *durations.entry(turn.speaker).or_default() += duration;
-        }
-    }
-    durations
-}
-
-fn reassign_unstable_speakers(
-    mut turns: Vec<DiarizationTurn>,
-    stable_speakers: &BTreeSet<usize>,
-) -> Vec<DiarizationTurn> {
-    if stable_speakers.is_empty() {
-        return turns;
-    }
-
-    let fallback_speaker = dominant_stable_speaker(&turns, stable_speakers);
-    for index in 0..turns.len() {
-        if stable_speakers.contains(&turns[index].speaker) {
-            continue;
-        }
-
-        turns[index].speaker = nearest_stable_speaker(&turns, stable_speakers, index)
-            .or(fallback_speaker)
-            .unwrap_or(turns[index].speaker);
-    }
-
-    turns
-}
-
-fn dominant_stable_speaker(
-    turns: &[DiarizationTurn],
-    stable_speakers: &BTreeSet<usize>,
-) -> Option<usize> {
-    speaker_durations(turns)
-        .into_iter()
-        .filter(|(speaker, _)| stable_speakers.contains(speaker))
-        .max_by(|left, right| {
-            left.1
-                .partial_cmp(&right.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| right.0.cmp(&left.0))
-        })
-        .map(|(speaker, _)| speaker)
-}
-
-fn nearest_stable_speaker(
-    turns: &[DiarizationTurn],
-    stable_speakers: &BTreeSet<usize>,
-    index: usize,
-) -> Option<usize> {
-    let previous = turns[..index]
-        .iter()
-        .rev()
-        .find(|turn| stable_speakers.contains(&turn.speaker));
-    let next = turns[index + 1..]
-        .iter()
-        .find(|turn| stable_speakers.contains(&turn.speaker));
-
-    match (previous, next) {
-        (Some(previous), Some(next)) if previous.speaker == next.speaker => Some(previous.speaker),
-        (Some(previous), Some(next)) => {
-            let previous_gap = (turns[index].start_time - previous.end_time).max(0.0);
-            let next_gap = (next.start_time - turns[index].end_time).max(0.0);
-            if previous_gap <= next_gap {
-                Some(previous.speaker)
-            } else {
-                Some(next.speaker)
-            }
-        }
-        (Some(previous), None) => Some(previous.speaker),
-        (None, Some(next)) => Some(next.speaker),
-        (None, None) => None,
-    }
-}
-
-fn smooth_short_diarization_turns(mut turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
-    if turns.len() < 3 {
-        return turns;
-    }
-
-    for index in 1..turns.len() - 1 {
-        let duration = turns[index].end_time - turns[index].start_time;
-        if duration >= SHORT_TURN_SMOOTHING_SECONDS {
-            continue;
-        }
-
-        let previous = turns[index - 1].speaker;
-        let next = turns[index + 1].speaker;
-        if previous == next {
-            turns[index].speaker = previous;
-            continue;
-        }
-
-        let previous_duration = turns[index - 1].end_time - turns[index - 1].start_time;
-        let next_duration = turns[index + 1].end_time - turns[index + 1].start_time;
-        turns[index].speaker = if previous_duration >= next_duration {
-            previous
-        } else {
-            next
-        };
-    }
-
-    turns
 }
 
 fn collapse_adjacent_diarization_turns(turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
@@ -1114,43 +934,6 @@ fn speaker_count_from_turns(turns: &[DiarizationTurn]) -> usize {
         .map(|turn| turn.speaker)
         .collect::<BTreeSet<_>>()
         .len()
-}
-
-fn short_clip_retry_speaker_count(
-    sample_count: usize,
-    turns: &[DiarizationTurn],
-    explicit_num_speakers: Option<i32>,
-) -> Option<i32> {
-    if explicit_num_speakers.is_some()
-        || audio_duration_minutes(sample_count) > SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES
-    {
-        return None;
-    }
-
-    let detected_speakers = speaker_count_from_turns(turns);
-    if detected_speakers <= SHORT_CLIP_OVERCLUSTERED_SPEAKERS {
-        return None;
-    }
-
-    let durations = speaker_durations(turns);
-
-    let longest_speaker = durations.values().copied().fold(0.0, f64::max);
-    if longest_speaker <= 0.0 {
-        return None;
-    }
-
-    let meaningful_threshold =
-        (longest_speaker * SHORT_CLIP_RETRY_DOMINANT_SHARE).max(SHORT_CLIP_RETRY_MIN_SECONDS);
-    let meaningful_speakers = durations
-        .values()
-        .filter(|duration| **duration >= meaningful_threshold)
-        .count();
-
-    if meaningful_speakers == 0 || meaningful_speakers > SHORT_CLIP_OVERCLUSTERED_SPEAKERS {
-        return None;
-    }
-
-    (meaningful_speakers < detected_speakers).then_some(meaningful_speakers as i32)
 }
 
 fn ensure_model_file(path: &Path, model_name: &str) -> Result<()> {
@@ -1572,58 +1355,13 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         &mut profile,
     )
     .await?;
-    if let Some(retry_speaker_count) =
-        short_clip_retry_speaker_count(sample_count, &turns, explicit_num_speakers)
-    {
-        let detected_speakers = speaker_count_from_turns(&turns);
-        let speaker_word = if retry_speaker_count == 1 {
-            "speaker"
-        } else {
-            "speakers"
-        };
-        let retry_message = format!(
-            "Auto speaker detection split this short clip into {detected_speakers} speakers; retrying with {retry_speaker_count} likely {speaker_word}..."
-        );
-        log::info!(
-            "speaker_diarization_short_clip_retry detected_speakers={} retry_speakers={}",
-            detected_speakers,
-            retry_speaker_count
-        );
-        emit_progress(&app, &meeting_id, "diarizing", 65, &retry_message);
-
-        let mut retry_config = diarization_config_for_provider(
-            &model_paths,
-            explicit_num_speakers,
-            provider,
-            clustering_threshold,
-        );
-        retry_config.num_clusters = Some(retry_speaker_count);
-        turns = run_sherpa_diarization_with_fallback(
-            &app,
-            &meeting_id,
-            retry_config,
-            Arc::clone(&samples),
-            &mut profile,
-        )
-        .await?;
-    }
 
     if turns.is_empty() {
         return Err(anyhow!(
             "No speaker turns were detected in this meeting audio"
         ));
     }
-    let detected_speaker_count = speaker_count_from_turns(&turns);
     turns = prepare_diarization_turns_for_mapping(sample_count, &turns, explicit_num_speakers);
-    let mapped_speaker_count = speaker_count_from_turns(&turns);
-    if mapped_speaker_count < detected_speaker_count {
-        log::info!(
-            "speaker_diarization_smoothed detected_speakers={} mapped_speakers={} turns={}",
-            detected_speaker_count,
-            mapped_speaker_count,
-            turns.len()
-        );
-    }
 
     emit_progress(
         &app,
@@ -3251,87 +2989,7 @@ mod tests {
     }
 
     #[test]
-    fn estimates_short_clip_retry_count_from_meaningful_speaker_duration() {
-        let turns = vec![
-            turn(0.0, 120.0, 0),
-            turn(120.0, 225.0, 1),
-            turn(225.0, 227.0, 2),
-            turn(227.0, 229.0, 3),
-            turn(229.0, 231.0, 4),
-        ];
-
-        assert_eq!(
-            short_clip_retry_speaker_count(sample_count_for_minutes(8), &turns, None),
-            Some(2)
-        );
-        assert_eq!(
-            short_clip_retry_speaker_count(sample_count_for_minutes(8), &turns, Some(2)),
-            None
-        );
-        assert_eq!(
-            short_clip_retry_speaker_count(sample_count_for_minutes(20), &turns, None),
-            None
-        );
-        assert_eq!(
-            short_clip_retry_speaker_count(
-                sample_count_for_minutes(8),
-                &turns[..SHORT_CLIP_OVERCLUSTERED_SPEAKERS],
-                None,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn short_clip_retry_allows_one_speaker_when_fragments_are_noise() {
-        let turns = vec![
-            turn(0.0, 180.0, 0),
-            turn(180.0, 181.0, 1),
-            turn(181.0, 182.0, 2),
-            turn(182.0, 183.0, 3),
-            turn(183.0, 184.0, 4),
-        ];
-
-        assert_eq!(
-            short_clip_retry_speaker_count(sample_count_for_minutes(5), &turns, None),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn short_clip_retry_skips_genuine_multi_speaker_clips() {
-        let turns = vec![
-            turn(0.0, 60.0, 0),
-            turn(60.0, 120.0, 1),
-            turn(120.0, 180.0, 2),
-            turn(180.0, 240.0, 3),
-            turn(240.0, 300.0, 4),
-        ];
-
-        assert_eq!(
-            short_clip_retry_speaker_count(sample_count_for_seconds(300), &turns, None,),
-            None
-        );
-    }
-
-    #[test]
-    fn short_clip_retry_can_cap_to_four_meaningful_speakers() {
-        let turns = vec![
-            turn(0.0, 80.0, 0),
-            turn(80.0, 150.0, 1),
-            turn(150.0, 220.0, 2),
-            turn(220.0, 290.0, 3),
-            turn(290.0, 291.0, 4),
-        ];
-
-        assert_eq!(
-            short_clip_retry_speaker_count(sample_count_for_seconds(300), &turns, None,),
-            Some(4)
-        );
-    }
-
-    #[test]
-    fn mapping_preparation_folds_noisy_short_clip_speakers_into_stable_speakers() {
+    fn mapping_preparation_preserves_auto_detected_speakers() {
         let turns = vec![
             turn(0.0, 13.0, 0),
             turn(13.0, 30.0, 1),
@@ -3348,20 +3006,21 @@ mod tests {
         let prepared =
             prepare_diarization_turns_for_mapping(sample_count_for_minutes(8), &turns, None);
 
-        assert!(speaker_count_from_turns(&prepared) <= SHORT_CLIP_OVERCLUSTERED_SPEAKERS);
-        assert!(prepared
-            .iter()
-            .all(|turn| turn.speaker < SHORT_CLIP_OVERCLUSTERED_SPEAKERS));
+        assert_eq!(speaker_count_from_turns(&prepared), 7);
+        assert_eq!(
+            prepared.iter().map(|turn| turn.speaker).collect::<Vec<_>>(),
+            vec![0, 1, 2, 1, 2, 3, 1, 4, 5, 6]
+        );
     }
 
     #[test]
-    fn smoothing_removes_subsecond_turn_between_same_speaker() {
+    fn mapping_preparation_keeps_short_interjection_between_same_speaker() {
         let turns = vec![turn(0.0, 4.0, 0), turn(4.0, 4.5, 1), turn(4.5, 8.0, 0)];
 
         let prepared =
             prepare_diarization_turns_for_mapping(sample_count_for_minutes(2), &turns, Some(2));
 
-        assert_eq!(prepared, vec![turn(0.0, 8.0, 0)]);
+        assert_eq!(prepared, turns);
     }
 
     #[test]
