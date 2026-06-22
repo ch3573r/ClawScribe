@@ -36,6 +36,7 @@ import { installTeamsDetectionDebugBridge } from '@/services/teamsDetectionServi
 import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { TeamsAutoRecord } from '@/components/TeamsAutoRecord'
+import { AudioDeviceHotSwapMonitor } from '@/components/AudioDeviceHotSwapMonitor'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -289,6 +290,7 @@ export default function RootLayout({
         <AppTitlebar />
         <AnalyticsProvider>
           <RecordingStateProvider>
+            <AudioDeviceHotSwapMonitor />
             <TranscriptProvider>
               <ConfigProvider>
                 <OllamaDownloadProvider>

@@ -22,6 +22,29 @@ export interface RecordingStoppedPayload {
   meeting_name?: string;
 }
 
+export type AudioDeviceEvent =
+  | {
+      type: 'DeviceDisconnected';
+      device_name: string;
+      device_type: 'Microphone' | 'SystemAudio';
+    }
+  | {
+      type: 'DeviceReconnected';
+      device_name: string;
+      device_type: 'Microphone' | 'SystemAudio';
+    }
+  | {
+      type: 'DeviceListChanged';
+    };
+
+export interface ReconnectionStatus {
+  is_reconnecting: boolean;
+  disconnected_device?: {
+    name: string;
+    device_type: 'Microphone' | 'SystemAudio';
+  } | null;
+}
+
 /**
  * Recording Service
  * Singleton service for managing recording lifecycle operations
@@ -103,6 +126,21 @@ export class RecordingService {
    */
   async resumeRecording(): Promise<void> {
     return invoke('resume_recording');
+  }
+
+  async pollAudioDeviceEvents(): Promise<AudioDeviceEvent | null> {
+    return invoke<AudioDeviceEvent | null>('poll_audio_device_events');
+  }
+
+  async getReconnectionStatus(): Promise<ReconnectionStatus> {
+    return invoke<ReconnectionStatus>('get_reconnection_status');
+  }
+
+  async attemptDeviceReconnect(deviceName: string, deviceType: 'Microphone' | 'SystemAudio'): Promise<boolean> {
+    return invoke<boolean>('attempt_device_reconnect', {
+      device_name: deviceName,
+      device_type: deviceType,
+    });
   }
 
   // Event Listeners

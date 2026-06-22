@@ -1235,6 +1235,13 @@ pub async fn poll_audio_device_events() -> Result<Option<DeviceEventResponse>, S
     if let Some(manager) = manager_guard.as_mut() {
         if let Some(event) = manager.poll_device_events() {
             info!("📱 Device event polled: {:?}", event);
+            if let DeviceEvent::DeviceDisconnected {
+                device_name,
+                device_type,
+            } = &event
+            {
+                manager.handle_device_disconnect_event(device_name.clone(), device_type.clone());
+            }
             Ok(Some(event.into()))
         } else {
             Ok(None)
@@ -1257,7 +1264,11 @@ pub async fn get_reconnection_status() -> Result<ReconnectionStatus, String> {
             .get_disconnected_device()
             .map(|(device, device_type)| DisconnectedDeviceInfo {
                 name: device.name.clone(),
-                device_type: format!("{:?}", device_type),
+                device_type: match device_type {
+                    super::recording_state::DeviceType::Microphone => "Microphone",
+                    super::recording_state::DeviceType::System => "SystemAudio",
+                }
+                .to_string(),
             });
 
         Ok(ReconnectionStatus {

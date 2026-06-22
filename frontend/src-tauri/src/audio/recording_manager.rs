@@ -546,6 +546,30 @@ impl RecordingManager {
         }
     }
 
+    pub fn handle_device_disconnect_event(
+        &mut self,
+        device_name: String,
+        device_type: DeviceMonitorType,
+    ) {
+        warn!(
+            "📱 Device disconnected: {} ({:?})",
+            device_name, device_type
+        );
+
+        let device = match device_type {
+            DeviceMonitorType::Microphone => self.state.get_microphone_device(),
+            DeviceMonitorType::SystemAudio => self.state.get_system_device(),
+        };
+
+        if let Some(device) = device {
+            let recording_device_type = match device_type {
+                DeviceMonitorType::Microphone => RecordingDeviceType::Microphone,
+                DeviceMonitorType::SystemAudio => RecordingDeviceType::System,
+            };
+            self.state.start_reconnecting(device, recording_device_type);
+        }
+    }
+
     /// Attempt to reconnect a disconnected device
     /// Returns true if reconnection successful
     pub async fn attempt_device_reconnect(
@@ -586,6 +610,7 @@ impl RecordingManager {
                         .start_streams(Some(device_arc.clone()), system_device, None)
                         .await?;
                     self.state.set_microphone_device(device_arc);
+                    self.state.stop_reconnecting();
 
                     info!("✅ Microphone reconnected successfully");
                     Ok(true)
@@ -602,6 +627,7 @@ impl RecordingManager {
                         .start_streams(microphone_device, Some(device_arc.clone()), None)
                         .await?;
                     self.state.set_system_device(device_arc);
+                    self.state.stop_reconnecting();
 
                     info!("✅ System audio reconnected successfully");
                     Ok(true)
@@ -620,24 +646,7 @@ impl RecordingManager {
         device_name: String,
         device_type: DeviceMonitorType,
     ) {
-        warn!(
-            "📱 Device disconnected: {} ({:?})",
-            device_name, device_type
-        );
-
-        // Mark state as reconnecting (keeps recording alive but in waiting state)
-        let device = match device_type {
-            DeviceMonitorType::Microphone => self.state.get_microphone_device(),
-            DeviceMonitorType::SystemAudio => self.state.get_system_device(),
-        };
-
-        if let Some(device) = device {
-            let recording_device_type = match device_type {
-                DeviceMonitorType::Microphone => RecordingDeviceType::Microphone,
-                DeviceMonitorType::SystemAudio => RecordingDeviceType::System,
-            };
-            self.state.start_reconnecting(device, recording_device_type);
-        }
+        self.handle_device_disconnect_event(device_name, device_type);
     }
 
     /// Handle a device reconnect event
