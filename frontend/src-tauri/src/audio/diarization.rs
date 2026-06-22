@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
+use whatlang::{detect, Lang};
 
 const FLOAT_TIE_EPSILON: f64 = 1e-9;
 const MIN_SPLIT_SPEAKER_OVERLAP_SECONDS: f64 = 1.0;
@@ -45,6 +46,8 @@ const SEGMENTATION_MODEL_URL: &str =
 const ZH_CN_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
+const DIARIZATION_LANGUAGE_MIN_CHARS: usize = 20;
+const DIARIZATION_LANGUAGE_MIN_CONFIDENCE: f64 = 0.25;
 const DIRECTML_PROBE_SECONDS: usize = 5;
 const DIRECTML_REQUIRED_SPEEDUP: f64 = 1.10;
 const SHERPA_RUNTIME_DLLS: &[&str] = &[
@@ -1348,11 +1351,35 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         "Finding meeting audio...",
     );
     let audio_path = find_audio_file(&folder_path)?;
+    let app_state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow!("Application database is not initialized"))?;
+    let pool = app_state.db_manager.pool().clone();
+
+    let stored_segments = sqlx::query_as::<_, StoredTranscriptSegment>(
+        "SELECT id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json
+         FROM transcripts
+         WHERE meeting_id = ?
+         ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id",
+    )
+    .bind(&meeting_id)
+    .fetch_all(&pool)
+    .await?;
+
+    if stored_segments.is_empty() {
+        return Err(anyhow!("No transcript segments found for this meeting"));
+    }
+
+    let resolved_embedding_model_id = resolve_embedding_model_id_for_transcript(
+        embedding_model_path.as_deref(),
+        embedding_model_id,
+        &stored_segments,
+    );
     let model_paths = resolve_model_paths_for_embedding(
         &app,
         segmentation_model_path,
         embedding_model_path,
-        embedding_model_id,
+        resolved_embedding_model_id,
     )?;
 
     ensure_model_available(
@@ -1466,25 +1493,6 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         82,
         "Applying speaker labels to transcripts...",
     );
-
-    let app_state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| anyhow!("Application database is not initialized"))?;
-    let pool = app_state.db_manager.pool().clone();
-
-    let stored_segments = sqlx::query_as::<_, StoredTranscriptSegment>(
-        "SELECT id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json
-         FROM transcripts
-         WHERE meeting_id = ?
-         ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id",
-    )
-    .bind(&meeting_id)
-    .fetch_all(&pool)
-    .await?;
-
-    if stored_segments.is_empty() {
-        return Err(anyhow!("No transcript segments found for this meeting"));
-    }
 
     let transcript_segments: Vec<TranscriptSegment> = stored_segments
         .iter()
@@ -2468,6 +2476,78 @@ fn default_clustering_threshold(model_paths: &DiarizationModelPaths) -> f32 {
         .unwrap_or(DEFAULT_CLUSTERING_THRESHOLD)
 }
 
+fn resolve_embedding_model_id_for_transcript(
+    embedding_model_path: Option<&str>,
+    embedding_model_id: Option<String>,
+    stored_segments: &[StoredTranscriptSegment],
+) -> Option<String> {
+    let explicit_model_id = embedding_model_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    if explicit_model_id.is_some()
+        || embedding_model_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .is_some()
+    {
+        return explicit_model_id;
+    }
+
+    infer_embedding_model_id_from_transcript(stored_segments).map(str::to_string)
+}
+
+fn infer_embedding_model_id_from_transcript(
+    stored_segments: &[StoredTranscriptSegment],
+) -> Option<&'static str> {
+    match detect_diarization_transcript_language(stored_segments) {
+        Some("zh") => Some(ZH_CN_EMBEDDING_MODEL_ID),
+        _ => None,
+    }
+}
+
+fn detect_diarization_transcript_language(
+    stored_segments: &[StoredTranscriptSegment],
+) -> Option<&'static str> {
+    let mut weights = BTreeMap::<&'static str, usize>::new();
+
+    for segment in stored_segments {
+        let text = segment.transcript.trim();
+        let meaningful_chars = text
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .count();
+        if meaningful_chars < DIARIZATION_LANGUAGE_MIN_CHARS {
+            continue;
+        }
+
+        let Some(info) = detect(text) else {
+            continue;
+        };
+        if !info.is_reliable() && info.confidence() < DIARIZATION_LANGUAGE_MIN_CONFIDENCE {
+            continue;
+        }
+
+        let language = match info.lang() {
+            Lang::Cmn => "zh",
+            _ => "en",
+        };
+        *weights.entry(language).or_insert(0) += meaningful_chars;
+    }
+
+    weights
+        .into_iter()
+        .fold(
+            None,
+            |best: Option<(&'static str, usize)>, current| match best {
+                Some((best_language, best_weight)) if current.1 <= best_weight => {
+                    Some((best_language, best_weight))
+                }
+                _ => Some(current),
+            },
+        )
+        .map(|(language, _)| language)
+}
+
 fn model_cache_path(models_dir: &Path, descriptor: &DiarizationModelDescriptor) -> PathBuf {
     models_dir
         .join(descriptor.cache_dir)
@@ -2865,6 +2945,19 @@ mod tests {
         segment
     }
 
+    fn stored_transcript(text: &str) -> StoredTranscriptSegment {
+        StoredTranscriptSegment {
+            id: Uuid::new_v4().to_string(),
+            transcript: text.to_string(),
+            timestamp: "2026-06-22T12:00:00Z".to_string(),
+            audio_start_time: Some(0.0),
+            audio_end_time: Some(1.0),
+            duration: Some(1.0),
+            speaker: None,
+            word_timestamps_json: None,
+        }
+    }
+
     fn turn(start: f64, end: f64, speaker: usize) -> DiarizationTurn {
         DiarizationTurn {
             start_time: start,
@@ -3054,6 +3147,63 @@ mod tests {
         );
         assert!(paths.can_download_segmentation);
         assert!(paths.can_download_embedding);
+    }
+
+    #[test]
+    fn speaker_embedding_model_infers_zh_cn_from_chinese_transcript() {
+        let segments = vec![stored_transcript(
+            "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
+        )];
+
+        assert_eq!(
+            detect_diarization_transcript_language(&segments),
+            Some("zh")
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_transcript(None, None, &segments).as_deref(),
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn speaker_embedding_model_uses_default_for_english_transcript() {
+        let segments = vec![stored_transcript(
+            "Participants discussed campaign finance, defense contracts, follow-up actions, and open questions for the next meeting.",
+        )];
+
+        assert_eq!(
+            detect_diarization_transcript_language(&segments),
+            Some("en")
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_transcript(None, None, &segments),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_embedding_model_overrides_transcript_language_detection() {
+        let segments = vec![stored_transcript(
+            "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
+        )];
+
+        assert_eq!(
+            resolve_embedding_model_id_for_transcript(
+                None,
+                Some("nemo-titanet-small-en".to_string()),
+                &segments,
+            )
+            .as_deref(),
+            Some("nemo-titanet-small-en")
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_transcript(
+                Some("C:/models/custom.onnx"),
+                None,
+                &segments,
+            ),
+            None
+        );
     }
 
     #[test]
