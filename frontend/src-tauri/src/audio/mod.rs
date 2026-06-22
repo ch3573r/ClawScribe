@@ -70,9 +70,10 @@ pub use system_detector::{
 
 // Export system audio commands
 pub use system_audio_commands::{
-    check_system_audio_permissions_command, get_system_audio_monitoring_status,
-    init_system_audio_state, list_system_audio_devices_command, start_system_audio_capture_command,
-    start_system_audio_monitoring, stop_system_audio_monitoring,
+    check_system_audio_permissions_command, get_system_audio_capture_status,
+    get_system_audio_monitoring_status, init_system_audio_capture_state, init_system_audio_state,
+    list_system_audio_devices_command, start_system_audio_capture_command,
+    start_system_audio_monitoring, stop_system_audio_capture_command, stop_system_audio_monitoring,
 };
 
 // Export new simplified components

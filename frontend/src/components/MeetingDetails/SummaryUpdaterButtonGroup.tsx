@@ -7,7 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Copy, Save, Loader2, FolderOpen, MoreHorizontal } from 'lucide-react';
+import { Copy, Save, Loader2, FolderOpen, MoreHorizontal, Search } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 
 interface SummaryUpdaterButtonGroupProps {
@@ -28,6 +28,7 @@ export function SummaryUpdaterButtonGroup({
   isDirty,
   onSave,
   onCopy,
+  onFind,
   onOpenFolder,
   hasSummary,
 }: SummaryUpdaterButtonGroupProps) {
@@ -64,6 +65,17 @@ export function SummaryUpdaterButtonGroup({
             <Copy className="mr-2 h-4 w-4" />
             Copy summary
           </DropdownMenuItem>
+          {onFind && (
+            <DropdownMenuItem
+              onClick={() => {
+                Analytics.trackButtonClick('find_summary', 'meeting_details');
+                onFind();
+              }}
+            >
+              <Search className="mr-2 h-4 w-4" />
+              Find in summary
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem
             onClick={() => {
               Analytics.trackButtonClick('open_folder', 'meeting_details');

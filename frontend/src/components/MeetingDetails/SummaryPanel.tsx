@@ -10,7 +10,7 @@ import { MeetingExportButtons } from './MeetingExportButtons';
 import Analytics from '@/lib/analytics';
 import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
-import { Languages, ChevronDown } from 'lucide-react';
+import { Languages, ChevronDown, ChevronUp, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -62,6 +62,12 @@ interface SummaryPanelProps {
   onOpenModelSettings?: (openFn: () => void) => void;
 }
 
+type SummaryTextMatch = {
+  node: Text;
+  start: number;
+  end: number;
+};
+
 export function SummaryPanel({
   meeting,
   meetingTitle,
@@ -100,10 +106,16 @@ export function SummaryPanel({
   const [summaryLang, setSummaryLang] = useState<string | null>(null);
   const [summaryLangStorage, setSummaryLangStorage] = useState<SummaryLanguageStorage>('metadata');
   const [langPickerOpen, setLangPickerOpen] = useState(false);
+  const [isFindOpen, setIsFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findMatchCount, setFindMatchCount] = useState(0);
+  const [activeFindIndex, setActiveFindIndex] = useState(-1);
   const languageLoadVersionRef = useRef(0);
   const activeMeetingIdRef = useRef(meeting.id);
   const languageSaveVersionRef = useRef(0);
   const languageSaveLoopRunningRef = useRef(false);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const summarySearchRootRef = useRef<HTMLDivElement>(null);
   const latestLanguageSaveRequestRef = useRef<{
     version: number;
     meetingId: string;
@@ -235,6 +247,93 @@ export function SummaryPanel({
         });
   })();
 
+  const collectSummaryMatches = (query: string): SummaryTextMatch[] => {
+    const root = summarySearchRootRef.current;
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!root || !normalizedQuery) return [];
+
+    const matches: SummaryTextMatch[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const text = node.textContent ?? '';
+        return text.trim()
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+
+    let current = walker.nextNode();
+    while (current) {
+      const node = current as Text;
+      const text = node.data.toLowerCase();
+      let start = text.indexOf(normalizedQuery);
+      while (start !== -1) {
+        matches.push({
+          node,
+          start,
+          end: start + normalizedQuery.length,
+        });
+        start = text.indexOf(normalizedQuery, start + normalizedQuery.length);
+      }
+      current = walker.nextNode();
+    }
+
+    return matches;
+  };
+
+  const selectSummaryMatch = (match: SummaryTextMatch) => {
+    const range = document.createRange();
+    range.setStart(match.node, match.start);
+    range.setEnd(match.node, match.end);
+
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    match.node.parentElement?.scrollIntoView({
+      block: 'center',
+      inline: 'nearest',
+      behavior: 'smooth',
+    });
+  };
+
+  const runSummaryFind = (direction: 1 | -1 = 1) => {
+    const matches = collectSummaryMatches(findQuery);
+    setFindMatchCount(matches.length);
+
+    if (matches.length === 0) {
+      setActiveFindIndex(-1);
+      window.getSelection()?.removeAllRanges();
+      return;
+    }
+
+    const nextIndex =
+      activeFindIndex === -1 || activeFindIndex >= matches.length
+        ? direction === 1
+          ? 0
+          : matches.length - 1
+        : (activeFindIndex + direction + matches.length) % matches.length;
+
+    setActiveFindIndex(nextIndex);
+    selectSummaryMatch(matches[nextIndex]);
+  };
+
+  const openSummaryFind = () => {
+    setIsFindOpen(true);
+    window.requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  };
+
+  const closeSummaryFind = () => {
+    setIsFindOpen(false);
+    setFindQuery('');
+    setFindMatchCount(0);
+    setActiveFindIndex(-1);
+    window.getSelection()?.removeAllRanges();
+  };
+
   const languageSlot = (
     <Popover open={langPickerOpen} onOpenChange={setLangPickerOpen}>
       <PopoverTrigger asChild>
@@ -322,10 +421,7 @@ export function SummaryPanel({
                 isDirty={isTitleDirty || (summaryRef.current?.isDirty || false)}
                 onSave={onSaveAll}
                 onCopy={onCopySummary}
-                onFind={() => {
-                  // TODO: Implement find in summary functionality
-                  console.log('Find in summary clicked');
-                }}
+                onFind={openSummaryFind}
                 onOpenFolder={onOpenFolder}
                 hasSummary={!!aiSummary}
               />
@@ -342,6 +438,61 @@ export function SummaryPanel({
           )}
         </div>
       </div>
+
+      {isFindOpen && aiSummary && !isSummaryLoading && (
+        <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
+          <Search className="h-4 w-4 text-muted-foreground" />
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            onChange={(event) => {
+              setFindQuery(event.target.value);
+              setFindMatchCount(0);
+              setActiveFindIndex(-1);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                runSummaryFind(event.shiftKey ? -1 : 1);
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                closeSummaryFind();
+              }
+            }}
+            placeholder="Find in summary"
+            className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
+          />
+          <span className="min-w-[4.5rem] text-right text-xs tabular-nums text-muted-foreground">
+            {findQuery.trim()
+              ? findMatchCount > 0
+                ? `${activeFindIndex + 1}/${findMatchCount}`
+                : 'No matches'
+              : ''}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => runSummaryFind(-1)}
+            disabled={!findQuery.trim()}
+            title="Previous match"
+          >
+            <ChevronUp className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => runSummaryFind(1)}
+            disabled={!findQuery.trim()}
+            title="Next match"
+          >
+            <ChevronDown className="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="sm" onClick={closeSummaryFind} title="Close find">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
 
       {isSummaryLoading ? (
         <div className="flex flex-col h-full">
@@ -447,7 +598,7 @@ export function SummaryPanel({
               ) : null}
             </div>
           )}
-          <div className="w-full bg-background/60 p-5">
+          <div ref={summarySearchRootRef} className="w-full bg-background/60 p-5">
             <div className="mx-auto max-w-[72rem] rounded-xl bg-[#fbfbf8] p-8 text-slate-950 shadow-sm ring-1 ring-black/10 dark:ring-white/10">
               <BlockNoteSummaryView
                 ref={summaryRef}

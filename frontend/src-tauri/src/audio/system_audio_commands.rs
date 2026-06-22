@@ -1,6 +1,6 @@
 use crate::audio::{
     check_system_audio_permissions, list_system_audio_devices, new_system_audio_callback,
-    start_system_audio_capture, SystemAudioDetector, SystemAudioEvent,
+    start_system_audio_capture, SystemAudioDetector, SystemAudioEvent, SystemAudioStream,
 };
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -8,17 +8,66 @@ use tauri::{command, AppHandle, Emitter, State};
 
 // Global state for system audio detector
 type SystemAudioDetectorState = Arc<Mutex<Option<SystemAudioDetector>>>;
+type SystemAudioCaptureState = Arc<Mutex<Option<SystemAudioStream>>>;
 
 /// Start system audio capture (for capturing system output audio)
 #[command]
-pub async fn start_system_audio_capture_command() -> Result<String, String> {
+pub async fn start_system_audio_capture_command(
+    capture_state: State<'_, SystemAudioCaptureState>,
+) -> Result<String, String> {
+    {
+        let capture_guard = capture_state
+            .lock()
+            .map_err(|e| format!("Failed to acquire system audio capture lock: {}", e))?;
+
+        if capture_guard.is_some() {
+            return Ok("System audio capture is already active".to_string());
+        }
+    }
+
     match start_system_audio_capture().await {
-        Ok(_stream) => {
-            // TODO: Store the stream in global state if needed for management
+        Ok(stream) => {
+            let mut capture_guard = capture_state
+                .lock()
+                .map_err(|e| format!("Failed to acquire system audio capture lock: {}", e))?;
+
+            if capture_guard.is_some() {
+                return Ok("System audio capture is already active".to_string());
+            }
+
+            *capture_guard = Some(stream);
             Ok("System audio capture started successfully".to_string())
         }
         Err(e) => Err(format!("Failed to start system audio capture: {}", e)),
     }
+}
+
+/// Stop active system audio capture
+#[command]
+pub async fn stop_system_audio_capture_command(
+    capture_state: State<'_, SystemAudioCaptureState>,
+) -> Result<String, String> {
+    let mut capture_guard = capture_state
+        .lock()
+        .map_err(|e| format!("Failed to acquire system audio capture lock: {}", e))?;
+
+    if capture_guard.take().is_some() {
+        Ok("System audio capture stopped".to_string())
+    } else {
+        Ok("System audio capture is not active".to_string())
+    }
+}
+
+/// Get the current status of system audio capture
+#[command]
+pub async fn get_system_audio_capture_status(
+    capture_state: State<'_, SystemAudioCaptureState>,
+) -> Result<bool, String> {
+    let capture_guard = capture_state
+        .lock()
+        .map_err(|e| format!("Failed to acquire system audio capture lock: {}", e))?;
+
+    Ok(capture_guard.is_some())
 }
 
 /// List available system audio devices
@@ -98,6 +147,11 @@ pub async fn get_system_audio_monitoring_status(
 
 /// Initialize the system audio detector state in Tauri app
 pub fn init_system_audio_state() -> SystemAudioDetectorState {
+    Arc::new(Mutex::new(None))
+}
+
+/// Initialize the system audio capture state in Tauri app
+pub fn init_system_audio_capture_state() -> SystemAudioCaptureState {
     Arc::new(Mutex::new(None))
 }
 

@@ -470,6 +470,7 @@ pub fn run() {
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(audio::init_system_audio_state())
+        .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
@@ -826,6 +827,8 @@ pub fn run() {
             notifications::commands::get_notification_stats,
             // System audio capture commands
             audio::system_audio_commands::start_system_audio_capture_command,
+            audio::system_audio_commands::stop_system_audio_capture_command,
+            audio::system_audio_commands::get_system_audio_capture_status,
             audio::system_audio_commands::list_system_audio_devices_command,
             audio::system_audio_commands::check_system_audio_permissions_command,
             audio::system_audio_commands::start_system_audio_monitoring,

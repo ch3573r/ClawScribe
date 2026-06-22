@@ -1,7 +1,6 @@
 // Audio capture implementations module
 
 pub mod backend_config;
-pub mod microphone;
 pub mod system;
 
 #[cfg(target_os = "macos")]
