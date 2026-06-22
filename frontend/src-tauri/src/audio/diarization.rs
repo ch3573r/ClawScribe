@@ -2,6 +2,8 @@ use crate::api::{TranscriptSegment as ApiTranscriptSegment, TranscriptWord};
 use crate::audio::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
+use crate::summary::language_detection::detect_summary_language;
+use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -24,7 +26,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
-use whatlang::{detect, Lang};
 
 const FLOAT_TIE_EPSILON: f64 = 1e-9;
 const MIN_SPLIT_SPEAKER_OVERLAP_SECONDS: f64 = 1.0;
@@ -46,8 +47,6 @@ const SEGMENTATION_MODEL_URL: &str =
 const ZH_CN_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
-const DIARIZATION_LANGUAGE_MIN_CHARS: usize = 20;
-const DIARIZATION_LANGUAGE_MIN_CONFIDENCE: f64 = 0.25;
 const DIRECTML_PROBE_SECONDS: usize = 5;
 const DIRECTML_REQUIRED_SPEEDUP: f64 = 1.10;
 const SHERPA_RUNTIME_DLLS: &[&str] = &[
@@ -1256,6 +1255,21 @@ struct StoredTranscriptSegment {
     word_timestamps_json: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiarizationEmbeddingChoice {
+    Default,
+    Model(&'static str),
+}
+
+impl DiarizationEmbeddingChoice {
+    fn model_id(self) -> Option<String> {
+        match self {
+            Self::Default => None,
+            Self::Model(id) => Some(id.to_string()),
+        }
+    }
+}
+
 struct DiarizationRunGuard;
 
 impl DiarizationRunGuard {
@@ -1370,7 +1384,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         return Err(anyhow!("No transcript segments found for this meeting"));
     }
 
-    let resolved_embedding_model_id = resolve_embedding_model_id_for_transcript(
+    let resolved_embedding_model_id = resolve_embedding_model_id_for_meeting(
+        &folder_path,
         embedding_model_path.as_deref(),
         embedding_model_id,
         &stored_segments,
@@ -2476,9 +2491,38 @@ fn default_clustering_threshold(model_paths: &DiarizationModelPaths) -> f32 {
         .unwrap_or(DEFAULT_CLUSTERING_THRESHOLD)
 }
 
-fn resolve_embedding_model_id_for_transcript(
+fn resolve_embedding_model_id_for_meeting(
+    folder_path: &Path,
     embedding_model_path: Option<&str>,
     embedding_model_id: Option<String>,
+    stored_segments: &[StoredTranscriptSegment],
+) -> Option<String> {
+    let language_preference = crate::get_language_preference_internal();
+    let detected_summary_language = match read_detected_summary_language_from_metadata(folder_path)
+    {
+        Ok(language) => language,
+        Err(error) => {
+            log::warn!(
+                "Failed to read cached summary language for diarization model selection: {error}"
+            );
+            None
+        }
+    };
+
+    resolve_embedding_model_id_for_signals(
+        embedding_model_path,
+        embedding_model_id,
+        language_preference.as_deref(),
+        detected_summary_language.as_deref(),
+        stored_segments,
+    )
+}
+
+fn resolve_embedding_model_id_for_signals(
+    embedding_model_path: Option<&str>,
+    embedding_model_id: Option<String>,
+    language_preference: Option<&str>,
+    detected_summary_language: Option<&str>,
     stored_segments: &[StoredTranscriptSegment],
 ) -> Option<String> {
     let explicit_model_id = embedding_model_id
@@ -2493,59 +2537,75 @@ fn resolve_embedding_model_id_for_transcript(
         return explicit_model_id;
     }
 
-    infer_embedding_model_id_from_transcript(stored_segments).map(str::to_string)
+    if let Some(choice) = embedding_choice_for_language_preference(language_preference) {
+        return choice.model_id();
+    }
+
+    if let Some(choice) = detected_summary_language.and_then(embedding_choice_for_language_code) {
+        return choice.model_id();
+    }
+
+    infer_embedding_choice_from_transcript(stored_segments).and_then(|choice| choice.model_id())
 }
 
-fn infer_embedding_model_id_from_transcript(
+fn infer_embedding_choice_from_transcript(
     stored_segments: &[StoredTranscriptSegment],
-) -> Option<&'static str> {
-    match detect_diarization_transcript_language(stored_segments) {
-        Some("zh") => Some(ZH_CN_EMBEDDING_MODEL_ID),
-        _ => None,
+) -> Option<DiarizationEmbeddingChoice> {
+    let transcript_texts = stored_segments
+        .iter()
+        .map(|segment| segment.transcript.clone())
+        .collect::<Vec<_>>();
+    let detection = detect_summary_language(&transcript_texts);
+
+    detection
+        .language
+        .as_deref()
+        .and_then(embedding_choice_for_language_code)
+}
+
+fn embedding_choice_for_language_preference(
+    language_preference: Option<&str>,
+) -> Option<DiarizationEmbeddingChoice> {
+    let code = language_preference?
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if code.is_empty() || matches!(code.as_str(), "auto" | "auto-translate") {
+        return None;
+    }
+
+    Some(embedding_choice_for_language_code(&code).unwrap_or(DiarizationEmbeddingChoice::Default))
+}
+
+fn embedding_choice_for_language_code(raw_code: &str) -> Option<DiarizationEmbeddingChoice> {
+    let code = raw_code.trim().to_ascii_lowercase().replace('_', "-");
+    if code.is_empty() {
+        return None;
+    }
+
+    if language_code_is_chinese(&code) {
+        Some(DiarizationEmbeddingChoice::Model(ZH_CN_EMBEDDING_MODEL_ID))
+    } else {
+        Some(DiarizationEmbeddingChoice::Default)
     }
 }
 
-fn detect_diarization_transcript_language(
-    stored_segments: &[StoredTranscriptSegment],
-) -> Option<&'static str> {
-    let mut weights = BTreeMap::<&'static str, usize>::new();
-
-    for segment in stored_segments {
-        let text = segment.transcript.trim();
-        let meaningful_chars = text
-            .chars()
-            .filter(|character| character.is_alphabetic())
-            .count();
-        if meaningful_chars < DIARIZATION_LANGUAGE_MIN_CHARS {
-            continue;
-        }
-
-        let Some(info) = detect(text) else {
-            continue;
-        };
-        if !info.is_reliable() && info.confidence() < DIARIZATION_LANGUAGE_MIN_CONFIDENCE {
-            continue;
-        }
-
-        let language = match info.lang() {
-            Lang::Cmn => "zh",
-            _ => "en",
-        };
-        *weights.entry(language).or_insert(0) += meaningful_chars;
-    }
-
-    weights
-        .into_iter()
-        .fold(
-            None,
-            |best: Option<(&'static str, usize)>, current| match best {
-                Some((best_language, best_weight)) if current.1 <= best_weight => {
-                    Some((best_language, best_weight))
-                }
-                _ => Some(current),
-            },
-        )
-        .map(|(language, _)| language)
+fn language_code_is_chinese(code: &str) -> bool {
+    matches!(
+        code,
+        "zh" | "zh-cn"
+            | "zh-hans"
+            | "zh-hant"
+            | "zh-tw"
+            | "cmn"
+            | "cmn-cn"
+            | "cmn-hans"
+            | "cmn-hant"
+            | "yue"
+            | "yue-cn"
+            | "yue-hk"
+            | "cn"
+    )
 }
 
 fn model_cache_path(models_dir: &Path, descriptor: &DiarizationModelDescriptor) -> PathBuf {
@@ -3150,56 +3210,114 @@ mod tests {
     }
 
     #[test]
-    fn speaker_embedding_model_infers_zh_cn_from_chinese_transcript() {
+    fn speaker_embedding_model_uses_language_preference_before_text_detection() {
         let segments = vec![stored_transcript(
             "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
         )];
 
         assert_eq!(
-            detect_diarization_transcript_language(&segments),
-            Some("zh")
-        );
-        assert_eq!(
-            resolve_embedding_model_id_for_transcript(None, None, &segments).as_deref(),
+            resolve_embedding_model_id_for_signals(None, None, Some("zh"), Some("en"), &segments)
+                .as_deref(),
             Some(ZH_CN_EMBEDDING_MODEL_ID)
         );
-    }
-
-    #[test]
-    fn speaker_embedding_model_uses_default_for_english_transcript() {
-        let segments = vec![stored_transcript(
-            "Participants discussed campaign finance, defense contracts, follow-up actions, and open questions for the next meeting.",
-        )];
-
         assert_eq!(
-            detect_diarization_transcript_language(&segments),
-            Some("en")
-        );
-        assert_eq!(
-            resolve_embedding_model_id_for_transcript(None, None, &segments),
+            resolve_embedding_model_id_for_signals(None, None, Some("en"), Some("zh"), &segments),
             None
         );
     }
 
     #[test]
-    fn explicit_embedding_model_overrides_transcript_language_detection() {
+    fn speaker_embedding_model_uses_cached_summary_language_before_text_detection() {
+        let segments = vec![stored_transcript(
+            "Participants discussed campaign finance, defense contracts, follow-up actions, and open questions for the next meeting.",
+        )];
+
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(None, None, None, Some("zh"), &segments)
+                .as_deref(),
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(None, None, None, Some("en"), &segments),
+            None
+        );
+    }
+
+    #[test]
+    fn speaker_embedding_model_falls_back_to_shared_text_detection() {
+        let chinese_segments = vec![stored_transcript(
+            "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
+        )];
+        let english_segments = vec![stored_transcript(
+            "Participants discussed campaign finance, defense contracts, follow-up actions, and open questions for the next meeting.",
+        )];
+
+        assert_eq!(
+            infer_embedding_choice_from_transcript(&chinese_segments),
+            Some(DiarizationEmbeddingChoice::Model(ZH_CN_EMBEDDING_MODEL_ID))
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(None, None, None, None, &chinese_segments)
+                .as_deref(),
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
+        );
+        assert_eq!(
+            infer_embedding_choice_from_transcript(&english_segments),
+            Some(DiarizationEmbeddingChoice::Default)
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(None, None, None, None, &english_segments),
+            None
+        );
+    }
+
+    #[test]
+    fn auto_language_preferences_do_not_force_embedding_model() {
         let segments = vec![stored_transcript(
             "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
         )];
 
         assert_eq!(
-            resolve_embedding_model_id_for_transcript(
+            resolve_embedding_model_id_for_signals(None, None, Some("auto"), None, &segments)
+                .as_deref(),
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(
+                None,
+                None,
+                Some("auto-translate"),
+                None,
+                &segments,
+            )
+            .as_deref(),
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn explicit_embedding_model_overrides_language_signals() {
+        let segments = vec![stored_transcript(
+            "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
+        )];
+
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(
                 None,
                 Some("nemo-titanet-small-en".to_string()),
+                Some("zh"),
+                Some("zh"),
                 &segments,
             )
             .as_deref(),
             Some("nemo-titanet-small-en")
         );
         assert_eq!(
-            resolve_embedding_model_id_for_transcript(
+            resolve_embedding_model_id_for_signals(
                 Some("C:/models/custom.onnx"),
                 None,
+                Some("zh"),
+                Some("zh"),
                 &segments,
             ),
             None
