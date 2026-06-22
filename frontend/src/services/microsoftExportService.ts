@@ -221,6 +221,10 @@ export const microsoftExportService = {
     return invoke<ToDoListInfo[]>("list_todo_lists");
   },
 
+  async createToDoList(displayName: string): Promise<ToDoListInfo> {
+    return invoke<ToDoListInfo>("create_todo_list", { displayName });
+  },
+
   async createNotebook(displayName: string): Promise<NotebookInfo> {
     return invoke<NotebookInfo>("create_onenote_notebook", { displayName });
   },

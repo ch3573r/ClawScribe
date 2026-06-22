@@ -929,6 +929,30 @@ pub async fn create_planner_bucket(
     discovery::create_bucket(&client, &token, &plan_id, &name).await
 }
 
+fn sanitize_todo_list_name(raw: &str) -> String {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let name: String = name.chars().take(255).collect();
+    if name.is_empty() {
+        "ClawScribe".to_string()
+    } else {
+        name
+    }
+}
+
+/// Create a Microsoft To Do list and return it, so accounts without an existing
+/// task list can configure export without leaving ClawScribe.
+#[tauri::command]
+pub async fn create_todo_list(
+    state: tauri::State<'_, MicrosoftAuthState>,
+    display_name: String,
+) -> Result<discovery::ToDoListInfo, String> {
+    let (token, _, _) = get_token_and_context(&state).await?;
+    let name = sanitize_todo_list_name(&display_name);
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+    discovery::create_todo_list(&client, &token, &name).await
+}
+
 #[tauri::command]
 pub async fn list_onenote_sections(
     state: tauri::State<'_, MicrosoftAuthState>,

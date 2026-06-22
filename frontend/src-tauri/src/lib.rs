@@ -891,6 +891,7 @@ pub fn run() {
             exports::commands::create_onenote_notebook,
             exports::commands::create_onenote_section,
             exports::commands::create_planner_bucket,
+            exports::commands::create_todo_list,
             exports::commands::list_calendar_events,
             exports::commands::current_or_next_meeting,
             exports::commands::preview_planner_tasks,

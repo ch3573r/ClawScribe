@@ -234,6 +234,23 @@ export function useMicrosoftExport() {
     [],
   );
 
+  const createToDoList = useCallback(
+    async (displayName: string): Promise<ToDoListInfo | null> => {
+      setError(null);
+      try {
+        const list = await microsoftExportService.createToDoList(displayName);
+        setToDoLists((prev) =>
+          prev.some((existing) => existing.id === list.id) ? prev : [...prev, list],
+        );
+        return list;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    },
+    [],
+  );
+
   return {
     connection,
     signingIn,
@@ -255,6 +272,7 @@ export function useMicrosoftExport() {
     loadToDoLists,
     createNotebook,
     createBucket,
+    createToDoList,
     refreshStatus,
     calendarEvents,
     currentMeeting,

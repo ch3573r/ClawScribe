@@ -266,6 +266,24 @@ pub async fn list_todo_lists<T: GraphTransport, S: Sleeper>(
     map_outcome(client.execute(&request, token).await)
 }
 
+/// Create a Microsoft To Do list and return it. Requires `Tasks.ReadWrite`,
+/// which this app already requests for Planner and To Do task export.
+pub async fn create_todo_list<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    display_name: &str,
+) -> Result<ToDoListInfo, String> {
+    let request = GraphRequest {
+        method: "POST".into(),
+        url: format!("{GRAPH_BASE}/me/todo/lists"),
+        content_type: "application/json".into(),
+        body: serde_json::json!({ "displayName": display_name }).to_string(),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+        headers: Vec::new(),
+    };
+    map_single(client.execute(&request, token).await, "created To Do list")
+}
+
 /// Create a new bucket within a plan and return it. Requires `Tasks.ReadWrite`,
 /// which this app already requests. The `orderHint` " !" places the bucket at
 /// the start of the plan (Graph's documented "beginning" hint).
@@ -377,6 +395,22 @@ mod tests {
         assert_eq!(lists.len(), 1);
         assert_eq!(lists[0].display_name, "Tasks");
         assert_eq!(lists[0].wellknown_list_name.as_deref(), Some("defaultList"));
+    }
+
+    #[tokio::test]
+    async fn create_todo_list_parses_created_list() {
+        let transport = MockGraphTransport::new();
+        transport.queue_default([GraphResponse::success(
+            201,
+            r#"{"id":"td-9","displayName":"Meeting actions","wellknownListName":"none"}"#,
+        )]);
+        let c = client(transport);
+        let list = create_todo_list(&c, "token", "Meeting actions")
+            .await
+            .unwrap();
+        assert_eq!(list.id, "td-9");
+        assert_eq!(list.display_name, "Meeting actions");
+        assert_eq!(list.wellknown_list_name.as_deref(), Some("none"));
     }
 
     #[tokio::test]

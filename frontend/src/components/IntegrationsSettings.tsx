@@ -336,6 +336,10 @@ function sanitizeNotebookName(raw: string): string {
   return raw.replace(NOTEBOOK_FORBIDDEN, " ").replace(/\s+/g, " ").trimStart().slice(0, 128);
 }
 
+function sanitizeToDoListName(raw: string): string {
+  return raw.replace(/\s+/g, " ").trimStart().slice(0, 255);
+}
+
 const NEW_OPTION = "__new__";
 
 function OneNotePanel() {
@@ -778,7 +782,23 @@ function ToDoPanel() {
   const ms = useMicrosoftExport();
   const saved = getExportDestinations();
   const [selectedList, setSelectedList] = useState<string>(saved.todoListId ?? "");
+  const [creatingList, setCreatingList] = useState(false);
+  const [newListName, setNewListName] = useState("");
+  const [savingList, setSavingList] = useState(false);
   const isConnected = ms.connection.state === "connected";
+
+  const submitNewList = async () => {
+    const name = sanitizeToDoListName(newListName).trim();
+    if (!name) return;
+    setSavingList(true);
+    const list = await ms.createToDoList(name);
+    setSavingList(false);
+    if (list) {
+      setSelectedList(list.id);
+      setCreatingList(false);
+      setNewListName("");
+    }
+  };
 
   useEffect(() => {
     if (isConnected && ms.todoLists.length === 0 && !ms.loadingToDoLists) {
@@ -830,8 +850,15 @@ function ToDoPanel() {
             </div>
             <select
               className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-              value={selectedList}
-              onChange={(e) => setSelectedList(e.target.value)}
+              value={creatingList ? NEW_OPTION : selectedList}
+              onChange={(e) => {
+                if (e.target.value === NEW_OPTION) {
+                  setCreatingList(true);
+                } else {
+                  setCreatingList(false);
+                  setSelectedList(e.target.value);
+                }
+              }}
               disabled={ms.loadingToDoLists}
             >
               <option value="">
@@ -847,8 +874,59 @@ function ToDoPanel() {
                   {saved.todoListName ?? "Saved To Do list"}
                 </option>
               )}
+              <option value={NEW_OPTION}>+ New To Do list…</option>
             </select>
           </div>
+
+          {creatingList && (
+            <div className="space-y-2 rounded-lg border border-border bg-muted p-3">
+              <label className="block text-xs font-medium text-muted-foreground">
+                New To Do list name
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  autoFocus
+                  value={newListName}
+                  onChange={(e) =>
+                    setNewListName(sanitizeToDoListName(e.target.value))
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void submitNewList();
+                    if (e.key === "Escape") setCreatingList(false);
+                  }}
+                  placeholder="e.g. Meeting action items"
+                  maxLength={255}
+                  className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void submitNewList()}
+                  disabled={savingList || !newListName.trim()}
+                >
+                  {savingList ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    "Create"
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setCreatingList(false)}
+                  disabled={savingList}
+                >
+                  Cancel
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Creates a personal Microsoft To Do list in the signed-in
+                account, then saves it as the export destination.
+              </p>
+            </div>
+          )}
 
           {ms.error && (
             <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
@@ -858,8 +936,8 @@ function ToDoPanel() {
           )}
           {!ms.loadingToDoLists && !ms.error && ms.todoLists.length === 0 && (
             <p className="rounded-lg border border-border bg-muted p-3 text-sm text-muted-foreground">
-              No Microsoft To Do lists were returned for this account. Create a
-              list in Microsoft To Do, then use Reload to pick it here.
+              No Microsoft To Do lists were returned for this account. Create
+              one here, or use Reload after creating one elsewhere.
             </p>
           )}
           {selectedList && (
