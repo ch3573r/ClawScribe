@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
@@ -49,6 +49,24 @@ export function TranscriptButtonGroup({
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
+  const diarizationToastIdRef = useRef<string | number | null>(null);
+
+  const showDiarizationProgress = useCallback((message: string, progress?: number) => {
+    const id = diarizationToastIdRef.current ?? `speaker-diarization-${meetingId ?? 'current'}`;
+    diarizationToastIdRef.current = id;
+    toast.loading('Detecting speakers', {
+      id,
+      description: typeof progress === 'number' ? `${progress}% - ${message}` : message,
+      duration: Infinity,
+    });
+  }, [meetingId]);
+
+  const clearDiarizationProgress = useCallback(() => {
+    if (diarizationToastIdRef.current !== null) {
+      toast.dismiss(diarizationToastIdRef.current);
+      diarizationToastIdRef.current = null;
+    }
+  }, []);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data
@@ -64,14 +82,19 @@ export function TranscriptButtonGroup({
 
     void listen<SpeakerDiarizationProgress>('speaker-diarization-progress', (event) => {
       if (event.payload.meeting_id !== meetingId) return;
-      setIsDiarizing(event.payload.stage !== 'complete');
+      const running = event.payload.stage !== 'complete';
+      setIsDiarizing(running);
       setDiarizationMessage(event.payload.message);
+      if (running) {
+        showDiarizationProgress(event.payload.message, event.payload.progress_percentage);
+      }
     }).then((unlisten) => unlistenCallbacks.push(unlisten));
 
     void listen<SpeakerDiarizationComplete>('speaker-diarization-complete', async (event) => {
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      clearDiarizationProgress();
       toast.success('Speaker labels applied', {
         description: `${event.payload.updated_segments} transcript segments updated across ${event.payload.speaker_count} speaker${event.payload.speaker_count === 1 ? '' : 's'}.`,
       });
@@ -82,6 +105,7 @@ export function TranscriptButtonGroup({
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      clearDiarizationProgress();
       toast.error('Speaker diarization failed', {
         description: event.payload.error,
       });
@@ -90,12 +114,13 @@ export function TranscriptButtonGroup({
     return () => {
       unlistenCallbacks.forEach((unlisten) => unlisten());
     };
-  }, [meetingId, onRefetchTranscripts]);
+  }, [clearDiarizationProgress, meetingId, onRefetchTranscripts, showDiarizationProgress]);
 
   const handleRunSpeakerDiarization = useCallback(async () => {
     if (!meetingId || !meetingFolderPath) return;
     setIsDiarizing(true);
     setDiarizationMessage('Starting speaker diarization...');
+    showDiarizationProgress('Starting speaker diarization...', 0);
     try {
       Analytics.trackButtonClick('speaker_diarization', 'meeting_details');
       await invoke('start_speaker_diarization_command', {
@@ -109,11 +134,12 @@ export function TranscriptButtonGroup({
     } catch (error) {
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      clearDiarizationProgress();
       toast.error('Could not start speaker diarization', {
         description: String(error),
       });
     }
-  }, [meetingFolderPath, meetingId]);
+  }, [clearDiarizationProgress, meetingFolderPath, meetingId, showDiarizationProgress]);
 
   return (
     <div className="flex shrink-0 items-center justify-end gap-2">

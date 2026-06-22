@@ -4,6 +4,7 @@ use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{
     FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
@@ -12,8 +13,13 @@ use sherpa_onnx::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tokio::io::AsyncWriteExt;
 
 const FLOAT_TIE_EPSILON: f64 = 1e-9;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
@@ -23,6 +29,11 @@ const EMBEDDING_MODEL_DIR: &str =
 const SEGMENTATION_MODEL_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
 const EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
+const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
+const SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES: f64 = 10.0;
+const SHORT_CLIP_OVERCLUSTERED_SPEAKERS: usize = 4;
+const SHORT_CLIP_RETRY_NUM_SPEAKERS: i32 = 2;
 
 static DIARIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
@@ -272,7 +283,7 @@ impl SherpaOfflineDiarizer {
             .process(mono_samples)
             .ok_or_else(|| anyhow!("sherpa-onnx speaker diarization failed"))?;
 
-        Ok(result
+        let turns = result
             .sort_by_start_time()
             .into_iter()
             .filter_map(|segment| {
@@ -284,8 +295,52 @@ impl SherpaOfflineDiarizer {
                 };
                 is_valid_interval(turn.start_time, turn.end_time).then_some(turn)
             })
-            .collect())
+            .collect();
+
+        Ok(compact_diarization_speakers(turns))
     }
+}
+
+fn compact_diarization_speakers(turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
+    let mut remapped_speakers = BTreeMap::<usize, usize>::new();
+
+    turns
+        .into_iter()
+        .map(|mut turn| {
+            let compacted_speaker = match remapped_speakers.get(&turn.speaker).copied() {
+                Some(compacted_speaker) => compacted_speaker,
+                None => {
+                    let compacted_speaker = remapped_speakers.len();
+                    remapped_speakers.insert(turn.speaker, compacted_speaker);
+                    compacted_speaker
+                }
+            };
+            turn.speaker = compacted_speaker;
+            turn
+        })
+        .collect()
+}
+
+fn audio_duration_minutes(sample_count: usize) -> f64 {
+    sample_count as f64 / f64::from(DIARIZATION_SAMPLE_RATE) / 60.0
+}
+
+fn speaker_count_from_turns(turns: &[DiarizationTurn]) -> usize {
+    turns
+        .iter()
+        .map(|turn| turn.speaker)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn should_retry_short_clip_with_two_speakers(
+    sample_count: usize,
+    turns: &[DiarizationTurn],
+    explicit_num_speakers: Option<i32>,
+) -> bool {
+    explicit_num_speakers.is_none()
+        && audio_duration_minutes(sample_count) <= SHORT_CLIP_OVERCLUSTER_RETRY_MAX_MINUTES
+        && speaker_count_from_turns(turns) > SHORT_CLIP_OVERCLUSTERED_SPEAKERS
 }
 
 fn ensure_model_file(path: &Path, model_name: &str) -> Result<()> {
@@ -490,34 +545,45 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         return Err(anyhow!("Meeting audio did not contain decodable samples"));
     }
 
-    emit_progress(
-        &app,
-        &meeting_id,
-        "diarizing",
-        45,
-        "Detecting speaker turns...",
-    );
+    let sample_count = samples.len();
+    let audio_minutes = audio_duration_minutes(sample_count);
+    let diarization_message = if audio_minutes >= 1.0 {
+        format!(
+            "Detecting speaker turns in {:.1} min of audio...",
+            audio_minutes
+        )
+    } else {
+        "Detecting speaker turns...".to_string()
+    };
+    emit_progress(&app, &meeting_id, "diarizing", 45, &diarization_message);
+
+    let samples = Arc::new(samples);
+    let explicit_num_speakers = num_speakers.filter(|value| *value > 0);
     let mut config = SherpaDiarizationConfig::new(
         model_paths.segmentation_model.clone(),
         model_paths.embedding_model.clone(),
     );
     config.num_threads = default_diarization_threads();
-    config.num_clusters = num_speakers.filter(|value| *value > 0);
+    config.num_clusters = explicit_num_speakers;
 
-    let turns = tokio::task::spawn_blocking(move || {
-        let diarizer = SherpaOfflineDiarizer::new(config)?;
-        let sample_rate = diarizer.sample_rate();
-        if sample_rate != DIARIZATION_SAMPLE_RATE {
-            return Err(anyhow!(
-                "Diarization model expects {} Hz audio, but prepared audio is {} Hz",
-                sample_rate,
-                DIARIZATION_SAMPLE_RATE
-            ));
-        }
-        diarizer.diarize(&samples)
-    })
-    .await
-    .map_err(|e| anyhow!("Speaker diarization task failed: {}", e))??;
+    let mut turns = run_sherpa_diarization(config, Arc::clone(&samples)).await?;
+    if should_retry_short_clip_with_two_speakers(sample_count, &turns, explicit_num_speakers) {
+        emit_progress(
+            &app,
+            &meeting_id,
+            "diarizing",
+            65,
+            "Auto speaker detection split this short clip into too many speakers; retrying with 2 speakers...",
+        );
+
+        let mut retry_config = SherpaDiarizationConfig::new(
+            model_paths.segmentation_model.clone(),
+            model_paths.embedding_model.clone(),
+        );
+        retry_config.num_threads = default_diarization_threads();
+        retry_config.num_clusters = Some(SHORT_CLIP_RETRY_NUM_SPEAKERS);
+        turns = run_sherpa_diarization(retry_config, Arc::clone(&samples)).await?;
+    }
 
     if turns.is_empty() {
         return Err(anyhow!(
@@ -642,6 +708,26 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     })
 }
 
+async fn run_sherpa_diarization(
+    config: SherpaDiarizationConfig,
+    samples: Arc<Vec<f32>>,
+) -> Result<Vec<DiarizationTurn>> {
+    tokio::task::spawn_blocking(move || {
+        let diarizer = SherpaOfflineDiarizer::new(config)?;
+        let sample_rate = diarizer.sample_rate();
+        if sample_rate != DIARIZATION_SAMPLE_RATE {
+            return Err(anyhow!(
+                "Diarization model expects {} Hz audio, but prepared audio is {} Hz",
+                sample_rate,
+                DIARIZATION_SAMPLE_RATE
+            ));
+        }
+        diarizer.diarize(samples.as_ref().as_slice())
+    })
+    .await
+    .map_err(|e| anyhow!("Speaker diarization task failed: {}", e))?
+}
+
 fn emit_progress<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
@@ -754,7 +840,13 @@ async fn ensure_model_available<R: Runtime>(
         .ok_or_else(|| anyhow!("Model path has no parent: {}", model_path.display()))?;
     tokio::fs::create_dir_all(parent).await?;
 
-    let response = reqwest::get(download_url).await.map_err(|e| {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(MODEL_DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| anyhow!("Failed to configure diarization model downloader: {}", e))?;
+
+    let response = client.get(download_url).send().await.map_err(|e| {
         anyhow!(
             "Failed to download {} diarization model from {}: {}",
             model_name,
@@ -772,15 +864,60 @@ async fn ensure_model_available<R: Runtime>(
         ));
     }
 
-    let bytes = response.bytes().await.map_err(|e| {
-        anyhow!(
-            "Failed to read {} diarization model download from {}: {}",
-            model_name,
-            download_url,
-            e
-        )
-    })?;
-    if bytes.is_empty() {
+    let temp_path = model_path.with_extension("download");
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    let total_bytes = response.content_length();
+    let mut downloaded_bytes = 0u64;
+    let mut last_reported_percent = 0u32;
+    let mut last_reported_mebibytes = 0u64;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            anyhow!(
+                "Failed to read {} diarization model download from {}: {}",
+                model_name,
+                download_url,
+                e
+            )
+        })?;
+        if chunk.is_empty() {
+            continue;
+        }
+
+        file.write_all(&chunk).await?;
+        downloaded_bytes += chunk.len() as u64;
+
+        if let Some(total) = total_bytes.filter(|value| *value > 0) {
+            let percent = ((downloaded_bytes.saturating_mul(100)) / total).min(100) as u32;
+            if percent == 100 || percent >= last_reported_percent.saturating_add(10) {
+                last_reported_percent = percent;
+                emit_progress(
+                    app,
+                    meeting_id,
+                    "downloading_models",
+                    8 + ((percent.min(100) * 6) / 100),
+                    &format!("Downloading {model_name} diarization model ({percent}%)..."),
+                );
+            }
+        } else {
+            let mebibytes = downloaded_bytes / (1024 * 1024);
+            if mebibytes >= last_reported_mebibytes.saturating_add(10) {
+                last_reported_mebibytes = mebibytes;
+                emit_progress(
+                    app,
+                    meeting_id,
+                    "downloading_models",
+                    8,
+                    &format!("Downloading {model_name} diarization model ({mebibytes} MiB)..."),
+                );
+            }
+        }
+    }
+
+    file.flush().await?;
+
+    if downloaded_bytes == 0 {
         return Err(anyhow!(
             "{} diarization model download was empty: {}",
             model_name,
@@ -788,8 +925,6 @@ async fn ensure_model_available<R: Runtime>(
         ));
     }
 
-    let temp_path = model_path.with_extension("download");
-    tokio::fs::write(&temp_path, &bytes).await?;
     tokio::fs::rename(&temp_path, model_path).await?;
 
     Ok(())
@@ -860,6 +995,57 @@ mod tests {
             end_time: end,
             speaker,
         }
+    }
+
+    fn sample_count_for_minutes(minutes: usize) -> usize {
+        DIARIZATION_SAMPLE_RATE as usize * 60 * minutes
+    }
+
+    #[test]
+    fn compacts_sparse_sherpa_speaker_ids_by_first_turn() {
+        let turns = vec![
+            turn(0.0, 1.0, 59),
+            turn(1.0, 2.0, 3),
+            turn(2.0, 3.0, 59),
+            turn(3.0, 4.0, 13),
+        ];
+
+        let compacted = compact_diarization_speakers(turns);
+        let speakers: Vec<usize> = compacted.iter().map(|turn| turn.speaker).collect();
+
+        assert_eq!(speakers, vec![0, 1, 0, 2]);
+    }
+
+    #[test]
+    fn retries_short_auto_runs_that_overcluster_speakers() {
+        let turns = vec![
+            turn(0.0, 1.0, 0),
+            turn(1.0, 2.0, 1),
+            turn(2.0, 3.0, 2),
+            turn(3.0, 4.0, 3),
+            turn(4.0, 5.0, 4),
+        ];
+
+        assert!(should_retry_short_clip_with_two_speakers(
+            sample_count_for_minutes(8),
+            &turns,
+            None,
+        ));
+        assert!(!should_retry_short_clip_with_two_speakers(
+            sample_count_for_minutes(8),
+            &turns,
+            Some(2),
+        ));
+        assert!(!should_retry_short_clip_with_two_speakers(
+            sample_count_for_minutes(20),
+            &turns,
+            None,
+        ));
+        assert!(!should_retry_short_clip_with_two_speakers(
+            sample_count_for_minutes(8),
+            &turns[..SHORT_CLIP_OVERCLUSTERED_SPEAKERS],
+            None,
+        ));
     }
 
     #[test]
