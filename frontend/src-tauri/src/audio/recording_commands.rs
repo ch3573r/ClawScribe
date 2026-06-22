@@ -311,14 +311,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 // Create structured transcript segment
                 let segment = crate::audio::recording_saver::TranscriptSegment {
                     id: format!("seg_{}", update.sequence_id),
-                    // Persist the speaker inline so summaries and the saved
-                    // transcript attribute who spoke (live updates carry it in a
-                    // separate field shown as a badge).
-                    text: match update.source.as_str() {
-                        "Me" | "Participants" => {
-                            format!("{}: {}", update.source, update.text)
-                        }
-                        _ => update.text.clone(),
+                    text: update.text.clone(),
+                    speaker: match update.source.as_str() {
+                        "Me" | "Participants" => Some(update.source.clone()),
+                        _ => None,
                     },
                     audio_start_time: update.audio_start_time,
                     audio_end_time: update.audio_end_time,
@@ -528,14 +524,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 // Create structured transcript segment
                 let segment = crate::audio::recording_saver::TranscriptSegment {
                     id: format!("seg_{}", update.sequence_id),
-                    // Persist the speaker inline so summaries and the saved
-                    // transcript attribute who spoke (live updates carry it in a
-                    // separate field shown as a badge).
-                    text: match update.source.as_str() {
-                        "Me" | "Participants" => {
-                            format!("{}: {}", update.source, update.text)
-                        }
-                        _ => update.text.clone(),
+                    text: update.text.clone(),
+                    speaker: match update.source.as_str() {
+                        "Me" | "Participants" => Some(update.source.clone()),
+                        _ => None,
                     },
                     audio_start_time: update.audio_start_time,
                     audio_end_time: update.audio_end_time,

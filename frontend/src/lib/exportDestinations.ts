@@ -19,6 +19,8 @@ export interface ExportDestinations {
   planName?: string;
   bucketId?: string;
   bucketName?: string;
+  todoListId?: string;
+  todoListName?: string;
   /** AI-polish Planner task titles & notes before export (default off). */
   plannerAiPolish?: boolean;
   /** Confluence export mode. Draft is clipboard/browser only; REST uses a saved PAT. */
@@ -62,6 +64,10 @@ export function hasOneNoteDestination(d: ExportDestinations = getExportDestinati
 
 export function hasPlannerDestination(d: ExportDestinations = getExportDestinations()): boolean {
   return !!d.planId && !!d.bucketId;
+}
+
+export function hasToDoDestination(d: ExportDestinations = getExportDestinations()): boolean {
+  return !!d.todoListId;
 }
 
 export function hasConfluenceDraftTarget(d: ExportDestinations = getExportDestinations()): boolean {

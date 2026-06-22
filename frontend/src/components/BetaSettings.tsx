@@ -99,14 +99,6 @@ export function BetaSettings() {
           </div>
         </div>
       </div>
-
-      {/* Info Box */}
-      <div className="p-4 rounded-lg border border-primary/30 bg-primary/10">
-        <p className="text-sm text-primary">
-          <strong>Note:</strong> Import Audio and Retranscribe are now stable
-          features and are available from Home, the sidebar, and meeting details.
-        </p>
-      </div>
     </div>
   );
 }

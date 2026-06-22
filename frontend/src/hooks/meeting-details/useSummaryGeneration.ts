@@ -9,6 +9,7 @@ import { isOllamaNotInstalledError } from '@/lib/utils';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
 import { getMeetingContext } from '@/lib/meetingContext';
 import { getMeetingCalendar, attendeeChecklist } from '@/lib/meetingCalendar';
+import { formatTranscriptLine } from '@/lib/transcriptFormatting';
 import {
   detectAndCacheSummaryLanguage,
   readMeetingSummaryLanguage,
@@ -436,24 +437,11 @@ export function useSummaryGeneration({
   }, []);
 
   const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
-    const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
-      if (seconds === undefined) {
-        return fallbackTimestamp;
-      }
-      const totalSecs = Math.floor(seconds);
-      const mins = Math.floor(totalSecs / 60);
-      const secs = totalSecs % 60;
-      return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-    };
-
     return {
-      // Prefix each line with the speaker (Me / Participants) when known, so the
-      // summary model gets who-said-what, not just a flat transcript.
+      // Include corrected speaker labels when known, so the summary model gets
+      // who-said-what, not just a flat transcript.
       transcriptText: allTranscripts
-        .map(t => {
-          const who = t.speaker ? `${t.speaker}: ` : '';
-          return `${formatTime(t.audio_start_time, t.timestamp)} ${who}${t.text}`;
-        })
+        .map(t => formatTranscriptLine(t))
         .join('\n'),
       transcriptTexts: allTranscripts.map(t => t.text),
     };

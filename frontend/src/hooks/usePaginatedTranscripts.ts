@@ -25,6 +25,8 @@ interface UsePaginatedTranscriptsReturn {
     loadMore: () => Promise<void>;
     reset: () => void;
     refetch: () => Promise<void>;
+    updateSpeaker: (transcriptId: string, speaker: string | null) => Promise<void>;
+    applySpeakerToMatching: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
 }
 
 /**
@@ -37,7 +39,13 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
         endTime: t.audio_end_time,
         text: t.text,
         confidence: t.confidence,
+        speaker: t.speaker,
     }));
+}
+
+function normalizeSpeaker(speaker: string | null | undefined): string | null {
+    const label = speaker?.trim().replace(/\s+/g, " ") ?? "";
+    return label ? label.slice(0, 64) : null;
 }
 
 export function usePaginatedTranscripts({
@@ -166,6 +174,54 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId, reset, loadMetadata, loadTranscriptsAtOffset]);
 
+    const updateSpeaker = useCallback(async (transcriptId: string, speaker: string | null) => {
+        if (!meetingId) return;
+        const nextSpeaker = normalizeSpeaker(speaker);
+        setTranscripts(prev =>
+            prev.map(t => t.id === transcriptId ? { ...t, speaker: nextSpeaker ?? undefined } : t)
+        );
+        try {
+            await invoke('api_update_transcript_speaker', {
+                meetingId,
+                transcriptId,
+                speaker: nextSpeaker,
+            });
+        } catch (err) {
+            console.error('Failed to update transcript speaker:', err);
+            setError('Failed to update speaker label');
+            await refetch();
+            throw err;
+        }
+    }, [meetingId, refetch]);
+
+    const applySpeakerToMatching = useCallback(async (
+        fromSpeaker: string | null | undefined,
+        speaker: string | null,
+    ): Promise<number> => {
+        if (!meetingId) return 0;
+        const currentSpeaker = normalizeSpeaker(fromSpeaker);
+        const nextSpeaker = normalizeSpeaker(speaker);
+        setTranscripts(prev =>
+            prev.map(t => {
+                const rowSpeaker = normalizeSpeaker(t.speaker);
+                return rowSpeaker === currentSpeaker ? { ...t, speaker: nextSpeaker ?? undefined } : t;
+            })
+        );
+        try {
+            const response = await invoke<{ updated: number }>('api_update_transcript_speakers_matching', {
+                meetingId,
+                fromSpeaker: currentSpeaker,
+                speaker: nextSpeaker,
+            });
+            return response.updated;
+        } catch (err) {
+            console.error('Failed to update matching transcript speakers:', err);
+            setError('Failed to update matching speaker labels');
+            await refetch();
+            throw err;
+        }
+    }, [meetingId, refetch]);
+
     // Initial load
     useEffect(() => {
         if (!meetingId) {
@@ -211,5 +267,7 @@ export function usePaginatedTranscripts({
         loadMore,
         reset,
         refetch,
+        updateSpeaker,
+        applySpeakerToMatching,
     };
 }

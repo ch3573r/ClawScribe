@@ -697,7 +697,15 @@ fn build_transcript_markdown(title: &str, transcript: &Value) -> String {
                 })
                 .unwrap_or_else(|| "[00:00]".to_string());
 
-            markdown.push_str(&format!("{} {}\n", timestamp, text));
+            let speaker = segment
+                .get("speaker")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{s}: "))
+                .unwrap_or_default();
+
+            markdown.push_str(&format!("{} {}{}\n", timestamp, speaker, text));
             wrote_transcript_line = true;
         }
     } else if let Some(segments) = transcript.as_array() {

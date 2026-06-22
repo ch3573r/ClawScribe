@@ -1,4 +1,4 @@
-//! Graph API destination discovery: notebooks, sections, plans, buckets.
+//! Graph API destination discovery: notebooks, sections, plans, buckets, To Do lists.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,15 @@ pub struct PlanInfo {
 pub struct BucketInfo {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToDoListInfo {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub wellknown_list_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +256,16 @@ pub async fn list_buckets<T: GraphTransport, S: Sleeper>(
     map_outcome(client.execute(&request, token).await)
 }
 
+pub async fn list_todo_lists<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+) -> Result<Vec<ToDoListInfo>, String> {
+    let request = get_request(format!(
+        "{GRAPH_BASE}/me/todo/lists?$select=id,displayName,wellknownListName&$top=50"
+    ));
+    map_outcome(client.execute(&request, token).await)
+}
+
 /// Create a new bucket within a plan and return it. Requires `Tasks.ReadWrite`,
 /// which this app already requests. The `orderHint` " !" places the bucket at
 /// the start of the plan (Graph's documented "beginning" hint).
@@ -344,6 +363,20 @@ mod tests {
             .unwrap();
         assert_eq!(bucket.id, "bk-3");
         assert_eq!(bucket.name, "Action items");
+    }
+
+    #[tokio::test]
+    async fn list_todo_lists_parses_graph_response() {
+        let transport = MockGraphTransport::new();
+        transport.queue_default([GraphResponse::success(
+            200,
+            r#"{"value":[{"id":"td-1","displayName":"Tasks","wellknownListName":"defaultList"}]}"#,
+        )]);
+        let c = client(transport);
+        let lists = list_todo_lists(&c, "token").await.unwrap();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].display_name, "Tasks");
+        assert_eq!(lists[0].wellknown_list_name.as_deref(), Some("defaultList"));
     }
 
     #[tokio::test]

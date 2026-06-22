@@ -1,8 +1,9 @@
 # Microsoft Graph Integration
 
 ClawScribe uses Microsoft Graph as an optional delegated integration for
-calendar context, OneNote export, and Planner task export. Microsoft auth is
-separate from OpenAI, OpenClaw, Codex, Ollama, and other summary providers.
+calendar context, OneNote export, Planner task export, and Microsoft To Do task
+export. Microsoft auth is separate from OpenAI, OpenClaw, Codex, Ollama, and
+other summary providers.
 
 ## Current Capabilities
 
@@ -12,6 +13,8 @@ separate from OpenAI, OpenClaw, Codex, Ollama, and other summary providers.
 - OneNote notebook discovery/creation and export.
 - Planner plan/bucket discovery, optional bucket creation, task preview, and
   selected task export.
+- Microsoft To Do list discovery, task preview, and selected personal task
+  export.
 - Connection status surfaced in the integrations/settings UI.
 
 ## Delegated Scopes
@@ -35,6 +38,7 @@ Scope rules:
   `OnlineMeetings.*` or `Presence.*`.
 - File access scopes should stay out unless a OneDrive/SharePoint file export
   feature actually lands.
+- Mail scopes should stay out unless an Outlook recap sender actually lands.
 - `Notes.ReadWrite.All` is intentionally broader than basic page creation so
   shared-notebook workflows can work, but it should remain visible in reviews.
 
@@ -105,6 +109,22 @@ Tasks must not be silently created from AI output without user review.
 
 See [planner-export.md](planner-export.md).
 
+## Microsoft To Do
+
+To Do export is also review-first:
+
+1. extract action items from the meeting notes
+2. preview candidate personal tasks
+3. let the user edit/deselect tasks and notes
+4. choose the destination To Do list in Settings → Add-ons
+5. export selected tasks
+6. record local duplicate-protection metadata
+
+To Do uses the existing `Tasks.ReadWrite` scope and targets the signed-in user's
+lists under `/me/todo/...`. It does not assign tasks to other users.
+
+See [todo-export.md](todo-export.md).
+
 ## Error Handling
 
 - `401`: mark session expired and prompt reconnect.
@@ -125,5 +145,6 @@ Before changing Microsoft integration:
 - smoke sign-in and connection status on Windows
 - test OneNote export without relying on section listing
 - test Planner preview before task creation
+- test To Do preview before task creation
 - verify no tokens or auth URLs appear in logs
 - verify local recording and summary still work when Microsoft is disconnected

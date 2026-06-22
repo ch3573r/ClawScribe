@@ -7,6 +7,81 @@ use uuid::Uuid;
 pub struct TranscriptsRepository;
 
 impl TranscriptsRepository {
+    pub async fn update_transcript_speaker(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        transcript_id: &str,
+        speaker: Option<&str>,
+    ) -> Result<u64, SqlxError> {
+        let mut conn = pool.acquire().await?;
+        let mut transaction = conn.begin().await?;
+        let now = Utc::now();
+
+        let result = sqlx::query(
+            "UPDATE transcripts SET speaker = ? WHERE meeting_id = ? AND id = ?",
+        )
+        .bind(speaker)
+        .bind(meeting_id)
+        .bind(transcript_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        if result.rows_affected() > 0 {
+            sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn update_transcript_speakers_matching(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        from_speaker: Option<&str>,
+        speaker: Option<&str>,
+    ) -> Result<u64, SqlxError> {
+        let mut conn = pool.acquire().await?;
+        let mut transaction = conn.begin().await?;
+        let now = Utc::now();
+
+        let result = match from_speaker {
+            Some(from) => {
+                sqlx::query(
+                    "UPDATE transcripts SET speaker = ? WHERE meeting_id = ? AND speaker = ?",
+                )
+                .bind(speaker)
+                .bind(meeting_id)
+                .bind(from)
+                .execute(&mut *transaction)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE transcripts SET speaker = ? WHERE meeting_id = ? AND (speaker IS NULL OR TRIM(speaker) = '')",
+                )
+                .bind(speaker)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?
+            }
+        };
+
+        if result.rows_affected() > 0 {
+            sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(result.rows_affected())
+    }
+
     /// Saves a new meeting and its associated transcript segments.
     /// This function uses a transaction to ensure that either both the meeting
     /// and all its transcripts are saved, or none of them are.

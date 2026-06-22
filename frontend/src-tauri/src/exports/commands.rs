@@ -15,6 +15,7 @@ use crate::exports::model::MicrosoftConnectionState;
 use crate::exports::ms_auth_state::MicrosoftAuthState;
 use crate::exports::planner::PlannerDestination;
 use crate::exports::reqwest_transport::ReqwestGraphTransport;
+use crate::exports::todo::ToDoDestination;
 use crate::exports::token_store;
 use crate::summary::codex_provider::open_url_in_default_browser;
 
@@ -603,6 +604,15 @@ pub async fn preview_planner_tasks(
     Ok(previews)
 }
 
+#[tauri::command]
+pub async fn preview_todo_tasks(
+    meeting_id: String,
+    meeting_title: String,
+    markdown: String,
+) -> Result<Vec<PlannerTaskPreview>, String> {
+    preview_planner_tasks(meeting_id, meeting_title, markdown).await
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannerTaskInput {
@@ -616,6 +626,18 @@ pub struct PlannerTaskInput {
     pub owner: Option<String>,
     pub due_date: Option<String>,
     pub bucket_id: String,
+    #[serde(default)]
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToDoTaskInput {
+    #[serde(default)]
+    pub local_id: String,
+    pub title: String,
+    pub owner: Option<String>,
+    pub due_date: Option<String>,
     #[serde(default)]
     pub details: Option<String>,
 }
@@ -740,6 +762,68 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         },
         items: merged_items,
     })
+}
+
+#[tauri::command]
+pub async fn export_selected_todo_tasks<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+    meeting_title: String,
+    list_id: String,
+    tasks: Vec<ToDoTaskInput>,
+) -> Result<ExportReportResponse, String> {
+    let tasks: Vec<ToDoTaskInput> = tasks
+        .into_iter()
+        .filter(|t| !t.title.trim().is_empty())
+        .collect();
+    if tasks.is_empty() {
+        return Err("No tasks selected to export.".to_string());
+    }
+
+    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+    let ctx = ExportContext {
+        tenant_id: &tenant_id,
+        user_id: &user_id,
+        bearer_token: &token,
+    };
+    let mut action_items: Vec<crate::exports::model::ExportActionItem> = tasks
+        .into_iter()
+        .map(|t| crate::exports::model::ExportActionItem {
+            local_action_id: t.local_id,
+            task: t.title,
+            owner: t.owner,
+            due_date: t.due_date,
+            details: t.details,
+        })
+        .collect();
+    crate::exports::planner::ensure_local_action_ids(&mut action_items);
+
+    let meeting_export = crate::exports::model::MeetingExport {
+        meeting_id: meeting_id.clone(),
+        title: meeting_title,
+        created_at: None,
+        executive_summary: String::new(),
+        decisions: Vec::new(),
+        action_items,
+        transcript_excerpt: None,
+        summary_html: None,
+    };
+    let destination = ToDoDestination { list_id };
+    let mut ledger = load_ledger(&app, &meeting_id);
+    let report = exporter::export_todo(&client, &mut ledger, &meeting_export, &destination, &ctx)
+        .await
+        .map_err(|e| e.to_string())?;
+    save_ledger(&app, &meeting_id, &ledger);
+
+    if report.connection_state == Some(MicrosoftConnectionState::Expired) {
+        let mut inner = state.inner.write().await;
+        inner.connection_state = MicrosoftConnectionState::Expired;
+    }
+
+    Ok(report.into())
 }
 
 // ── Discovery commands ──────────────────────────────────────────────────
@@ -875,4 +959,14 @@ pub async fn list_planner_buckets(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_buckets(&client, &token, &plan_id).await
+}
+
+#[tauri::command]
+pub async fn list_todo_lists(
+    state: tauri::State<'_, MicrosoftAuthState>,
+) -> Result<Vec<discovery::ToDoListInfo>, String> {
+    let (token, _, _) = get_token_and_context(&state).await?;
+    let transport = ReqwestGraphTransport::new();
+    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+    discovery::list_todo_lists(&client, &token).await
 }

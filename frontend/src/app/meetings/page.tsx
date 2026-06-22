@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   ArrowRight,
+  CalendarDays,
   Clock3,
   FileText,
   NotebookPen,
@@ -13,11 +14,39 @@ import {
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
 } from "@/components/ui/input-group";
+
+type SortMode = "newest" | "oldest" | "title";
+
+function timeValue(value?: string): number {
+  if (!value) return 0;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function formatMeetingDate(value?: string): string {
+  if (!value) return "Saved meeting";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Saved meeting";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
 
 export default function MeetingsPage() {
   const router = useRouter();
@@ -31,15 +60,32 @@ export default function MeetingsPage() {
   } = useSidebar();
   const [query, setQuery] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [sortMode, setSortMode] = useState<SortMode>("newest");
 
   const normalizedQuery = query.trim().toLowerCase();
 
+  const sortedMeetings = useMemo(() => {
+    const next = [...meetings];
+    next.sort((a, b) => {
+      if (sortMode === "title") {
+        return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+      }
+      const aTime = timeValue(a.created_at);
+      const bTime = timeValue(b.created_at);
+      if (aTime !== bTime) {
+        return sortMode === "oldest" ? aTime - bTime : bTime - aTime;
+      }
+      return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+    });
+    return next;
+  }, [meetings, sortMode]);
+
   const titleMatches = useMemo(() => {
-    if (!normalizedQuery) return meetings;
-    return meetings.filter((meeting) =>
+    if (!normalizedQuery) return sortedMeetings;
+    return sortedMeetings.filter((meeting) =>
       meeting.title.toLowerCase().includes(normalizedQuery),
     );
-  }, [meetings, normalizedQuery]);
+  }, [normalizedQuery, sortedMeetings]);
 
   const hasTranscriptMatches = normalizedQuery.length > 0 && searchResults.length > 0;
   const visibleMeetings = normalizedQuery ? titleMatches : meetings;
@@ -72,6 +118,12 @@ export default function MeetingsPage() {
   const titleFor = useCallback(
     (id: string, fallback: string) =>
       meetings.find((meeting) => meeting.id === id)?.title || fallback,
+    [meetings],
+  );
+
+  const dateFor = useCallback(
+    (id: string) =>
+      formatMeetingDate(meetings.find((meeting) => meeting.id === id)?.created_at),
     [meetings],
   );
 
@@ -125,7 +177,17 @@ export default function MeetingsPage() {
               )}
             </InputGroup>
 
-            <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+            <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
+              <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
+                <SelectTrigger className="h-9 w-36 bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  <SelectItem value="newest">Newest first</SelectItem>
+                  <SelectItem value="oldest">Oldest first</SelectItem>
+                  <SelectItem value="title">Title A-Z</SelectItem>
+                </SelectContent>
+              </Select>
               <span>{meetings.length} total</span>
               <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
               <span>{shownCount} shown</span>
@@ -175,6 +237,9 @@ export default function MeetingsPage() {
                           </h3>
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                             <span>Transcript match</span>
+                            <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
+                            <CalendarDays className="h-3.5 w-3.5" />
+                            <span>{dateFor(result.id)}</span>
                             {result.timestamp ? (
                               <>
                                 <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
@@ -211,9 +276,9 @@ export default function MeetingsPage() {
                         <h3 className="truncate text-sm font-semibold text-foreground">
                           {meeting.title}
                         </h3>
-                        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <Clock3 className="h-3.5 w-3.5" />
-                          Saved meeting
+                          <span>{formatMeetingDate(meeting.created_at)}</span>
                         </div>
                       </div>
                     </div>

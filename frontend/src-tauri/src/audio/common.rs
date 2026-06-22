@@ -93,6 +93,7 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
             serde_json::json!({
                 "id": s.id,
                 "text": s.text,
+                "speaker": s.speaker,
                 "timestamp": s.timestamp,
                 "audio_start_time": s.audio_start_time,
                 "audio_end_time": s.audio_end_time,

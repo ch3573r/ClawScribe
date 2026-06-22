@@ -10,6 +10,7 @@ use crate::exports::ledger::ExportLedger;
 use crate::exports::model::{ExportStatus, MeetingExport, MicrosoftConnectionState};
 use crate::exports::onenote::{self, DEFAULT_PAGE_BUDGET_BYTES};
 use crate::exports::planner::{self, PlannerDestination};
+use crate::exports::todo::{self, ToDoDestination};
 use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -287,6 +288,51 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
             }
         }
 
+        items.push(result);
+        if stop {
+            break;
+        }
+    }
+
+    let (overall, connection_state) = summarize(&items);
+    Ok(ExportReport {
+        overall,
+        connection_state,
+        items,
+    })
+}
+
+/// Export a meeting's reviewed action items as personal Microsoft To Do tasks.
+pub async fn export_todo<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    ledger: &mut ExportLedger,
+    meeting: &MeetingExport,
+    destination: &ToDoDestination,
+    ctx: &ExportContext<'_>,
+) -> Result<ExportReport, todo::ToDoBuildError> {
+    let url = format!("{GRAPH_BASE}/me/todo/lists/{}/tasks", destination.list_id);
+    let mut items = Vec::new();
+
+    for action in &meeting.action_items {
+        let dedupe_key = todo::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action);
+        let local_id = action.local_action_id.clone();
+
+        if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
+            items.push(from_ledger(dedupe_key, local_id, ledger));
+            continue;
+        }
+
+        let body = todo::build_task_request(destination, meeting, action)?;
+        let request = GraphRequest {
+            method: "POST".into(),
+            url: url.clone(),
+            content_type: "application/json".into(),
+            body: body.to_string(),
+            correlation_id: uuid::Uuid::new_v4().to_string(),
+            headers: Vec::new(),
+        };
+        let (result, stop) =
+            run_item(client, ledger, ctx.bearer_token, dedupe_key, local_id, request).await;
         items.push(result);
         if stop {
             break;
@@ -660,5 +706,27 @@ mod tests {
         };
         let err = export_planner(&client, &mut ledger, &m, &bad, &ctx()).await;
         assert_eq!(err, Err(planner::PlannerBuildError::MissingPlanId));
+    }
+
+    #[tokio::test]
+    async fn todo_exports_action_item() {
+        let transport = MockGraphTransport::new();
+        transport.queue_default([GraphResponse::success(201, r#"{"id":"todo-1"}"#)]);
+        let client = client(transport);
+        let mut ledger = ExportLedger::new("m1");
+        let mut m = meeting();
+        m.action_items.truncate(1);
+        let dest = ToDoDestination {
+            list_id: "list-1".into(),
+        };
+        let report = export_todo(&client, &mut ledger, &m, &dest, &ctx())
+            .await
+            .unwrap();
+        assert_eq!(report.overall, ExportStatus::Succeeded);
+        assert_eq!(report.items[0].resource_id.as_deref(), Some("todo-1"));
+        assert_eq!(
+            client.transport().calls_for(&format!("{GRAPH_BASE}/me/todo/lists/list-1/tasks")),
+            1
+        );
     }
 }

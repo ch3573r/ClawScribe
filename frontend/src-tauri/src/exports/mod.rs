@@ -1,7 +1,7 @@
-//! Microsoft Graph export integration (calendar + OneNote + Planner).
+//! Microsoft Graph export integration (calendar + OneNote + Planner + To Do).
 //!
 //! This module owns delegated Microsoft sign-in, token storage, Graph request
-//! transport, calendar lookup, OneNote export, Planner export, sanitized error
+//! transport, calendar lookup, OneNote export, Planner/To Do export, sanitized error
 //! mapping, and local duplicate-protection metadata. See:
 //!
 //! - `docs/integrations/microsoft-graph.md`
@@ -25,13 +25,15 @@ pub mod onenote;
 pub mod planner;
 pub mod reqwest_transport;
 pub mod token_store;
+pub mod todo;
 pub mod transport;
 
 pub use error::GraphErrorKind;
-pub use exporter::{export_onenote, export_planner, ExportContext, ExportReport, OneNoteTarget};
+pub use exporter::{export_onenote, export_planner, export_todo, ExportContext, ExportReport, OneNoteTarget};
 pub use ledger::ExportLedger;
 pub use model::{ExportActionItem, ExportDecision, ExportStatus, MeetingExport, MicrosoftConnectionState};
 pub use planner::PlannerDestination;
+pub use todo::ToDoDestination;
 
 use crate::summary::codex_provider::MeetingNotesOutput;
 

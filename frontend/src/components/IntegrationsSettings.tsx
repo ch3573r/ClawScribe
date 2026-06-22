@@ -21,6 +21,7 @@ import {
   OutlookCalendarIcon,
   PlannerIcon,
   TeamsIcon,
+  ToDoIcon,
 } from "@/components/IntegrationIcons";
 import { Button } from "@/components/ui/button";
 import {
@@ -233,7 +234,7 @@ function MicrosoftSignInPanel() {
 
   const detail = useMemo(() => {
     if (ms.connection.state === "connected") {
-      return `Signed in as ${ms.connection.userDisplayName ?? ms.connection.userEmail ?? "Microsoft user"}. OneNote and Planner exports are available.`;
+      return `Signed in as ${ms.connection.userDisplayName ?? ms.connection.userEmail ?? "Microsoft user"}. OneNote, Planner, and To Do exports are available.`;
     }
     if (ms.connection.state === "connecting" || ms.signingIn) {
       return "Waiting for Microsoft sign-in to complete…";
@@ -241,7 +242,7 @@ function MicrosoftSignInPanel() {
     if (ms.connection.state === "expired") {
       return "Microsoft session expired. Sign in again to re-enable exports.";
     }
-    return "Sign in with your Microsoft account to enable OneNote and Planner exports.";
+    return "Sign in with your Microsoft account to enable OneNote, Planner, and To Do exports.";
   }, [ms.connection, ms.signingIn]);
 
   return (
@@ -287,7 +288,7 @@ function MicrosoftSignInPanel() {
                     <code className="break-all">
                       {ms.connection.grantedScopes || "(none)"}
                     </code>
-                    . Sign out and sign in again to grant OneNote/Planner
+                    . Sign out and sign in again to grant Microsoft export
                     access; if the consent screen does not list them, the Entra
                     app registration needs those Graph permissions and admin
                     consent.
@@ -765,6 +766,106 @@ function PlannerPanel() {
                 Planner destination ready. Export from a meeting&apos;s summary
                 panel.
               </span>
+            </div>
+          )}
+        </div>
+      )}
+    </AddonPanel>
+  );
+}
+
+function ToDoPanel() {
+  const ms = useMicrosoftExport();
+  const saved = getExportDestinations();
+  const [selectedList, setSelectedList] = useState<string>(saved.todoListId ?? "");
+  const isConnected = ms.connection.state === "connected";
+
+  useEffect(() => {
+    if (isConnected && ms.todoLists.length === 0 && !ms.loadingToDoLists) {
+      void ms.loadToDoLists();
+    }
+  }, [isConnected]);
+
+  useEffect(() => {
+    if (!selectedList) return;
+    setExportDestinations({
+      todoListId: selectedList,
+      todoListName: ms.todoLists.find((l) => l.id === selectedList)?.displayName,
+    });
+  }, [selectedList, ms.todoLists]);
+
+  const panelState: AddonState = isConnected ? "connected" : "signin";
+  const detail = isConnected
+    ? "Pick the personal To Do list for reviewed meeting action items."
+    : "Sign in with Microsoft above to enable To Do export.";
+  const selectedListMissing =
+    !!selectedList && !ms.todoLists.some((l) => l.id === selectedList);
+
+  return (
+    <AddonPanel
+      icon={ToDoIcon}
+      title="Microsoft To Do export"
+      state={panelState}
+      detail={detail}
+      showBadge={!isConnected}
+    >
+      {isConnected && (
+        <div className="space-y-3">
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="block text-xs font-medium text-muted-foreground">
+                To Do list
+              </label>
+              <button
+                type="button"
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                onClick={() => void ms.loadToDoLists()}
+                disabled={ms.loadingToDoLists}
+              >
+                <RefreshCw
+                  className={`h-3 w-3 ${ms.loadingToDoLists ? "animate-spin" : ""}`}
+                />
+                Reload
+              </button>
+            </div>
+            <select
+              className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
+              value={selectedList}
+              onChange={(e) => setSelectedList(e.target.value)}
+              disabled={ms.loadingToDoLists}
+            >
+              <option value="">
+                {ms.loadingToDoLists ? "Loading…" : "Select a To Do list"}
+              </option>
+              {ms.todoLists.map((list) => (
+                <option key={list.id} value={list.id}>
+                  {list.displayName}
+                </option>
+              ))}
+              {selectedListMissing && (
+                <option value={selectedList}>
+                  {saved.todoListName ?? "Saved To Do list"}
+                </option>
+              )}
+            </select>
+          </div>
+
+          {ms.error && (
+            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{ms.error}</span>
+            </div>
+          )}
+          {!ms.loadingToDoLists && !ms.error && ms.todoLists.length === 0 && (
+            <p className="rounded-lg border border-border bg-muted p-3 text-sm text-muted-foreground">
+              No Microsoft To Do lists were returned for this account. Create a
+              list in Microsoft To Do, then use Reload to pick it here.
+            </p>
+          )}
+          {selectedList && (
+            <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-4 w-4" />
+              <span>To Do destination ready. Export reviewed action items from a meeting summary.</span>
             </div>
           )}
         </div>
@@ -1778,12 +1879,13 @@ export function IntegrationsSettings() {
         <GroupHeader
           icon={<Microsoft365Icon />}
           title="Microsoft 365"
-          desc="Sign in with your work account to export meetings to OneNote and Planner, and pull in calendar events."
+          desc="Sign in with your work account to export meetings to OneNote, Planner, and To Do, and pull in calendar events."
         />
         <div className="space-y-4">
           <MicrosoftSignInPanel />
           <OneNotePanel />
           <PlannerPanel />
+          <ToDoPanel />
           <CalendarPanel />
         </div>
       </section>

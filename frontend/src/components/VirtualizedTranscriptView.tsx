@@ -6,6 +6,17 @@ import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuSeparator,
+    DropdownMenuSub,
+    DropdownMenuSubContent,
+    DropdownMenuSubTrigger,
+    DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
@@ -34,6 +45,10 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+
+    // Saved meeting speaker review
+    onSpeakerChange?: (segmentId: string, speaker: string | null) => Promise<void> | void;
+    onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number> | number | void;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -72,6 +87,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speaker,
     isStreaming,
     showConfidence,
+    onSpeakerChange,
+    onApplySpeakerToMatching,
 }: {
     id: string;
     timestamp: number;
@@ -80,11 +97,53 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speaker?: string;
     isStreaming: boolean;
     showConfidence: boolean;
+    onSpeakerChange?: (segmentId: string, speaker: string | null) => Promise<void> | void;
+    onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number> | number | void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     // "Me" = your microphone, "Participants" = system audio. Color-code so the
     // two sides of the conversation are scannable.
-    const isMe = speaker === "Me";
+    const currentSpeaker = speaker?.trim() || null;
+    const isMe = currentSpeaker === "Me";
+    const [customSpeaker, setCustomSpeaker] = useState("");
+    const [isSaving, setIsSaving] = useState(false);
+
+    const saveSpeaker = async (nextSpeaker: string | null) => {
+        if (!onSpeakerChange) return;
+        setIsSaving(true);
+        try {
+            await onSpeakerChange(id, nextSpeaker);
+        } catch (error) {
+            console.error("Failed to save speaker label:", error);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const saveCustomSpeaker = async () => {
+        const nextSpeaker = customSpeaker.trim().replace(/\s+/g, " ");
+        if (!nextSpeaker) return;
+        await saveSpeaker(nextSpeaker);
+        setCustomSpeaker("");
+    };
+
+    const applyMatching = async (nextSpeaker: string | null) => {
+        if (!onApplySpeakerToMatching) return;
+        setIsSaving(true);
+        try {
+            await onApplySpeakerToMatching(currentSpeaker, nextSpeaker);
+        } catch (error) {
+            console.error("Failed to apply matching speaker labels:", error);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const speakerClass = isMe
+        ? "bg-primary/10 text-primary hover:bg-primary/15"
+        : currentSpeaker
+            ? "bg-muted text-muted-foreground hover:bg-muted/80"
+            : "border border-dashed border-border bg-transparent text-muted-foreground hover:bg-muted";
 
     return (
         <div id={`segment-${id}`} className="mb-4">
@@ -102,15 +161,89 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     </TooltipContent>
                 </Tooltip>
                 <div className="min-w-0 flex-1">
-                    {speaker && (
+                    {onSpeakerChange ? (
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <button
+                                    type="button"
+                                    disabled={isSaving}
+                                    className={`mb-0.5 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition disabled:opacity-60 ${speakerClass}`}
+                                >
+                                    {currentSpeaker ?? "Label"}
+                                </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="start" className="w-56">
+                                <DropdownMenuLabel>Speaker label</DropdownMenuLabel>
+                                <DropdownMenuItem onSelect={() => void saveSpeaker("Me")}>
+                                    Me
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => void saveSpeaker("Participants")}>
+                                    Participants
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => void saveSpeaker(null)}>
+                                    Clear label
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <div
+                                    className="space-y-1.5 px-2 py-1.5"
+                                    onClick={(e) => e.stopPropagation()}
+                                    onKeyDown={(e) => e.stopPropagation()}
+                                >
+                                    <label className="text-xs font-medium text-muted-foreground">
+                                        Custom label
+                                    </label>
+                                    <div className="flex gap-1.5">
+                                        <input
+                                            value={customSpeaker}
+                                            onChange={(e) => setCustomSpeaker(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === "Enter") {
+                                                    e.preventDefault();
+                                                    void saveCustomSpeaker();
+                                                }
+                                            }}
+                                            maxLength={64}
+                                            placeholder="Speaker name"
+                                            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => void saveCustomSpeaker()}
+                                            disabled={!customSpeaker.trim()}
+                                            className="rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                                        >
+                                            Set
+                                        </button>
+                                    </div>
+                                </div>
+                                {onApplySpeakerToMatching && (
+                                    <>
+                                        <DropdownMenuSeparator />
+                                        <DropdownMenuSub>
+                                            <DropdownMenuSubTrigger>
+                                                Apply matching {currentSpeaker ?? "unlabeled"} rows
+                                            </DropdownMenuSubTrigger>
+                                            <DropdownMenuSubContent>
+                                                <DropdownMenuItem onSelect={() => void applyMatching("Me")}>
+                                                    To Me
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem onSelect={() => void applyMatching("Participants")}>
+                                                    To Participants
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem onSelect={() => void applyMatching(null)}>
+                                                    Clear labels
+                                                </DropdownMenuItem>
+                                            </DropdownMenuSubContent>
+                                        </DropdownMenuSub>
+                                    </>
+                                )}
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    ) : currentSpeaker && (
                         <span
-                            className={`mb-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                                isMe
-                                    ? "bg-primary/10 text-primary"
-                                    : "bg-muted text-muted-foreground"
-                            }`}
+                            className={`mb-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${speakerClass}`}
                         >
-                            {speaker}
+                            {currentSpeaker}
                         </span>
                     )}
                     {isStreaming ? (
@@ -140,6 +273,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    onSpeakerChange,
+    onApplySpeakerToMatching,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -313,6 +448,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speaker={segment.speaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onSpeakerChange={onSpeakerChange}
+                                        onApplySpeakerToMatching={onApplySpeakerToMatching}
                                     />
                                 </div>
                             );
@@ -370,6 +507,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speaker={segment.speaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onSpeakerChange={onSpeakerChange}
+                                        onApplySpeakerToMatching={onApplySpeakerToMatching}
                                     />
                                 </motion.div>
                             );

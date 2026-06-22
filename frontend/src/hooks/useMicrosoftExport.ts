@@ -9,6 +9,7 @@ import {
   type NotebookInfo,
   type PlanInfo,
   type BucketInfo,
+  type ToDoListInfo,
   type CalendarEvent,
 } from "@/services/microsoftExportService";
 import { clearAllCalendarLinks } from "@/lib/meetingCalendar";
@@ -25,11 +26,13 @@ export function useMicrosoftExport() {
   const [notebooks, setNotebooks] = useState<NotebookInfo[]>([]);
   const [plans, setPlans] = useState<PlanInfo[]>([]);
   const [buckets, setBuckets] = useState<BucketInfo[]>([]);
+  const [todoLists, setToDoLists] = useState<ToDoListInfo[]>([]);
   const [oneNoteNotebookListingLimited, setOneNoteNotebookListingLimited] = useState(false);
 
   const [loadingNotebooks, setLoadingNotebooks] = useState(false);
   const [loadingPlans, setLoadingPlans] = useState(false);
   const [loadingBuckets, setLoadingBuckets] = useState(false);
+  const [loadingToDoLists, setLoadingToDoLists] = useState(false);
 
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
   const [currentMeeting, setCurrentMeeting] = useState<CalendarEvent | null>(null);
@@ -68,6 +71,7 @@ export function useMicrosoftExport() {
         setNotebooks([]);
         setPlans([]);
         setBuckets([]);
+        setToDoLists([]);
         setOneNoteNotebookListingLimited(false);
         setCalendarEvents([]);
         setCurrentMeeting(null);
@@ -104,6 +108,7 @@ export function useMicrosoftExport() {
       setNotebooks([]);
       setPlans([]);
       setBuckets([]);
+      setToDoLists([]);
       setOneNoteNotebookListingLimited(false);
       setCalendarEvents([]);
       setCurrentMeeting(null);
@@ -156,6 +161,17 @@ export function useMicrosoftExport() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingBuckets(false);
+    }
+  }, []);
+
+  const loadToDoLists = useCallback(async () => {
+    setLoadingToDoLists(true);
+    try {
+      setToDoLists(await microsoftExportService.listToDoLists());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingToDoLists(false);
     }
   }, []);
 
@@ -227,13 +243,16 @@ export function useMicrosoftExport() {
     notebooks,
     plans,
     buckets,
+    todoLists,
     loadingNotebooks,
     oneNoteNotebookListingLimited,
     loadingPlans,
     loadingBuckets,
+    loadingToDoLists,
     loadNotebooks,
     loadPlans,
     loadBuckets,
+    loadToDoLists,
     createNotebook,
     createBucket,
     refreshStatus,

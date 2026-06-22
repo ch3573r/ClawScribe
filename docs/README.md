@@ -27,6 +27,7 @@ Microsoft 365 integration docs:
 - [Microsoft Graph integration](integrations/microsoft-graph.md)
 - [OneNote export](integrations/onenote-export.md)
 - [Planner export](integrations/planner-export.md)
+- [Microsoft To Do export](integrations/todo-export.md)
 
 Image assets:
 

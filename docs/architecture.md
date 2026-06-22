@@ -40,7 +40,8 @@ recordings and migration paths continue to work.
 - `frontend/src-tauri/src/summary/`: summary generation providers, including
   built-in/local, API-based, OpenClaw, and Codex app-server paths.
 - `frontend/src-tauri/src/exports/`: Microsoft Graph auth, calendar lookup,
-  OneNote export, Planner export, idempotency, and testable Graph transport.
+  OneNote export, Planner/To Do task export, idempotency, and testable Graph
+  transport.
 - `frontend/src-tauri/src/exports/confluence.rs`: Confluence direct publish and
   credential handling.
 - `frontend/src-tauri/src/teams_detection.rs`: local Windows Teams meeting
@@ -54,7 +55,7 @@ recordings and migration paths continue to work.
 - Summary generation can be local or external depending on the configured
   provider.
 - Microsoft Graph is used only after Microsoft sign-in and only for calendar,
-  OneNote, and Planner workflows.
+  OneNote, Planner, and To Do workflows.
 - Confluence direct publish uses the configured server URL and PAT. Browser
   draft export remains available when SSO, proxy, or tenant policy blocks REST.
 - OpenClaw handoff is optional and sends completed recording artifacts only to

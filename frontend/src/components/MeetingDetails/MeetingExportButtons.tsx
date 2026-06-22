@@ -7,6 +7,7 @@ import {
   ConfluenceIcon,
   OneNoteIcon,
   PlannerIcon,
+  ToDoIcon,
 } from "@/components/IntegrationIcons";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,10 +42,12 @@ import {
 import {
   getExportDestinations,
   hasPlannerDestination,
+  hasToDoDestination,
   setExportDestinations,
 } from "@/lib/exportDestinations";
 import { confluenceExportService } from "@/services/confluenceExportService";
 import { PlannerExportPreview } from "./PlannerExportPreview";
+import { ToDoExportPreview } from "./ToDoExportPreview";
 
 interface MeetingExportButtonsProps {
   meetingId: string;
@@ -54,7 +57,7 @@ interface MeetingExportButtonsProps {
   getMarkdown: () => Promise<string>;
 }
 
-type Busy = "onenote" | "planner" | "confluence" | null;
+type Busy = "onenote" | "planner" | "todo" | "confluence" | null;
 
 const ONENOTE_NOTEBOOK_MAX = 128;
 function sanitizeNotebookName(raw: string): string {
@@ -121,6 +124,7 @@ export function MeetingExportButtons({
 
   const [oneNoteOpen, setOneNoteOpen] = useState(false);
   const [plannerOpen, setPlannerOpen] = useState(false);
+  const [todoOpen, setToDoOpen] = useState(false);
   const [oneNoteNotebooks, setOneNoteNotebooks] = useState<NotebookInfo[]>([]);
   const [oneNoteNotebookId, setOneNoteNotebookId] = useState("");
   const [oneNoteSavedNotebookName, setOneNoteSavedNotebookName] = useState<string | null>(null);
@@ -320,6 +324,16 @@ export function MeetingExportButtons({
     setPlannerOpen(true);
   }, []);
 
+  const openToDo = useCallback(() => {
+    if (!hasToDoDestination(getExportDestinations())) {
+      toast.info("Pick a Microsoft To Do list first", {
+        description: "Settings → Add-ons → Microsoft To Do export.",
+      });
+      return;
+    }
+    setToDoOpen(true);
+  }, []);
+
   const exportConfluence = useCallback(async () => {
     setBusy("confluence");
     try {
@@ -433,6 +447,12 @@ export function MeetingExportButtons({
             <DropdownMenuItem onClick={openPlanner}>
               <PlannerIcon className="mr-2 h-4 w-4" />
               Planner action items
+            </DropdownMenuItem>
+          )}
+          {connected && hasActionItems && (
+            <DropdownMenuItem onClick={openToDo}>
+              <ToDoIcon className="mr-2 h-4 w-4" />
+              Microsoft To Do tasks
             </DropdownMenuItem>
           )}
           <DropdownMenuItem onClick={exportConfluence}>
@@ -597,6 +617,18 @@ export function MeetingExportButtons({
           defaultBucketName={getExportDestinations().bucketName}
           getMarkdown={getMarkdown}
           onReport={(report) => reportToast("Planner", report)}
+        />
+      )}
+      {connected && (
+        <ToDoExportPreview
+          open={todoOpen}
+          onOpenChange={(o) => !busy && setToDoOpen(o)}
+          meetingId={meetingId}
+          meetingTitle={meetingTitle}
+          listId={getExportDestinations().todoListId ?? ""}
+          listName={getExportDestinations().todoListName}
+          getMarkdown={getMarkdown}
+          onReport={(report) => reportToast("Microsoft To Do", report)}
         />
       )}
     </div>

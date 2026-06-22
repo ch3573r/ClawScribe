@@ -28,6 +28,8 @@ interface TranscriptPanelProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
+  onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
+  onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
 }
 
 export function TranscriptPanel({
@@ -48,6 +50,8 @@ export function TranscriptPanel({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
+  onUpdateTranscriptSpeaker,
+  onApplySpeakerToMatching,
 }: TranscriptPanelProps) {
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
@@ -103,6 +107,8 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          onSpeakerChange={onUpdateTranscriptSpeaker}
+          onApplySpeakerToMatching={onApplySpeakerToMatching}
         />
       </div>
 

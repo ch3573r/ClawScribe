@@ -63,6 +63,8 @@ and [LICENSE.md](LICENSE.md).
   limit on large OneDrive/SharePoint libraries.
 - Planner task export through Microsoft Graph with review, edit, bucket
   selection, optional bucket creation, and duplicate protection.
+- Microsoft To Do export through Microsoft Graph for reviewed personal action
+  items, using the existing task permission scope.
 - Confluence export through either browser draft handoff or direct REST publish
   with a personal access token.
 - Optional OpenClaw handoff for deployments that ingest completed
@@ -104,6 +106,9 @@ tokens in the platform credential store.
   section-listing limit that affects large OneDrive/SharePoint libraries.
 - Planner: review parsed action items, edit titles/details, choose buckets, and
   export selected tasks. Re-exporting uses a local ledger to avoid duplicates.
+- Microsoft To Do: review parsed action items, edit titles/notes, choose a To
+  Do list, and export selected personal tasks. This uses the same
+  `Tasks.ReadWrite` consent as Planner.
 
 ## Confluence Export
 

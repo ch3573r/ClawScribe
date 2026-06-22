@@ -42,6 +42,11 @@ export interface BucketInfo {
   id: string;
   name: string;
 }
+export interface ToDoListInfo {
+  id: string;
+  displayName: string;
+  wellknownListName?: string | null;
+}
 export interface CalendarAttendee {
   name: string | null;
   email: string | null;
@@ -75,6 +80,14 @@ export interface PlannerTaskInput {
   owner: string | null;
   dueDate: string | null;
   bucketId: string;
+  details?: string | null;
+}
+
+export interface ToDoTaskInput {
+  localId: string;
+  title: string;
+  owner: string | null;
+  dueDate: string | null;
   details?: string | null;
 }
 
@@ -204,6 +217,10 @@ export const microsoftExportService = {
     return invoke<BucketInfo[]>("list_planner_buckets", { planId });
   },
 
+  async listToDoLists(): Promise<ToDoListInfo[]> {
+    return invoke<ToDoListInfo[]>("list_todo_lists");
+  },
+
   async createNotebook(displayName: string): Promise<NotebookInfo> {
     return invoke<NotebookInfo>("create_onenote_notebook", { displayName });
   },
@@ -241,6 +258,32 @@ export const microsoftExportService = {
       meetingId,
       meetingTitle,
       planId,
+      tasks,
+    });
+  },
+
+  async previewToDoTasks(
+    meetingId: string,
+    meetingTitle: string,
+    markdown: string,
+  ): Promise<PlannerTaskPreview[]> {
+    return invoke<PlannerTaskPreview[]>("preview_todo_tasks", {
+      meetingId,
+      meetingTitle,
+      markdown,
+    });
+  },
+
+  async exportSelectedToDoTasks(
+    meetingId: string,
+    meetingTitle: string,
+    listId: string,
+    tasks: ToDoTaskInput[],
+  ): Promise<ExportReport> {
+    return invoke<ExportReport>("export_selected_todo_tasks", {
+      meetingId,
+      meetingTitle,
+      listId,
       tasks,
     });
   },

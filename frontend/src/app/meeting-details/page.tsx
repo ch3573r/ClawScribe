@@ -45,6 +45,8 @@ function MeetingDetailsContent() {
     loadedCount,
     loadMore,
     refetch,
+    updateSpeaker,
+    applySpeakerToMatching,
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
 
@@ -362,6 +364,8 @@ function MeetingDetailsContent() {
       await refetchMeetings();
     }}
     onRefetchTranscripts={refetch}
+    onUpdateTranscriptSpeaker={updateSpeaker}
+    onApplySpeakerToMatching={applySpeakerToMatching}
     // Pagination props for efficient transcript loading
     segments={segments}
     hasMore={hasMore}

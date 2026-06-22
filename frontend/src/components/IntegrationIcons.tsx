@@ -36,6 +36,28 @@ export function PlannerIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
   );
 }
 
+export function ToDoIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
+      <rect x="3" y="3" width="18" height="18" rx="4" fill="#2563EB" />
+      <path
+        d="m7.1 12.3 2.7 2.7 7-7.2"
+        fill="none"
+        stroke="#fff"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2.1"
+      />
+      <path
+        d="M6.5 7.2h4.1M6.5 17h10.2"
+        stroke="#93C5FD"
+        strokeLinecap="round"
+        strokeWidth="1.35"
+      />
+    </svg>
+  );
+}
+
 export function TeamsIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
