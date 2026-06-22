@@ -5,9 +5,9 @@ import { Switch } from "./ui/switch";
 import { AlertCircle, Cpu, Users } from "lucide-react";
 import { getParakeetDirectml, setParakeetDirectml } from "@/lib/parakeetAccel";
 import {
-  getSourceAttribution,
   setSourceAttribution,
 } from "@/lib/sourceAttribution";
+import { useSourceAttribution } from "@/hooks/useSourceAttribution";
 
 export function BetaSettings() {
   // Parakeet DirectML (GPU) — experimental, opt-in. Applied on the next model
@@ -22,12 +22,8 @@ export function BetaSettings() {
   };
 
   // Source attribution (Me/Participants) — experimental, opt-in (default off).
-  const [sourceAttribution, setSourceAttributionState] = useState(false);
-  useEffect(() => {
-    setSourceAttributionState(getSourceAttribution());
-  }, []);
+  const sourceAttribution = useSourceAttribution();
   const onToggleSourceAttribution = (checked: boolean) => {
-    setSourceAttributionState(checked);
     void setSourceAttribution(checked);
   };
 

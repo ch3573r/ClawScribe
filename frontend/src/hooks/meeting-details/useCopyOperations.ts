@@ -12,6 +12,7 @@ interface UseCopyOperationsProps {
   meetingTitle: string;
   aiSummary: Summary | null;
   blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef>;
+  includeSpeakerLabels?: boolean;
 }
 
 export function useCopyOperations({
@@ -20,6 +21,7 @@ export function useCopyOperations({
   meetingTitle,
   aiSummary,
   blockNoteSummaryRef,
+  includeSpeakerLabels = true,
 }: UseCopyOperationsProps) {
 
   // Helper function to fetch ALL transcripts for copying (not just paginated data)
@@ -75,7 +77,7 @@ export function useCopyOperations({
     const header = `# Transcript of the Meeting: ${meeting.id} - ${meetingTitle ?? meeting.title}\n\n`;
     const date = `## Date: ${new Date(meeting.created_at).toLocaleDateString()}\n\n`;
     const fullTranscript = allTranscripts
-      .map(t => `${formatTranscriptLine(t)}  `)
+      .map(t => `${formatTranscriptLine(t, { includeSpeaker: includeSpeakerLabels })}  `)
       .join('\n');
 
     await navigator.clipboard.writeText(header + date + fullTranscript);
@@ -91,7 +93,7 @@ export function useCopyOperations({
       transcript_length: allTranscripts.length.toString(),
       word_count: wordCount.toString()
     });
-  }, [meeting, meetingTitle, fetchAllTranscripts]);
+  }, [meeting, meetingTitle, fetchAllTranscripts, includeSpeakerLabels]);
 
   // Copy summary to clipboard
   const handleCopySummary = useCallback(async () => {

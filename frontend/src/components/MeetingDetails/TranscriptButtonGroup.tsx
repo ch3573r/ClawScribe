@@ -34,6 +34,7 @@ interface TranscriptButtonGroupProps {
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
+  showSpeakerAttribution?: boolean;
   onRefetchTranscripts?: () => Promise<void>;
 }
 
@@ -44,6 +45,7 @@ export function TranscriptButtonGroup({
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
+  showSpeakerAttribution = true,
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
@@ -172,7 +174,7 @@ export function TranscriptButtonGroup({
           <span className="hidden 2xl:inline">Recording</span>
         </Button>
 
-        {meetingId && meetingFolderPath && (
+        {showSpeakerAttribution && meetingId && meetingFolderPath && (
           <Button
             size="sm"
             variant="outline"

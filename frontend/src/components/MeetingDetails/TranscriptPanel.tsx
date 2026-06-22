@@ -27,6 +27,7 @@ interface TranscriptPanelProps {
   // Retranscription props
   meetingId?: string;
   meetingFolderPath?: string | null;
+  showSpeakerAttribution?: boolean;
   onRefetchTranscripts?: () => Promise<void>;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
@@ -49,6 +50,7 @@ export function TranscriptPanel({
   onLoadMore,
   meetingId,
   meetingFolderPath,
+  showSpeakerAttribution = true,
   onRefetchTranscripts,
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
@@ -86,6 +88,7 @@ export function TranscriptPanel({
             onOpenMeetingFolder={onOpenMeetingFolder}
             meetingId={meetingId}
             meetingFolderPath={meetingFolderPath}
+            showSpeakerAttribution={showSpeakerAttribution}
             onRefetchTranscripts={onRefetchTranscripts}
           />
         </div>
@@ -107,8 +110,9 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
-          onSpeakerChange={onUpdateTranscriptSpeaker}
-          onApplySpeakerToMatching={onApplySpeakerToMatching}
+          showSpeakerLabels={showSpeakerAttribution}
+          onSpeakerChange={showSpeakerAttribution ? onUpdateTranscriptSpeaker : undefined}
+          onApplySpeakerToMatching={showSpeakerAttribution ? onApplySpeakerToMatching : undefined}
         />
       </div>
 

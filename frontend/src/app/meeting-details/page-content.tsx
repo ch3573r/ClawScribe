@@ -19,6 +19,7 @@ import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 
 export default function PageContent({
   meeting,
@@ -88,6 +89,7 @@ export default function PageContent({
 
   // Get model config from ConfigContext
   const { modelConfig, setModelConfig } = useConfig();
+  const sourceAttributionEnabled = useSourceAttribution();
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
@@ -138,6 +140,7 @@ export default function PageContent({
     modelConfig: modelConfig,
     isModelConfigLoading: false, // ConfigContext loads on mount
     selectedTemplate: templates.selectedTemplate,
+    includeSpeakerLabels: sourceAttributionEnabled,
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
@@ -150,6 +153,7 @@ export default function PageContent({
     meetingTitle: meetingData.meetingTitle,
     aiSummary: meetingData.aiSummary,
     blockNoteSummaryRef: meetingData.blockNoteSummaryRef,
+    includeSpeakerLabels: sourceAttributionEnabled,
   });
 
   const meetingOperations = useMeetingOperations({
@@ -223,6 +227,7 @@ export default function PageContent({
           // Retranscription props
           meetingId={meeting.id}
           meetingFolderPath={meeting.folder_path}
+          showSpeakerAttribution={sourceAttributionEnabled}
           onRefetchTranscripts={onRefetchTranscripts}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}

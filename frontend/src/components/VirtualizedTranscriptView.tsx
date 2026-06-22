@@ -38,6 +38,8 @@ export interface VirtualizedTranscriptViewProps {
     showConfidence?: boolean;
     /** Completely disable auto-scroll behavior (for meeting details page) */
     disableAutoScroll?: boolean;
+    /** Show saved speaker/source labels and editing controls. */
+    showSpeakerLabels?: boolean;
 
     // Pagination props (infinite scroll)
     hasMore?: boolean;
@@ -85,6 +87,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text,
     confidence,
     speaker,
+    showSpeakerLabels,
     isStreaming,
     showConfidence,
     onSpeakerChange,
@@ -95,6 +98,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text: string;
     confidence?: number;
     speaker?: string;
+    showSpeakerLabels: boolean;
     isStreaming: boolean;
     showConfidence: boolean;
     onSpeakerChange?: (segmentId: string, speaker: string | null) => Promise<void> | void;
@@ -103,7 +107,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     // "Me" = your microphone, "Participants" = system audio. Color-code so the
     // two sides of the conversation are scannable.
-    const currentSpeaker = speaker?.trim() || null;
+    const currentSpeaker = showSpeakerLabels ? speaker?.trim() || null : null;
     const isMe = currentSpeaker === "Me";
     const [customSpeaker, setCustomSpeaker] = useState("");
     const [isSaving, setIsSaving] = useState(false);
@@ -161,7 +165,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     </TooltipContent>
                 </Tooltip>
                 <div className="min-w-0 flex-1">
-                    {onSpeakerChange ? (
+                    {showSpeakerLabels && onSpeakerChange ? (
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                                 <button
@@ -239,7 +243,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                 )}
                             </DropdownMenuContent>
                         </DropdownMenu>
-                    ) : currentSpeaker && (
+                    ) : showSpeakerLabels && currentSpeaker && (
                         <span
                             className={`mb-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${speakerClass}`}
                         >
@@ -268,6 +272,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     enableStreaming = false,
     showConfidence = true,
     disableAutoScroll = false,
+    showSpeakerLabels = true,
     hasMore = false,
     isLoadingMore = false,
     totalCount = 0,
@@ -446,10 +451,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
+                                        showSpeakerLabels={showSpeakerLabels}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
-                                        onSpeakerChange={onSpeakerChange}
-                                        onApplySpeakerToMatching={onApplySpeakerToMatching}
+                                        onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
+                                        onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                     />
                                 </div>
                             );
@@ -505,10 +511,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
+                                        showSpeakerLabels={showSpeakerLabels}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
-                                        onSpeakerChange={onSpeakerChange}
-                                        onApplySpeakerToMatching={onApplySpeakerToMatching}
+                                        onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
+                                        onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                     />
                                 </motion.div>
                             );

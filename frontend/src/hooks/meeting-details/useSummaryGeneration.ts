@@ -59,6 +59,7 @@ interface UseSummaryGenerationProps {
   modelConfig: ModelConfig;
   isModelConfigLoading: boolean;
   selectedTemplate: string;
+  includeSpeakerLabels?: boolean;
   onMeetingUpdated?: () => Promise<void>;
   updateMeetingTitle: (title: string) => void;
   setAiSummary: (summary: Summary | null) => void;
@@ -71,6 +72,7 @@ export function useSummaryGeneration({
   modelConfig,
   isModelConfigLoading,
   selectedTemplate,
+  includeSpeakerLabels = true,
   onMeetingUpdated,
   updateMeetingTitle,
   setAiSummary,
@@ -441,11 +443,11 @@ export function useSummaryGeneration({
       // Include corrected speaker labels when known, so the summary model gets
       // who-said-what, not just a flat transcript.
       transcriptText: allTranscripts
-        .map(t => formatTranscriptLine(t))
+        .map(t => formatTranscriptLine(t, { includeSpeaker: includeSpeakerLabels }))
         .join('\n'),
       transcriptTexts: allTranscripts.map(t => t.text),
     };
-  }, []);
+  }, [includeSpeakerLabels]);
 
   // Prepend the bound calendar event's invited attendees to the summary context.
   // The binding is created at record-save (useRecordingStop), keyed by the real
