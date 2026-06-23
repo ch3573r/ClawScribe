@@ -37,6 +37,7 @@ const MIN_SPLIT_PART_SECONDS: f64 = 1.25;
 const SAME_SPEAKER_MERGE_GAP_SECONDS: f64 = 0.25;
 const SAME_SPEAKER_TRANSCRIPT_MERGE_GAP_SECONDS: f64 = 1.0;
 const SPLIT_BOUNDARY_SEARCH_WORDS: usize = 8;
+const LEGACY_ESTIMATED_WORD_TIMESTAMP_TOLERANCE_SECONDS: f64 = 0.05;
 const MAX_DOMINANT_SPEAKER_SHARE_FOR_EXPLICIT_COUNT: f64 = 0.92;
 const AUTO_MAX_CONFIDENT_SPEAKER_LANES: usize = 4;
 const AUTO_SIGNIFICANT_SPEAKER_MIN_SECONDS: f64 = 6.0;
@@ -591,13 +592,90 @@ fn has_real_aligned_word_timestamps(segment: &TranscriptSegment) -> bool {
     let Some(words) = segment.word_timestamps.as_ref() else {
         return false;
     };
-    let tokens = word_tokens(segment.text.trim());
-    !tokens.is_empty()
-        && tokens.len() == words.len()
-        && words.iter().all(|word| {
-            word.timestamp_source == Some(TranscriptWordTimestampSource::Real)
-                && is_valid_interval(word.start, word.end)
-        })
+    let text = segment.text.trim();
+    let tokens = word_tokens(text);
+    if tokens.is_empty()
+        || tokens.len() != words.len()
+        || words
+            .iter()
+            .any(|word| !is_valid_interval(word.start, word.end))
+    {
+        return false;
+    }
+
+    if words
+        .iter()
+        .any(|word| word.timestamp_source == Some(TranscriptWordTimestampSource::Estimated))
+    {
+        return false;
+    }
+
+    if words
+        .iter()
+        .all(|word| word.timestamp_source == Some(TranscriptWordTimestampSource::Real))
+    {
+        return true;
+    }
+
+    if words.iter().any(|word| word.timestamp_source.is_none()) {
+        return !matches_weighted_estimated_word_timestamps(segment, text, &tokens, words);
+    }
+
+    false
+}
+
+fn matches_weighted_estimated_word_timestamps(
+    segment: &TranscriptSegment,
+    text: &str,
+    tokens: &[WordToken],
+    words: &[TranscriptWord],
+) -> bool {
+    let Some(segment_start) = segment.audio_start_time else {
+        return false;
+    };
+    let Some(segment_end) = segment.audio_end_time else {
+        return false;
+    };
+    if tokens.is_empty()
+        || tokens.len() != words.len()
+        || !is_valid_interval(segment_start, segment_end)
+    {
+        return false;
+    }
+
+    let total_weight = tokens
+        .iter()
+        .map(|token| word_token_weight(text, token))
+        .sum::<f64>()
+        .max(1.0);
+    let duration = segment_end - segment_start;
+    let mut cursor = segment_start;
+
+    for (index, (token, word)) in tokens.iter().zip(words.iter()).enumerate() {
+        let expected_start = cursor;
+        let expected_end = if index + 1 == tokens.len() {
+            segment_end
+        } else {
+            (cursor + duration * (word_token_weight(text, token) / total_weight)).min(segment_end)
+        };
+        cursor = expected_end;
+
+        if (word.start - expected_start).abs() > LEGACY_ESTIMATED_WORD_TIMESTAMP_TOLERANCE_SECONDS
+            || (word.end - expected_end).abs() > LEGACY_ESTIMATED_WORD_TIMESTAMP_TOLERANCE_SECONDS
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn word_token_weight(text: &str, token: &WordToken) -> f64 {
+    text[token.start_byte..token.end_byte]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+        .max(1) as f64
 }
 
 fn merge_adjacent_transcript_segments_by_speaker(
@@ -4612,6 +4690,52 @@ mod tests {
     }
 
     #[test]
+    fn splits_short_interjection_with_legacy_precise_word_timestamps() {
+        let mut segment = transcript_with_word_timestamps(
+            "a",
+            &[
+                ("What", 0.0, 0.4),
+                ("about", 0.4, 0.8),
+                ("drones?", 0.8, 4.0),
+                ("Who", 4.0, 4.15),
+                ("made", 4.15, 4.3),
+                ("money", 4.3, 4.45),
+                ("on", 4.45, 4.6),
+                ("that", 4.6, 4.8),
+                ("one?", 4.8, 5.0),
+                ("Should", 5.0, 5.3),
+                ("we", 5.3, 5.6),
+                ("look", 5.6, 5.9),
+                ("it", 5.9, 6.1),
+                ("up?", 6.1, 8.0),
+            ],
+            0.0,
+            8.0,
+        );
+        for word in segment.word_timestamps.as_mut().unwrap() {
+            word.timestamp_source = None;
+        }
+        let turns = vec![turn(0.0, 4.0, 1), turn(4.0, 5.0, 0), turn(5.0, 8.0, 1)];
+
+        let mapped = map_diarization_to_transcript_segments(
+            &[segment],
+            &turns,
+            DiarizationMappingOptions {
+                existing_speaker_policy: ExistingSpeakerPolicy::Overwrite,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[0].speaker.as_deref(), Some("Speaker 2"));
+        assert_eq!(mapped[0].text, "What about drones?");
+        assert_eq!(mapped[1].speaker.as_deref(), Some("Speaker 1"));
+        assert_eq!(mapped[1].text, "Who made money on that one?");
+        assert_eq!(mapped[2].speaker.as_deref(), Some("Speaker 2"));
+        assert_eq!(mapped[2].text, "Should we look it up?");
+    }
+
+    #[test]
     fn does_not_bypass_short_part_gate_for_estimated_word_timestamps() {
         let mut segment = transcript_with_word_timestamps(
             "a",
@@ -4636,6 +4760,34 @@ mod tests {
         );
         for word in segment.word_timestamps.as_mut().unwrap() {
             word.timestamp_source = Some(TranscriptWordTimestampSource::Estimated);
+        }
+        let turns = vec![turn(0.0, 4.0, 1), turn(4.0, 5.0, 0), turn(5.0, 8.0, 1)];
+
+        let mapped = map_diarization_to_transcript_segments(
+            &[segment],
+            &turns,
+            DiarizationMappingOptions {
+                existing_speaker_policy: ExistingSpeakerPolicy::Overwrite,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].speaker.as_deref(), Some("Speaker 2"));
+    }
+
+    #[test]
+    fn does_not_bypass_short_part_gate_for_legacy_estimated_word_timestamps() {
+        let mut segment = transcript_with_text(
+            "a",
+            "What about drones? Who made money on that one? Should we look it up?",
+            Some(0.0),
+            Some(8.0),
+        );
+        segment.word_timestamps =
+            crate::audio::common::estimate_word_timestamps(&segment.text, 0.0, 8.0, None, None);
+        for word in segment.word_timestamps.as_mut().unwrap() {
+            word.timestamp_source = None;
         }
         let turns = vec![turn(0.0, 4.0, 1), turn(4.0, 5.0, 0), turn(5.0, 8.0, 1)];
 
