@@ -1,16 +1,8 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,42 +12,22 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
-  CheckCircle2,
   ChevronDown,
-  Clock,
   Copy,
-  Cpu,
   FolderOpen,
-  Gauge,
-  Hash,
   RefreshCw,
-  Route,
   Users,
-  Zap,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
-
-interface SpeakerDiarizationProgress {
-  meeting_id: string;
-  stage: string;
-  progress_percentage: number;
-  message: string;
-}
-
-interface SpeakerDiarizationComplete {
-  meeting_id: string;
-  speaker_count: number;
-  updated_segments: number;
-  duration_seconds: number;
-  processing_seconds: number;
-  provider: string;
-  embedding_model: string;
-  turn_count: number;
-}
+import {
+  SpeakerDiarizationDialog,
+  SpeakerDiarizationComplete,
+  SpeakerDiarizationProgress,
+} from './SpeakerDiarizationDialog';
 
 interface SpeakerDiarizationError {
   meeting_id: string;
@@ -72,27 +44,6 @@ interface TranscriptButtonGroupProps {
   onRefetchTranscripts?: () => Promise<void>;
 }
 
-function formatDuration(seconds: number): string {
-  const safeSeconds = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-  const hours = Math.floor(safeSeconds / 3600);
-  const minutes = Math.floor((safeSeconds % 3600) / 60);
-  const secs = Math.floor(safeSeconds % 60);
-
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  }
-  return `${minutes}:${secs.toString().padStart(2, '0')}`;
-}
-
-function formatProvider(provider: string): string {
-  const normalized = provider.trim().toLowerCase();
-  if (normalized === 'directml') return 'DirectML';
-  if (normalized === 'cpu') return 'CPU';
-  if (!normalized) return 'Unknown provider';
-  return provider;
-}
-
-
 export function TranscriptButtonGroup({
   transcriptCount,
   onCopyTranscript,
@@ -103,28 +54,13 @@ export function TranscriptButtonGroup({
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const [showDiarizationDialog, setShowDiarizationDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
+  const [diarizationProgress, setDiarizationProgress] = useState<SpeakerDiarizationProgress | null>(null);
   const [diarizationResult, setDiarizationResult] = useState<SpeakerDiarizationComplete | null>(null);
-  const [showDiarizationResult, setShowDiarizationResult] = useState(false);
-  const diarizationToastIdRef = useRef<string | number | null>(null);
-
-  const showDiarizationProgress = useCallback((message: string, progress?: number) => {
-    const id = diarizationToastIdRef.current ?? `speaker-diarization-${meetingId ?? 'current'}`;
-    diarizationToastIdRef.current = id;
-    toast.loading('Detecting speakers', {
-      id,
-      description: typeof progress === 'number' ? `${progress}% - ${message}` : message,
-      duration: Infinity,
-    });
-  }, [meetingId]);
-
-  const clearDiarizationProgress = useCallback(() => {
-    if (diarizationToastIdRef.current !== null) {
-      toast.dismiss(diarizationToastIdRef.current);
-      diarizationToastIdRef.current = null;
-    }
-  }, []);
+  const [diarizationError, setDiarizationError] = useState<string | null>(null);
+  const [diarizationMode, setDiarizationMode] = useState<string | null>(null);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data
@@ -143,18 +79,18 @@ export function TranscriptButtonGroup({
       const running = event.payload.stage !== 'complete';
       setIsDiarizing(running);
       setDiarizationMessage(event.payload.message);
-      if (running) {
-        showDiarizationProgress(event.payload.message, event.payload.progress_percentage);
-      }
+      setDiarizationProgress(event.payload);
+      setShowDiarizationDialog(true);
     }).then((unlisten) => unlistenCallbacks.push(unlisten));
 
     void listen<SpeakerDiarizationComplete>('speaker-diarization-complete', async (event) => {
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      setDiarizationProgress(null);
       setDiarizationResult(event.payload);
-      setShowDiarizationResult(true);
-      clearDiarizationProgress();
+      setDiarizationError(null);
+      setShowDiarizationDialog(true);
       toast.success('Speaker labels applied', {
         description: `${event.payload.updated_segments} transcript segments updated across ${event.payload.speaker_count} speaker${event.payload.speaker_count === 1 ? '' : 's'}.`,
       });
@@ -165,9 +101,10 @@ export function TranscriptButtonGroup({
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      setDiarizationProgress(null);
       setDiarizationResult(null);
-      setShowDiarizationResult(false);
-      clearDiarizationProgress();
+      setDiarizationError(event.payload.error);
+      setShowDiarizationDialog(true);
       toast.error('Speaker diarization failed', {
         description: event.payload.error,
       });
@@ -177,16 +114,23 @@ export function TranscriptButtonGroup({
     return () => {
       unlistenCallbacks.forEach((unlisten) => unlisten());
     };
-  }, [clearDiarizationProgress, meetingId, onRefetchTranscripts, showDiarizationProgress]);
+  }, [meetingId, onRefetchTranscripts]);
 
   const handleRunSpeakerDiarization = useCallback(async (numSpeakers: number | null = null) => {
     if (!meetingId || !meetingFolderPath) return;
     const speakerMode = numSpeakers ? `${numSpeakers} speakers` : 'Auto speaker detection';
     setIsDiarizing(true);
     setDiarizationMessage(`Starting ${speakerMode.toLowerCase()}...`);
+    setDiarizationMode(speakerMode);
+    setDiarizationProgress({
+      meeting_id: meetingId,
+      stage: 'starting',
+      progress_percentage: 0,
+      message: `Starting ${speakerMode.toLowerCase()}...`,
+    });
     setDiarizationResult(null);
-    setShowDiarizationResult(false);
-    showDiarizationProgress(`Starting ${speakerMode.toLowerCase()}...`, 0);
+    setDiarizationError(null);
+    setShowDiarizationDialog(true);
     try {
       Analytics.trackButtonClick(numSpeakers ? `speaker_diarization_${numSpeakers}` : 'speaker_diarization_auto', 'meeting_details');
       await invoke('start_speaker_diarization_command', {
@@ -201,17 +145,16 @@ export function TranscriptButtonGroup({
     } catch (error) {
       setIsDiarizing(false);
       setDiarizationMessage(null);
-      clearDiarizationProgress();
+      setDiarizationProgress(null);
+      setDiarizationError(String(error));
+      setShowDiarizationDialog(true);
       toast.error('Could not start speaker diarization', {
         description: String(error),
       });
     }
-  }, [clearDiarizationProgress, meetingFolderPath, meetingId, showDiarizationProgress]);
+  }, [meetingFolderPath, meetingId]);
 
   const speakerDetectionDisabled = transcriptCount === 0 || isDiarizing;
-  const diarizationSpeed = diarizationResult && diarizationResult.processing_seconds > 0
-    ? diarizationResult.duration_seconds / diarizationResult.processing_seconds
-    : null;
 
   return (
     <div className="flex shrink-0 items-center justify-end gap-2">
@@ -305,97 +248,21 @@ export function TranscriptButtonGroup({
         />
       )}
 
-      <Dialog open={showDiarizationResult} onOpenChange={setShowDiarizationResult}>
-        <DialogContent className="sm:max-w-[540px]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-              Speaker Diarization Complete
-            </DialogTitle>
-            <DialogDescription>
-              Speaker labels were applied. Benchmark below.
-            </DialogDescription>
-          </DialogHeader>
-
-          {diarizationResult && (
-            <div className="space-y-4 py-2">
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                <div className="rounded-md border border-border bg-muted p-3">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Clock className="h-3.5 w-3.5" />
-                    Audio
-                  </div>
-                  <p className="mt-1 text-lg font-semibold text-foreground">
-                    {formatDuration(diarizationResult.duration_seconds)}
-                  </p>
-                </div>
-                <div className="rounded-md border border-border bg-muted p-3">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Gauge className="h-3.5 w-3.5" />
-                    Processing
-                  </div>
-                  <p className="mt-1 text-lg font-semibold text-foreground">
-                    {diarizationResult.processing_seconds.toFixed(1)}s
-                  </p>
-                </div>
-                <div className="rounded-md border border-border bg-muted p-3">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Zap className="h-3.5 w-3.5" />
-                    Speed
-                  </div>
-                  <p className="mt-1 text-lg font-semibold text-foreground">
-                    {diarizationSpeed ? `${diarizationSpeed.toFixed(1)}x` : '-'}
-                  </p>
-                </div>
-                <div className="rounded-md border border-border bg-muted p-3">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Users className="h-3.5 w-3.5" />
-                    Speakers
-                  </div>
-                  <p className="mt-1 text-lg font-semibold text-foreground">
-                    {diarizationResult.speaker_count}
-                  </p>
-                </div>
-                <div className="rounded-md border border-border bg-muted p-3">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Route className="h-3.5 w-3.5" />
-                    Turns
-                  </div>
-                  <p className="mt-1 text-lg font-semibold text-foreground">
-                    {diarizationResult.turn_count}
-                  </p>
-                </div>
-                <div className="rounded-md border border-border bg-muted p-3">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Hash className="h-3.5 w-3.5" />
-                    Rows
-                  </div>
-                  <p className="mt-1 text-lg font-semibold text-foreground">
-                    {diarizationResult.updated_segments}
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-1 text-xs text-muted-foreground">
-                <div className="flex items-start gap-1.5">
-                  <Cpu className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span>Provider: {formatProvider(diarizationResult.provider)}</span>
-                </div>
-                <div className="flex items-start gap-1.5">
-                  <Users className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span className="break-words">Embedding: {diarizationResult.embedding_model}</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowDiarizationResult(false)}>
-              Close
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <SpeakerDiarizationDialog
+        open={showDiarizationDialog}
+        onOpenChange={setShowDiarizationDialog}
+        isProcessing={isDiarizing}
+        progress={diarizationProgress}
+        result={diarizationResult}
+        error={diarizationError}
+        speakerMode={diarizationMode}
+        onClearError={() => {
+          setDiarizationError(null);
+          setDiarizationProgress(null);
+          setDiarizationResult(null);
+          setShowDiarizationDialog(false);
+        }}
+      />
     </div>
   );
 }

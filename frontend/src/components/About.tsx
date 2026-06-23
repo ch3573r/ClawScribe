@@ -111,13 +111,6 @@ export function About() {
                 </div>
             </div>
 
-            {/* Current workflow - Compact */}
-            <div className="bg-primary/10 rounded p-3">
-                <p className="text-s text-primary">
-                    <span className="font-bold">Current workflow:</span> Review action items before exporting to Planner or Microsoft To Do, send meeting notes to OneNote or Confluence, and optionally hand completed recordings to OpenClaw when configured.
-                </p>
-            </div>
-
             {/* CTA Section - Compact */}
             <div className="text-center space-y-2">
                 <h3 className="text-medium font-semibold text-foreground">Need a private meeting workflow?</h3>
