@@ -700,21 +700,13 @@ const Sidebar: React.FC = () => {
                 </span>
               </button>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid gap-2">
                 <button
                   onClick={() => openImportDialog()}
                   className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
                 >
                   <Upload className="h-4 w-4 shrink-0" />
                   <span className="truncate">Import</span>
-                </button>
-
-                <button
-                  onClick={() => router.push("/settings")}
-                  className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
-                >
-                  <Settings className="h-4 w-4 shrink-0" />
-                  <span className="truncate">Settings</span>
                 </button>
               </div>
 
