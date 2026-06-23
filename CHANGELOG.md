@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.21
+
+- Prevented a diarization mapping collapse where sherpa found multiple speaker
+  lanes but overlapping turns caused the transcript labels to flatten to one
+  speaker.
+- Added an overlap-to-midpoint mapping fallback for diarization and an
+  actionable hard error when an explicitly requested multi-speaker run would
+  otherwise save fake one-speaker labels.
+- Kept the retranscription benchmark dialog open after completion so users can
+  see audio length, processing time, realtime speed, model, language, and
+  segment count.
+- Added a speaker-diarization completion dialog with audio length, processing
+  time, realtime speed, provider, embedding model, turn count, detected
+  speakers, and updated transcript rows.
+- `latest.json` advertises runtime version `0.5.21`, so installed `0.5.20`
+  clients can discover this update.
+
 ## 0.5.20
 
 - Improved speaker diarization accuracy by preserving sherpa speaker turns
