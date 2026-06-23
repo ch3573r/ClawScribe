@@ -1297,10 +1297,22 @@ pub struct SpeakerDiarizationError {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiarizationRuntimeDll {
-    name: String,
-    present: bool,
-    bytes: Option<u64>,
+pub struct DiarizationRuntimeDll {
+    pub name: String,
+    pub present: bool,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerDiarizationRuntimeStatus {
+    pub in_progress: bool,
+    pub directml_compiled: bool,
+    pub directml_fast: bool,
+    pub directml_slow: bool,
+    pub directml_unavailable: bool,
+    pub preferred_provider: String,
+    pub runtime_dlls: Vec<DiarizationRuntimeDll>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2669,6 +2681,18 @@ fn collect_sherpa_runtime_dlls() -> Vec<DiarizationRuntimeDll> {
             }
         })
         .collect()
+}
+
+pub fn speaker_diarization_runtime_status() -> SpeakerDiarizationRuntimeStatus {
+    SpeakerDiarizationRuntimeStatus {
+        in_progress: DIARIZATION_IN_PROGRESS.load(Ordering::SeqCst),
+        directml_compiled: cfg!(all(target_os = "windows", feature = "directml")),
+        directml_fast: DIARIZATION_DIRECTML_FAST.load(Ordering::SeqCst),
+        directml_slow: DIARIZATION_DIRECTML_SLOW.load(Ordering::SeqCst),
+        directml_unavailable: DIARIZATION_DIRECTML_UNAVAILABLE.load(Ordering::SeqCst),
+        preferred_provider: preferred_diarization_provider().to_string(),
+        runtime_dlls: collect_sherpa_runtime_dlls(),
+    }
 }
 
 fn diarization_log_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {

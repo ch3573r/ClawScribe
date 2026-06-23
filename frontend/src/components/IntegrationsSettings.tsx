@@ -7,11 +7,19 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  Copy,
+  Cpu,
+  Gauge,
+  HardDrive,
   Loader2,
   LogIn,
   LogOut,
+  Mic,
   RefreshCw,
+  ShieldCheck,
+  Zap,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   CodexIcon,
   ConfluenceIcon,
@@ -2222,6 +2230,441 @@ function CalendarPanel() {
   );
 }
 
+interface AccelerationDiagnosticStatus {
+  compiledBackend: string;
+  runtimeDetectedGpu: string;
+  useGpu: boolean;
+  flashAttn: boolean;
+  label: string;
+  gpuAvailableButUnused: boolean;
+  cpuCores: number;
+  memoryGb: number;
+  performanceTier: string;
+}
+
+interface SystemResourcesDiagnostic {
+  memory_used_percent: number;
+  cpu_usage_percent: number;
+  cpu_temperature_celsius?: number | null;
+  available_memory_mb: number;
+  total_memory_mb: number;
+  cpu_cores: number;
+}
+
+interface ModelEngineDiagnostic {
+  provider: string;
+  loaded?: boolean | null;
+  currentModel?: string | null;
+  selectedModelPresent?: boolean | null;
+  downloadedModels: number;
+  totalModels: number;
+  modelsDirectory?: string | null;
+  error?: string | null;
+}
+
+interface TranscriptionDiagnostic {
+  selectedProvider: string;
+  selectedModel: string;
+  apiKeyConfigured: boolean;
+  parakeetDirectmlEnabled?: boolean | null;
+  engines: ModelEngineDiagnostic[];
+}
+
+interface AudioDiagnostic {
+  inputDevices: number;
+  outputDevices: number;
+  totalDevices: number;
+  deviceNames: string[];
+  error?: string | null;
+}
+
+interface RecordingDiagnostic {
+  is_recording?: boolean;
+  is_paused?: boolean;
+  is_active?: boolean;
+  recording_duration?: number | null;
+  active_duration?: number | null;
+  total_pause_duration?: number | null;
+  current_pause_duration?: number | null;
+}
+
+interface DiarizationRuntimeDiagnostic {
+  inProgress: boolean;
+  directmlCompiled: boolean;
+  directmlFast: boolean;
+  directmlSlow: boolean;
+  directmlUnavailable: boolean;
+  preferredProvider: string;
+  runtimeDlls: Array<{
+    name: string;
+    present: boolean;
+    bytes?: number | null;
+  }>;
+}
+
+interface DiagnosticsSnapshot {
+  app: {
+    version: string;
+    os: string;
+    arch: string;
+    buildProfile: string;
+    appDataDir?: string | null;
+    logsDir?: string | null;
+  };
+  systemResources?: SystemResourcesDiagnostic | null;
+  acceleration?: AccelerationDiagnosticStatus | null;
+  transcription: TranscriptionDiagnostic;
+  audio: AudioDiagnostic;
+  recording: RecordingDiagnostic;
+  diarization: DiarizationRuntimeDiagnostic;
+  integrations: {
+    teams?: TeamsDetectionStatus | null;
+    openclaw?: OpenClawConfigStatus | null;
+    codex?: CodexStatus | null;
+  };
+  errors: string[];
+}
+
+const TRANSCRIPT_PROVIDER_LABELS: Record<string, string> = {
+  localWhisper: "Whisper",
+  parakeet: "Parakeet",
+  nemotron: "Nemotron",
+  api: "API",
+};
+
+function providerLabel(provider: string): string {
+  return TRANSCRIPT_PROVIDER_LABELS[provider] ?? provider;
+}
+
+function formatPercent(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(0)}%`;
+}
+
+function formatSeconds(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  if (value < 60) return `${value.toFixed(0)}s`;
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.floor(value % 60);
+  return `${minutes}m ${seconds}s`;
+}
+
+function selectedEngine(snapshot: DiagnosticsSnapshot | null): ModelEngineDiagnostic | null {
+  if (!snapshot) return null;
+  return (
+    snapshot.transcription.engines.find(
+      (engine) => engine.provider === snapshot.transcription.selectedProvider,
+    ) ?? null
+  );
+}
+
+function modelState(snapshot: DiagnosticsSnapshot | null): AddonState {
+  const engine = selectedEngine(snapshot);
+  if (!snapshot || !engine) return "connecting";
+  if (engine.error) return "advanced";
+  if (engine.selectedModelPresent === false) return "provider";
+  return "ready";
+}
+
+function diagnosticsState(snapshot: DiagnosticsSnapshot | null): AddonState {
+  if (!snapshot) return "connecting";
+  if (snapshot.errors.length > 0) return "advanced";
+  if (snapshot.audio.inputDevices === 0) return "provider";
+  if (snapshot.acceleration?.gpuAvailableButUnused) return "advanced";
+  if (modelState(snapshot) !== "ready") return modelState(snapshot);
+  return "ready";
+}
+
+function diagnosticToneClasses(tone: "good" | "warn" | "neutral" | "bad") {
+  switch (tone) {
+    case "good":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200";
+    case "warn":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200";
+    case "bad":
+      return "border-destructive/30 bg-destructive/10 text-destructive";
+    case "neutral":
+    default:
+      return "border-border bg-muted/45 text-foreground";
+  }
+}
+
+function DiagnosticTile({
+  icon: Icon,
+  label,
+  value,
+  detail,
+  tone = "neutral",
+}: {
+  icon: ElementType;
+  label: string;
+  value: string;
+  detail?: string;
+  tone?: "good" | "warn" | "neutral" | "bad";
+}) {
+  return (
+    <div className={`rounded-lg border p-3 ${diagnosticToneClasses(tone)}`}>
+      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide opacity-80">
+        <Icon className="h-3.5 w-3.5" />
+        {label}
+      </div>
+      <div className="mt-2 text-sm font-semibold">{value}</div>
+      {detail && <div className="mt-1 text-xs opacity-80">{detail}</div>}
+    </div>
+  );
+}
+
+function sanitizeDiagnosticsForCopy(snapshot: DiagnosticsSnapshot) {
+  return {
+    generatedAt: new Date().toISOString(),
+    app: snapshot.app,
+    systemResources: snapshot.systemResources,
+    acceleration: snapshot.acceleration,
+    transcription: snapshot.transcription,
+    audio: {
+      ...snapshot.audio,
+      deviceNames: snapshot.audio.deviceNames.slice(0, 20),
+    },
+    recording: snapshot.recording,
+    diarization: snapshot.diarization,
+    integrations: {
+      teams: snapshot.integrations.teams,
+      openclaw: snapshot.integrations.openclaw,
+      codex: snapshot.integrations.codex,
+    },
+    errors: snapshot.errors,
+  };
+}
+
+function DiagnosticsSystemPanel({
+  snapshot,
+  loading,
+  error,
+  onRefresh,
+}: {
+  snapshot: DiagnosticsSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const engine = selectedEngine(snapshot);
+  const modelStatus = !engine
+    ? "Checking"
+    : engine.error
+      ? "Error"
+      : engine.selectedModelPresent === false
+        ? "Missing"
+        : "Ready";
+  const modelTone = modelStatus === "Ready" ? "good" : modelStatus === "Missing" ? "bad" : "warn";
+  const accelerationTone = snapshot?.acceleration?.useGpu
+    ? "good"
+    : snapshot?.acceleration?.gpuAvailableButUnused
+      ? "warn"
+      : "neutral";
+  const audioTone = snapshot?.audio.error
+    ? "bad"
+    : snapshot && snapshot.audio.inputDevices > 0
+      ? "good"
+      : "warn";
+  const diarizationTone = snapshot?.diarization.directmlFast
+    ? "good"
+    : snapshot?.diarization.directmlSlow || snapshot?.diarization.directmlUnavailable
+      ? "warn"
+      : "neutral";
+
+  const copyDiagnostics = async () => {
+    if (!snapshot) return;
+    try {
+      await navigator.clipboard.writeText(
+        JSON.stringify(sanitizeDiagnosticsForCopy(snapshot), null, 2),
+      );
+      toast.success("Diagnostics copied");
+    } catch (copyError) {
+      toast.error("Failed to copy diagnostics", {
+        description: copyError instanceof Error ? copyError.message : String(copyError),
+      });
+    }
+  };
+
+  return (
+    <AddonPanel
+      icon={ShieldCheck}
+      title="System health"
+      state={diagnosticsState(snapshot)}
+      badgeLabel={snapshot ? stateBadge(diagnosticsState(snapshot)) : "Checking…"}
+      detail="Build, engine, audio, and diarization status for support and troubleshooting."
+    >
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-sm text-muted-foreground">
+            {snapshot
+              ? `ClawScribe ${snapshot.app.version} · ${snapshot.app.os}/${snapshot.app.arch} · ${snapshot.app.buildProfile}`
+              : "Loading local diagnostics…"}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+              <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={copyDiagnostics}
+              disabled={!snapshot}
+            >
+              <Copy className="mr-2 h-4 w-4" />
+              Copy diagnostics
+            </Button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <DiagnosticTile
+            icon={snapshot?.acceleration?.useGpu ? Zap : Cpu}
+            label="Transcription backend"
+            value={snapshot?.acceleration?.label ?? "Checking"}
+            detail={
+              snapshot
+                ? `${snapshot.acceleration?.compiledBackend ?? "Unknown"} · GPU: ${
+                    snapshot.acceleration?.runtimeDetectedGpu ?? "Unknown"
+                  }`
+                : undefined
+            }
+            tone={accelerationTone}
+          />
+          <DiagnosticTile
+            icon={HardDrive}
+            label="Selected model"
+            value={
+              snapshot
+                ? `${providerLabel(snapshot.transcription.selectedProvider)} · ${modelStatus}`
+                : "Checking"
+            }
+            detail={snapshot?.transcription.selectedModel}
+            tone={modelTone}
+          />
+          <DiagnosticTile
+            icon={Mic}
+            label="Audio devices"
+            value={
+              snapshot
+                ? `${snapshot.audio.inputDevices} input · ${snapshot.audio.outputDevices} output`
+                : "Checking"
+            }
+            detail={snapshot?.audio.error ?? `${snapshot?.audio.totalDevices ?? 0} total devices`}
+            tone={audioTone}
+          />
+          <DiagnosticTile
+            icon={Gauge}
+            label="Diarization"
+            value={
+              snapshot
+                ? snapshot.diarization.inProgress
+                  ? "Running"
+                  : snapshot.diarization.preferredProvider.toUpperCase()
+                : "Checking"
+            }
+            detail={
+              snapshot
+                ? snapshot.diarization.directmlFast
+                  ? "DirectML accepted this session"
+                  : snapshot.diarization.directmlSlow
+                    ? "DirectML probed slow; CPU fallback"
+                    : snapshot.diarization.directmlUnavailable
+                      ? "DirectML unavailable; CPU fallback"
+                      : `${snapshot.diarization.runtimeDlls.filter((dll) => dll.present).length}/${
+                          snapshot.diarization.runtimeDlls.length
+                        } runtime files present`
+                : undefined
+            }
+            tone={diarizationTone}
+          />
+        </div>
+
+        {snapshot?.acceleration?.gpuAvailableButUnused && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              A {snapshot.acceleration.runtimeDetectedGpu} GPU is visible, but this build is using
+              CPU transcription.
+            </span>
+          </div>
+        )}
+
+        {snapshot && (
+          <details className="rounded-lg border border-border bg-muted/35 p-3">
+            <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">
+              Details
+            </summary>
+            <div className="mt-3 grid gap-3 text-sm lg:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-xs font-medium uppercase text-muted-foreground">
+                  System load
+                </div>
+                <div className="rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
+                  CPU {formatPercent(snapshot.systemResources?.cpu_usage_percent)} · Memory{" "}
+                  {formatPercent(snapshot.systemResources?.memory_used_percent)} ·{" "}
+                  {snapshot.systemResources?.cpu_cores ?? snapshot.acceleration?.cpuCores ?? "—"}{" "}
+                  cores
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-medium uppercase text-muted-foreground">
+                  Recording
+                </div>
+                <div className="rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
+                  {snapshot.recording.is_recording ? "Recording" : "Idle"} ·{" "}
+                  {snapshot.recording.is_paused ? "Paused" : "Active-ready"} · active{" "}
+                  {formatSeconds(snapshot.recording.active_duration)}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-medium uppercase text-muted-foreground">
+                  Models
+                </div>
+                <div className="space-y-1 rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
+                  {snapshot.transcription.engines.map((engine) => (
+                    <div key={engine.provider} className="flex justify-between gap-3">
+                      <span>{providerLabel(engine.provider)}</span>
+                      <span>
+                        {engine.downloadedModels}/{engine.totalModels} downloaded
+                        {engine.loaded ? " · loaded" : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-medium uppercase text-muted-foreground">
+                  Runtime paths
+                </div>
+                <div className="space-y-1 rounded-md border border-border bg-background/70 p-3 font-mono text-[11px] text-muted-foreground">
+                  <div className="break-all">Data: {snapshot.app.appDataDir ?? "—"}</div>
+                  <div className="break-all">Logs: {snapshot.app.logsDir ?? "—"}</div>
+                </div>
+              </div>
+            </div>
+            {snapshot.errors.length > 0 && (
+              <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+                {snapshot.errors.map((item) => (
+                  <div key={item}>{item}</div>
+                ))}
+              </div>
+            )}
+          </details>
+        )}
+      </div>
+    </AddonPanel>
+  );
+}
+
 function GroupHeader({ icon, title, desc }: { icon: ReactNode; title: string; desc: string }) {
   return (
     <div className="flex items-start gap-3 border-b border-border pb-3">
@@ -2279,6 +2722,26 @@ export function IntegrationsSettings() {
 }
 
 export function DiagnosticsSettings() {
+  const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const loadSnapshot = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setSnapshot(await invoke<DiagnosticsSnapshot>("get_diagnostics_snapshot"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSnapshot();
+  }, [loadSnapshot]);
+
   return (
     <div className="space-y-5">
       <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
@@ -2287,13 +2750,19 @@ export function DiagnosticsSettings() {
           <div>
             <h2 className="text-lg font-semibold text-foreground">Diagnostics</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Live status for meeting detection, OpenClaw handoff, and the Codex
-              app-server.
+              Build, model, audio, diarization, and integration health for
+              troubleshooting.
             </p>
           </div>
         </div>
       </div>
 
+      <DiagnosticsSystemPanel
+        snapshot={snapshot}
+        loading={loading}
+        error={error}
+        onRefresh={loadSnapshot}
+      />
       <TeamsDetectionPanel />
       <OpenClawPanel />
       <CodexPanel />

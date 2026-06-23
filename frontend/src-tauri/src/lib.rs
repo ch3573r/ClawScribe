@@ -45,6 +45,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod diagnostics;
 pub mod exports;
 pub mod groq;
 pub mod nemotron_engine;
@@ -859,6 +860,7 @@ pub fn run() {
             // Playback device detection (Bluetooth warning)
             audio::recording_commands::get_active_audio_output,
             // OpenClaw handoff commands
+            diagnostics::get_diagnostics_snapshot,
             openclaw::get_openclaw_config_status,
             openclaw::get_openclaw_submission_status,
             openclaw::save_openclaw_config,
