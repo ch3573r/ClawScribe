@@ -35,6 +35,7 @@ const MIN_SPLIT_PART_SECONDS: f64 = 1.25;
 const SAME_SPEAKER_MERGE_GAP_SECONDS: f64 = 0.25;
 const SAME_SPEAKER_TRANSCRIPT_MERGE_GAP_SECONDS: f64 = 1.0;
 const SPLIT_BOUNDARY_SEARCH_WORDS: usize = 8;
+const MAX_DOMINANT_SPEAKER_SHARE_FOR_EXPLICIT_COUNT: f64 = 0.92;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
 const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 const DEFAULT_SEGMENTATION_MODEL_ID: &str = "pyannote-segmentation-3-0-int8";
@@ -98,6 +99,26 @@ struct TranscriptSpeakerSpan {
 struct WordToken {
     start_byte: usize,
     end_byte: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MappedDiarizationQuality {
+    speaker_count: usize,
+    labelled_seconds: f64,
+    dominant_speaker: Option<String>,
+    dominant_seconds: f64,
+    dominant_share: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DiarizationMappingAttempt {
+    model_paths: DiarizationModelPaths,
+    profile: DiarizationProfile,
+    provider: &'static str,
+    turns: Vec<DiarizationTurn>,
+    mapped_segments: Vec<TranscriptSegment>,
+    prepared_speaker_count: usize,
+    quality: MappedDiarizationQuality,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1464,6 +1485,19 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         return Err(anyhow!("No transcript segments found for this meeting"));
     }
 
+    let requested_segmentation_model_path = segmentation_model_path.clone();
+    let requested_embedding_model_path = embedding_model_path.clone();
+    let custom_embedding_requested = embedding_model_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .is_some()
+        || embedding_model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .is_some();
+
     let resolved_embedding_model_id = resolve_embedding_model_id_for_meeting(
         &folder_path,
         embedding_model_path.as_deref(),
@@ -1476,25 +1510,6 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         embedding_model_path,
         resolved_embedding_model_id,
     )?;
-
-    ensure_model_available(
-        &app,
-        &meeting_id,
-        &model_paths.segmentation_model,
-        model_paths.segmentation_descriptor,
-        "segmentation",
-        model_paths.can_download_segmentation,
-    )
-    .await?;
-    ensure_model_available(
-        &app,
-        &meeting_id,
-        &model_paths.embedding_model,
-        model_paths.embedding_descriptor,
-        "embedding",
-        model_paths.can_download_embedding,
-    )
-    .await?;
 
     emit_progress(
         &app,
@@ -1523,73 +1538,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     }
 
     let sample_count = samples.len();
-    let audio_minutes = audio_duration_minutes(sample_count);
     let samples = Arc::new(samples);
     let explicit_num_speakers = num_speakers.filter(|value| *value > 0);
-    let clustering_threshold = default_clustering_threshold(&model_paths);
-    let mut profile = DiarizationProfile::new(
-        &meeting_id,
-        sample_count,
-        explicit_num_speakers,
-        clustering_threshold,
-        &model_paths,
-    );
-    let provider = select_diarization_provider(
-        &app,
-        &meeting_id,
-        &model_paths,
-        explicit_num_speakers,
-        clustering_threshold,
-        Arc::clone(&samples),
-        &mut profile,
-    )
-    .await?;
-    let diarization_message = if audio_minutes >= 1.0 {
-        format!(
-            "Detecting speaker turns in {:.1} min of audio{}...",
-            audio_minutes,
-            diarization_provider_message_suffix(provider)
-        )
-    } else {
-        format!(
-            "Detecting speaker turns{}...",
-            diarization_provider_message_suffix(provider)
-        )
-    };
-    emit_progress(&app, &meeting_id, "diarizing", 45, &diarization_message);
-
-    let config = diarization_config_for_provider(
-        &model_paths,
-        explicit_num_speakers,
-        provider,
-        clustering_threshold,
-    );
-
-    let mut turns = run_sherpa_diarization_with_fallback(
-        &app,
-        &meeting_id,
-        config,
-        Arc::clone(&samples),
-        &mut profile,
-    )
-    .await?;
-
-    if turns.is_empty() {
-        return Err(anyhow!(
-            "No speaker turns were detected in this meeting audio"
-        ));
-    }
-    turns = prepare_diarization_turns_for_mapping(sample_count, &turns, explicit_num_speakers);
-    let prepared_speaker_count = speaker_count_from_turns(&turns);
-
-    emit_progress(
-        &app,
-        &meeting_id,
-        "saving",
-        82,
-        "Applying speaker labels to transcripts...",
-    );
-
     let transcript_segments: Vec<TranscriptSegment> = stored_segments
         .iter()
         .map(|segment| TranscriptSegment {
@@ -1604,53 +1554,122 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         })
         .collect();
 
-    let mut mapped_segments = map_diarization_to_transcript_segments(
+    let mut attempt = run_diarization_mapping_attempt(
+        &app,
+        &meeting_id,
+        model_paths,
+        sample_count,
+        explicit_num_speakers,
+        Arc::clone(&samples),
         &transcript_segments,
-        &turns,
-        DiarizationMappingOptions {
-            mode: DiarizationMappingMode::Overlap,
-            existing_speaker_policy: if preserve_existing_labels {
-                ExistingSpeakerPolicy::PreserveNonEmpty
-            } else {
-                ExistingSpeakerPolicy::Overwrite
-            },
-        },
-    );
-    let mut mapped_speaker_count = transcript_speaker_count(&mapped_segments);
-    if prepared_speaker_count > 1 && mapped_speaker_count <= 1 {
-        let midpoint_segments = map_diarization_to_transcript_segments(
-            &transcript_segments,
-            &turns,
-            DiarizationMappingOptions {
-                mode: DiarizationMappingMode::Midpoint,
-                existing_speaker_policy: if preserve_existing_labels {
-                    ExistingSpeakerPolicy::PreserveNonEmpty
-                } else {
-                    ExistingSpeakerPolicy::Overwrite
-                },
-            },
-        );
-        let midpoint_speaker_count = transcript_speaker_count(&midpoint_segments);
-        if midpoint_speaker_count > mapped_speaker_count {
-            log::info!(
-                "speaker_diarization_mapping_fallback meeting_id={} overlap_speakers={} midpoint_speakers={} prepared_speakers={}",
-                meeting_id,
-                mapped_speaker_count,
-                midpoint_speaker_count,
-                prepared_speaker_count
-            );
-            mapped_segments = midpoint_segments;
-            mapped_speaker_count = midpoint_speaker_count;
+        preserve_existing_labels,
+        45,
+        None,
+    )
+    .await?;
+
+    if let Some(expected_speakers) = explicit_num_speakers
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 1)
+    {
+        if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality)
+            && !custom_embedding_requested
+        {
+            let current_embedding_id = attempt
+                .model_paths
+                .embedding_descriptor
+                .map(|descriptor| descriptor.id);
+            let mut best_failed_attempt = attempt.clone();
+
+            for embedding_model_id in fallback_embedding_model_ids(current_embedding_id) {
+                let candidate_model_paths = resolve_model_paths_for_embedding(
+                    &app,
+                    requested_segmentation_model_path.clone(),
+                    requested_embedding_model_path.clone(),
+                    Some(embedding_model_id.to_string()),
+                )?;
+                let embedding_name = candidate_model_paths
+                    .embedding_descriptor
+                    .map(|descriptor| descriptor.display_name)
+                    .unwrap_or("custom embedding model");
+                emit_progress(
+                    &app,
+                    &meeting_id,
+                    "diarizing_retry",
+                    65,
+                    &format!("Speaker labels look collapsed; retrying with {embedding_name}..."),
+                );
+
+                let candidate = match run_diarization_mapping_attempt(
+                    &app,
+                    &meeting_id,
+                    candidate_model_paths,
+                    sample_count,
+                    explicit_num_speakers,
+                    Arc::clone(&samples),
+                    &transcript_segments,
+                    preserve_existing_labels,
+                    65,
+                    Some(embedding_name),
+                )
+                .await
+                {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        log::warn!(
+                            "speaker_diarization_embedding_retry_failed meeting_id={} embedding_model_id={} error={}",
+                            meeting_id,
+                            embedding_model_id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+
+                if is_better_explicit_mapping_attempt(
+                    expected_speakers,
+                    &candidate,
+                    &best_failed_attempt,
+                ) {
+                    best_failed_attempt = candidate.clone();
+                }
+
+                if !explicit_speaker_mapping_is_collapsed(expected_speakers, &candidate.quality) {
+                    attempt = candidate;
+                    break;
+                }
+            }
+
+            if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality)
+                && is_better_explicit_mapping_attempt(
+                    expected_speakers,
+                    &best_failed_attempt,
+                    &attempt,
+                )
+            {
+                attempt = best_failed_attempt;
+            }
+        }
+
+        if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality) {
+            write_diarization_profile(&app, &attempt.profile);
+            return Err(anyhow!(explicit_mapping_failure_message(
+                expected_speakers,
+                attempt.prepared_speaker_count,
+                &attempt.quality,
+            )));
         }
     }
-    if explicit_num_speakers.unwrap_or_default() > 1 && mapped_speaker_count <= 1 {
-        return Err(anyhow!(
-            "Speaker diarization detected {} speaker lanes, but transcript mapping only produced {} speaker label. No labels were saved; retranscribe this meeting to add word timestamps, then run diarization again.",
-            prepared_speaker_count,
-            mapped_speaker_count
-        ));
-    }
 
+    emit_progress(
+        &app,
+        &meeting_id,
+        "saving",
+        82,
+        "Applying speaker labels to transcripts...",
+    );
+
+    let mapped_segments = attempt.mapped_segments;
     let updated_segments = count_changed_transcript_segments(&stored_segments, &mapped_segments);
     if updated_segments > 0 {
         let mut tx = pool.begin().await?;
@@ -1716,8 +1735,9 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     super::common::write_transcripts_json(&folder_path, &transcript_file_segments)?;
 
     let speaker_count = transcript_speaker_count(&mapped_segments);
-    let turn_count = turns.len();
-    let embedding_model = model_paths
+    let turn_count = attempt.turns.len();
+    let embedding_model = attempt
+        .model_paths
         .embedding_descriptor
         .map(|descriptor| descriptor.display_name.to_string())
         .unwrap_or_else(|| "Custom embedding model".to_string());
@@ -1729,7 +1749,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         100,
         "Speaker labels applied.",
     );
-    write_diarization_profile(&app, &profile);
+    write_diarization_profile(&app, &attempt.profile);
 
     Ok(SpeakerDiarizationComplete {
         meeting_id,
@@ -1737,10 +1757,188 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         updated_segments,
         duration_seconds: sample_count as f64 / f64::from(DIARIZATION_SAMPLE_RATE),
         processing_seconds: run_started.elapsed().as_secs_f64(),
-        provider: provider.to_string(),
+        provider: attempt.provider.to_string(),
         embedding_model,
         turn_count,
     })
+}
+
+async fn run_diarization_mapping_attempt<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    model_paths: DiarizationModelPaths,
+    sample_count: usize,
+    explicit_num_speakers: Option<i32>,
+    samples: Arc<Vec<f32>>,
+    transcript_segments: &[TranscriptSegment],
+    preserve_existing_labels: bool,
+    progress_percentage: u32,
+    retry_embedding_name: Option<&str>,
+) -> Result<DiarizationMappingAttempt> {
+    ensure_model_available(
+        app,
+        meeting_id,
+        &model_paths.segmentation_model,
+        model_paths.segmentation_descriptor,
+        "segmentation",
+        model_paths.can_download_segmentation,
+    )
+    .await?;
+    ensure_model_available(
+        app,
+        meeting_id,
+        &model_paths.embedding_model,
+        model_paths.embedding_descriptor,
+        "embedding",
+        model_paths.can_download_embedding,
+    )
+    .await?;
+
+    let clustering_threshold = default_clustering_threshold(&model_paths);
+    let mut profile = DiarizationProfile::new(
+        meeting_id,
+        sample_count,
+        explicit_num_speakers,
+        clustering_threshold,
+        &model_paths,
+    );
+    let provider = select_diarization_provider(
+        app,
+        meeting_id,
+        &model_paths,
+        explicit_num_speakers,
+        clustering_threshold,
+        Arc::clone(&samples),
+        &mut profile,
+    )
+    .await?;
+    let audio_minutes = audio_duration_minutes(sample_count);
+    let diarization_message = match retry_embedding_name {
+        Some(embedding_name) => format!(
+            "Retrying speaker turns with {embedding_name}{}...",
+            diarization_provider_message_suffix(provider)
+        ),
+        None if audio_minutes >= 1.0 => format!(
+            "Detecting speaker turns in {:.1} min of audio{}...",
+            audio_minutes,
+            diarization_provider_message_suffix(provider)
+        ),
+        None => format!(
+            "Detecting speaker turns{}...",
+            diarization_provider_message_suffix(provider)
+        ),
+    };
+    emit_progress(
+        app,
+        meeting_id,
+        "diarizing",
+        progress_percentage,
+        &diarization_message,
+    );
+
+    let config = diarization_config_for_provider(
+        &model_paths,
+        explicit_num_speakers,
+        provider,
+        clustering_threshold,
+    );
+    let mut turns =
+        run_sherpa_diarization_with_fallback(app, meeting_id, config, samples, &mut profile)
+            .await?;
+
+    if turns.is_empty() {
+        return Err(anyhow!(
+            "No speaker turns were detected in this meeting audio"
+        ));
+    }
+    turns = prepare_diarization_turns_for_mapping(sample_count, &turns, explicit_num_speakers);
+    let prepared_speaker_count = speaker_count_from_turns(&turns);
+    let mut mapped_segments = map_diarization_to_transcript_segments(
+        transcript_segments,
+        &turns,
+        DiarizationMappingOptions {
+            mode: DiarizationMappingMode::Overlap,
+            existing_speaker_policy: if preserve_existing_labels {
+                ExistingSpeakerPolicy::PreserveNonEmpty
+            } else {
+                ExistingSpeakerPolicy::Overwrite
+            },
+        },
+    );
+    let mut mapped_speaker_count = transcript_speaker_count(&mapped_segments);
+    if prepared_speaker_count > 1 && mapped_speaker_count <= 1 {
+        let midpoint_segments = map_diarization_to_transcript_segments(
+            transcript_segments,
+            &turns,
+            DiarizationMappingOptions {
+                mode: DiarizationMappingMode::Midpoint,
+                existing_speaker_policy: if preserve_existing_labels {
+                    ExistingSpeakerPolicy::PreserveNonEmpty
+                } else {
+                    ExistingSpeakerPolicy::Overwrite
+                },
+            },
+        );
+        let midpoint_speaker_count = transcript_speaker_count(&midpoint_segments);
+        if midpoint_speaker_count > mapped_speaker_count {
+            log::info!(
+                "speaker_diarization_mapping_fallback meeting_id={} overlap_speakers={} midpoint_speakers={} prepared_speakers={}",
+                meeting_id,
+                mapped_speaker_count,
+                midpoint_speaker_count,
+                prepared_speaker_count
+            );
+            mapped_segments = midpoint_segments;
+            mapped_speaker_count = midpoint_speaker_count;
+        }
+    }
+    let quality = mapped_diarization_quality(&mapped_segments);
+    log::info!(
+        "speaker_diarization_mapping_quality meeting_id={} embedding_model={} provider={} prepared_speakers={} mapped_speakers={} labelled_seconds={:.1} dominant_speaker={} dominant_seconds={:.1} dominant_share={:.3}",
+        meeting_id,
+        model_paths
+            .embedding_descriptor
+            .map(|descriptor| descriptor.id)
+            .unwrap_or("custom"),
+        provider,
+        prepared_speaker_count,
+        mapped_speaker_count,
+        quality.labelled_seconds,
+        quality
+            .dominant_speaker
+            .as_deref()
+            .unwrap_or("<none>"),
+        quality.dominant_seconds,
+        quality.dominant_share,
+    );
+
+    Ok(DiarizationMappingAttempt {
+        model_paths,
+        profile,
+        provider,
+        turns,
+        mapped_segments,
+        prepared_speaker_count,
+        quality,
+    })
+}
+
+fn is_better_explicit_mapping_attempt(
+    expected_speakers: usize,
+    candidate: &DiarizationMappingAttempt,
+    current: &DiarizationMappingAttempt,
+) -> bool {
+    let candidate_meets_count = candidate.quality.speaker_count >= expected_speakers;
+    let current_meets_count = current.quality.speaker_count >= expected_speakers;
+    if candidate_meets_count != current_meets_count {
+        return candidate_meets_count;
+    }
+
+    if candidate.quality.speaker_count != current.quality.speaker_count {
+        return candidate.quality.speaker_count > current.quality.speaker_count;
+    }
+
+    candidate.quality.dominant_share + FLOAT_TIE_EPSILON < current.quality.dominant_share
 }
 
 #[derive(Debug, Clone)]
@@ -1927,6 +2125,101 @@ fn transcript_speaker_count(segments: &[TranscriptSegment]) -> usize {
         .filter(|speaker| !speaker.trim().is_empty())
         .collect::<BTreeSet<_>>()
         .len()
+}
+
+fn mapped_diarization_quality(segments: &[TranscriptSegment]) -> MappedDiarizationQuality {
+    let mut seconds_by_speaker = BTreeMap::<String, f64>::new();
+    for segment in segments {
+        let Some(speaker) = segment
+            .speaker
+            .as_deref()
+            .map(|speaker| speaker.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|speaker| !speaker.is_empty())
+        else {
+            continue;
+        };
+
+        let seconds = segment
+            .duration
+            .or_else(|| Some((segment.audio_end_time? - segment.audio_start_time?).max(0.0)))
+            .unwrap_or(0.0);
+        if seconds > 0.0 {
+            *seconds_by_speaker.entry(speaker).or_insert(0.0) += seconds;
+        }
+    }
+
+    let labelled_seconds = seconds_by_speaker.values().sum::<f64>();
+    let (dominant_speaker, dominant_seconds) = seconds_by_speaker
+        .iter()
+        .max_by(|left, right| {
+            left.1
+                .partial_cmp(right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.0.cmp(left.0))
+        })
+        .map(|(speaker, seconds)| (Some(speaker.clone()), *seconds))
+        .unwrap_or((None, 0.0));
+    let dominant_share = if labelled_seconds > 0.0 {
+        dominant_seconds / labelled_seconds
+    } else {
+        0.0
+    };
+
+    MappedDiarizationQuality {
+        speaker_count: seconds_by_speaker.len(),
+        labelled_seconds,
+        dominant_speaker,
+        dominant_seconds,
+        dominant_share,
+    }
+}
+
+fn explicit_speaker_mapping_is_collapsed(
+    expected_speakers: usize,
+    quality: &MappedDiarizationQuality,
+) -> bool {
+    expected_speakers > 1
+        && (quality.speaker_count < expected_speakers
+            || quality.dominant_share > MAX_DOMINANT_SPEAKER_SHARE_FOR_EXPLICIT_COUNT)
+}
+
+fn explicit_mapping_failure_message(
+    expected_speakers: usize,
+    prepared_speaker_count: usize,
+    quality: &MappedDiarizationQuality,
+) -> String {
+    let dominant = quality
+        .dominant_speaker
+        .as_deref()
+        .map(|speaker| {
+            format!(
+                "{speaker} has {:.1}s ({:.1}%)",
+                quality.dominant_seconds,
+                quality.dominant_share * 100.0
+            )
+        })
+        .unwrap_or_else(|| "no dominant speaker was mapped".to_string());
+
+    format!(
+        "Speaker diarization was asked for {expected_speakers} speakers, but the best mapping produced {} speaker label{} from {prepared_speaker_count} diarization lane{} ({dominant}). No labels were saved because this result looks collapsed. Try another speaker count or retranscribe with word timestamps before rerunning diarization.",
+        quality.speaker_count,
+        if quality.speaker_count == 1 { "" } else { "s" },
+        if prepared_speaker_count == 1 { "" } else { "s" },
+    )
+}
+
+fn fallback_embedding_model_ids(current_id: Option<&str>) -> Vec<&'static str> {
+    let mut ids = vec![
+        "3dspeaker-campplus-en",
+        "3dspeaker-eres2net-en",
+        "nemo-titanet-small-en",
+        DEFAULT_EMBEDDING_MODEL_ID,
+        ZH_CN_EMBEDDING_MODEL_ID,
+    ];
+    if let Some(current_id) = current_id {
+        ids.retain(|id| *id != current_id);
+    }
+    ids
 }
 
 fn optional_seconds_equal(left: Option<f64>, right: Option<f64>) -> bool {
@@ -3664,6 +3957,49 @@ mod tests {
         );
 
         assert_eq!(mapped[0].speaker.as_deref(), Some("Speaker 2"));
+    }
+
+    #[test]
+    fn explicit_speaker_quality_rejects_missing_requested_speakers() {
+        let mut segments = vec![
+            transcript("a", Some(0.0), Some(450.0)),
+            transcript("b", Some(450.0), Some(455.0)),
+        ];
+        segments[0].speaker = Some("Speaker 1".to_string());
+        segments[1].speaker = Some("Speaker 2".to_string());
+
+        let quality = mapped_diarization_quality(&segments);
+
+        assert_eq!(quality.speaker_count, 2);
+        assert!(quality.dominant_share > 0.98);
+        assert!(explicit_speaker_mapping_is_collapsed(3, &quality));
+    }
+
+    #[test]
+    fn explicit_speaker_quality_accepts_balanced_requested_speakers() {
+        let mut segments = vec![
+            transcript("a", Some(0.0), Some(180.0)),
+            transcript("b", Some(180.0), Some(320.0)),
+            transcript("c", Some(320.0), Some(455.0)),
+        ];
+        segments[0].speaker = Some("Speaker 1".to_string());
+        segments[1].speaker = Some("Speaker 2".to_string());
+        segments[2].speaker = Some("Speaker 3".to_string());
+
+        let quality = mapped_diarization_quality(&segments);
+
+        assert_eq!(quality.speaker_count, 3);
+        assert!(quality.dominant_share < MAX_DOMINANT_SPEAKER_SHARE_FOR_EXPLICIT_COUNT);
+        assert!(!explicit_speaker_mapping_is_collapsed(3, &quality));
+    }
+
+    #[test]
+    fn fallback_embedding_models_skip_current_default() {
+        let ids = fallback_embedding_model_ids(Some(DEFAULT_EMBEDDING_MODEL_ID));
+
+        assert!(!ids.contains(&DEFAULT_EMBEDDING_MODEL_ID));
+        assert_eq!(ids.first().copied(), Some("3dspeaker-campplus-en"));
+        assert!(ids.contains(&"nemo-titanet-small-en"));
     }
 
     #[test]
