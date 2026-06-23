@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.23
+
+- Preserved Parakeet token timestamps through live transcription, import, and
+  retranscription paths so speaker-turn splitting can use real word anchors when
+  available.
+- Tightened import and retranscription VAD redemption so transcript rows are
+  less likely to bridge speaker handoffs before diarization runs.
+- Blocked unreliable Auto diarization from saving over-fragmented generated
+  speaker labels, while preserving user-renamed speaker labels.
+- Moved speaker diarization progress into the same dialog-style workflow used
+  for import and retranscription, including percent, stage, and status details
+  while speaker detection runs.
+- Kept the speaker diarization completion window open with benchmark stats for
+  audio length, processing time, realtime speed, provider, embedding model,
+  detected speakers, speaker turns, and updated transcript rows.
+- Removed the outdated "Current workflow" callout from About.
+- `latest.json` advertises runtime version `0.5.23`, so installed `0.5.22`
+  clients can discover this update.
+
 ## 0.5.22
 
 - Stopped explicit multi-speaker diarization from silently saving collapsed

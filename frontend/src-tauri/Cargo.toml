@@ -1,6 +1,6 @@
 [package]
 name = "clawscribe"
-version = "0.5.22"
+version = "0.5.23"
 description = "Windows meeting recorder with OpenClaw handoff"
 authors = ["OpenClaw"]
 license = "MIT"
