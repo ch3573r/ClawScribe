@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.24
+
+- Added a Diagnostics health snapshot with model, audio, storage, runtime, and
+  speaker-diarization status so troubleshooting no longer depends on scattered
+  logs.
+- Let the speaker diarization progress dialog continue in the background while
+  the run remains active, then return to the result/error state when processing
+  finishes.
+- Prevented English speaker-diarization retries from falling through to the
+  Mandarin `zh-cn` embedding model, so English meetings stay on English
+  speaker embeddings.
+- Made failed diarization non-destructive: collapsed, low-confidence, or
+  zero-speaker mappings now return an error without clearing existing speaker
+  labels.
+- Treat zero mapped transcript speakers as a failure instead of a successful
+  completion with `0` speakers.
+- Made the speaker diarization benchmark window reliable by returning the
+  completion payload from the Tauri command as well as emitting the existing
+  completion event.
+- `latest.json` advertises runtime version `0.5.24`, so installed `0.5.23`
+  clients can discover this update.
+
 ## 0.5.23
 
 - Preserved Parakeet token timestamps through live transcription, import, and
