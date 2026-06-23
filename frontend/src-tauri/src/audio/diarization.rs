@@ -1,4 +1,6 @@
-use crate::api::{TranscriptSegment as ApiTranscriptSegment, TranscriptWord};
+use crate::api::{
+    TranscriptSegment as ApiTranscriptSegment, TranscriptWord, TranscriptWordTimestampSource,
+};
 use crate::audio::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
@@ -517,8 +519,8 @@ fn split_transcript_segment_by_speaker_spans(
         return vec![segment.clone()];
     }
 
-    let has_aligned_word_timestamps = has_aligned_word_timestamps(segment);
-    if !has_aligned_word_timestamps
+    let has_real_aligned_word_timestamps = has_real_aligned_word_timestamps(segment);
+    if !has_real_aligned_word_timestamps
         && spans
             .iter()
             .any(|span| span.end_time - span.start_time < MIN_SPLIT_PART_SECONDS)
@@ -534,7 +536,7 @@ fn split_transcript_segment_by_speaker_spans(
     let text_parts =
         match split_text_by_word_timestamps(&segment.text, &segment.word_timestamps, &boundaries) {
             Some(parts) => parts,
-            None if has_aligned_word_timestamps => return vec![segment.clone()],
+            None if has_real_aligned_word_timestamps => return vec![segment.clone()],
             None => split_text_by_time_boundaries(
                 &segment.text,
                 segment_start,
@@ -585,16 +587,17 @@ fn split_transcript_segment_by_speaker_spans(
         .collect()
 }
 
-fn has_aligned_word_timestamps(segment: &TranscriptSegment) -> bool {
+fn has_real_aligned_word_timestamps(segment: &TranscriptSegment) -> bool {
     let Some(words) = segment.word_timestamps.as_ref() else {
         return false;
     };
     let tokens = word_tokens(segment.text.trim());
     !tokens.is_empty()
         && tokens.len() == words.len()
-        && words
-            .iter()
-            .all(|word| is_valid_interval(word.start, word.end))
+        && words.iter().all(|word| {
+            word.timestamp_source == Some(TranscriptWordTimestampSource::Real)
+                && is_valid_interval(word.start, word.end)
+        })
 }
 
 fn merge_adjacent_transcript_segments_by_speaker(
@@ -649,6 +652,7 @@ fn word_timestamps_for_interval(
             end: word.end.min(end_time).max(word.start.max(start_time)),
             confidence: word.confidence,
             speaker: speaker.clone().or_else(|| word.speaker.clone()),
+            timestamp_source: word.timestamp_source,
         })
         .collect::<Vec<_>>();
 
@@ -3670,6 +3674,7 @@ mod tests {
                     end: *end,
                     confidence: None,
                     speaker: None,
+                    timestamp_source: Some(TranscriptWordTimestampSource::Real),
                 })
                 .collect(),
         );
@@ -4604,6 +4609,47 @@ mod tests {
         assert_eq!(mapped[1].audio_end_time, Some(5.0));
         assert_eq!(mapped[2].speaker.as_deref(), Some("Speaker 2"));
         assert_eq!(mapped[2].text, "Should we look it up?");
+    }
+
+    #[test]
+    fn does_not_bypass_short_part_gate_for_estimated_word_timestamps() {
+        let mut segment = transcript_with_word_timestamps(
+            "a",
+            &[
+                ("What", 0.0, 0.4),
+                ("about", 0.4, 0.8),
+                ("drones?", 0.8, 4.0),
+                ("Who", 4.0, 4.15),
+                ("made", 4.15, 4.3),
+                ("money", 4.3, 4.45),
+                ("on", 4.45, 4.6),
+                ("that", 4.6, 4.8),
+                ("one?", 4.8, 5.0),
+                ("Should", 5.0, 5.3),
+                ("we", 5.3, 5.6),
+                ("look", 5.6, 5.9),
+                ("it", 5.9, 6.1),
+                ("up?", 6.1, 8.0),
+            ],
+            0.0,
+            8.0,
+        );
+        for word in segment.word_timestamps.as_mut().unwrap() {
+            word.timestamp_source = Some(TranscriptWordTimestampSource::Estimated);
+        }
+        let turns = vec![turn(0.0, 4.0, 1), turn(4.0, 5.0, 0), turn(5.0, 8.0, 1)];
+
+        let mapped = map_diarization_to_transcript_segments(
+            &[segment],
+            &turns,
+            DiarizationMappingOptions {
+                existing_speaker_policy: ExistingSpeakerPolicy::Overwrite,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].speaker.as_deref(), Some("Speaker 2"));
     }
 
     #[test]

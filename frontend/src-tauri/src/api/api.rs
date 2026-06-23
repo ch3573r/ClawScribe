@@ -211,6 +211,15 @@ pub struct TranscriptWord {
     pub confidence: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_source: Option<TranscriptWordTimestampSource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptWordTimestampSource {
+    Real,
+    Estimated,
 }
 
 fn normalize_speaker_label(speaker: Option<String>) -> Option<String> {

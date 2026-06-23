@@ -1,4 +1,4 @@
-use crate::api::{TranscriptSegment, TranscriptWord};
+use crate::api::{TranscriptSegment, TranscriptWord, TranscriptWordTimestampSource};
 use crate::summary::processor::language_name_from_code;
 use anyhow::Result;
 use log::{debug, info};
@@ -203,6 +203,7 @@ pub(crate) fn transcript_words_from_token_timestamps(
             end,
             confidence,
             speaker: speaker.clone(),
+            timestamp_source: Some(TranscriptWordTimestampSource::Real),
         });
     }
 
@@ -291,6 +292,7 @@ pub(crate) fn estimate_word_timestamps(
                     end: word_end.max(word_start),
                     confidence,
                     speaker: speaker.clone(),
+                    timestamp_source: Some(TranscriptWordTimestampSource::Estimated),
                 }
             })
             .collect(),
