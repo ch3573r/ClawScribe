@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.25
+
+- Redacted copied diagnostics so exported support payloads no longer include
+  local account names, email addresses, home-folder paths, or endpoint hosts.
+- Recovered Auto speaker diarization when clustering over-fragments into
+  micro-lanes by rerunning with the meaningful speaker count instead of saving
+  unreliable labels or failing immediately.
+- Improved short speaker-turn splitting for Parakeet transcripts by using real
+  word timestamps to split brief interjections that were previously swallowed by
+  longer transcript rows.
+- Tracked word-timestamp provenance so real ASR anchors can use fine-grained
+  speaker splits while estimated timestamps stay on the conservative path.
+- Clarified Settings -> Add-ons copy and labels, including Confluence/Calendar
+  discoverability and clearer Teams auto-record/status wording.
+- `latest.json` advertises runtime version `0.5.25`, so installed `0.5.24`
+  clients can discover this update.
+
 ## 0.5.24
 
 - Added a Diagnostics health snapshot with model, audio, storage, runtime, and
