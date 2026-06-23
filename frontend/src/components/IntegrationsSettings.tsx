@@ -2414,8 +2414,82 @@ function DiagnosticTile({
   );
 }
 
+function redactHomePaths(value: string): string {
+  return value
+    .replace(
+      /(?:\\\\\?\\)?[A-Z]:\\Users\\[^\\/:\r\n]+\\AppData\\Roaming/gi,
+      "%APPDATA%",
+    )
+    .replace(
+      /(?:\\\\\?\\)?[A-Z]:\\Users\\[^\\/:\r\n]+\\AppData\\Local/gi,
+      "%LOCALAPPDATA%",
+    )
+    .replace(
+      /(?:\\\\\?\\)?[A-Z]:\\Users\\[^\\/:\r\n]+/gi,
+      "%USERPROFILE%",
+    )
+    .replace(/\/Users\/[^/\s]+/g, "~")
+    .replace(/\/home\/[^/\s]+/g, "~");
+}
+
+function redactEmails(value: string): string {
+  return value.replace(
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+    "<redacted-email>",
+  );
+}
+
+function redactEndpoint(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return `${url.protocol}//<redacted-host>`;
+    }
+  } catch {
+    // Fall through to a generic placeholder for non-URL endpoint strings.
+  }
+
+  return "<redacted-endpoint>";
+}
+
+function redactDiagnosticsValue(
+  value: unknown,
+  key = "",
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactDiagnosticsValue(entry, key));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(
+        ([entryKey, entryValue]) => [
+          entryKey,
+          redactDiagnosticsValue(entryValue, entryKey),
+        ],
+      ),
+    );
+  }
+
+  if (typeof value !== "string") return value;
+
+  const normalizedKey = key.toLowerCase();
+  if (normalizedKey.includes("email") || normalizedKey === "accountemail") {
+    return value.trim() ? "<redacted-email>" : value;
+  }
+
+  if (normalizedKey.includes("endpoint") || normalizedKey.endsWith("url")) {
+    return redactEndpoint(value);
+  }
+
+  return redactEmails(redactHomePaths(value));
+}
+
 function sanitizeDiagnosticsForCopy(snapshot: DiagnosticsSnapshot) {
-  return {
+  const copyPayload = {
     generatedAt: new Date().toISOString(),
     app: snapshot.app,
     systemResources: snapshot.systemResources,
@@ -2434,6 +2508,8 @@ function sanitizeDiagnosticsForCopy(snapshot: DiagnosticsSnapshot) {
     },
     errors: snapshot.errors,
   };
+
+  return redactDiagnosticsValue(copyPayload);
 }
 
 function DiagnosticsSystemPanel({
