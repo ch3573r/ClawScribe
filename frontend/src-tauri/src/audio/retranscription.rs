@@ -1,7 +1,7 @@
 // Retranscription module - allows re-processing stored audio with different settings
 
 use super::common::{
-    create_transcript_segments_with_words, split_segment_at_silence,
+    create_readable_transcript_segments_with_words, split_segment_at_silence,
     transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
 };
 use super::constants::AUDIO_EXTENSIONS;
@@ -514,8 +514,9 @@ async fn run_retranscription<R: Runtime>(
 
     emit_progress(&app, &meeting_id, "saving", 80, "Saving transcripts...");
 
-    // Create transcript segments with proper timestamps from VAD
-    let segments = create_transcript_segments_with_words(&all_transcripts);
+    // Create transcript segments with proper timestamps from VAD, then stitch
+    // obvious VAD fragments so the saved transcript reads like prose.
+    let segments = create_readable_transcript_segments_with_words(&all_transcripts);
 
     // Save to database
     let app_state = app

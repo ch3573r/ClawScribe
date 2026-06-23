@@ -142,6 +142,233 @@ pub(crate) fn create_transcript_segments_with_words(
         .collect()
 }
 
+pub(crate) fn create_readable_transcript_segments_with_words(
+    transcripts: &[TranscribedSegment],
+) -> Vec<TranscriptSegment> {
+    let stitched = stitch_transcript_fragments(transcripts);
+    create_transcript_segments_with_words(&stitched)
+}
+
+fn stitch_transcript_fragments(transcripts: &[TranscribedSegment]) -> Vec<TranscribedSegment> {
+    const MAX_STITCH_GAP_MS: f64 = 1_500.0;
+    const MAX_STITCHED_DURATION_MS: f64 = 30_000.0;
+    const SHORT_UTTERANCE_WORDS: usize = 7;
+    const ORPHAN_FRAGMENT_WORDS: usize = 4;
+
+    let mut stitched: Vec<TranscribedSegment> = Vec::new();
+
+    for segment in transcripts.iter().map(clean_transcribed_segment) {
+        if segment.text.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(previous) = stitched.last_mut() {
+            let gap_ms = segment.start_ms - previous.end_ms;
+            let combined_duration_ms = segment.end_ms - previous.start_ms;
+            let should_stitch = gap_ms >= -250.0
+                && gap_ms <= MAX_STITCH_GAP_MS
+                && combined_duration_ms <= MAX_STITCHED_DURATION_MS
+                && (is_incomplete_fragment(&previous.text)
+                    || is_short_utterance(&previous.text, SHORT_UTTERANCE_WORDS)
+                    || is_orphan_fragment(&segment.text, ORPHAN_FRAGMENT_WORDS)
+                    || starts_like_continuation(&segment.text));
+
+            if should_stitch {
+                stitch_segment_into(previous, segment);
+                continue;
+            }
+        }
+
+        stitched.push(segment);
+    }
+
+    if stitched.len() != transcripts.len() {
+        debug!(
+            "Stitched transcript fragments for readability: {} -> {} segments",
+            transcripts.len(),
+            stitched.len()
+        );
+    }
+
+    stitched
+}
+
+fn clean_transcribed_segment(segment: &TranscribedSegment) -> TranscribedSegment {
+    let mut cleaned = segment.clone();
+    cleaned.text = collapse_whitespace(&cleaned.text);
+
+    if cleaned
+        .text
+        .get(..6)
+        .map(|prefix| prefix.eq_ignore_ascii_case("th it "))
+        .unwrap_or(false)
+    {
+        let can_fix_words = match cleaned.word_timestamps.as_mut() {
+            Some(words) if words.len() >= 2 => {
+                let first = words[0].text.trim_matches(is_word_edge_punctuation);
+                let second = words[1].text.trim_matches(is_word_edge_punctuation);
+                if first.eq_ignore_ascii_case("th") && second.eq_ignore_ascii_case("it") {
+                    words[1].text = "It".to_string();
+                    words[1].start = words[0].start.min(words[1].start);
+                    words.remove(0);
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(_) => false,
+            None => true,
+        };
+
+        if can_fix_words {
+            cleaned.text = format!("It {}", cleaned.text[6..].trim_start());
+        }
+    }
+
+    cleaned
+}
+
+fn stitch_segment_into(previous: &mut TranscribedSegment, mut next: TranscribedSegment) {
+    let previous_is_incomplete = is_incomplete_fragment(&previous.text);
+    let next_text = if previous_is_incomplete {
+        lowercase_continuation_start(&next.text, next.word_timestamps.as_mut())
+    } else {
+        next.text.clone()
+    };
+
+    previous.text = join_transcript_text(&previous.text, &next_text);
+    previous.end_ms = previous.end_ms.max(next.end_ms);
+
+    match (&mut previous.word_timestamps, next.word_timestamps) {
+        (Some(previous_words), Some(mut next_words)) => {
+            previous_words.append(&mut next_words);
+        }
+        (Some(_), None) => {
+            previous.word_timestamps = None;
+        }
+        (None, _) => {}
+    }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn join_transcript_text(left: &str, right: &str) -> String {
+    match (left.trim(), right.trim()) {
+        ("", right) => right.to_string(),
+        (left, "") => left.to_string(),
+        (left, right) => format!("{left} {right}"),
+    }
+}
+
+fn word_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|word| !word.is_empty())
+        .count()
+}
+
+fn is_incomplete_fragment(text: &str) -> bool {
+    !ends_with_terminal_punctuation(text)
+}
+
+fn is_short_utterance(text: &str, max_words: usize) -> bool {
+    word_count(text) <= max_words
+}
+
+fn is_orphan_fragment(text: &str, max_words: usize) -> bool {
+    word_count(text) <= max_words && !ends_with_terminal_punctuation(text)
+}
+
+fn starts_like_continuation(text: &str) -> bool {
+    let first_word = text.split_whitespace().next().unwrap_or_default();
+    if first_word.is_empty() {
+        return false;
+    }
+
+    let normalized = first_word
+        .trim_matches(is_word_edge_punctuation)
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "and"
+            | "but"
+            | "or"
+            | "so"
+            | "then"
+            | "because"
+            | "that"
+            | "those"
+            | "this"
+            | "these"
+            | "it"
+            | "that's"
+            | "they"
+            | "where"
+            | "who"
+            | "which"
+            | "when"
+    ) || first_word
+        .chars()
+        .next()
+        .map(|ch| ch.is_lowercase())
+        .unwrap_or(false)
+}
+
+fn ends_with_terminal_punctuation(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .rev()
+        .find(|ch| !matches!(ch, '"' | '\'' | ')' | ']' | '}'))
+        .map(|ch| matches!(ch, '.' | '!' | '?' | ':' | ';'))
+        .unwrap_or(false)
+}
+
+fn lowercase_continuation_start(text: &str, words: Option<&mut Vec<TranscriptWord>>) -> String {
+    let trimmed = text.trim_start();
+    let Some(first_word) = trimmed.split_whitespace().next() else {
+        return text.to_string();
+    };
+
+    let bare_word = first_word.trim_matches(is_word_edge_punctuation);
+    if bare_word.len() <= 1 || bare_word.chars().all(|ch| !ch.is_lowercase()) {
+        return text.to_string();
+    }
+    if matches!(bare_word, "I" | "I'm" | "I've" | "I'd" | "I'll") {
+        return text.to_string();
+    }
+
+    let Some(first_char) = bare_word.chars().next() else {
+        return text.to_string();
+    };
+    if !first_char.is_uppercase() {
+        return text.to_string();
+    }
+
+    let lower_first = first_char.to_lowercase().collect::<String>();
+    let replacement = format!("{}{}", lower_first, &bare_word[first_char.len_utf8()..]);
+    let updated = trimmed.replacen(bare_word, &replacement, 1);
+
+    if let Some(words) = words {
+        if let Some(word) = words.first_mut() {
+            let word_bare = word.text.trim_matches(is_word_edge_punctuation);
+            if word_bare == bare_word {
+                word.text = word.text.replacen(bare_word, &replacement, 1);
+            }
+        }
+    }
+
+    if text.len() == trimmed.len() {
+        updated
+    } else {
+        format!("{}{}", &text[..text.len() - trimmed.len()], updated)
+    }
+}
+
+fn is_word_edge_punctuation(ch: char) -> bool {
+    ch.is_ascii_punctuation()
+}
+
 pub(crate) fn transcript_words_from_token_timestamps(
     text: &str,
     tokens: &[String],
@@ -542,6 +769,119 @@ mod tests {
         assert_eq!(words.len(), 3);
         assert_eq!(words[0].text, "Citizens");
         assert_eq!(words[2].end, 5.0);
+    }
+
+    fn test_word(text: &str, start: f64, end: f64) -> TranscriptWord {
+        TranscriptWord {
+            text: text.to_string(),
+            start,
+            end,
+            confidence: None,
+            speaker: None,
+            timestamp_source: Some(TranscriptWordTimestampSource::Real),
+        }
+    }
+
+    fn test_transcribed_segment(
+        text: &str,
+        start_ms: f64,
+        end_ms: f64,
+        words: &[&str],
+    ) -> TranscribedSegment {
+        let duration = ((end_ms - start_ms) / 1000.0).max(0.001);
+        let start = start_ms / 1000.0;
+        let step = duration / words.len().max(1) as f64;
+        TranscribedSegment {
+            text: text.to_string(),
+            start_ms,
+            end_ms,
+            word_timestamps: Some(
+                words
+                    .iter()
+                    .enumerate()
+                    .map(|(index, word)| {
+                        let word_start = start + step * index as f64;
+                        test_word(word, word_start, word_start + step)
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn readable_segments_stitch_vad_fragments_without_losing_word_anchors() {
+        let transcripts = vec![
+            test_transcribed_segment(
+                "Th it seems like there is a pretty clear point.",
+                0.0,
+                13_000.0,
+                &[
+                    "Th", "it", "seems", "like", "there", "is", "a", "pretty", "clear", "point.",
+                ],
+            ),
+            test_transcribed_segment(
+                "What about the military drones?",
+                13_000.0,
+                15_000.0,
+                &["What", "about", "the", "military", "drones?"],
+            ),
+            test_transcribed_segment(
+                "Those contracts when this war started",
+                15_000.0,
+                18_000.0,
+                &["Those", "contracts", "when", "this", "war", "started"],
+            ),
+            test_transcribed_segment("That's", 18_000.0, 20_000.0, &["That's"]),
+            test_transcribed_segment(
+                "You can look into who made money.",
+                20_000.0,
+                24_000.0,
+                &["You", "can", "look", "into", "who", "made", "money."],
+            ),
+        ];
+
+        let segments = create_readable_transcript_segments_with_words(&transcripts);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            segments[0].text,
+            "It seems like there is a pretty clear point."
+        );
+        assert_eq!(
+            segments[1].text,
+            "What about the military drones? Those contracts when this war started that's you can look into who made money."
+        );
+        assert_eq!(segments[0].audio_start_time, Some(0.0));
+        assert_eq!(segments[0].audio_end_time, Some(13.0));
+        assert_eq!(segments[1].audio_start_time, Some(13.0));
+        assert_eq!(segments[1].audio_end_time, Some(24.0));
+
+        let first_words = segments[0].word_timestamps.as_ref().unwrap();
+        assert_eq!(first_words[0].text, "It");
+        assert_eq!(first_words.len(), 9);
+
+        let second_words = segments[1].word_timestamps.as_ref().unwrap();
+        assert_eq!(second_words.len(), 19);
+        assert_eq!(second_words[0].text, "What");
+        assert_eq!(second_words[11].text, "that's");
+        assert_eq!(second_words[12].text, "you");
+        assert!(second_words
+            .iter()
+            .all(|word| word.timestamp_source == Some(TranscriptWordTimestampSource::Real)));
+    }
+
+    #[test]
+    fn readable_segments_do_not_stitch_complete_rows_across_long_gap() {
+        let transcripts = vec![
+            test_transcribed_segment("First complete sentence.", 0.0, 1_000.0, &["First"]),
+            test_transcribed_segment("Second complete sentence.", 4_000.0, 5_000.0, &["Second"]),
+        ];
+
+        let segments = create_readable_transcript_segments_with_words(&transcripts);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "First complete sentence.");
+        assert_eq!(segments[1].text, "Second complete sentence.");
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
 use super::common::{
-    create_transcript_segments_with_words, split_segment_at_silence,
+    create_readable_transcript_segments_with_words, split_segment_at_silence,
     transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
 };
 use super::constants::AUDIO_EXTENSIONS;
@@ -687,8 +687,9 @@ async fn run_import<R: Runtime>(
 
     emit_progress(&app, "saving", 85, "Creating meeting...");
 
-    // Create transcript segments
-    let segments = create_transcript_segments_with_words(&all_transcripts);
+    // Create transcript segments, then stitch obvious VAD fragments so imported
+    // transcripts do not save one-word rows for natural sentence continuations.
+    let segments = create_readable_transcript_segments_with_words(&all_transcripts);
 
     // Save to database
     let app_state = app
