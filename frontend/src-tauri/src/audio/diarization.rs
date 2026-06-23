@@ -1248,6 +1248,11 @@ pub struct SpeakerDiarizationComplete {
     pub meeting_id: String,
     pub speaker_count: usize,
     pub updated_segments: usize,
+    pub duration_seconds: f64,
+    pub processing_seconds: f64,
+    pub provider: String,
+    pub embedding_model: String,
+    pub turn_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1423,6 +1428,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     num_speakers: Option<i32>,
     preserve_existing_labels: bool,
 ) -> Result<SpeakerDiarizationComplete> {
+    let run_started = Instant::now();
     let folder_path = PathBuf::from(&meeting_folder_path);
     if !folder_path.is_dir() {
         return Err(anyhow!(
@@ -1710,6 +1716,11 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     super::common::write_transcripts_json(&folder_path, &transcript_file_segments)?;
 
     let speaker_count = transcript_speaker_count(&mapped_segments);
+    let turn_count = turns.len();
+    let embedding_model = model_paths
+        .embedding_descriptor
+        .map(|descriptor| descriptor.display_name.to_string())
+        .unwrap_or_else(|| "Custom embedding model".to_string());
 
     emit_progress(
         &app,
@@ -1724,6 +1735,11 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         meeting_id,
         speaker_count,
         updated_segments,
+        duration_seconds: sample_count as f64 / f64::from(DIARIZATION_SAMPLE_RATE),
+        processing_seconds: run_started.elapsed().as_secs_f64(),
+        provider: provider.to_string(),
+        embedding_model,
+        turn_count,
     })
 }
 

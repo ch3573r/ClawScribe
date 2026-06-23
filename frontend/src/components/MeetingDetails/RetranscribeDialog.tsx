@@ -1,5 +1,17 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { RefreshCw, Globe, Loader2, AlertCircle, CheckCircle2, X, Cpu } from 'lucide-react';
+import {
+  RefreshCw,
+  Globe,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  X,
+  Cpu,
+  Clock,
+  Gauge,
+  Zap,
+  Hash,
+} from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -51,6 +63,17 @@ interface RetranscriptionError {
   error: string;
 }
 
+function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${minutes}:${secs.toString().padStart(2, '0')}`;
+}
+
 export function RetranscribeDialog({
   open,
   onOpenChange,
@@ -64,6 +87,13 @@ export function RetranscribeDialog({
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
+  const [stats, setStats] = useState<{
+    segments: number;
+    audioSeconds: number;
+    processingSeconds: number;
+    modelLabel: string;
+    language: string;
+  } | null>(null);
 
   // Use centralized model fetching hook
   const {
@@ -79,6 +109,8 @@ export function RetranscribeDialog({
   const onCompleteRef = useRef(onComplete);
   const onOpenChangeRef = useRef(onOpenChange);
   const isCancellingRef = useRef(false);
+  const retranscriptionStartedAtRef = useRef<number | null>(null);
+  const retranscribedModelLabelRef = useRef<string>('Default model');
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
   useEffect(() => { onOpenChangeRef.current = onOpenChange; }, [onOpenChange]);
   useEffect(() => { isCancellingRef.current = isCancelling; }, [isCancelling]);
@@ -115,6 +147,7 @@ export function RetranscribeDialog({
       setIsCancelling(false);
       setProgress(null);
       setError(null);
+      setStats(null);
       setSelectedLang(selectedLanguage || 'auto');
 
       // Fetch available models using centralized hook
@@ -158,11 +191,20 @@ export function RetranscribeDialog({
 
             setIsProcessing(false);
             setIsCancelling(false);
+            setProgress(null);
+            const startedAt = retranscriptionStartedAtRef.current;
+            const processingSeconds = startedAt ? (performance.now() - startedAt) / 1000 : 0;
+            setStats({
+              segments: event.payload.segments_count,
+              audioSeconds: event.payload.duration_seconds,
+              processingSeconds,
+              modelLabel: retranscribedModelLabelRef.current,
+              language: event.payload.language || 'Auto',
+            });
             toast.success(
               `Retranscription complete! ${event.payload.segments_count} segments created.`
             );
             onCompleteRef.current?.();
-            onOpenChangeRef.current(false);
           }
         }
       );
@@ -223,9 +265,14 @@ export function RetranscribeDialog({
     setIsCancelling(false);
     setError(null);
     setProgress(null);
+    setStats(null);
 
     try {
       const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
+      retranscriptionStartedAtRef.current = performance.now();
+      retranscribedModelLabelRef.current = selectedModelDetails
+        ? `${selectedModelDetails.displayName} (${selectedModelDetails.provider})`
+        : 'Default model';
       await Analytics.track('enhance_transcript_started', {
         language: isParakeetModel ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
         model_provider: selectedModelDetails?.provider || '',
@@ -312,6 +359,11 @@ export function RetranscribeDialog({
                 <AlertCircle className="h-5 w-5 text-red-600" />
                 Retranscription Failed
               </>
+            ) : stats ? (
+              <>
+                <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                Retranscription Complete
+              </>
             ) : (
               <>
                 <RefreshCw className="h-5 w-5 text-primary" />
@@ -326,12 +378,14 @@ export function RetranscribeDialog({
               ? progress?.message || 'Processing audio...'
               : error
                 ? 'An error occurred during retranscription'
+                : stats
+                  ? 'Updated transcript is ready. Benchmark below.'
                 : 'Replace the current transcript using the saved audio'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {!isProcessing && !isCancelling && !error && (
+          {!isProcessing && !isCancelling && !error && !stats && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-100">
               <div className="flex gap-2">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -346,7 +400,7 @@ export function RetranscribeDialog({
             </div>
           )}
 
-          {!isProcessing && !isCancelling && !error && (
+          {!isProcessing && !isCancelling && !error && !stats && (
             !isParakeetModel ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
@@ -382,7 +436,7 @@ export function RetranscribeDialog({
             )
           )}
 
-          {!isProcessing && !isCancelling && !error && availableModels.length > 0 && (
+          {!isProcessing && !isCancelling && !error && !stats && availableModels.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-muted-foreground" />
@@ -431,10 +485,63 @@ export function RetranscribeDialog({
               <p className="text-sm text-red-800">{error}</p>
             </div>
           )}
+
+          {stats && !isProcessing && !isCancelling && !error && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Clock className="h-3.5 w-3.5" />
+                    Audio length
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {formatDuration(stats.audioSeconds)}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Gauge className="h-3.5 w-3.5" />
+                    Processing time
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {stats.processingSeconds.toFixed(1)}s
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Zap className="h-3.5 w-3.5" />
+                    Speed
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {stats.processingSeconds > 0
+                      ? `${(stats.audioSeconds / stats.processingSeconds).toFixed(1)}x realtime`
+                      : '-'}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Hash className="h-3.5 w-3.5" />
+                    Segments
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">{stats.segments}</p>
+                </div>
+              </div>
+              <div className="space-y-1 text-xs text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <Cpu className="h-3.5 w-3.5" />
+                  Retranscribed with {stats.modelLabel}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Globe className="h-3.5 w-3.5" />
+                  Language: {stats.language}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <DialogFooter>
-          {!isProcessing && !isCancelling && !error && (
+          {!isProcessing && !isCancelling && !error && !stats && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
@@ -446,6 +553,23 @@ export function RetranscribeDialog({
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Replace Transcript
+              </Button>
+            </>
+          )}
+          {stats && !isProcessing && !isCancelling && !error && (
+            <>
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                Close
+              </Button>
+              <Button
+                onClick={() => {
+                  setStats(null);
+                  setProgress(null);
+                  setError(null);
+                }}
+                variant="outline"
+              >
+                Retranscribe Again
               </Button>
             </>
           )}

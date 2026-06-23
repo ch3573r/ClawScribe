@@ -4,6 +4,14 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -11,7 +19,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { ChevronDown, Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
+import {
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Copy,
+  Cpu,
+  FolderOpen,
+  Gauge,
+  Hash,
+  RefreshCw,
+  Route,
+  Users,
+  Zap,
+} from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
@@ -29,6 +50,11 @@ interface SpeakerDiarizationComplete {
   meeting_id: string;
   speaker_count: number;
   updated_segments: number;
+  duration_seconds: number;
+  processing_seconds: number;
+  provider: string;
+  embedding_model: string;
+  turn_count: number;
 }
 
 interface SpeakerDiarizationError {
@@ -46,6 +72,26 @@ interface TranscriptButtonGroupProps {
   onRefetchTranscripts?: () => Promise<void>;
 }
 
+function formatDuration(seconds: number): string {
+  const safeSeconds = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const secs = Math.floor(safeSeconds % 60);
+
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${minutes}:${secs.toString().padStart(2, '0')}`;
+}
+
+function formatProvider(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === 'directml') return 'DirectML';
+  if (normalized === 'cpu') return 'CPU';
+  if (!normalized) return 'Unknown provider';
+  return provider;
+}
+
 
 export function TranscriptButtonGroup({
   transcriptCount,
@@ -59,6 +105,8 @@ export function TranscriptButtonGroup({
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
+  const [diarizationResult, setDiarizationResult] = useState<SpeakerDiarizationComplete | null>(null);
+  const [showDiarizationResult, setShowDiarizationResult] = useState(false);
   const diarizationToastIdRef = useRef<string | number | null>(null);
 
   const showDiarizationProgress = useCallback((message: string, progress?: number) => {
@@ -104,6 +152,8 @@ export function TranscriptButtonGroup({
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      setDiarizationResult(event.payload);
+      setShowDiarizationResult(true);
       clearDiarizationProgress();
       toast.success('Speaker labels applied', {
         description: `${event.payload.updated_segments} transcript segments updated across ${event.payload.speaker_count} speaker${event.payload.speaker_count === 1 ? '' : 's'}.`,
@@ -115,6 +165,8 @@ export function TranscriptButtonGroup({
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
+      setDiarizationResult(null);
+      setShowDiarizationResult(false);
       clearDiarizationProgress();
       toast.error('Speaker diarization failed', {
         description: event.payload.error,
@@ -131,6 +183,8 @@ export function TranscriptButtonGroup({
     const speakerMode = numSpeakers ? `${numSpeakers} speakers` : 'Auto speaker detection';
     setIsDiarizing(true);
     setDiarizationMessage(`Starting ${speakerMode.toLowerCase()}...`);
+    setDiarizationResult(null);
+    setShowDiarizationResult(false);
     showDiarizationProgress(`Starting ${speakerMode.toLowerCase()}...`, 0);
     try {
       Analytics.trackButtonClick(numSpeakers ? `speaker_diarization_${numSpeakers}` : 'speaker_diarization_auto', 'meeting_details');
@@ -154,6 +208,9 @@ export function TranscriptButtonGroup({
   }, [clearDiarizationProgress, meetingFolderPath, meetingId, showDiarizationProgress]);
 
   const speakerDetectionDisabled = transcriptCount === 0 || isDiarizing;
+  const diarizationSpeed = diarizationResult && diarizationResult.processing_seconds > 0
+    ? diarizationResult.duration_seconds / diarizationResult.processing_seconds
+    : null;
 
   return (
     <div className="flex shrink-0 items-center justify-end gap-2">
@@ -246,6 +303,98 @@ export function TranscriptButtonGroup({
           onComplete={handleRetranscribeComplete}
         />
       )}
+
+      <Dialog open={showDiarizationResult} onOpenChange={setShowDiarizationResult}>
+        <DialogContent className="sm:max-w-[540px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              Speaker Diarization Complete
+            </DialogTitle>
+            <DialogDescription>
+              Speaker labels were applied. Benchmark below.
+            </DialogDescription>
+          </DialogHeader>
+
+          {diarizationResult && (
+            <div className="space-y-4 py-2">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Clock className="h-3.5 w-3.5" />
+                    Audio
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {formatDuration(diarizationResult.duration_seconds)}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Gauge className="h-3.5 w-3.5" />
+                    Processing
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {diarizationResult.processing_seconds.toFixed(1)}s
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Zap className="h-3.5 w-3.5" />
+                    Speed
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {diarizationSpeed ? `${diarizationSpeed.toFixed(1)}x` : '-'}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Users className="h-3.5 w-3.5" />
+                    Speakers
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {diarizationResult.speaker_count}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Route className="h-3.5 w-3.5" />
+                    Turns
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {diarizationResult.turn_count}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border bg-muted p-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Hash className="h-3.5 w-3.5" />
+                    Rows
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {diarizationResult.updated_segments}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-1 text-xs text-muted-foreground">
+                <div className="flex items-start gap-1.5">
+                  <Cpu className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>Provider: {formatProvider(diarizationResult.provider)}</span>
+                </div>
+                <div className="flex items-start gap-1.5">
+                  <Users className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="break-words">Embedding: {diarizationResult.embedding_model}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDiarizationResult(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
