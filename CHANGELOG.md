@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.26
+
+- Added diarization mapping diagnostics to speaker-detection profiles so support
+  payloads can show timestamp eligibility, prepared turn counts, and split-block
+  reasons when speaker labels look wrong.
+- Removed the redundant top-level Add-ons sidebar item now that Add-ons lives
+  under Settings.
+- Kept Settings in the sidebar footer, including the collapsed icon rail, so it
+  stays with the recording/import controls instead of duplicating primary
+  navigation.
+- Neutralized dark-mode shell colors from blue-black to charcoal while keeping
+  the Claw cyan/blue accent for active states, recording controls, and primary
+  actions.
+- `latest.json` advertises runtime version `0.5.26`, so installed `0.5.25`
+  clients can discover this update.
+
 ## 0.5.25
 
 - Redacted copied diagnostics so exported support payloads no longer include
