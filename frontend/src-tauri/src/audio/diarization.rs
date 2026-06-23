@@ -42,6 +42,10 @@ const MAX_DOMINANT_SPEAKER_SHARE_FOR_EXPLICIT_COUNT: f64 = 0.92;
 const AUTO_MAX_CONFIDENT_SPEAKER_LANES: usize = 4;
 const AUTO_SIGNIFICANT_SPEAKER_MIN_SECONDS: f64 = 6.0;
 const AUTO_SIGNIFICANT_SPEAKER_DOMINANT_SHARE: f64 = 0.06;
+const DEFAULT_MIN_DURATION_ON_SECONDS: f32 = 0.3;
+const DEFAULT_MIN_DURATION_OFF_SECONDS: f32 = 0.5;
+const FIXED_COUNT_MIN_DURATION_ON_SECONDS: f32 = 0.12;
+const FIXED_COUNT_MIN_DURATION_OFF_SECONDS: f32 = 0.12;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
 const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 const DEFAULT_SEGMENTATION_MODEL_ID: &str = "pyannote-segmentation-3-0-int8";
@@ -1157,8 +1161,8 @@ impl SherpaDiarizationConfig {
             provider: preferred_diarization_provider().to_string(),
             num_clusters: None,
             clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-            min_duration_on: 0.3,
-            min_duration_off: 0.5,
+            min_duration_on: DEFAULT_MIN_DURATION_ON_SECONDS,
+            min_duration_off: DEFAULT_MIN_DURATION_OFF_SECONDS,
             debug: false,
         }
     }
@@ -1853,82 +1857,22 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality)
             && !custom_embedding_requested
         {
-            let current_embedding_id = attempt
-                .model_paths
-                .embedding_descriptor
-                .map(|descriptor| descriptor.id);
-            let mut best_failed_attempt = attempt.clone();
-
-            for embedding_model_id in
-                fallback_embedding_model_ids(current_embedding_id, allow_zh_cn_fallback)
-            {
-                let candidate_model_paths = resolve_model_paths_for_embedding(
-                    &app,
-                    requested_segmentation_model_path.clone(),
-                    requested_embedding_model_path.clone(),
-                    Some(embedding_model_id.to_string()),
-                )?;
-                let embedding_name = candidate_model_paths
-                    .embedding_descriptor
-                    .map(|descriptor| descriptor.display_name)
-                    .unwrap_or("custom embedding model");
-                emit_progress(
-                    &app,
-                    &meeting_id,
-                    "diarizing_retry",
-                    65,
-                    &format!("Speaker labels look collapsed; retrying with {embedding_name}..."),
-                );
-
-                let candidate = match run_diarization_mapping_attempt(
-                    &app,
-                    &meeting_id,
-                    candidate_model_paths,
-                    sample_count,
-                    explicit_num_speakers,
-                    Arc::clone(&samples),
-                    &transcript_segments,
-                    preserve_existing_labels,
-                    65,
-                    Some(embedding_name),
-                )
-                .await
-                {
-                    Ok(candidate) => candidate,
-                    Err(error) => {
-                        log::warn!(
-                            "speaker_diarization_embedding_retry_failed meeting_id={} embedding_model_id={} error={}",
-                            meeting_id,
-                            embedding_model_id,
-                            error
-                        );
-                        continue;
-                    }
-                };
-
-                if is_better_explicit_mapping_attempt(
-                    expected_speakers,
-                    &candidate,
-                    &best_failed_attempt,
-                ) {
-                    best_failed_attempt = candidate.clone();
-                }
-
-                if !explicit_speaker_mapping_is_collapsed(expected_speakers, &candidate.quality) {
-                    attempt = candidate;
-                    break;
-                }
-            }
-
-            if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality)
-                && is_better_explicit_mapping_attempt(
-                    expected_speakers,
-                    &best_failed_attempt,
-                    &attempt,
-                )
-            {
-                attempt = best_failed_attempt;
-            }
+            attempt = retry_collapsed_mapping_with_fallback_embeddings(
+                &app,
+                &meeting_id,
+                attempt,
+                expected_speakers,
+                explicit_num_speakers,
+                sample_count,
+                Arc::clone(&samples),
+                &transcript_segments,
+                preserve_existing_labels,
+                requested_segmentation_model_path.clone(),
+                requested_embedding_model_path.clone(),
+                allow_zh_cn_fallback,
+                65,
+            )
+            .await?;
         }
 
         if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality) {
@@ -1961,7 +1905,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             ),
         );
 
-        let recovered_attempt = run_diarization_mapping_attempt(
+        let mut recovered_attempt = run_diarization_mapping_attempt(
             &app,
             &meeting_id,
             attempt.model_paths.clone(),
@@ -1976,6 +1920,28 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         .await?;
 
         let expected_speakers = usize::try_from(recovery.speaker_count).unwrap_or(0);
+        if expected_speakers > 1
+            && explicit_speaker_mapping_is_collapsed(expected_speakers, &recovered_attempt.quality)
+            && !custom_embedding_requested
+        {
+            recovered_attempt = retry_collapsed_mapping_with_fallback_embeddings(
+                &app,
+                &meeting_id,
+                recovered_attempt,
+                expected_speakers,
+                Some(recovery.speaker_count),
+                sample_count,
+                Arc::clone(&samples),
+                &transcript_segments,
+                preserve_existing_labels,
+                requested_segmentation_model_path.clone(),
+                requested_embedding_model_path.clone(),
+                allow_zh_cn_fallback,
+                65,
+            )
+            .await?;
+        }
+
         if explicit_speaker_mapping_is_collapsed(expected_speakers, &recovered_attempt.quality) {
             write_diarization_profile(&app, &recovered_attempt.profile);
             return Err(anyhow!(explicit_mapping_failure_message(
@@ -2266,6 +2232,98 @@ async fn run_diarization_mapping_attempt<R: Runtime>(
         prepared_speaker_count,
         quality,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retry_collapsed_mapping_with_fallback_embeddings<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    mut attempt: DiarizationMappingAttempt,
+    expected_speakers: usize,
+    explicit_num_speakers: Option<i32>,
+    sample_count: usize,
+    samples: Arc<Vec<f32>>,
+    transcript_segments: &[TranscriptSegment],
+    preserve_existing_labels: bool,
+    requested_segmentation_model_path: Option<String>,
+    requested_embedding_model_path: Option<String>,
+    allow_zh_cn_fallback: bool,
+    progress_percentage: u32,
+) -> Result<DiarizationMappingAttempt> {
+    if !explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality) {
+        return Ok(attempt);
+    }
+
+    let current_embedding_id = attempt
+        .model_paths
+        .embedding_descriptor
+        .map(|descriptor| descriptor.id);
+    let mut best_failed_attempt = attempt.clone();
+
+    for embedding_model_id in
+        fallback_embedding_model_ids(current_embedding_id, allow_zh_cn_fallback)
+    {
+        let candidate_model_paths = resolve_model_paths_for_embedding(
+            app,
+            requested_segmentation_model_path.clone(),
+            requested_embedding_model_path.clone(),
+            Some(embedding_model_id.to_string()),
+        )?;
+        let embedding_name = candidate_model_paths
+            .embedding_descriptor
+            .map(|descriptor| descriptor.display_name)
+            .unwrap_or("custom embedding model");
+        emit_progress(
+            app,
+            meeting_id,
+            "diarizing_retry",
+            progress_percentage,
+            &format!("Speaker labels look collapsed; retrying with {embedding_name}..."),
+        );
+
+        let candidate = match run_diarization_mapping_attempt(
+            app,
+            meeting_id,
+            candidate_model_paths,
+            sample_count,
+            explicit_num_speakers,
+            Arc::clone(&samples),
+            transcript_segments,
+            preserve_existing_labels,
+            progress_percentage,
+            Some(embedding_name),
+        )
+        .await
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                log::warn!(
+                    "speaker_diarization_embedding_retry_failed meeting_id={} embedding_model_id={} error={}",
+                    meeting_id,
+                    embedding_model_id,
+                    error
+                );
+                continue;
+            }
+        };
+
+        if is_better_explicit_mapping_attempt(expected_speakers, &candidate, &best_failed_attempt) {
+            best_failed_attempt = candidate.clone();
+        }
+
+        if !explicit_speaker_mapping_is_collapsed(expected_speakers, &candidate.quality) {
+            attempt = candidate;
+            break;
+        }
+    }
+
+    if explicit_speaker_mapping_is_collapsed(expected_speakers, &attempt.quality)
+        && is_better_explicit_mapping_attempt(expected_speakers, &best_failed_attempt, &attempt)
+    {
+        attempt = best_failed_attempt;
+    }
+
+    Ok(attempt)
 }
 
 fn is_better_explicit_mapping_attempt(
@@ -3119,6 +3177,13 @@ fn diarization_config_for_provider(
     config.clustering_threshold = clustering_threshold;
     config.provider = provider.to_string();
     config.debug = sherpa_diarization_debug_enabled(provider);
+    if explicit_num_speakers
+        .filter(|speakers| *speakers > 1)
+        .is_some()
+    {
+        config.min_duration_on = FIXED_COUNT_MIN_DURATION_ON_SECONDS;
+        config.min_duration_off = FIXED_COUNT_MIN_DURATION_OFF_SECONDS;
+    }
     config
 }
 
@@ -4534,6 +4599,38 @@ mod tests {
 
         assert!(!english_ids.contains(&ZH_CN_EMBEDDING_MODEL_ID));
         assert!(chinese_ids.contains(&ZH_CN_EMBEDDING_MODEL_ID));
+    }
+
+    #[test]
+    fn fixed_speaker_count_uses_short_turn_duration_gates() {
+        let model_paths = test_model_paths();
+
+        let auto_config = diarization_config_for_provider(
+            &model_paths,
+            None,
+            "cpu",
+            DEFAULT_CLUSTERING_THRESHOLD,
+        );
+        assert_eq!(auto_config.min_duration_on, DEFAULT_MIN_DURATION_ON_SECONDS);
+        assert_eq!(
+            auto_config.min_duration_off,
+            DEFAULT_MIN_DURATION_OFF_SECONDS
+        );
+
+        let fixed_config = diarization_config_for_provider(
+            &model_paths,
+            Some(3),
+            "cpu",
+            DEFAULT_CLUSTERING_THRESHOLD,
+        );
+        assert_eq!(
+            fixed_config.min_duration_on,
+            FIXED_COUNT_MIN_DURATION_ON_SECONDS
+        );
+        assert_eq!(
+            fixed_config.min_duration_off,
+            FIXED_COUNT_MIN_DURATION_OFF_SECONDS
+        );
     }
 
     #[test]
