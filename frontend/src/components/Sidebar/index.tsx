@@ -16,7 +16,6 @@ import {
   SearchIcon,
   X,
   Upload,
-  Plug,
 } from "lucide-react";
 import { useRouter, usePathname } from "next/navigation";
 import { useSidebar } from "./SidebarProvider";
@@ -328,14 +327,8 @@ const Sidebar: React.FC = () => {
       {
         label: "Settings",
         icon: Settings,
-        active: isSettingsPage && !onAddons,
+        active: isSettingsPage,
         onClick: () => openSettingsTab("general"),
-      },
-      {
-        label: "Add-ons",
-        icon: Plug,
-        active: onAddons,
-        onClick: () => openSettingsTab("integrations"),
       },
     ];
     const statusDot = isRecording
@@ -538,7 +531,6 @@ const Sidebar: React.FC = () => {
   };
 
   const onSettings = pathname === "/settings";
-  const onAddons = onSettings && settingsTab === "integrations";
   const isEffectivelyCollapsed = isCollapsed || onSettings;
 
   const goToMeetings = () => {
@@ -568,14 +560,8 @@ const Sidebar: React.FC = () => {
     {
       label: "Settings",
       icon: Settings,
-      active: onSettings && !onAddons,
+      active: onSettings,
       onClick: () => openSettingsTab("general"),
-    },
-    {
-      label: "Add-ons",
-      icon: Plug,
-      active: onAddons,
-      onClick: () => openSettingsTab("integrations"),
     },
   ];
 
