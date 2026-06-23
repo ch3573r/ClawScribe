@@ -575,10 +575,36 @@ async fn run_retranscription<R: Runtime>(
         .and_then(|n| n.to_str())
         .unwrap_or("audio.mp4")
         .to_string();
+    let used_provider = if use_nemotron {
+        "nemotron"
+    } else if use_parakeet {
+        "parakeet"
+    } else {
+        "localWhisper"
+    };
+    let used_model = if let Some(e) = &nemotron_engine {
+        e.get_current_model().await
+    } else if let Some(e) = &parakeet_engine {
+        e.get_current_model().await
+    } else if let Some(e) = &whisper_engine {
+        e.get_current_model().await
+    } else {
+        None
+    }
+    .or_else(|| model.clone())
+    .unwrap_or_default();
+    let source_language =
+        super::common::transcription_source_language_hint(Some(used_provider), language.as_deref());
 
-    if let Err(e) =
-        write_retranscription_metadata(&folder_path, &meeting_id, duration_seconds, &audio_filename)
-    {
+    if let Err(e) = write_retranscription_metadata(
+        &folder_path,
+        &meeting_id,
+        duration_seconds,
+        &audio_filename,
+        used_provider,
+        &used_model,
+        source_language.as_deref(),
+    ) {
         warn!("Failed to update metadata.json: {}", e);
     }
 
@@ -894,6 +920,9 @@ fn write_retranscription_metadata(
     meeting_id: &str,
     duration_seconds: f64,
     audio_filename: &str,
+    transcription_provider: &str,
+    transcription_model: &str,
+    transcription_source_language: Option<&str>,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
@@ -910,6 +939,25 @@ fn write_retranscription_metadata(
                 "transcript_file".to_string(),
                 serde_json::json!("transcripts.json"),
             );
+            obj.insert(
+                "transcription_provider".to_string(),
+                serde_json::json!(transcription_provider),
+            );
+            obj.insert(
+                "transcription_model".to_string(),
+                serde_json::json!(transcription_model),
+            );
+            match transcription_source_language {
+                Some(language) => {
+                    obj.insert(
+                        "transcription_source_language".to_string(),
+                        serde_json::json!(language),
+                    );
+                }
+                None => {
+                    obj.remove("transcription_source_language");
+                }
+            }
             obj.remove("detected_summary_language");
         }
         value
@@ -924,7 +972,10 @@ fn write_retranscription_metadata(
             "audio_file": audio_filename,
             "transcript_file": "transcripts.json",
             "status": "completed",
-            "source": "retranscription"
+            "source": "retranscription",
+            "transcription_provider": transcription_provider,
+            "transcription_model": transcription_model,
+            "transcription_source_language": transcription_source_language
         })
     };
 
@@ -1205,7 +1256,15 @@ mod tests {
         )
         .unwrap();
 
-        let result = write_retranscription_metadata(dir.path(), "meeting-123", 240.0, "audio.wav");
+        let result = write_retranscription_metadata(
+            dir.path(),
+            "meeting-123",
+            240.0,
+            "audio.wav",
+            "nemotron",
+            "nemotron-streaming-0.6b-fp16",
+            Some("de"),
+        );
         assert!(
             result.is_ok(),
             "write_retranscription_metadata failed: {:?}",
@@ -1220,6 +1279,12 @@ mod tests {
         assert_eq!(parsed["custom_field"], "keep-me");
         assert_eq!(parsed["status"], "completed");
         assert_eq!(parsed["transcript_file"], "transcripts.json");
+        assert_eq!(parsed["transcription_provider"], "nemotron");
+        assert_eq!(
+            parsed["transcription_model"],
+            "nemotron-streaming-0.6b-fp16"
+        );
+        assert_eq!(parsed["transcription_source_language"], "de");
         assert!(parsed.get("retranscribed_at").is_some());
         assert!(parsed.get("detected_summary_language").is_none());
         assert!(!dir.path().join(".metadata.json.tmp").exists());
@@ -1229,7 +1294,15 @@ mod tests {
     fn test_write_retranscription_metadata_creates_missing_file() {
         let dir = tempfile::tempdir().unwrap();
 
-        let result = write_retranscription_metadata(dir.path(), "meeting-456", 300.0, "audio.flac");
+        let result = write_retranscription_metadata(
+            dir.path(),
+            "meeting-456",
+            300.0,
+            "audio.flac",
+            "parakeet",
+            "parakeet-tdt-0.6b-v3-int8",
+            Some("en"),
+        );
         assert!(
             result.is_ok(),
             "write_retranscription_metadata failed: {:?}",
@@ -1245,6 +1318,9 @@ mod tests {
         assert_eq!(parsed["audio_file"], "audio.flac");
         assert_eq!(parsed["transcript_file"], "transcripts.json");
         assert_eq!(parsed["source"], "retranscription");
+        assert_eq!(parsed["transcription_provider"], "parakeet");
+        assert_eq!(parsed["transcription_model"], "parakeet-tdt-0.6b-v3-int8");
+        assert_eq!(parsed["transcription_source_language"], "en");
         assert!(parsed.get("retranscribed_at").is_some());
     }
 }

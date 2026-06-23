@@ -252,11 +252,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     manager.set_recordings_folder(save_folder);
 
     // Record which transcription engine + model this session uses.
-    let (tp, tm) = resolve_transcription_info(&app).await;
+    let (tp, tm, source_language) = resolve_transcription_info(&app).await;
     // Provider-specific live VAD cap: Nemotron is slower per segment, so cap its
     // live segments shorter to reduce perceived latency; others keep the default.
     crate::audio::pipeline::set_live_max_segment_ms_for_provider(tp.as_deref().unwrap_or(""));
-    manager.set_transcription_info(tp, tm);
+    manager.set_transcription_info(tp, tm, source_language);
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -466,11 +466,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     manager.set_recordings_folder(save_folder);
 
     // Record which transcription engine + model this session uses.
-    let (tp, tm) = resolve_transcription_info(&app).await;
+    let (tp, tm, source_language) = resolve_transcription_info(&app).await;
     // Provider-specific live VAD cap: Nemotron is slower per segment, so cap its
     // live segments shorter to reduce perceived latency; others keep the default.
     crate::audio::pipeline::set_live_max_segment_ms_for_provider(tp.as_deref().unwrap_or(""));
-    manager.set_transcription_info(tp, tm);
+    manager.set_transcription_info(tp, tm, source_language);
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -1347,16 +1347,26 @@ pub async fn attempt_device_reconnect(
     }
 }
 
-/// Resolve the configured transcription provider + model so it can be recorded
-/// in the meeting metadata. Live recording has no silent provider fallback, so
-/// the saved config is what actually runs.
+/// Resolve the transcription provider + model recorded in meeting metadata.
+/// When no transcript config exists, recording defaults to Parakeet.
 async fn resolve_transcription_info<R: Runtime>(
     app: &AppHandle<R>,
-) -> (Option<String>, Option<String>) {
-    match crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await {
-        Ok(Some(c)) => (Some(c.provider), Some(c.model)),
-        _ => (None, None),
-    }
+) -> (Option<String>, Option<String>, Option<String>) {
+    let (provider, model) =
+        match crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await {
+            Ok(Some(c)) => (c.provider, c.model),
+            _ => (
+                "parakeet".to_string(),
+                crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+            ),
+        };
+    let language_preference = crate::get_language_preference_internal();
+    let source_language = super::common::transcription_source_language_hint(
+        Some(provider.as_str()),
+        language_preference.as_deref(),
+    );
+
+    (Some(provider), Some(model), source_language)
 }
 
 /// Beta (opt-in, default off): toggle energy-based "Me"/"Participants" source

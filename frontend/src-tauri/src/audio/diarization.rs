@@ -3,7 +3,9 @@ use crate::audio::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
 use crate::summary::language_detection::detect_summary_language;
-use crate::summary::metadata::read_detected_summary_language_from_metadata;
+use crate::summary::metadata::{
+    read_detected_summary_language_from_metadata, read_transcription_source_language_from_metadata,
+};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -2498,6 +2500,15 @@ fn resolve_embedding_model_id_for_meeting(
     stored_segments: &[StoredTranscriptSegment],
 ) -> Option<String> {
     let language_preference = crate::get_language_preference_internal();
+    let transcription_source_language = match read_transcription_source_language_from_metadata(
+        folder_path,
+    ) {
+        Ok(language) => language,
+        Err(error) => {
+            log::warn!("Failed to read transcription source language for diarization model selection: {error}");
+            None
+        }
+    };
     let detected_summary_language = match read_detected_summary_language_from_metadata(folder_path)
     {
         Ok(language) => language,
@@ -2512,6 +2523,7 @@ fn resolve_embedding_model_id_for_meeting(
     resolve_embedding_model_id_for_signals(
         embedding_model_path,
         embedding_model_id,
+        transcription_source_language.as_deref(),
         language_preference.as_deref(),
         detected_summary_language.as_deref(),
         stored_segments,
@@ -2521,6 +2533,7 @@ fn resolve_embedding_model_id_for_meeting(
 fn resolve_embedding_model_id_for_signals(
     embedding_model_path: Option<&str>,
     embedding_model_id: Option<String>,
+    transcription_source_language: Option<&str>,
     language_preference: Option<&str>,
     detected_summary_language: Option<&str>,
     stored_segments: &[StoredTranscriptSegment],
@@ -2535,6 +2548,11 @@ fn resolve_embedding_model_id_for_signals(
             .is_some()
     {
         return explicit_model_id;
+    }
+
+    if let Some(choice) = transcription_source_language.and_then(embedding_choice_for_language_code)
+    {
+        return choice.model_id();
     }
 
     if let Some(choice) = embedding_choice_for_language_preference(language_preference) {
@@ -3210,18 +3228,63 @@ mod tests {
     }
 
     #[test]
+    fn speaker_embedding_model_uses_transcription_source_language_before_current_preference() {
+        let segments = vec![stored_transcript(
+            "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
+        )];
+
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(
+                None,
+                None,
+                Some("zh"),
+                Some("en"),
+                Some("en"),
+                &segments,
+            )
+            .as_deref(),
+            Some(ZH_CN_EMBEDDING_MODEL_ID)
+        );
+        assert_eq!(
+            resolve_embedding_model_id_for_signals(
+                None,
+                None,
+                Some("en"),
+                Some("zh"),
+                Some("zh"),
+                &segments,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn speaker_embedding_model_uses_language_preference_before_text_detection() {
         let segments = vec![stored_transcript(
             "我们今天讨论项目进展、后续行动和会议记录，需要区分不同发言人的贡献。",
         )];
 
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, Some("zh"), Some("en"), &segments)
-                .as_deref(),
+            resolve_embedding_model_id_for_signals(
+                None,
+                None,
+                None,
+                Some("zh"),
+                Some("en"),
+                &segments,
+            )
+            .as_deref(),
             Some(ZH_CN_EMBEDDING_MODEL_ID)
         );
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, Some("en"), Some("zh"), &segments),
+            resolve_embedding_model_id_for_signals(
+                None,
+                None,
+                None,
+                Some("en"),
+                Some("zh"),
+                &segments,
+            ),
             None
         );
     }
@@ -3233,12 +3296,12 @@ mod tests {
         )];
 
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, None, Some("zh"), &segments)
+            resolve_embedding_model_id_for_signals(None, None, None, None, Some("zh"), &segments)
                 .as_deref(),
             Some(ZH_CN_EMBEDDING_MODEL_ID)
         );
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, None, Some("en"), &segments),
+            resolve_embedding_model_id_for_signals(None, None, None, None, Some("en"), &segments),
             None
         );
     }
@@ -3257,8 +3320,15 @@ mod tests {
             Some(DiarizationEmbeddingChoice::Model(ZH_CN_EMBEDDING_MODEL_ID))
         );
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, None, None, &chinese_segments)
-                .as_deref(),
+            resolve_embedding_model_id_for_signals(
+                None,
+                None,
+                None,
+                None,
+                None,
+                &chinese_segments,
+            )
+            .as_deref(),
             Some(ZH_CN_EMBEDDING_MODEL_ID)
         );
         assert_eq!(
@@ -3266,7 +3336,7 @@ mod tests {
             Some(DiarizationEmbeddingChoice::Default)
         );
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, None, None, &english_segments),
+            resolve_embedding_model_id_for_signals(None, None, None, None, None, &english_segments,),
             None
         );
     }
@@ -3278,12 +3348,13 @@ mod tests {
         )];
 
         assert_eq!(
-            resolve_embedding_model_id_for_signals(None, None, Some("auto"), None, &segments)
+            resolve_embedding_model_id_for_signals(None, None, None, Some("auto"), None, &segments)
                 .as_deref(),
             Some(ZH_CN_EMBEDDING_MODEL_ID)
         );
         assert_eq!(
             resolve_embedding_model_id_for_signals(
+                None,
                 None,
                 None,
                 Some("auto-translate"),
@@ -3307,6 +3378,7 @@ mod tests {
                 Some("nemo-titanet-small-en".to_string()),
                 Some("zh"),
                 Some("zh"),
+                Some("zh"),
                 &segments,
             )
             .as_deref(),
@@ -3316,6 +3388,7 @@ mod tests {
             resolve_embedding_model_id_for_signals(
                 Some("C:/models/custom.onnx"),
                 None,
+                Some("zh"),
                 Some("zh"),
                 Some("zh"),
                 &segments,

@@ -483,8 +483,14 @@ impl RecordingManager {
     }
 
     /// Record which transcription engine + model this session uses.
-    pub fn set_transcription_info(&mut self, provider: Option<String>, model: Option<String>) {
-        self.recording_saver.set_transcription_info(provider, model);
+    pub fn set_transcription_info(
+        &mut self,
+        provider: Option<String>,
+        model: Option<String>,
+        source_language: Option<String>,
+    ) {
+        self.recording_saver
+            .set_transcription_info(provider, model, source_language);
     }
 
     /// Add a structured transcript segment to be saved later

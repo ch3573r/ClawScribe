@@ -8,6 +8,7 @@ use super::processor::language_name_from_code;
 
 const SUMMARY_LANGUAGE_FIELD: &str = "summary_language";
 const DETECTED_SUMMARY_LANGUAGE_FIELD: &str = "detected_summary_language";
+const TRANSCRIPTION_SOURCE_LANGUAGE_FIELD: &str = "transcription_source_language";
 const METADATA_FILE: &str = "metadata.json";
 const METADATA_TEMP_FILE_PREFIX: &str = ".metadata.json.";
 static METADATA_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -22,6 +23,12 @@ pub(crate) fn read_detected_summary_language_from_metadata(
     read_language_field_from_metadata(folder, DETECTED_SUMMARY_LANGUAGE_FIELD)
 }
 
+pub(crate) fn read_transcription_source_language_from_metadata(
+    folder: &Path,
+) -> Result<Option<String>> {
+    read_language_field_from_metadata(folder, TRANSCRIPTION_SOURCE_LANGUAGE_FIELD)
+}
+
 pub(crate) fn write_summary_language_to_metadata(
     folder: &Path,
     summary_language: Option<&str>,
@@ -34,6 +41,13 @@ pub(crate) fn write_detected_summary_language_to_metadata(
     summary_language: Option<&str>,
 ) -> Result<()> {
     write_language_field_to_metadata(folder, DETECTED_SUMMARY_LANGUAGE_FIELD, summary_language)
+}
+
+pub(crate) fn write_transcription_source_language_to_metadata(
+    folder: &Path,
+    source_language: Option<&str>,
+) -> Result<()> {
+    write_language_field_to_metadata(folder, TRANSCRIPTION_SOURCE_LANGUAGE_FIELD, source_language)
 }
 
 fn read_language_field_from_metadata(folder: &Path, field: &str) -> Result<Option<String>> {
@@ -213,6 +227,39 @@ mod tests {
         assert_eq!(
             read_summary_language_from_metadata(dir.path()).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn transcription_source_language_is_stored_separately_from_summary_languages() {
+        let dir = tempfile::tempdir().unwrap();
+
+        write_transcription_source_language_to_metadata(dir.path(), Some("zh-cn")).unwrap();
+        write_detected_summary_language_to_metadata(dir.path(), Some("es")).unwrap();
+        write_summary_language_to_metadata(dir.path(), Some("fr")).unwrap();
+
+        assert_eq!(
+            read_transcription_source_language_from_metadata(dir.path()).unwrap(),
+            Some("zh".to_string())
+        );
+        assert_eq!(
+            read_detected_summary_language_from_metadata(dir.path()).unwrap(),
+            Some("es".to_string())
+        );
+        assert_eq!(
+            read_summary_language_from_metadata(dir.path()).unwrap(),
+            Some("fr".to_string())
+        );
+
+        write_transcription_source_language_to_metadata(dir.path(), None).unwrap();
+
+        assert_eq!(
+            read_transcription_source_language_from_metadata(dir.path()).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_detected_summary_language_from_metadata(dir.path()).unwrap(),
+            Some("es".to_string())
         );
     }
 

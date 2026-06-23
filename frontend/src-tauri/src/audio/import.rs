@@ -713,6 +713,8 @@ async fn run_import<R: Runtime>(
     }
     .or_else(|| model.clone())
     .unwrap_or_default();
+    let source_language =
+        super::common::transcription_source_language_hint(Some(used_provider), language.as_deref());
 
     if let Err(e) = write_import_metadata(
         &meeting_folder,
@@ -723,6 +725,7 @@ async fn run_import<R: Runtime>(
         "import",
         used_provider,
         &used_model,
+        source_language.as_deref(),
     ) {
         warn!("Failed to write metadata.json: {}", e);
     }
@@ -997,12 +1000,13 @@ fn write_import_metadata(
     source: &str,
     transcription_provider: &str,
     transcription_model: &str,
+    transcription_source_language: Option<&str>,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
     let now = chrono::Utc::now().to_rfc3339();
 
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "version": "1.0",
         "meeting_id": meeting_id,
         "meeting_name": title,
@@ -1017,6 +1021,9 @@ fn write_import_metadata(
         "transcription_provider": transcription_provider,
         "transcription_model": transcription_model
     });
+    if let Some(language) = transcription_source_language {
+        json["transcription_source_language"] = serde_json::json!(language);
+    }
 
     let json_string = serde_json::to_string_pretty(&json)?;
     std::fs::write(&temp_path, &json_string)?;
@@ -1452,6 +1459,7 @@ mod tests {
             "import",
             "parakeet",
             "parakeet-tdt-0.6b-v3-int8",
+            Some("en"),
         );
         assert!(result.is_ok(), "write_import_metadata failed: {:?}", result);
 
@@ -1469,6 +1477,7 @@ mod tests {
         assert_eq!(parsed["source"], "import");
         assert_eq!(parsed["transcription_provider"], "parakeet");
         assert_eq!(parsed["transcription_model"], "parakeet-tdt-0.6b-v3-int8");
+        assert_eq!(parsed["transcription_source_language"], "en");
     }
 
     /// Integration test that decodes a real audio file and runs VAD.

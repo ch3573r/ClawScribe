@@ -48,6 +48,8 @@ pub struct MeetingMetadata {
     pub transcription_provider: Option<String>,
     #[serde(default)]
     pub transcription_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription_source_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ pub struct RecordingSaver {
     is_saving: Arc<Mutex<bool>>,
     transcription_provider: Option<String>,
     transcription_model: Option<String>,
+    transcription_source_language: Option<String>,
 }
 
 impl RecordingSaver {
@@ -83,14 +86,21 @@ impl RecordingSaver {
             is_saving: Arc::new(Mutex::new(false)),
             transcription_provider: None,
             transcription_model: None,
+            transcription_source_language: None,
         }
     }
 
     /// Record which transcription engine + model this recording uses. Set before
     /// the meeting folder is initialized so it lands in metadata.json.
-    pub fn set_transcription_info(&mut self, provider: Option<String>, model: Option<String>) {
+    pub fn set_transcription_info(
+        &mut self,
+        provider: Option<String>,
+        model: Option<String>,
+        source_language: Option<String>,
+    ) {
         self.transcription_provider = provider;
         self.transcription_model = model;
+        self.transcription_source_language = source_language;
     }
 
     /// Set the meeting name for this recording session
@@ -323,6 +333,7 @@ impl RecordingSaver {
             status: "recording".to_string(),
             transcription_provider: self.transcription_provider.clone(),
             transcription_model: self.transcription_model.clone(),
+            transcription_source_language: self.transcription_source_language.clone(),
         };
 
         // Write initial metadata.json

@@ -1,4 +1,5 @@
 use crate::api::TranscriptSegment;
+use crate::summary::processor::language_name_from_code;
 use anyhow::Result;
 use log::{debug, info};
 use once_cell::sync::Lazy;
@@ -9,6 +10,39 @@ use uuid::Uuid;
 
 static ENGINE_LIFECYCLE_LOCK: Lazy<Arc<AsyncMutex<()>>> =
     Lazy::new(|| Arc::new(AsyncMutex::new(())));
+
+pub(crate) fn transcription_source_language_hint(
+    provider: Option<&str>,
+    language: Option<&str>,
+) -> Option<String> {
+    if let Some(language) = normalise_fixed_language(language) {
+        return Some(language);
+    }
+
+    match provider.map(normalise_provider_name).as_deref() {
+        Some("parakeet") => Some("en".to_string()),
+        _ => None,
+    }
+}
+
+fn normalise_fixed_language(language: Option<&str>) -> Option<String> {
+    let code = language?.trim().to_ascii_lowercase().replace('_', "-");
+    if code.is_empty() || matches!(code.as_str(), "auto" | "auto-translate") {
+        return None;
+    }
+
+    language_name_from_code(&code)?;
+    Some(code)
+}
+
+fn normalise_provider_name(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "localwhisper" | "whisper" => "localwhisper".to_string(),
+        "parakeet" => "parakeet".to_string(),
+        "nemotron" => "nemotron".to_string(),
+        other => other.to_string(),
+    }
+}
 
 pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
@@ -229,6 +263,50 @@ pub(crate) fn split_segment_at_silence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_language_hint_uses_fixed_language_for_multilingual_engines() {
+        assert_eq!(
+            transcription_source_language_hint(Some("localWhisper"), Some("de")),
+            Some("de".to_string())
+        );
+        assert_eq!(
+            transcription_source_language_hint(Some("nemotron"), Some("zh-cn")),
+            Some("zh-cn".to_string())
+        );
+        assert_eq!(
+            transcription_source_language_hint(Some("parakeet"), Some("fr")),
+            Some("fr".to_string())
+        );
+    }
+
+    #[test]
+    fn source_language_hint_handles_auto_modes_by_provider() {
+        assert_eq!(
+            transcription_source_language_hint(Some("parakeet"), Some("auto-translate")),
+            Some("en".to_string())
+        );
+        assert_eq!(
+            transcription_source_language_hint(Some("parakeet"), None),
+            Some("en".to_string())
+        );
+        assert_eq!(
+            transcription_source_language_hint(Some("nemotron"), Some("auto")),
+            None
+        );
+        assert_eq!(
+            transcription_source_language_hint(Some("localWhisper"), Some("auto-translate")),
+            None
+        );
+    }
+
+    #[test]
+    fn source_language_hint_rejects_unknown_language_codes() {
+        assert_eq!(
+            transcription_source_language_hint(Some("nemotron"), Some("not-a-language")),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn test_engine_lifecycle_lock_serializes_acquirers() {
