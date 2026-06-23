@@ -1,4 +1,4 @@
-use crate::parakeet_engine::model::ParakeetModel;
+use crate::parakeet_engine::model::{ParakeetModel, TimestampedResult};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -546,6 +546,15 @@ impl ParakeetEngine {
 
     /// Transcribe audio samples using the loaded Parakeet model
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>) -> Result<String> {
+        Ok(self.transcribe_audio_timestamped(audio_data).await?.text)
+    }
+
+    /// Transcribe audio samples using the loaded Parakeet model and retain
+    /// provider-native token timestamps for downstream word alignment.
+    pub async fn transcribe_audio_timestamped(
+        &self,
+        audio_data: Vec<f32>,
+    ) -> Result<TimestampedResult> {
         let mut model_guard = self.current_model.write().await;
         let model = model_guard
             .as_mut()
@@ -580,7 +589,7 @@ impl ParakeetEngine {
         );
         log::debug!("Parakeet transcription result: '{}'", result.text);
 
-        Ok(result.text)
+        Ok(result)
     }
 
     /// Get the models directory path

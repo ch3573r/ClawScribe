@@ -1,6 +1,9 @@
 // Retranscription module - allows re-processing stored audio with different settings
 
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
+use super::common::{
+    create_transcript_segments_with_words, split_segment_at_silence,
+    transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
+};
 use super::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::vad::get_speech_chunks_with_progress;
@@ -45,11 +48,10 @@ impl Drop for RetranscriptionGuard {
     }
 }
 
-/// VAD redemption time in milliseconds - bridges natural pauses in speech
-/// Batch processing needs longer redemption (2000ms) than live pipeline (400ms)
-/// because the entire file is processed at once by VAD, and 400ms fragments
-/// speech at every natural sentence/topic pause (500ms-2s)
-const VAD_REDEMPTION_TIME_MS: u32 = 2000;
+/// VAD redemption time in milliseconds. Keep this close to the live pipeline so
+/// retranscription rows do not bridge normal speaker handoffs into long
+/// multi-speaker transcript rows that diarization then has to split later.
+const VAD_REDEMPTION_TIME_MS: u32 = 500;
 
 /// Progress update emitted during retranscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,7 +390,7 @@ async fn run_retranscription<R: Runtime>(
     );
 
     // Process each speech segment with progress updates
-    let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new(); // (text, start_ms, end_ms)
+    let mut all_transcripts: Vec<TranscribedSegment> = Vec::new();
     let mut total_confidence = 0.0f32;
 
     for (i, segment) in processable_segments.iter().enumerate() {
@@ -424,27 +426,37 @@ async fn run_retranscription<R: Runtime>(
         }
 
         // Transcribe this segment
-        let (text, conf) = if use_nemotron {
+        let (text, conf, word_timestamps) = if use_nemotron {
             let engine = nemotron_engine.as_ref().unwrap();
             let text = engine
                 .transcribe_audio(segment.samples.clone(), language.clone())
                 .await
                 .map_err(|e| anyhow!("Nemotron transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
+            (text, 0.9f32, None)
         } else if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
+            let result = engine
+                .transcribe_audio_timestamped(segment.samples.clone())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
+            let text = result.text;
+            let word_timestamps = transcript_words_from_token_timestamps(
+                &text,
+                &result.tokens,
+                &result.timestamps,
+                segment.start_timestamp_ms / 1000.0,
+                segment.end_timestamp_ms / 1000.0,
+                None,
+                None,
+            );
+            (text, 0.9f32, word_timestamps)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _) = engine
                 .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
                 .await
                 .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
+            (text, conf, None)
         };
 
         // Skip empty transcripts
@@ -466,7 +478,12 @@ async fn run_retranscription<R: Runtime>(
                     trimmed
                 }
             );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
+            all_transcripts.push(TranscribedSegment {
+                text,
+                start_ms: segment.start_timestamp_ms,
+                end_ms: segment.end_timestamp_ms,
+                word_timestamps,
+            });
             total_confidence += conf;
         } else {
             debug!(
@@ -498,7 +515,7 @@ async fn run_retranscription<R: Runtime>(
     emit_progress(&app, &meeting_id, "saving", 80, "Saving transcripts...");
 
     // Create transcript segments with proper timestamps from VAD
-    let segments = create_transcript_segments(&all_transcripts);
+    let segments = create_transcript_segments_with_words(&all_transcripts);
 
     // Save to database
     let app_state = app
@@ -1055,6 +1072,7 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::common::create_transcript_segments;
     use super::*;
 
     #[test]
@@ -1149,8 +1167,8 @@ mod tests {
 
     #[test]
     fn test_vad_redemption_time_constant() {
-        // Batch processing uses 2000ms to bridge natural pauses in full-file VAD
-        assert_eq!(VAD_REDEMPTION_TIME_MS, 2000);
+        // Batch processing stays close to live VAD to avoid merging speaker turns.
+        assert_eq!(VAD_REDEMPTION_TIME_MS, 500);
     }
 
     #[test]

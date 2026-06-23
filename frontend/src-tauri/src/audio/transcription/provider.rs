@@ -3,6 +3,7 @@
 // Defines the unified TranscriptionProvider trait and common types for all
 // transcription engines (Whisper, Parakeet, future providers).
 
+use crate::api::TranscriptWord;
 use async_trait::async_trait;
 
 // ============================================================================
@@ -43,6 +44,7 @@ pub struct TranscriptResult {
     pub text: String,
     pub confidence: Option<f32>, // None if provider doesn't support confidence scores
     pub is_partial: bool,
+    pub word_timestamps: Option<Vec<TranscriptWord>>,
 }
 
 /// Trait for transcription providers (Whisper, Parakeet, future providers)

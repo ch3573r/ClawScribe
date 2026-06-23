@@ -1,4 +1,4 @@
-use crate::api::TranscriptSegment;
+use crate::api::{TranscriptSegment, TranscriptWord};
 use crate::summary::processor::language_name_from_code;
 use anyhow::Result;
 use log::{debug, info};
@@ -89,30 +89,212 @@ pub(crate) async fn unload_engine_after_batch_for(use_parakeet: bool, use_nemotr
     }
 }
 
-/// Create transcript segments from transcription results.
+/// Create transcript segments from legacy tuple fixtures.
 /// Each tuple is (text, start_ms, end_ms) from VAD timestamps.
+#[cfg(test)]
 pub(crate) fn create_transcript_segments(
     transcripts: &[(String, f64, f64)],
 ) -> Vec<TranscriptSegment> {
+    let transcripts = transcripts
+        .iter()
+        .map(|(text, start_ms, end_ms)| TranscribedSegment {
+            text: text.clone(),
+            start_ms: *start_ms,
+            end_ms: *end_ms,
+            word_timestamps: None,
+        })
+        .collect::<Vec<_>>();
+    create_transcript_segments_with_words(&transcripts)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TranscribedSegment {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub word_timestamps: Option<Vec<TranscriptWord>>,
+}
+
+/// Create transcript segments from transcription results that may include
+/// provider-native word anchors. Each segment carries absolute audio-relative
+/// seconds for its words.
+pub(crate) fn create_transcript_segments_with_words(
+    transcripts: &[TranscribedSegment],
+) -> Vec<TranscriptSegment> {
     transcripts
         .iter()
-        .map(|(text, start_ms, end_ms)| {
-            let start_seconds = start_ms / 1000.0;
-            let end_seconds = end_ms / 1000.0;
+        .map(|segment| {
+            let start_seconds = segment.start_ms / 1000.0;
+            let end_seconds = segment.end_ms / 1000.0;
             let duration = end_seconds - start_seconds;
 
             TranscriptSegment {
                 id: format!("transcript-{}", Uuid::new_v4()),
-                text: text.trim().to_string(),
+                text: segment.text.trim().to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),
                 duration: Some(duration),
                 speaker: None,
-                word_timestamps: None,
+                word_timestamps: segment.word_timestamps.clone(),
             }
         })
         .collect()
+}
+
+pub(crate) fn transcript_words_from_token_timestamps(
+    text: &str,
+    tokens: &[String],
+    timestamps: &[f32],
+    segment_start_seconds: f64,
+    segment_end_seconds: f64,
+    confidence: Option<f32>,
+    speaker: Option<&str>,
+) -> Option<Vec<TranscriptWord>> {
+    if text.trim().is_empty()
+        || tokens.is_empty()
+        || tokens.len() != timestamps.len()
+        || !segment_start_seconds.is_finite()
+        || !segment_end_seconds.is_finite()
+        || segment_end_seconds <= segment_start_seconds
+    {
+        return None;
+    }
+
+    let text_words = text
+        .split_whitespace()
+        .filter(|word| !word.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if text_words.is_empty() {
+        return None;
+    }
+
+    let token_word_starts = token_word_start_times(
+        tokens,
+        timestamps,
+        segment_start_seconds,
+        segment_end_seconds,
+    )?;
+    if token_word_starts.len() != text_words.len() {
+        return estimate_word_timestamps(
+            text,
+            segment_start_seconds,
+            segment_end_seconds,
+            confidence,
+            speaker,
+        );
+    }
+
+    let speaker = speaker.map(str::to_string);
+    let mut words = Vec::with_capacity(text_words.len());
+    for (index, word) in text_words.iter().enumerate() {
+        let start = token_word_starts[index].clamp(segment_start_seconds, segment_end_seconds);
+        let next_start = token_word_starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or(segment_end_seconds)
+            .clamp(segment_start_seconds, segment_end_seconds);
+        let end = next_start.max(start).min(segment_end_seconds);
+
+        words.push(TranscriptWord {
+            text: word.clone(),
+            start,
+            end,
+            confidence,
+            speaker: speaker.clone(),
+        });
+    }
+
+    Some(words)
+}
+
+fn token_word_start_times(
+    tokens: &[String],
+    timestamps: &[f32],
+    segment_start_seconds: f64,
+    segment_end_seconds: f64,
+) -> Option<Vec<f64>> {
+    let mut starts = Vec::<f64>::new();
+    let mut in_word = false;
+
+    for (token, timestamp) in tokens.iter().zip(timestamps.iter()) {
+        if !timestamp.is_finite() {
+            return None;
+        }
+        if token.trim().is_empty() {
+            continue;
+        }
+
+        let starts_new_word = !in_word
+            || token
+                .chars()
+                .next()
+                .map(|ch| ch.is_whitespace())
+                .unwrap_or(false);
+        if starts_new_word {
+            let absolute = (segment_start_seconds + *timestamp as f64)
+                .clamp(segment_start_seconds, segment_end_seconds);
+            starts.push(absolute);
+            in_word = true;
+        }
+    }
+
+    (!starts.is_empty()).then_some(starts)
+}
+
+pub(crate) fn estimate_word_timestamps(
+    text: &str,
+    start_time: f64,
+    end_time: f64,
+    confidence: Option<f32>,
+    speaker: Option<&str>,
+) -> Option<Vec<TranscriptWord>> {
+    if !start_time.is_finite() || !end_time.is_finite() || end_time <= start_time {
+        return None;
+    }
+
+    let words = text
+        .split_whitespace()
+        .filter(|word| !word.trim().is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+
+    let total_weight = words
+        .iter()
+        .map(|word| word.chars().filter(|ch| !ch.is_whitespace()).count().max(1) as f64)
+        .sum::<f64>()
+        .max(1.0);
+    let duration = end_time - start_time;
+    let mut cursor = start_time;
+    let speaker = speaker.map(str::to_string);
+
+    Some(
+        words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                let weight = word.chars().filter(|ch| !ch.is_whitespace()).count().max(1) as f64;
+                let word_start = cursor;
+                let word_end = if index + 1 == words.len() {
+                    end_time
+                } else {
+                    (cursor + duration * (weight / total_weight)).min(end_time)
+                };
+                cursor = word_end;
+
+                TranscriptWord {
+                    text: (*word).to_string(),
+                    start: word_start,
+                    end: word_end.max(word_start),
+                    confidence,
+                    speaker: speaker.clone(),
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Write transcripts.json to a meeting folder (atomic write with temp file)
@@ -306,6 +488,58 @@ mod tests {
             transcription_source_language_hint(Some("nemotron"), Some("not-a-language")),
             None
         );
+    }
+
+    #[test]
+    fn token_timestamps_create_absolute_word_anchors() {
+        let tokens = vec![
+            "It".to_string(),
+            " seems".to_string(),
+            " like".to_string(),
+            " drones".to_string(),
+        ];
+        let timestamps = vec![0.0, 0.4, 0.8, 1.6];
+
+        let words = transcript_words_from_token_timestamps(
+            "It seems like drones",
+            &tokens,
+            &timestamps,
+            10.0,
+            13.0,
+            None,
+            Some("Speaker 1"),
+        )
+        .unwrap();
+
+        assert_eq!(words.len(), 4);
+        assert_eq!(words[0].text, "It");
+        assert_eq!(words[0].start, 10.0);
+        assert!((words[1].start - 10.4).abs() < 0.001);
+        assert_eq!(words[3].end, 13.0);
+        assert!(words
+            .iter()
+            .all(|word| word.speaker.as_deref() == Some("Speaker 1")));
+    }
+
+    #[test]
+    fn token_timestamp_mismatch_falls_back_to_word_count_safe_estimate() {
+        let tokens = vec!["Citizens".to_string()];
+        let timestamps = vec![0.0];
+
+        let words = transcript_words_from_token_timestamps(
+            "Citizens United ruling",
+            &tokens,
+            &timestamps,
+            2.0,
+            5.0,
+            Some(0.9),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "Citizens");
+        assert_eq!(words[2].end, 5.0);
     }
 
     #[tokio::test]

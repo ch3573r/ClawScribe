@@ -161,7 +161,7 @@ export function TranscriptButtonGroup({
       await onRefetchTranscripts?.();
     }).then((unlisten) => unlistenCallbacks.push(unlisten));
 
-    void listen<SpeakerDiarizationError>('speaker-diarization-error', (event) => {
+    void listen<SpeakerDiarizationError>('speaker-diarization-error', async (event) => {
       if (event.payload.meeting_id !== meetingId) return;
       setIsDiarizing(false);
       setDiarizationMessage(null);
@@ -171,6 +171,7 @@ export function TranscriptButtonGroup({
       toast.error('Speaker diarization failed', {
         description: event.payload.error,
       });
+      await onRefetchTranscripts?.();
     }).then((unlisten) => unlistenCallbacks.push(unlisten));
 
     return () => {

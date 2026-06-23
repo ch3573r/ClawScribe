@@ -183,7 +183,12 @@ pub fn start_transcription_task<R: Runtime>(
                             match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
                                 .await
                             {
-                                Ok((transcript, confidence_opt, is_partial)) => {
+                                Ok((
+                                    transcript,
+                                    confidence_opt,
+                                    is_partial,
+                                    provider_word_timestamps,
+                                )) => {
                                     // Provider-aware confidence threshold
                                     let confidence_threshold = match &engine_clone {
                                         TranscriptionEngine::Whisper(_)
@@ -229,17 +234,22 @@ pub fn start_transcription_task<R: Runtime>(
                                             SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
-                                        let word_timestamps = estimate_word_timestamps(
-                                            &transcript,
-                                            audio_start_time,
-                                            audio_end_time,
-                                            confidence_opt,
-                                            if source_label.is_empty() {
-                                                None
-                                            } else {
-                                                Some(source_label)
-                                            },
-                                        );
+                                        let source_label_opt = if source_label.is_empty() {
+                                            None
+                                        } else {
+                                            Some(source_label)
+                                        };
+                                        let word_timestamps = provider_word_timestamps
+                                            .map(|words| with_word_speaker(words, source_label_opt))
+                                            .or_else(|| {
+                                                crate::audio::common::estimate_word_timestamps(
+                                                    &transcript,
+                                                    audio_start_time,
+                                                    audio_end_time,
+                                                    confidence_opt,
+                                                    source_label_opt,
+                                                )
+                                            });
 
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
@@ -462,7 +472,12 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
     app: &AppHandle<R>,
-) -> std::result::Result<(String, Option<f32>, bool), TranscriptionError> {
+) -> std::result::Result<(String, Option<f32>, bool, Option<Vec<TranscriptWord>>), TranscriptionError>
+{
+    let chunk_start_time = chunk.timestamp;
+    let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+    let chunk_end_time = chunk_start_time + chunk_duration;
+
     // Convert to 16kHz mono for transcription
     let transcription_data = if chunk.sample_rate != 16000 {
         crate::audio::audio_processing::resample_audio(&chunk.data, chunk.sample_rate, 16000)
@@ -508,7 +523,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 Ok((text, confidence, is_partial)) => {
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), Some(confidence), is_partial));
+                        return Ok((String::new(), Some(confidence), is_partial, None));
                     }
 
                     debug!(
@@ -516,7 +531,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         chunk.chunk_id, cleaned_text, confidence, is_partial
                     );
 
-                    Ok((cleaned_text, Some(confidence), is_partial))
+                    Ok((cleaned_text, Some(confidence), is_partial, None))
                 }
                 Err(e) => {
                     error!(
@@ -539,11 +554,14 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
             }
         }
         TranscriptionEngine::Parakeet(parakeet_engine) => {
-            match parakeet_engine.transcribe_audio(speech_samples).await {
-                Ok(text) => {
-                    let cleaned_text = text.trim().to_string();
+            match parakeet_engine
+                .transcribe_audio_timestamped(speech_samples)
+                .await
+            {
+                Ok(result) => {
+                    let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), None, false));
+                        return Ok((String::new(), None, false, None));
                     }
 
                     debug!(
@@ -551,8 +569,18 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         chunk.chunk_id, cleaned_text
                     );
 
-                    // Parakeet doesn't provide confidence or partial results
-                    Ok((cleaned_text, None, false))
+                    let word_timestamps =
+                        crate::audio::common::transcript_words_from_token_timestamps(
+                            &cleaned_text,
+                            &result.tokens,
+                            &result.timestamps,
+                            chunk_start_time,
+                            chunk_end_time,
+                            None,
+                            None,
+                        );
+
+                    Ok((cleaned_text, None, false, word_timestamps))
                 }
                 Err(e) => {
                     error!(
@@ -582,7 +610,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), result.confidence, result.is_partial));
+                        return Ok((String::new(), result.confidence, result.is_partial, None));
                     }
 
                     let confidence_str = match result.confidence {
@@ -599,7 +627,12 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         result.is_partial
                     );
 
-                    Ok((cleaned_text, result.confidence, result.is_partial))
+                    Ok((
+                        cleaned_text,
+                        result.confidence,
+                        result.is_partial,
+                        result.word_timestamps,
+                    ))
                 }
                 Err(e) => {
                     error!(
@@ -638,61 +671,18 @@ fn format_current_timestamp() -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
-fn estimate_word_timestamps(
-    text: &str,
-    start_time: f64,
-    end_time: f64,
-    confidence: Option<f32>,
-    speaker: Option<&str>,
-) -> Option<Vec<TranscriptWord>> {
-    // Playback-only approximation: Whisper is still running without native word
-    // timestamps here, so distribute words across the segment duration by text
-    // weight. Do not treat these anchors as exact quote boundaries.
-    if !start_time.is_finite() || !end_time.is_finite() || end_time <= start_time {
-        return None;
-    }
+fn with_word_speaker(words: Vec<TranscriptWord>, speaker: Option<&str>) -> Vec<TranscriptWord> {
+    let Some(speaker) = speaker.map(str::to_string) else {
+        return words;
+    };
 
-    let words = text
-        .split_whitespace()
-        .filter(|word| !word.trim().is_empty())
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        return None;
-    }
-
-    let total_weight = words
-        .iter()
-        .map(|word| word.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64)
-        .sum::<f64>()
-        .max(1.0);
-    let duration = end_time - start_time;
-    let mut cursor = start_time;
-    let speaker = speaker.map(str::to_string);
-
-    Some(
-        words
-            .iter()
-            .enumerate()
-            .map(|(index, word)| {
-                let weight = word.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64;
-                let word_start = cursor;
-                let word_end = if index + 1 == words.len() {
-                    end_time
-                } else {
-                    (cursor + duration * (weight / total_weight)).min(end_time)
-                };
-                cursor = word_end;
-
-                TranscriptWord {
-                    text: (*word).to_string(),
-                    start: word_start,
-                    end: word_end.max(word_start),
-                    confidence,
-                    speaker: speaker.clone(),
-                }
-            })
-            .collect(),
-    )
+    words
+        .into_iter()
+        .map(|mut word| {
+            word.speaker = Some(speaker.clone());
+            word
+        })
+        .collect()
 }
 
 /// Format recording-relative time as [MM:SS]

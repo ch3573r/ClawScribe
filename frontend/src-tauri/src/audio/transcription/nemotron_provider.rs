@@ -31,6 +31,7 @@ impl TranscriptionProvider for NemotronProvider {
                 text: text.trim().to_string(),
                 confidence: None,  // RNN-T greedy decode provides no confidence
                 is_partial: false, // offline-per-segment, no partials
+                word_timestamps: None,
             }),
             Err(e) => Err(TranscriptionError::EngineFailed(e.to_string())),
         }
