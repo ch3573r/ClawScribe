@@ -993,7 +993,79 @@ fn prepare_diarization_turns_for_mapping(
             .then_with(|| a.speaker.cmp(&b.speaker))
     });
 
+    prepared = resolve_overlapping_diarization_turns(prepared);
     compact_diarization_speakers(collapse_adjacent_diarization_turns(prepared))
+}
+
+fn resolve_overlapping_diarization_turns(turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
+    if turns.len() < 2 {
+        return turns;
+    }
+
+    let mut boundaries = turns
+        .iter()
+        .flat_map(|turn| [turn.start_time, turn.end_time])
+        .filter(|time| time.is_finite())
+        .collect::<Vec<_>>();
+    boundaries.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    boundaries.dedup_by(|left, right| (*left - *right).abs() <= FLOAT_TIE_EPSILON);
+    if boundaries.len() < 2 {
+        return turns;
+    }
+
+    let mut resolved = Vec::new();
+    for window in boundaries.windows(2) {
+        let start_time = window[0];
+        let end_time = window[1];
+        if !is_valid_interval(start_time, end_time) {
+            continue;
+        }
+
+        let Some(active) = dominant_turn_for_atomic_interval(&turns, start_time, end_time) else {
+            continue;
+        };
+        resolved.push(DiarizationTurn {
+            start_time,
+            end_time,
+            speaker: active.speaker,
+        });
+    }
+
+    if resolved.is_empty() {
+        turns
+    } else {
+        collapse_adjacent_diarization_turns(resolved)
+    }
+}
+
+fn dominant_turn_for_atomic_interval(
+    turns: &[DiarizationTurn],
+    start_time: f64,
+    end_time: f64,
+) -> Option<&DiarizationTurn> {
+    let interval_duration = end_time - start_time;
+    turns
+        .iter()
+        .filter(|turn| {
+            overlap_seconds(start_time, end_time, turn.start_time, turn.end_time)
+                >= interval_duration - FLOAT_TIE_EPSILON
+        })
+        .min_by(|left, right| {
+            turn_duration(*left)
+                .partial_cmp(&turn_duration(*right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    right
+                        .start_time
+                        .partial_cmp(&left.start_time)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.speaker.cmp(&right.speaker))
+        })
+}
+
+fn turn_duration(turn: &DiarizationTurn) -> f64 {
+    (turn.end_time - turn.start_time).max(0.0)
 }
 
 fn collapse_adjacent_diarization_turns(turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
@@ -1502,6 +1574,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         ));
     }
     turns = prepare_diarization_turns_for_mapping(sample_count, &turns, explicit_num_speakers);
+    let prepared_speaker_count = speaker_count_from_turns(&turns);
 
     emit_progress(
         &app,
@@ -1525,7 +1598,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         })
         .collect();
 
-    let mapped_segments = map_diarization_to_transcript_segments(
+    let mut mapped_segments = map_diarization_to_transcript_segments(
         &transcript_segments,
         &turns,
         DiarizationMappingOptions {
@@ -1537,6 +1610,40 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             },
         },
     );
+    let mut mapped_speaker_count = transcript_speaker_count(&mapped_segments);
+    if prepared_speaker_count > 1 && mapped_speaker_count <= 1 {
+        let midpoint_segments = map_diarization_to_transcript_segments(
+            &transcript_segments,
+            &turns,
+            DiarizationMappingOptions {
+                mode: DiarizationMappingMode::Midpoint,
+                existing_speaker_policy: if preserve_existing_labels {
+                    ExistingSpeakerPolicy::PreserveNonEmpty
+                } else {
+                    ExistingSpeakerPolicy::Overwrite
+                },
+            },
+        );
+        let midpoint_speaker_count = transcript_speaker_count(&midpoint_segments);
+        if midpoint_speaker_count > mapped_speaker_count {
+            log::info!(
+                "speaker_diarization_mapping_fallback meeting_id={} overlap_speakers={} midpoint_speakers={} prepared_speakers={}",
+                meeting_id,
+                mapped_speaker_count,
+                midpoint_speaker_count,
+                prepared_speaker_count
+            );
+            mapped_segments = midpoint_segments;
+            mapped_speaker_count = midpoint_speaker_count;
+        }
+    }
+    if explicit_num_speakers.unwrap_or_default() > 1 && mapped_speaker_count <= 1 {
+        return Err(anyhow!(
+            "Speaker diarization detected {} speaker lanes, but transcript mapping only produced {} speaker label. No labels were saved; retranscribe this meeting to add word timestamps, then run diarization again.",
+            prepared_speaker_count,
+            mapped_speaker_count
+        ));
+    }
 
     let updated_segments = count_changed_transcript_segments(&stored_segments, &mapped_segments);
     if updated_segments > 0 {
@@ -1602,12 +1709,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         .collect();
     super::common::write_transcripts_json(&folder_path, &transcript_file_segments)?;
 
-    let speaker_count = mapped_segments
-        .iter()
-        .filter_map(|segment| segment.speaker.as_deref())
-        .filter(|speaker| !speaker.trim().is_empty())
-        .collect::<BTreeSet<_>>()
-        .len();
+    let speaker_count = transcript_speaker_count(&mapped_segments);
 
     emit_progress(
         &app,
@@ -1800,6 +1902,15 @@ fn count_changed_transcript_segments(
                 || stored.speaker != mapped.speaker
         })
         .count()
+}
+
+fn transcript_speaker_count(segments: &[TranscriptSegment]) -> usize {
+    segments
+        .iter()
+        .filter_map(|segment| segment.speaker.as_deref())
+        .filter(|speaker| !speaker.trim().is_empty())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 fn optional_seconds_equal(left: Option<f64>, right: Option<f64>) -> bool {
@@ -3513,6 +3624,30 @@ mod tests {
             prepare_diarization_turns_for_mapping(sample_count_for_minutes(2), &turns, Some(2));
 
         assert_eq!(prepared, turns);
+    }
+
+    #[test]
+    fn mapping_preparation_resolves_overlapping_dominant_turns() {
+        let turns = vec![turn(0.0, 30.0, 0), turn(10.0, 20.0, 1)];
+
+        let prepared =
+            prepare_diarization_turns_for_mapping(sample_count_for_minutes(1), &turns, Some(2));
+
+        assert_eq!(
+            prepared,
+            vec![turn(0.0, 10.0, 0), turn(10.0, 20.0, 1), turn(20.0, 30.0, 0)]
+        );
+
+        let mapped = map_diarization_to_transcript_segments(
+            &[transcript("interjection", Some(10.0), Some(20.0))],
+            &prepared,
+            DiarizationMappingOptions {
+                existing_speaker_policy: ExistingSpeakerPolicy::Overwrite,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(mapped[0].speaker.as_deref(), Some("Speaker 2"));
     }
 
     #[test]
