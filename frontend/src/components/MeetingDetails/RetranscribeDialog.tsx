@@ -386,12 +386,19 @@ export function RetranscribeDialog({
 
         <div className="space-y-4 py-4">
           {!isProcessing && !isCancelling && !error && !stats && (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-100">
+            <div
+              className="rounded-lg border p-3 text-sm"
+              style={{
+                backgroundColor: 'hsl(var(--theme-warning-bg))',
+                borderColor: 'hsl(var(--theme-warning-fg) / 0.35)',
+                color: 'hsl(var(--theme-warning-fg))',
+              }}
+            >
               <div className="flex gap-2">
-                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <div>
                   <p className="font-medium">Retranscription replaces the current transcript.</p>
-                  <p className="mt-1 text-xs leading-5">
+                  <p className="mt-1 text-xs leading-5 opacity-90">
                     The existing transcript remains available until the replacement
                     finishes successfully. Meeting audio, notes, and summaries are not deleted.
                   </p>
