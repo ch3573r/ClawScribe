@@ -1513,6 +1513,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         embedding_model_id,
         &stored_segments,
     );
+    let allow_zh_cn_fallback =
+        resolved_embedding_model_id.as_deref() == Some(ZH_CN_EMBEDDING_MODEL_ID);
     let model_paths = resolve_model_paths_for_embedding(
         &app,
         segmentation_model_path,
@@ -1590,8 +1592,6 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
                 .map(|descriptor| descriptor.id);
             let mut best_failed_attempt = attempt.clone();
 
-            let allow_zh_cn_fallback =
-                resolved_embedding_model_id.as_deref() == Some(ZH_CN_EMBEDDING_MODEL_ID);
             for embedding_model_id in
                 fallback_embedding_model_ids(current_embedding_id, allow_zh_cn_fallback)
             {
