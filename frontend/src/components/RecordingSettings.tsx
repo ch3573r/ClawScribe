@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
+import { setSourceAttribution } from '@/lib/sourceAttribution';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -74,6 +75,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     await savePreferences(newPreferences, {
       successTitle: enabled ? 'Audio saving enabled' : 'Audio saving disabled'
     });
+    if (!enabled) {
+      await setSourceAttribution(false);
+    }
 
     // Track auto-save setting change
     await Analytics.track('auto_save_recording_toggled', {

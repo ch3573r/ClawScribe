@@ -5,6 +5,8 @@ import { Switch } from "./ui/switch";
 import { AlertCircle, Cpu, Users } from "lucide-react";
 import { getParakeetDirectml, setParakeetDirectml } from "@/lib/parakeetAccel";
 import {
+  getRecordingAudioSavingEnabled,
+  refreshSourceAttributionAvailability,
   setSourceAttribution,
 } from "@/lib/sourceAttribution";
 import { useSourceAttribution } from "@/hooks/useSourceAttribution";
@@ -23,8 +25,33 @@ export function BetaSettings() {
 
   // Source attribution (Me/Participants) — experimental, opt-in (default off).
   const sourceAttribution = useSourceAttribution();
-  const onToggleSourceAttribution = (checked: boolean) => {
-    void setSourceAttribution(checked);
+  const [audioSavingEnabled, setAudioSavingEnabled] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncAvailability = async () => {
+      const enabled = await getRecordingAudioSavingEnabled();
+      if (cancelled) return;
+      setAudioSavingEnabled(enabled);
+      if (!enabled) {
+        await refreshSourceAttributionAvailability();
+      }
+    };
+
+    void syncAvailability();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onToggleSourceAttribution = async (checked: boolean) => {
+    const enabled = await setSourceAttribution(checked);
+    setAudioSavingEnabled(await getRecordingAudioSavingEnabled());
+    if (checked && !enabled) {
+      setAudioSavingEnabled(false);
+    }
   };
 
   return (
@@ -86,11 +113,19 @@ export function BetaSettings() {
               default — when disabled, lines carry no speaker label. Takes effect
               on the next transcribed segment.
             </p>
+            {!audioSavingEnabled && (
+              <p className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+                Enable Recording &gt; Save Audio Recordings first. Source
+                attribution depends on the saved audio workflow and stays off
+                while audio saving is disabled.
+              </p>
+            )}
           </div>
           <div className="ml-6">
             <Switch
-              checked={sourceAttribution}
+              checked={audioSavingEnabled && sourceAttribution}
               onCheckedChange={onToggleSourceAttribution}
+              disabled={!audioSavingEnabled}
             />
           </div>
         </div>

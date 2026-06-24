@@ -95,6 +95,8 @@ export default function PageContent({
   // Get model config from ConfigContext
   const { modelConfig, setModelConfig } = useConfig();
   const sourceAttributionEnabled = useSourceAttribution();
+  const hasSavedAudio = Boolean(audioPath);
+  const showSpeakerAttribution = sourceAttributionEnabled && hasSavedAudio;
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
@@ -145,7 +147,7 @@ export default function PageContent({
     modelConfig: modelConfig,
     isModelConfigLoading: false, // ConfigContext loads on mount
     selectedTemplate: templates.selectedTemplate,
-    includeSpeakerLabels: sourceAttributionEnabled,
+    includeSpeakerLabels: showSpeakerAttribution,
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
@@ -158,7 +160,7 @@ export default function PageContent({
     meetingTitle: meetingData.meetingTitle,
     aiSummary: meetingData.aiSummary,
     blockNoteSummaryRef: meetingData.blockNoteSummaryRef,
-    includeSpeakerLabels: sourceAttributionEnabled,
+    includeSpeakerLabels: showSpeakerAttribution,
   });
 
   const meetingOperations = useMeetingOperations({
@@ -251,17 +253,19 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex h-full flex-col bg-background"
     >
-      <SpeakerLaneTimeline
-        segments={segments ?? []}
-        totalCount={totalCount}
-        loadedCount={loadedCount}
-        currentTime={audioPlayer.currentTime}
-        durationSeconds={audioPlayer.duration || undefined}
-        isPlaying={audioPlayer.isPlaying}
-        isAudioReady={isAudioReady}
-        onPlayPause={handleTimelinePlayPause}
-        onSeek={isAudioReady ? handleTimelineSeek : undefined}
-      />
+      {showSpeakerAttribution && (
+        <SpeakerLaneTimeline
+          segments={segments ?? []}
+          totalCount={totalCount}
+          loadedCount={loadedCount}
+          currentTime={audioPlayer.currentTime}
+          durationSeconds={audioPlayer.duration || undefined}
+          isPlaying={audioPlayer.isPlaying}
+          isAudioReady={isAudioReady}
+          onPlayPause={handleTimelinePlayPause}
+          onSeek={isAudioReady ? handleTimelineSeek : undefined}
+        />
+      )}
       <div className="flex flex-1 overflow-hidden">
         <TranscriptPanel
           transcripts={meetingData.transcripts}
@@ -281,8 +285,8 @@ export default function PageContent({
           onLoadMore={onLoadMore}
           // Retranscription props
           meetingId={meeting.id}
-          meetingFolderPath={meeting.folder_path}
-          showSpeakerAttribution={sourceAttributionEnabled}
+          meetingFolderPath={hasSavedAudio ? meeting.folder_path : null}
+          showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
           onSeekToTime={isAudioReady ? handleTimelineSeek : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
