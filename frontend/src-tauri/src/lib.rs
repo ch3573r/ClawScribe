@@ -259,6 +259,23 @@ async fn resolve_meeting_audio_file(
         return Ok(None);
     }
 
+    if let Some(audio_file) = find_audio_file_in_meeting_folder(&folder)? {
+        return Ok(Some(audio_file));
+    }
+
+    let recovery = audio::incremental_saver::recover_audio_from_checkpoints(
+        folder.to_string_lossy().to_string(),
+        48_000,
+    )
+    .await?;
+
+    if let Some(audio_file_path) = recovery.audio_file_path {
+        let path = PathBuf::from(&audio_file_path);
+        if path.is_file() {
+            return Ok(Some(audio_file_path));
+        }
+    }
+
     find_audio_file_in_meeting_folder(&folder)
 }
 

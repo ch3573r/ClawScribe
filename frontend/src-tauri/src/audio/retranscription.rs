@@ -186,6 +186,41 @@ fn find_audio_file(folder: &Path) -> Result<PathBuf> {
     Err(anyhow!("No audio file found in: {}", folder.display()))
 }
 
+async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
+    match find_audio_file(folder) {
+        Ok(path) => return Ok(path),
+        Err(initial_error) => {
+            let recovery = crate::audio::incremental_saver::recover_audio_from_checkpoints(
+                folder.to_string_lossy().to_string(),
+                48_000,
+            )
+            .await
+            .map_err(|recovery_error| {
+                anyhow!(
+                    "{}; audio recovery failed: {}",
+                    initial_error,
+                    recovery_error
+                )
+            })?;
+
+            if let Some(audio_file_path) = recovery.audio_file_path {
+                let path = PathBuf::from(audio_file_path);
+                if path.is_file() {
+                    return Ok(path);
+                }
+            }
+
+            find_audio_file(folder).map_err(|after_recovery| {
+                anyhow!(
+                    "{}; audio recovery result: {}",
+                    after_recovery,
+                    recovery.message
+                )
+            })
+        }
+    }
+}
+
 /// Internal function to run retranscription
 async fn run_retranscription<R: Runtime>(
     app: AppHandle<R>,
@@ -196,7 +231,7 @@ async fn run_retranscription<R: Runtime>(
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
     let folder_path = PathBuf::from(&meeting_folder_path);
-    let audio_path = find_audio_file(&folder_path)?;
+    let audio_path = find_or_recover_audio_file(&folder_path).await?;
 
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");

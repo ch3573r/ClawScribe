@@ -2014,7 +2014,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         5,
         "Finding meeting audio...",
     );
-    let audio_path = find_audio_file(&folder_path)?;
+    let audio_path = find_or_recover_audio_file(&folder_path).await?;
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("Application database is not initialized"))?;
@@ -2677,7 +2677,7 @@ pub(crate) async fn run_speaker_diarization_evaluation<R: Runtime>(
         ));
     }
 
-    let audio_path = find_audio_file(&folder_path)?;
+    let audio_path = find_or_recover_audio_file(&folder_path).await?;
     let model_paths =
         resolve_model_paths_for_embedding(&app, None, None, options.embedding_model_id.clone())?;
 
@@ -4210,6 +4210,41 @@ async fn ensure_model_available<R: Runtime>(
 
 fn first_existing_path(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|path| path.is_file()).cloned()
+}
+
+async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
+    match find_audio_file(folder) {
+        Ok(path) => return Ok(path),
+        Err(initial_error) => {
+            let recovery = crate::audio::incremental_saver::recover_audio_from_checkpoints(
+                folder.to_string_lossy().to_string(),
+                48_000,
+            )
+            .await
+            .map_err(|recovery_error| {
+                anyhow!(
+                    "{}; audio recovery failed: {}",
+                    initial_error,
+                    recovery_error
+                )
+            })?;
+
+            if let Some(audio_file_path) = recovery.audio_file_path {
+                let path = PathBuf::from(audio_file_path);
+                if path.is_file() {
+                    return Ok(path);
+                }
+            }
+
+            find_audio_file(folder).map_err(|after_recovery| {
+                anyhow!(
+                    "{}; audio recovery result: {}",
+                    after_recovery,
+                    recovery.message
+                )
+            })
+        }
+    }
 }
 
 fn find_audio_file(folder: &Path) -> Result<PathBuf> {

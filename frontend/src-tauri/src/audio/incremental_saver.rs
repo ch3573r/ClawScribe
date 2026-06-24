@@ -3,6 +3,7 @@ use super::recording_state::AudioChunk;
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_INTERVAL_SECONDS: usize = 10;
@@ -111,7 +112,7 @@ impl IncrementalAudioSaver {
 
         validate_recoverable_audio_file(&temp_path)?;
         std::fs::File::open(&temp_path)?.sync_all()?;
-        std::fs::rename(&temp_path, &checkpoint_path)?;
+        publish_checkpoint_file(&temp_path, &checkpoint_path)?;
 
         let duration_seconds = audio_data.len() as f32 / self.sample_rate as f32;
         self.checkpoint_count += 1;
@@ -297,6 +298,20 @@ fn checkpoint_index(path: &Path) -> Option<u32> {
     index.parse::<u32>().ok()
 }
 
+fn checkpoint_temp_index(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    let name = name.strip_prefix('.')?;
+    let name = name.strip_suffix(".tmp")?;
+    if !name.starts_with(CHECKPOINT_FILE_PREFIX) || !name.ends_with(CHECKPOINT_FILE_SUFFIX) {
+        return None;
+    }
+
+    let index = name
+        .trim_start_matches(CHECKPOINT_FILE_PREFIX)
+        .trim_end_matches(CHECKPOINT_FILE_SUFFIX);
+    index.parse::<u32>().ok()
+}
+
 fn validate_recoverable_audio_file(path: &Path) -> Result<()> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| anyhow!("Failed to stat audio file {}: {}", path.display(), e))?;
@@ -306,25 +321,76 @@ fn validate_recoverable_audio_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_recoverable_temp_audio_file(path: &Path) -> Result<()> {
+    validate_recoverable_audio_file(path)?;
+
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow!("Failed to read temp audio file {}: {}", path.display(), e))?;
+    if !bytes.windows(4).any(|window| window == b"ftyp") {
+        return Err(anyhow!(
+            "Temp audio file does not look like a complete MP4 chunk: {}",
+            path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn publish_checkpoint_file(temp_path: &Path, checkpoint_path: &Path) -> Result<()> {
+    let mut last_error = None;
+
+    for attempt in 0..5 {
+        match std::fs::rename(temp_path, checkpoint_path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to publish checkpoint {} from {}: {}",
+        checkpoint_path.display(),
+        temp_path.display(),
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown rename error".to_string())
+    ))
+}
+
 fn list_checkpoint_files(checkpoints_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     if !checkpoints_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut files: Vec<(u32, PathBuf)> = std::fs::read_dir(checkpoints_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let index = checkpoint_index(&path)?;
-            if validate_recoverable_audio_file(&path).is_err() {
-                return None;
-            }
-            Some((index, path))
-        })
-        .collect();
+    let mut complete_files: BTreeMap<u32, PathBuf> = BTreeMap::new();
+    let mut temp_files: BTreeMap<u32, PathBuf> = BTreeMap::new();
 
-    files.sort_by_key(|(index, _)| *index);
-    Ok(files.into_iter().map(|(_, path)| path).collect())
+    for entry in std::fs::read_dir(checkpoints_dir)?.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+
+        if let Some(index) = checkpoint_index(&path) {
+            if validate_recoverable_audio_file(&path).is_ok() {
+                complete_files.insert(index, path);
+            }
+            continue;
+        }
+
+        if let Some(index) = checkpoint_temp_index(&path) {
+            if validate_recoverable_temp_audio_file(&path).is_ok() {
+                temp_files.entry(index).or_insert(path);
+            }
+        }
+    }
+
+    for (index, path) in temp_files {
+        complete_files.entry(index).or_insert(path);
+    }
+
+    Ok(complete_files.into_values().collect())
 }
 
 /// Recover audio from checkpoint files
@@ -620,5 +686,29 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["audio_chunk_000.mp4", "audio_chunk_002.mp4"]);
+    }
+
+    #[test]
+    fn test_checkpoint_scanner_recovers_valid_temp_checkpoint() {
+        let temp_dir = tempdir().unwrap();
+        let checkpoints_dir = temp_dir.path().join(".checkpoints");
+        std::fs::create_dir_all(&checkpoints_dir).unwrap();
+        std::fs::write(
+            checkpoints_dir.join(".audio_chunk_000.mp4.tmp"),
+            b"\0\0\0 ftypisom\0\0\0\0",
+        )
+        .unwrap();
+        std::fs::write(checkpoints_dir.join("audio_chunk_001.mp4"), b"ok").unwrap();
+
+        let files = list_checkpoint_files(&checkpoints_dir).unwrap();
+        let names = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![".audio_chunk_000.mp4.tmp", "audio_chunk_001.mp4"]
+        );
     }
 }
