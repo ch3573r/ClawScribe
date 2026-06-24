@@ -64,12 +64,12 @@ function DownloadToastContent({
     <div className="flex items-center gap-3 w-full max-w-sm bg-card rounded-lg shadow-lg border border-border p-3 relative">
 
       {/* Icon */}
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : isCancelled ? 'bg-muted' : 'bg-muted'
+      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-[hsl(var(--theme-success-bg))]' : hasError ? 'bg-[hsl(var(--theme-error-bg))]' : isCancelled ? 'bg-muted' : 'bg-muted'
         }`}>
         {isComplete ? (
-          <Check className="w-4 h-4 text-green-600" />
+          <Check className="w-4 h-4 text-[hsl(var(--theme-success-fg))]" />
         ) : hasError ? (
-          <X className="w-4 h-4 text-red-600" />
+          <X className="w-4 h-4 text-[hsl(var(--theme-error-fg))]" />
         ) : isCancelled ? (
           <X className="w-4 h-4 text-muted-foreground" />
         ) : (
@@ -86,9 +86,9 @@ function DownloadToastContent({
         </div>
 
         {hasError ? (
-          <p className="text-xs text-red-600">{download.error || 'Download failed'}</p>
+          <p className="text-xs text-[hsl(var(--theme-error-fg))]">{download.error || 'Download failed'}</p>
         ) : isComplete ? (
-          <p className="text-xs text-green-600">Download complete</p>
+          <p className="text-xs text-[hsl(var(--theme-success-fg))]">Download complete</p>
         ) : isCancelled ? (
           <p className="text-xs text-muted-foreground">Download cancelled</p>
         ) : (

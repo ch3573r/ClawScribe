@@ -93,8 +93,8 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
           <p className="text-xs text-muted-foreground mb-1">
             Inform participants about recording.
           </p>
-          <div className="bg-amber-50 border border-amber-200 rounded p-1">
-            <p className="text-xs text-amber-800 font-medium">
+          <div className="rounded border p-1 border-[color:hsl(var(--theme-warning-fg)/0.28)] bg-[hsl(var(--theme-warning-bg))]">
+            <p className="text-xs font-medium text-[hsl(var(--theme-warning-fg))]">
               US compliance required
             </p>
           </div>
@@ -113,7 +113,7 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
           <Button
             size="sm"
             onClick={handleAcknowledge}
-            className="text-xs px-2 py-0.5 h-6 bg-green-600 hover:bg-green-700 flex-1"
+            className="text-xs px-2 py-0.5 h-6 bg-primary text-primary-foreground hover:bg-primary/90 flex-1"
           >
             <CheckCircle className="h-2 w-2 mr-1" />
             Done

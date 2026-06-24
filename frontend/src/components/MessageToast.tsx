@@ -19,7 +19,9 @@ export function MessageToast({ message, type, show, setShow }: MessageToastProps
     
     return (
         show && (
-            <span className={`${type === 'success' ? 'text-green-500' : 'text-red-500'}`}>{message}</span>
+            <span className={type === 'success' ? 'text-[hsl(var(--theme-success-fg))]' : 'text-[hsl(var(--theme-error-fg))]'}>
+                {message}
+            </span>
         )
     );
 }

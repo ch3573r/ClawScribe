@@ -1,5 +1,6 @@
 'use client'
 
+import "sonner/dist/styles.css"
 import './globals.css'
 import {
   Atkinson_Hyperlegible,
@@ -15,7 +16,6 @@ import MainContent from '@/components/MainContent'
 import { AppTitlebar } from '@/components/AppTitlebar'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { Toaster, toast } from 'sonner'
-import "sonner/dist/styles.css"
 import { useState, useEffect, useCallback } from 'react'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'

@@ -167,6 +167,8 @@
     --theme-success-fg: 166 55% 24%;
     --theme-warning-bg: 44 94% 90%;
     --theme-warning-fg: 31 82% 28%;
+    --theme-error-bg: 353 84% 96%;
+    --theme-error-fg: 353 72% 38%;
   }
 
   .dark {
@@ -226,6 +228,8 @@
     --theme-success-fg: 166 54% 76%;
     --theme-warning-bg: 37 50% 18%;
     --theme-warning-fg: 43 88% 78%;
+    --theme-error-bg: 353 42% 18%;
+    --theme-error-fg: 353 88% 82%;
   }
 
   html.font-pref-source-sans,
@@ -466,4 +470,47 @@
     --tw-shadow-color: hsl(var(--kontron-black) / 0.35);
     --tw-shadow: var(--tw-shadow-colored);
   }
+
+}
+
+/* Sonner ships fixed rich-color palettes. Keep every toast variant bound to
+   the active ClawScribe theme so light/dark and accent changes stay coherent. */
+[data-sonner-toaster] {
+  --normal-bg: hsl(var(--popover));
+  --normal-border: hsl(var(--border));
+  --normal-text: hsl(var(--popover-foreground));
+  --normal-bg-hover: hsl(var(--muted));
+  --normal-border-hover: hsl(var(--border));
+
+  --info-bg: hsl(var(--primary) / 0.12);
+  --info-border: hsl(var(--primary) / 0.32);
+  --info-text: hsl(var(--foreground));
+
+  --success-bg: hsl(var(--theme-success-bg));
+  --success-border: color-mix(in oklab, hsl(var(--theme-success-fg)), hsl(var(--theme-success-bg)) 68%);
+  --success-text: hsl(var(--theme-success-fg));
+
+  --warning-bg: hsl(var(--theme-warning-bg));
+  --warning-border: color-mix(in oklab, hsl(var(--theme-warning-fg)), hsl(var(--theme-warning-bg)) 68%);
+  --warning-text: hsl(var(--theme-warning-fg));
+
+  --error-bg: hsl(var(--theme-error-bg));
+  --error-border: color-mix(in oklab, hsl(var(--theme-error-fg)), hsl(var(--theme-error-bg)) 68%);
+  --error-text: hsl(var(--theme-error-fg));
+}
+
+[data-rich-colors='true'][data-sonner-toast][data-type='loading'],
+[data-rich-colors='true'][data-sonner-toast][data-type='default'] {
+  background: var(--normal-bg);
+  border-color: var(--normal-border);
+  color: var(--normal-text);
+}
+
+[data-sonner-toast][data-styled='true'] [data-button]:not([data-cancel]) {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+[data-sonner-toast][data-styled='true'] [data-button]:not([data-cancel]):hover {
+  background: hsl(var(--primary) / 0.9);
 }

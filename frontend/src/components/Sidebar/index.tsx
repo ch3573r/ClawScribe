@@ -376,10 +376,10 @@ const Sidebar: React.FC = () => {
               <TooltipTrigger asChild>
                 <button
                   onClick={handleRecordingToggle}
-                  className={`flex h-11 w-11 items-center justify-center rounded-lg shadow-sm transition ${
+                  className={`flex h-11 w-11 items-center justify-center rounded-lg transition ${
                     isRecording
                       ? "bg-red-500 text-white hover:bg-red-600"
-                      : "bg-primary text-primary-foreground shadow-primary/20 hover:bg-primary/90"
+                      : idleRecordingButtonClass
                   }`}
                   aria-label={isRecording ? "Stop recording" : "Start recording"}
                 >
@@ -571,6 +571,8 @@ const Sidebar: React.FC = () => {
       onClick: goToMeetings,
     },
   ];
+  const idleRecordingButtonClass =
+    "border border-primary/30 bg-primary/10 text-sidebar-foreground shadow-sm hover:border-primary/40 hover:bg-primary/20";
 
   return (
     <div className="fixed left-0 top-[var(--titlebar-height)] z-40 h-[calc(100vh-var(--titlebar-height))]">
@@ -687,10 +689,10 @@ const Sidebar: React.FC = () => {
               <button
                 onClick={handleRecordingToggle}
                 title={isRecording ? "Click to stop recording" : undefined}
-                className={`flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold shadow-sm transition ${
+                className={`flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold transition ${
                   isRecording
                     ? "bg-red-500 text-white hover:bg-red-600"
-                    : "bg-primary text-primary-foreground shadow-primary/20 hover:bg-primary/90"
+                    : idleRecordingButtonClass
                 }`}
               >
                 {isRecording ? (
