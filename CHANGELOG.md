@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.28
+
+- Fixed interrupted recording recovery so checkpoint-temp audio can still be
+  found and restored.
+- Centralized audio-recovery lookup so meeting and recording flows use the same
+  recovered-audio path.
+- Restored meeting audio actions after recording completes.
+- Gated source attribution on saved audio so transcripts do not claim an audio
+  source before one exists.
+- Made toast notifications and the recording CTA theme-aware.
+- Cleared stale diarization labels when speaker mapping is rerun in overwrite
+  mode and a segment no longer has diarization coverage.
+- Recovered compact diarization speaker hints that land in word-timestamp gaps
+  by anchoring them to the nearest word.
+- Flushed checkpoint-temp audio through a writable handle on Windows before
+  rename so interrupted-recording recovery files are durable.
+- `latest.json` advertises runtime version `0.5.28`, so installed `0.5.27`
+  clients can discover this update.
+
 ## 0.5.27
 
 - Kept retranscription and speaker-diarization benchmark dialogs mounted while

@@ -1,6 +1,6 @@
 {
     "name": "clawscribe",
-    "version": "0.5.27",
+    "version": "0.5.28",
     "private": true,
     "main": "electron/main.js",
     "scripts": {
