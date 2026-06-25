@@ -2995,7 +2995,7 @@ fn turn_speaker_quality(turns: &[DiarizationTurn]) -> Option<TurnSpeakerQuality>
     }
     let dominant_seconds = seconds_by_speaker.values().copied().fold(0.0f64, f64::max);
     let significant_threshold_seconds = AUTO_SIGNIFICANT_SPEAKER_MIN_SECONDS
-        .max(dominant_seconds * AUTO_SIGNIFICANT_SPEAKER_DOMINANT_SHARE);
+        .min(dominant_seconds * AUTO_SIGNIFICANT_SPEAKER_DOMINANT_SHARE);
     let significant_speakers = seconds_by_speaker
         .values()
         .filter(|seconds| **seconds >= significant_threshold_seconds)
