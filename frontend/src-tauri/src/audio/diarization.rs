@@ -491,6 +491,7 @@ fn map_diarization_to_transcript_segments_with_diagnostics(
                 segment,
                 diarization_turns,
                 options.mode,
+                options.existing_speaker_policy,
                 Some(&mut diagnostics),
             )
         })
@@ -509,6 +510,7 @@ fn split_or_label_transcript_segment(
     segment: &TranscriptSegment,
     diarization_turns: &[DiarizationTurn],
     mode: DiarizationMappingMode,
+    existing_policy: ExistingSpeakerPolicy,
     diagnostics: Option<&mut DiarizationMappingDiagnostics>,
 ) -> Vec<TranscriptSegment> {
     let spans = speaker_spans_for_segment(segment, diarization_turns);
@@ -523,10 +525,20 @@ fn split_or_label_transcript_segment(
     }
 
     let mut mapped = segment.clone();
-    mapped.speaker = assign_speaker(segment, diarization_turns, mode)
+    let assigned_speaker = assign_speaker(segment, diarization_turns, mode)
         .map(speaker_label)
-        .or_else(|| spans.first().map(|span| speaker_label(span.speaker)))
-        .or_else(|| segment.speaker.clone());
+        .or_else(|| spans.first().map(|span| speaker_label(span.speaker)));
+    mapped.speaker = match existing_policy {
+        ExistingSpeakerPolicy::PreserveNonEmpty => {
+            assigned_speaker.or_else(|| segment.speaker.clone())
+        }
+        ExistingSpeakerPolicy::Overwrite => assigned_speaker,
+    };
+    if let Some(words) = mapped.word_timestamps.as_mut() {
+        for word in words {
+            word.speaker = mapped.speaker.clone();
+        }
+    }
     vec![mapped]
 }
 
@@ -5825,6 +5837,47 @@ mod tests {
         );
 
         assert_eq!(mapped[0].speaker.as_deref(), Some("Speaker 2"));
+    }
+
+    #[test]
+    fn preserves_existing_labels_without_coverage_by_default() {
+        let mut segment = transcript("stale", Some(5.0), Some(6.0));
+        segment.speaker = Some("Alice".to_string());
+
+        let mapped = map_diarization_to_transcript_segments(
+            &[segment],
+            &[turn(0.0, 2.0, 0)],
+            DiarizationMappingOptions::default(),
+        );
+
+        assert_eq!(mapped[0].speaker.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn overwrite_clears_stale_labels_without_coverage() {
+        let mut segment = transcript_with_word_timestamps(
+            "stale",
+            &[("stale", 5.0, 5.4), ("label", 5.4, 6.0)],
+            5.0,
+            6.0,
+        );
+        segment.speaker = Some("Speaker 5".to_string());
+        for word in segment.word_timestamps.as_mut().unwrap() {
+            word.speaker = Some("Speaker 5".to_string());
+        }
+
+        let mapped = map_diarization_to_transcript_segments(
+            &[segment],
+            &[turn(0.0, 2.0, 0)],
+            DiarizationMappingOptions {
+                existing_speaker_policy: ExistingSpeakerPolicy::Overwrite,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(mapped[0].speaker, None);
+        let words = mapped[0].word_timestamps.as_ref().unwrap();
+        assert!(words.iter().all(|word| word.speaker.is_none()));
     }
 
     #[test]
