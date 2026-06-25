@@ -1,7 +1,6 @@
 use crate::api::{
     TranscriptSegment as ApiTranscriptSegment, TranscriptWord, TranscriptWordTimestampSource,
 };
-use crate::audio::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
 use crate::summary::language_detection::detect_summary_language;
@@ -2014,7 +2013,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         5,
         "Finding meeting audio...",
     );
-    let audio_path = find_or_recover_audio_file(&folder_path).await?;
+    let audio_path =
+        crate::audio::incremental_saver::find_or_recover_audio_file(&folder_path).await?;
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("Application database is not initialized"))?;
@@ -2677,7 +2677,8 @@ pub(crate) async fn run_speaker_diarization_evaluation<R: Runtime>(
         ));
     }
 
-    let audio_path = find_or_recover_audio_file(&folder_path).await?;
+    let audio_path =
+        crate::audio::incremental_saver::find_or_recover_audio_file(&folder_path).await?;
     let model_paths =
         resolve_model_paths_for_embedding(&app, None, None, options.embedding_model_id.clone())?;
 
@@ -4210,82 +4211,6 @@ async fn ensure_model_available<R: Runtime>(
 
 fn first_existing_path(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|path| path.is_file()).cloned()
-}
-
-async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
-    match find_audio_file(folder) {
-        Ok(path) => return Ok(path),
-        Err(initial_error) => {
-            let recovery = crate::audio::incremental_saver::recover_audio_from_checkpoints(
-                folder.to_string_lossy().to_string(),
-                48_000,
-            )
-            .await
-            .map_err(|recovery_error| {
-                anyhow!(
-                    "{}; audio recovery failed: {}",
-                    initial_error,
-                    recovery_error
-                )
-            })?;
-
-            if let Some(audio_file_path) = recovery.audio_file_path {
-                let path = PathBuf::from(audio_file_path);
-                if path.is_file() {
-                    return Ok(path);
-                }
-            }
-
-            find_audio_file(folder).map_err(|after_recovery| {
-                anyhow!(
-                    "{}; audio recovery result: {}",
-                    after_recovery,
-                    recovery.message
-                )
-            })
-        }
-    }
-}
-
-fn find_audio_file(folder: &Path) -> Result<PathBuf> {
-    let candidates = [
-        "audio.mp4",
-        "audio.m4a",
-        "audio.wav",
-        "audio.mp3",
-        "audio.flac",
-        "audio.ogg",
-        "recording.mp4",
-        "audio.mkv",
-        "audio.webm",
-        "audio.wma",
-    ];
-
-    for name in candidates {
-        let path = folder.join(name);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-
-    for entry in std::fs::read_dir(folder)
-        .map_err(|e| anyhow!("Failed to scan meeting folder {}: {}", folder.display(), e))?
-    {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
-            continue;
-        };
-
-        if AUDIO_EXTENSIONS.contains(&extension.to_lowercase().as_str()) {
-            return Ok(path);
-        }
-    }
-
-    Err(anyhow!("No audio file found in: {}", folder.display()))
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use super::constants::AUDIO_EXTENSIONS;
 use super::encode::encode_single_audio;
 use super::recording_state::AudioChunk;
 use anyhow::{anyhow, Result};
@@ -10,6 +11,18 @@ const CHECKPOINT_INTERVAL_SECONDS: usize = 10;
 const CHECKPOINT_FILE_PREFIX: &str = "audio_chunk_";
 const CHECKPOINT_FILE_SUFFIX: &str = ".mp4";
 const FINAL_AUDIO_FILE: &str = "audio.mp4";
+const AUDIO_FILE_CANDIDATES: &[&str] = &[
+    "audio.mp4",
+    "audio.m4a",
+    "audio.wav",
+    "audio.mp3",
+    "audio.flac",
+    "audio.ogg",
+    "recording.mp4",
+    "audio.mkv",
+    "audio.webm",
+    "audio.wma",
+];
 
 use super::ffmpeg::find_ffmpeg_path;
 
@@ -393,12 +406,101 @@ fn list_checkpoint_files(checkpoints_dir: &Path) -> std::io::Result<Vec<PathBuf>
     Ok(complete_files.into_values().collect())
 }
 
+/// Find an existing audio file in a meeting folder.
+/// Tries ClawScribe's known recording names first, then scans by audio extension.
+pub fn find_existing_audio_file(folder: &Path) -> Result<PathBuf> {
+    for name in AUDIO_FILE_CANDIDATES {
+        let path = folder.join(name);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    for entry in std::fs::read_dir(folder)
+        .map_err(|e| anyhow!("Failed to scan meeting folder {}: {}", folder.display(), e))?
+    {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if AUDIO_EXTENSIONS.contains(&extension.to_lowercase().as_str()) {
+            return Ok(path);
+        }
+    }
+
+    Err(anyhow!("No audio file found in: {}", folder.display()))
+}
+
+/// Find an audio file, recovering it from checkpoints first when the final file is missing.
+pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
+    match find_existing_audio_file(folder) {
+        Ok(path) => Ok(path),
+        Err(initial_error) => {
+            let recovery = recover_audio_from_checkpoints(folder.to_string_lossy().to_string())
+                .await
+                .map_err(|recovery_error| {
+                    anyhow!(
+                        "{}; audio recovery failed: {}",
+                        initial_error,
+                        recovery_error
+                    )
+                })?;
+
+            if let Some(audio_file_path) = recovery.audio_file_path {
+                let path = PathBuf::from(audio_file_path);
+                if path.is_file() {
+                    return Ok(path);
+                }
+            }
+
+            find_existing_audio_file(folder).map_err(|after_recovery| {
+                anyhow!(
+                    "{}; audio recovery result: {}",
+                    after_recovery,
+                    recovery.message
+                )
+            })
+        }
+    }
+}
+
+/// Resolve a meeting audio file for UI gating. Missing audio/checkpoints are not an error here.
+pub async fn resolve_audio_file_or_recover(folder: &Path) -> Result<Option<PathBuf>, String> {
+    match find_existing_audio_file(folder) {
+        Ok(path) => Ok(Some(path)),
+        Err(_) => {
+            let recovery =
+                recover_audio_from_checkpoints(folder.to_string_lossy().to_string()).await?;
+
+            if let Some(audio_file_path) = recovery.audio_file_path {
+                let path = PathBuf::from(audio_file_path);
+                if path.is_file() {
+                    return Ok(Some(path));
+                }
+            }
+
+            match find_existing_audio_file(folder) {
+                Ok(path) => Ok(Some(path)),
+                Err(_) if recovery.status == "none" => Ok(None),
+                Err(error) => Err(format!(
+                    "{}; audio recovery result: {}",
+                    error, recovery.message
+                )),
+            }
+        }
+    }
+}
+
 /// Recover audio from checkpoint files
 /// This is called by the transcript recovery system to merge audio chunks after a crash
 #[tauri::command]
 pub async fn recover_audio_from_checkpoints(
     meeting_folder: String,
-    _sample_rate: u32,
 ) -> Result<AudioRecoveryStatus, String> {
     info!("Starting audio recovery for folder: {}", meeting_folder);
 

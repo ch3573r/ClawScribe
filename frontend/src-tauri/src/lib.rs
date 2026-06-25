@@ -259,24 +259,9 @@ async fn resolve_meeting_audio_file(
         return Ok(None);
     }
 
-    if let Some(audio_file) = find_audio_file_in_meeting_folder(&folder)? {
-        return Ok(Some(audio_file));
-    }
-
-    let recovery = audio::incremental_saver::recover_audio_from_checkpoints(
-        folder.to_string_lossy().to_string(),
-        48_000,
-    )
-    .await?;
-
-    if let Some(audio_file_path) = recovery.audio_file_path {
-        let path = PathBuf::from(&audio_file_path);
-        if path.is_file() {
-            return Ok(Some(audio_file_path));
-        }
-    }
-
-    find_audio_file_in_meeting_folder(&folder)
+    audio::incremental_saver::resolve_audio_file_or_recover(&folder)
+        .await
+        .map(|path| path.map(|path| path.to_string_lossy().to_string()))
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -317,49 +302,6 @@ fn canonical_paths_equal(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn find_audio_file_in_meeting_folder(folder: &Path) -> Result<Option<String>, String> {
-    let candidates = [
-        "audio.mp4",
-        "audio.m4a",
-        "audio.wav",
-        "audio.mp3",
-        "audio.flac",
-        "audio.ogg",
-        "recording.mp4",
-        "audio.mkv",
-        "audio.webm",
-        "audio.wma",
-    ];
-
-    for candidate in candidates {
-        let path = folder.join(candidate);
-        if path.is_file() {
-            return Ok(Some(path.to_string_lossy().to_string()));
-        }
-    }
-
-    for entry in std::fs::read_dir(&folder)
-        .map_err(|e| format!("Failed to scan meeting folder {}: {}", folder.display(), e))?
-    {
-        let path = entry
-            .map_err(|e| format!("Failed to read meeting folder entry: {}", e))?
-            .path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
-            continue;
-        };
-
-        if audio::constants::AUDIO_EXTENSIONS.contains(&extension.to_lowercase().as_str()) {
-            return Ok(Some(path.to_string_lossy().to_string()));
-        }
-    }
-
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,9 +339,10 @@ mod tests {
         std::fs::write(&fallback_audio, b"fallback").unwrap();
         std::fs::write(&preferred_audio, b"preferred").unwrap();
 
-        let resolved = find_audio_file_in_meeting_folder(meeting_folder)
+        let resolved = audio::incremental_saver::find_existing_audio_file(meeting_folder)
             .unwrap()
-            .unwrap();
+            .to_string_lossy()
+            .to_string();
 
         assert_eq!(PathBuf::from(resolved), preferred_audio);
     }

@@ -141,7 +141,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         try {
           audioRecoveryStatus = await invoke<AudioRecoveryStatus>(
             'recover_audio_from_checkpoints',
-            { meetingFolder: folderPath, sampleRate: 48000 }
+            { meetingFolder: folderPath }
           );
         } catch (error) {
           console.error('Audio recovery failed:', error);

@@ -4,7 +4,6 @@ use super::common::{
     create_readable_transcript_segments_with_words, split_segment_at_silence,
     transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
 };
-use super::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
@@ -147,80 +146,6 @@ pub async fn start_retranscription<R: Runtime>(
     result
 }
 
-/// Find audio file in meeting folder
-/// Tries common names first, then scans for any file with an audio extension
-fn find_audio_file(folder: &Path) -> Result<PathBuf> {
-    let candidates = [
-        "audio.mp4",
-        "audio.m4a",
-        "audio.wav",
-        "audio.mp3",
-        "audio.flac",
-        "audio.ogg",
-        "recording.mp4",
-        "audio.mkv",
-        "audio.webm",
-        "audio.wma",
-    ];
-
-    for name in candidates {
-        let path = folder.join(name);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    // Fallback: scan folder for any file with an audio extension
-    if let Ok(entries) = std::fs::read_dir(folder) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(ext) = path.extension() {
-                let ext = ext.to_string_lossy().to_lowercase();
-                if AUDIO_EXTENSIONS.contains(&ext.as_str()) {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-
-    Err(anyhow!("No audio file found in: {}", folder.display()))
-}
-
-async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
-    match find_audio_file(folder) {
-        Ok(path) => return Ok(path),
-        Err(initial_error) => {
-            let recovery = crate::audio::incremental_saver::recover_audio_from_checkpoints(
-                folder.to_string_lossy().to_string(),
-                48_000,
-            )
-            .await
-            .map_err(|recovery_error| {
-                anyhow!(
-                    "{}; audio recovery failed: {}",
-                    initial_error,
-                    recovery_error
-                )
-            })?;
-
-            if let Some(audio_file_path) = recovery.audio_file_path {
-                let path = PathBuf::from(audio_file_path);
-                if path.is_file() {
-                    return Ok(path);
-                }
-            }
-
-            find_audio_file(folder).map_err(|after_recovery| {
-                anyhow!(
-                    "{}; audio recovery result: {}",
-                    after_recovery,
-                    recovery.message
-                )
-            })
-        }
-    }
-}
-
 /// Internal function to run retranscription
 async fn run_retranscription<R: Runtime>(
     app: AppHandle<R>,
@@ -231,7 +156,8 @@ async fn run_retranscription<R: Runtime>(
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
     let folder_path = PathBuf::from(&meeting_folder_path);
-    let audio_path = find_or_recover_audio_file(&folder_path).await?;
+    let audio_path =
+        crate::audio::incremental_saver::find_or_recover_audio_file(&folder_path).await?;
 
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");
@@ -1110,6 +1036,9 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 mod tests {
     use super::super::common::create_transcript_segments;
     use super::*;
+    use crate::audio::constants::AUDIO_EXTENSIONS;
+    use crate::audio::incremental_saver::find_existing_audio_file;
+    use std::path::Path;
 
     #[test]
     fn test_create_transcript_segments_empty() {
@@ -1212,11 +1141,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // No audio file → error
-        assert!(find_audio_file(dir.path()).is_err());
+        assert!(find_existing_audio_file(dir.path()).is_err());
 
         // Create audio.mp4 — should be found first
         std::fs::write(dir.path().join("audio.mp4"), b"fake").unwrap();
-        let found = find_audio_file(dir.path()).unwrap();
+        let found = find_existing_audio_file(dir.path()).unwrap();
         assert_eq!(found.file_name().unwrap(), "audio.mp4");
     }
 
@@ -1226,7 +1155,7 @@ mod tests {
 
         // Create audio.wav (imported as .wav, not .mp4)
         std::fs::write(dir.path().join("audio.wav"), b"fake").unwrap();
-        let found = find_audio_file(dir.path()).unwrap();
+        let found = find_existing_audio_file(dir.path()).unwrap();
         assert_eq!(found.file_name().unwrap(), "audio.wav");
     }
 
@@ -1239,7 +1168,7 @@ mod tests {
         // Also add a non-audio file that should be ignored
         std::fs::write(dir.path().join("notes.txt"), b"text").unwrap();
 
-        let found = find_audio_file(dir.path()).unwrap();
+        let found = find_existing_audio_file(dir.path()).unwrap();
         assert_eq!(found.file_name().unwrap(), "my_recording.flac");
     }
 
@@ -1250,14 +1179,14 @@ mod tests {
         // Create both audio.m4a and audio.mp4 — mp4 should win (listed first in candidates)
         std::fs::write(dir.path().join("audio.m4a"), b"fake").unwrap();
         std::fs::write(dir.path().join("audio.mp4"), b"fake").unwrap();
-        let found = find_audio_file(dir.path()).unwrap();
+        let found = find_existing_audio_file(dir.path()).unwrap();
         assert_eq!(found.file_name().unwrap(), "audio.mp4");
     }
 
     #[test]
     fn test_find_audio_file_empty_folder() {
         let dir = tempfile::tempdir().unwrap();
-        let result = find_audio_file(dir.path());
+        let result = find_existing_audio_file(dir.path());
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1267,7 +1196,7 @@ mod tests {
 
     #[test]
     fn test_find_audio_file_nonexistent_folder() {
-        let result = find_audio_file(Path::new("/nonexistent/path/12345"));
+        let result = find_existing_audio_file(Path::new("/nonexistent/path/12345"));
         assert!(result.is_err());
     }
 
