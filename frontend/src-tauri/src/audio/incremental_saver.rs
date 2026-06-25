@@ -124,7 +124,11 @@ impl IncrementalAudioSaver {
         )?;
 
         validate_recoverable_audio_file(&temp_path)?;
-        std::fs::File::open(&temp_path)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temp_path)?
+            .sync_all()?;
         publish_checkpoint_file(&temp_path, &checkpoint_path)?;
 
         let duration_seconds = audio_data.len() as f32 / self.sample_rate as f32;
