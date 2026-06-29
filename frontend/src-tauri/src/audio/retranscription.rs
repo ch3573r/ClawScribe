@@ -102,7 +102,8 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_parakeet = provider.as_deref() == Some("parakeet")
+        || super::transcription::cloud::is_cloud_provider(provider.as_deref());
     let use_nemotron = provider.as_deref() == Some("nemotron");
     let result = run_retranscription(
         app.clone(),
@@ -152,21 +153,92 @@ async fn run_retranscription<R: Runtime>(
     meeting_id: String,
     meeting_folder_path: String,
     language: Option<String>,
-    model: Option<String>,
-    provider: Option<String>,
+    mut model: Option<String>,
+    mut provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path =
         crate::audio::incremental_saver::find_or_recover_audio_file(&folder_path).await?;
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-    let use_nemotron = provider.as_deref() == Some("nemotron");
-
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
         meeting_id, language, model, provider
     );
+
+    let mut cloud_fallback_error = None;
+    if super::transcription::cloud::is_cloud_provider(provider.as_deref()) {
+        if super::recording_commands::cloud_transcription_enabled() {
+            let provider_id = provider.as_deref().unwrap_or_default().to_string();
+            emit_progress(
+                &app,
+                &meeting_id,
+                "transcribing",
+                5,
+                "Uploading audio for cloud transcription...",
+            );
+            match super::transcription::cloud::transcribe_whole_file(
+                &app,
+                &provider_id,
+                model.as_deref(),
+                &audio_path,
+                language.as_deref(),
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    let duration_seconds = crate::audio::import::validate_audio_file(&audio_path)
+                        .map(|info| info.duration_seconds)
+                        .unwrap_or_else(|_| {
+                            outcome
+                                .segments
+                                .iter()
+                                .map(|segment| segment.end_ms)
+                                .fold(0.0_f64, f64::max)
+                                / 1000.0
+                        });
+                    let source_language = super::common::transcription_source_language_hint(
+                        Some(&outcome.provider),
+                        language.as_deref(),
+                    );
+                    return save_retranscription_transcripts(
+                        &app,
+                        &meeting_id,
+                        &folder_path,
+                        &audio_path,
+                        duration_seconds,
+                        &outcome.segments,
+                        &outcome.provider,
+                        &outcome.model,
+                        source_language.as_deref(),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    warn!(
+                        "Cloud retranscription failed for provider '{}' (category={}); falling back to local",
+                        provider_id,
+                        error.category().as_str()
+                    );
+                    super::transcription::cloud::emit_fallback_event(
+                        &app,
+                        Some(&meeting_id),
+                        &provider_id,
+                        &error,
+                    );
+                    cloud_fallback_error = Some(error);
+                }
+            }
+        } else {
+            info!("Cloud transcription provider requested while Beta toggle is disabled; using local fallback");
+        }
+
+        provider = Some("parakeet".to_string());
+        model = Some(DEFAULT_PARAKEET_MODEL.to_string());
+    }
+
+    // Determine which local provider to use after any cloud fallback.
+    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_nemotron = provider.as_deref() == Some("nemotron");
 
     // Emit progress: decoding
     emit_progress(&app, &meeting_id, "decoding", 5, "Decoding audio file...");
@@ -307,17 +379,50 @@ async fn run_retranscription<R: Runtime>(
 
     // Initialize the appropriate engine once (not per-segment)
     let whisper_engine = if !use_parakeet && !use_nemotron {
-        Some(get_or_init_whisper(&app, model.as_deref()).await?)
+        match get_or_init_whisper(&app, model.as_deref()).await {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                return Err(match &cloud_fallback_error {
+                    Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(
+                        cloud_error,
+                        error,
+                    ),
+                    None => error,
+                });
+            }
+        }
     } else {
         None
     };
     let parakeet_engine = if use_parakeet {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
+        match get_or_init_parakeet(&app, model.as_deref()).await {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                return Err(match &cloud_fallback_error {
+                    Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(
+                        cloud_error,
+                        error,
+                    ),
+                    None => error,
+                });
+            }
+        }
     } else {
         None
     };
     let nemotron_engine = if use_nemotron {
-        Some(get_or_init_nemotron(&app, model.as_deref()).await?)
+        match get_or_init_nemotron(&app, model.as_deref()).await {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                return Err(match &cloud_fallback_error {
+                    Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(
+                        cloud_error,
+                        error,
+                    ),
+                    None => error,
+                });
+            }
+        }
     } else {
         None
     };
@@ -473,11 +578,57 @@ async fn run_retranscription<R: Runtime>(
         return Err(anyhow!("Retranscription cancelled"));
     }
 
-    emit_progress(&app, &meeting_id, "saving", 80, "Saving transcripts...");
+    let used_provider = if use_nemotron {
+        "nemotron"
+    } else if use_parakeet {
+        "parakeet"
+    } else {
+        "localWhisper"
+    };
+    let used_model = if let Some(e) = &nemotron_engine {
+        e.get_current_model().await
+    } else if let Some(e) = &parakeet_engine {
+        e.get_current_model().await
+    } else if let Some(e) = &whisper_engine {
+        e.get_current_model().await
+    } else {
+        None
+    }
+    .or_else(|| model.clone())
+    .unwrap_or_default();
+    let source_language =
+        super::common::transcription_source_language_hint(Some(used_provider), language.as_deref());
+
+    save_retranscription_transcripts(
+        &app,
+        &meeting_id,
+        &folder_path,
+        &audio_path,
+        duration_seconds,
+        &all_transcripts,
+        used_provider,
+        &used_model,
+        source_language.as_deref(),
+    )
+    .await
+}
+
+async fn save_retranscription_transcripts<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    folder_path: &Path,
+    audio_path: &Path,
+    duration_seconds: f64,
+    all_transcripts: &[TranscribedSegment],
+    used_provider: &str,
+    used_model: &str,
+    source_language: Option<&str>,
+) -> Result<RetranscriptionResult> {
+    emit_progress(app, meeting_id, "saving", 80, "Saving transcripts...");
 
     // Create transcript segments with proper timestamps from VAD, then stitch
     // obvious VAD fragments so the saved transcript reads like prose.
-    let segments = create_readable_transcript_segments_with_words(&all_transcripts);
+    let segments = create_readable_transcript_segments_with_words(all_transcripts);
 
     // Save to database
     let app_state = app
@@ -495,7 +646,7 @@ async fn run_retranscription<R: Runtime>(
         .map_err(|e| anyhow!("Failed to start transaction: {}", e))?;
 
     sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
-        .bind(&meeting_id)
+        .bind(meeting_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to delete existing transcripts: {}", e))?;
@@ -512,7 +663,7 @@ async fn run_retranscription<R: Runtime>(
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&segment.id)
-        .bind(&meeting_id)
+        .bind(meeting_id)
         .bind(&segment.text)
         .bind(&segment.timestamp)
         .bind(segment.audio_start_time)
@@ -536,70 +687,37 @@ async fn run_retranscription<R: Runtime>(
     );
 
     // Write updated transcripts.json and metadata.json to the meeting folder
-    emit_progress(
-        &app,
-        &meeting_id,
-        "saving",
-        90,
-        "Writing transcript files...",
-    );
+    emit_progress(app, meeting_id, "saving", 90, "Writing transcript files...");
 
-    if let Err(e) = write_transcripts_json(&folder_path, &segments) {
+    if let Err(e) = write_transcripts_json(folder_path, &segments) {
         warn!("Failed to write transcripts.json: {}", e);
     }
 
-    // Find audio filename for metadata
     let audio_filename = audio_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("audio.mp4")
         .to_string();
-    let used_provider = if use_nemotron {
-        "nemotron"
-    } else if use_parakeet {
-        "parakeet"
-    } else {
-        "localWhisper"
-    };
-    let used_model = if let Some(e) = &nemotron_engine {
-        e.get_current_model().await
-    } else if let Some(e) = &parakeet_engine {
-        e.get_current_model().await
-    } else if let Some(e) = &whisper_engine {
-        e.get_current_model().await
-    } else {
-        None
-    }
-    .or_else(|| model.clone())
-    .unwrap_or_default();
-    let source_language =
-        super::common::transcription_source_language_hint(Some(used_provider), language.as_deref());
 
     if let Err(e) = write_retranscription_metadata(
-        &folder_path,
-        &meeting_id,
+        folder_path,
+        meeting_id,
         duration_seconds,
         &audio_filename,
         used_provider,
-        &used_model,
-        source_language.as_deref(),
+        used_model,
+        source_language,
     ) {
         warn!("Failed to update metadata.json: {}", e);
     }
 
-    emit_progress(
-        &app,
-        &meeting_id,
-        "complete",
-        100,
-        "Retranscription complete",
-    );
+    emit_progress(app, meeting_id, "complete", 100, "Retranscription complete");
 
     Ok(RetranscriptionResult {
-        meeting_id,
+        meeting_id: meeting_id.to_string(),
         segments_count: segments.len(),
         duration_seconds,
-        language,
+        language: source_language.map(str::to_string),
     })
 }
 

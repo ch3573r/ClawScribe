@@ -217,6 +217,9 @@ async fn transcript_config(state: &State<'_, AppState>) -> Result<TranscriptConf
                 provider: config.provider,
                 model: config.model,
                 api_key,
+                base_url: config.cloud_whisper_base_url,
+                endpoint: config.mai_transcribe_endpoint,
+                region: config.mai_transcribe_region,
             })
         }
         Ok(None) => Ok(default_transcript_config()),
@@ -229,6 +232,9 @@ fn default_transcript_config() -> TranscriptConfig {
         provider: "parakeet".to_string(),
         model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
         api_key: None,
+        base_url: None,
+        endpoint: None,
+        region: None,
     }
 }
 

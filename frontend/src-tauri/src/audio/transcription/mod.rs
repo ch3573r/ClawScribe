@@ -2,6 +2,7 @@
 //
 // Transcription module: Provider abstraction, engine management, and worker pool.
 
+pub mod cloud;
 pub mod engine;
 pub mod nemotron_provider;
 pub mod parakeet_provider;

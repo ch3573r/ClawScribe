@@ -56,7 +56,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(), String> {
     // Check transcript configuration to determine which engine to validate
-    let config =
+    let mut config =
         match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
             .await
         {
@@ -73,6 +73,9 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                     api_key: None,
+                    base_url: None,
+                    endpoint: None,
+                    region: None,
                 }
             }
             Err(e) => {
@@ -84,9 +87,21 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                     api_key: None,
+                    base_url: None,
+                    endpoint: None,
+                    region: None,
                 }
             }
         };
+    if crate::audio::transcription::cloud::is_cloud_provider(Some(config.provider.as_str())) {
+        warn!(
+            "Cloud transcription provider '{}' is batch-only; live recording will use Parakeet",
+            config.provider
+        );
+        config.provider = "parakeet".to_string();
+        config.model = crate::config::DEFAULT_PARAKEET_MODEL.to_string();
+        config.api_key = None;
+    }
 
     // Validate based on provider
     match config.provider.as_str() {
@@ -192,7 +207,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<TranscriptionEngine, String> {
     // Get provider configuration from API
-    let config =
+    let mut config =
         match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
             .await
         {
@@ -209,6 +224,9 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                     api_key: None,
+                    base_url: None,
+                    endpoint: None,
+                    region: None,
                 }
             }
             Err(e) => {
@@ -220,9 +238,21 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                     api_key: None,
+                    base_url: None,
+                    endpoint: None,
+                    region: None,
                 }
             }
         };
+    if crate::audio::transcription::cloud::is_cloud_provider(Some(config.provider.as_str())) {
+        warn!(
+            "Cloud transcription provider '{}' is batch-only; live recording will use Parakeet",
+            config.provider
+        );
+        config.provider = "parakeet".to_string();
+        config.model = crate::config::DEFAULT_PARAKEET_MODEL.to_string();
+        config.api_key = None;
+    }
 
     // Initialize the appropriate engine based on provider
     match config.provider.as_str() {

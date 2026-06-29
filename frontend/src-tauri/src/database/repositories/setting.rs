@@ -20,6 +20,10 @@ pub struct SaveTranscriptConfigRequest {
     pub model: String,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
 }
 
 pub struct SettingsRepository;
@@ -174,6 +178,48 @@ impl SettingsRepository {
         Ok(())
     }
 
+    pub async fn save_transcript_provider_config(
+        pool: &SqlitePool,
+        provider: &str,
+        base_url: Option<&str>,
+        endpoint: Option<&str>,
+        region: Option<&str>,
+    ) -> std::result::Result<(), sqlx::Error> {
+        match provider {
+            "cloud-whisper" => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl)
+                    VALUES ('1', 'cloud-whisper', 'whisper-1', $1)
+                    ON CONFLICT(id) DO UPDATE SET
+                        cloudWhisperBaseUrl = $1
+                    "#,
+                )
+                .bind(base_url)
+                .execute(pool)
+                .await?;
+            }
+            "mai-transcribe" => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion)
+                    VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', $1, $2)
+                    ON CONFLICT(id) DO UPDATE SET
+                        maiTranscribeEndpoint = $1,
+                        maiTranscribeRegion = $2
+                    "#,
+                )
+                .bind(endpoint)
+                .bind(region)
+                .execute(pool)
+                .await?;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     pub async fn save_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
@@ -186,6 +232,8 @@ impl SettingsRepository {
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
             "openai" => "openaiApiKey",
+            "cloud-whisper" => "cloudWhisperApiKey",
+            "mai-transcribe" => "maiTranscribeApiKey",
             _ => {
                 return Err(sqlx::Error::Protocol(
                     format!("Invalid provider: {}", provider).into(),
@@ -220,6 +268,8 @@ impl SettingsRepository {
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
             "openai" => "openaiApiKey",
+            "cloud-whisper" => "cloudWhisperApiKey",
+            "mai-transcribe" => "maiTranscribeApiKey",
             _ => {
                 return Err(sqlx::Error::Protocol(
                     format!("Invalid provider: {}", provider).into(),

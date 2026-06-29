@@ -729,7 +729,14 @@ pub async fn stop_recording<R: Runtime>(
     )
     .await
     {
-        Ok(Ok(Some(config))) => Some(config.provider),
+        Ok(Ok(Some(config))) => {
+            if crate::audio::transcription::cloud::is_cloud_provider(Some(config.provider.as_str()))
+            {
+                Some("parakeet".to_string())
+            } else {
+                Some(config.provider)
+            }
+        }
         Ok(Ok(None)) => None,
         Ok(Err(e)) => {
             warn!("⚠️ Failed to get transcript config: {:?}", e);
@@ -857,7 +864,18 @@ pub async fn stop_recording<R: Runtime>(
         )
         .await
         {
-            Ok(Some(config)) => Some((config.provider, config.model)),
+            Ok(Some(config)) => {
+                if crate::audio::transcription::cloud::is_cloud_provider(Some(
+                    config.provider.as_str(),
+                )) {
+                    Some((
+                        "parakeet".to_string(),
+                        crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                    ))
+                } else {
+                    Some((config.provider, config.model))
+                }
+            }
             _ => None,
         };
 
@@ -1360,6 +1378,15 @@ async fn resolve_transcription_info<R: Runtime>(
                 crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
             ),
         };
+    let (provider, model) =
+        if crate::audio::transcription::cloud::is_cloud_provider(Some(provider.as_str())) {
+            (
+                "parakeet".to_string(),
+                crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+            )
+        } else {
+            (provider, model)
+        };
     let language_preference = crate::get_language_preference_internal();
     let source_language = super::common::transcription_source_language_hint(
         Some(provider.as_str()),
@@ -1383,4 +1410,25 @@ pub async fn set_source_attribution_enabled(enabled: bool) -> Result<(), String>
 #[tauri::command]
 pub async fn get_source_attribution_enabled() -> Result<bool, String> {
     Ok(crate::audio::transcription::worker::SOURCE_ATTRIBUTION_ENABLED.load(Ordering::Relaxed))
+}
+
+static CLOUD_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Beta (opt-in, default off): allow hosted whole-file transcription providers
+/// for import and retranscription. Live recording remains local-only.
+#[tauri::command]
+pub async fn set_cloud_transcription_enabled(enabled: bool) -> Result<(), String> {
+    CLOUD_TRANSCRIPTION_ENABLED.store(enabled, Ordering::Relaxed);
+    info!("Cloud transcription set to {enabled}");
+    Ok(())
+}
+
+/// Read the current cloud-transcription toggle state.
+#[tauri::command]
+pub async fn get_cloud_transcription_enabled() -> Result<bool, String> {
+    Ok(CLOUD_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed))
+}
+
+pub(crate) fn cloud_transcription_enabled() -> bool {
+    CLOUD_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed)
 }

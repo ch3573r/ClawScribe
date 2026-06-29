@@ -103,6 +103,12 @@ pub struct TranscriptConfig {
     pub model: String,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(rename = "baseUrl", skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,6 +117,10 @@ pub struct SaveTranscriptConfigRequest {
     pub model: String,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -667,9 +677,12 @@ pub async fn api_get_transcript_config<R: Runtime>(
                 Ok(api_key) => {
                     log_info!("Successfully retrieved transcript config and API key.");
                     Ok(Some(TranscriptConfig {
-                        provider: config.provider,
+                        provider: config.provider.clone(),
                         model: config.model,
                         api_key,
+                        base_url: config.cloud_whisper_base_url,
+                        endpoint: config.mai_transcribe_endpoint,
+                        region: config.mai_transcribe_region,
                     }))
                 }
                 Err(e) => {
@@ -688,6 +701,9 @@ pub async fn api_get_transcript_config<R: Runtime>(
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
+                base_url: None,
+                endpoint: None,
+                region: None,
             }))
         }
         Err(e) => {
@@ -704,6 +720,9 @@ pub async fn api_save_transcript_config<R: Runtime>(
     provider: String,
     model: String,
     api_key: Option<String>,
+    base_url: Option<String>,
+    endpoint: Option<String>,
+    region: Option<String>,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
@@ -714,6 +733,31 @@ pub async fn api_save_transcript_config<R: Runtime>(
 
     if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
         log_error!("Failed to save transcript config: {}", e);
+        return Err(e.to_string());
+    }
+
+    let clean_base_url = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let clean_endpoint = endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let clean_region = region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Err(e) = SettingsRepository::save_transcript_provider_config(
+        pool,
+        &provider,
+        clean_base_url,
+        clean_endpoint,
+        clean_region,
+    )
+    .await
+    {
+        log_error!("Failed to save transcript provider config: {}", e);
         return Err(e.to_string());
     }
 

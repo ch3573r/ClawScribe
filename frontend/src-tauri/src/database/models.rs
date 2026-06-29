@@ -141,4 +141,19 @@ pub struct TranscriptSetting {
     #[sqlx(rename = "openaiApiKey")]
     #[serde(rename = "openaiApiKey")]
     pub openai_api_key: Option<String>,
+    #[sqlx(rename = "cloudWhisperApiKey")]
+    #[serde(rename = "cloudWhisperApiKey")]
+    pub cloud_whisper_api_key: Option<String>,
+    #[sqlx(rename = "cloudWhisperBaseUrl")]
+    #[serde(rename = "cloudWhisperBaseUrl")]
+    pub cloud_whisper_base_url: Option<String>,
+    #[sqlx(rename = "maiTranscribeApiKey")]
+    #[serde(rename = "maiTranscribeApiKey")]
+    pub mai_transcribe_api_key: Option<String>,
+    #[sqlx(rename = "maiTranscribeEndpoint")]
+    #[serde(rename = "maiTranscribeEndpoint")]
+    pub mai_transcribe_endpoint: Option<String>,
+    #[sqlx(rename = "maiTranscribeRegion")]
+    #[serde(rename = "maiTranscribeRegion")]
+    pub mai_transcribe_region: Option<String>,
 }

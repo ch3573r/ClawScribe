@@ -263,7 +263,8 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_parakeet = provider.as_deref() == Some("parakeet")
+        || super::transcription::cloud::is_cloud_provider(provider.as_deref());
     let use_nemotron = provider.as_deref() == Some("nemotron");
     let result = run_import(app.clone(), source_path, title, language, model, provider).await;
 
@@ -304,8 +305,8 @@ async fn run_import<R: Runtime>(
     source_path: String,
     title: String,
     language: Option<String>,
-    model: Option<String>,
-    provider: Option<String>,
+    mut model: Option<String>,
+    mut provider: Option<String>,
 ) -> Result<ImportResult> {
     let source = PathBuf::from(&source_path);
 
@@ -318,10 +319,6 @@ async fn run_import<R: Runtime>(
         "Starting import for '{}' from {} with language {:?}, model {:?}, provider {:?}",
         title, source_path, language, model, provider
     );
-
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-    let use_nemotron = provider.as_deref() == Some("nemotron");
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -367,6 +364,79 @@ async fn run_import<R: Runtime>(
         let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
+
+    let mut cloud_fallback_error = None;
+    if super::transcription::cloud::is_cloud_provider(provider.as_deref()) {
+        if super::recording_commands::cloud_transcription_enabled() {
+            let provider_id = provider.as_deref().unwrap_or_default().to_string();
+            emit_progress(
+                &app,
+                "transcribing",
+                15,
+                "Uploading audio for cloud transcription...",
+            );
+            match super::transcription::cloud::transcribe_whole_file(
+                &app,
+                &provider_id,
+                model.as_deref(),
+                &dest_path,
+                language.as_deref(),
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    let duration_seconds = extract_duration_from_metadata(&dest_path)
+                        .unwrap_or_else(|_| {
+                            outcome
+                                .segments
+                                .iter()
+                                .map(|segment| segment.end_ms)
+                                .fold(0.0_f64, f64::max)
+                                / 1000.0
+                        });
+                    let source_language = super::common::transcription_source_language_hint(
+                        Some(&outcome.provider),
+                        language.as_deref(),
+                    );
+                    return save_import_transcripts(
+                        &app,
+                        &meeting_folder,
+                        &title,
+                        &dest_filename,
+                        duration_seconds,
+                        &outcome.segments,
+                        &outcome.provider,
+                        &outcome.model,
+                        source_language.as_deref(),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    warn!(
+                        "Cloud transcription failed for provider '{}' (category={}); falling back to local",
+                        provider_id,
+                        error.category().as_str()
+                    );
+                    super::transcription::cloud::emit_fallback_event(
+                        &app,
+                        None,
+                        &provider_id,
+                        &error,
+                    );
+                    cloud_fallback_error = Some(error);
+                }
+            }
+        } else {
+            info!("Cloud transcription provider requested while Beta toggle is disabled; using local fallback");
+        }
+
+        provider = Some("parakeet".to_string());
+        model = Some(DEFAULT_PARAKEET_MODEL.to_string());
+    }
+
+    // Determine which local provider to use after any cloud fallback.
+    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_nemotron = provider.as_deref() == Some("nemotron");
 
     emit_progress(&app, "decoding", 15, "Decoding audio file...");
 
@@ -521,17 +591,50 @@ async fn run_import<R: Runtime>(
 
     // Initialize the appropriate engine
     let whisper_engine = if !use_parakeet && !use_nemotron && total_segments > 0 {
-        Some(get_or_init_whisper(&app, model.as_deref()).await?)
+        match get_or_init_whisper(&app, model.as_deref()).await {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                return Err(match &cloud_fallback_error {
+                    Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(
+                        cloud_error,
+                        error,
+                    ),
+                    None => error,
+                });
+            }
+        }
     } else {
         None
     };
     let parakeet_engine = if use_parakeet && total_segments > 0 {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
+        match get_or_init_parakeet(&app, model.as_deref()).await {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                return Err(match &cloud_fallback_error {
+                    Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(
+                        cloud_error,
+                        error,
+                    ),
+                    None => error,
+                });
+            }
+        }
     } else {
         None
     };
     let nemotron_engine = if use_nemotron && total_segments > 0 {
-        Some(get_or_init_nemotron(&app, model.as_deref()).await?)
+        match get_or_init_nemotron(&app, model.as_deref()).await {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                return Err(match &cloud_fallback_error {
+                    Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(
+                        cloud_error,
+                        error,
+                    ),
+                    None => error,
+                });
+            }
+        }
     } else {
         None
     };
@@ -685,32 +788,6 @@ async fn run_import<R: Runtime>(
         return Err(anyhow!("Import cancelled"));
     }
 
-    emit_progress(&app, "saving", 85, "Creating meeting...");
-
-    // Create transcript segments, then stitch obvious VAD fragments so imported
-    // transcripts do not save one-word rows for natural sentence continuations.
-    let segments = create_readable_transcript_segments_with_words(&all_transcripts);
-
-    // Save to database
-    let app_state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| anyhow!("App state not available"))?;
-
-    let meeting_id = create_meeting_with_transcripts(
-        app_state.db_manager.pool(),
-        &title,
-        &segments,
-        meeting_folder.to_string_lossy().to_string(),
-    )
-    .await?;
-
-    // Write transcripts.json and metadata.json to the meeting folder
-    emit_progress(&app, "saving", 90, "Writing transcript files...");
-
-    if let Err(e) = write_transcripts_json(&meeting_folder, &segments) {
-        warn!("Failed to write transcripts.json: {}", e);
-    }
-
     // Record the engine + model that actually ran (read back from the live
     // engine so the metadata reflects reality, not the requested config).
     let used_provider = if use_nemotron {
@@ -734,25 +811,76 @@ async fn run_import<R: Runtime>(
     let source_language =
         super::common::transcription_source_language_hint(Some(used_provider), language.as_deref());
 
-    if let Err(e) = write_import_metadata(
+    save_import_transcripts(
+        &app,
         &meeting_folder,
-        &meeting_id,
         &title,
-        duration_seconds,
         &dest_filename,
-        "import",
+        duration_seconds,
+        &all_transcripts,
         used_provider,
         &used_model,
         source_language.as_deref(),
+    )
+    .await
+}
+
+async fn save_import_transcripts<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_folder: &Path,
+    title: &str,
+    dest_filename: &str,
+    duration_seconds: f64,
+    all_transcripts: &[TranscribedSegment],
+    used_provider: &str,
+    used_model: &str,
+    transcription_source_language: Option<&str>,
+) -> Result<ImportResult> {
+    emit_progress(app, "saving", 85, "Creating meeting...");
+
+    // Create transcript segments, then stitch obvious VAD fragments so imported
+    // transcripts do not save one-word rows for natural sentence continuations.
+    let segments = create_readable_transcript_segments_with_words(all_transcripts);
+
+    // Save to database
+    let app_state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow!("App state not available"))?;
+
+    let meeting_id = create_meeting_with_transcripts(
+        app_state.db_manager.pool(),
+        title,
+        &segments,
+        meeting_folder.to_string_lossy().to_string(),
+    )
+    .await?;
+
+    // Write transcripts.json and metadata.json to the meeting folder
+    emit_progress(app, "saving", 90, "Writing transcript files...");
+
+    if let Err(e) = write_transcripts_json(meeting_folder, &segments) {
+        warn!("Failed to write transcripts.json: {}", e);
+    }
+
+    if let Err(e) = write_import_metadata(
+        meeting_folder,
+        &meeting_id,
+        title,
+        duration_seconds,
+        dest_filename,
+        "import",
+        used_provider,
+        used_model,
+        transcription_source_language,
     ) {
         warn!("Failed to write metadata.json: {}", e);
     }
 
-    emit_progress(&app, "complete", 100, "Import complete");
+    emit_progress(app, "complete", 100, "Import complete");
 
     Ok(ImportResult {
         meeting_id,
-        title,
+        title: title.to_string(),
         segments_count: segments.len(),
         duration_seconds,
     })

@@ -810,6 +810,8 @@ pub fn run() {
             // Source attribution (Beta, opt-in): Me/Participants labelling
             audio::recording_commands::set_source_attribution_enabled,
             audio::recording_commands::get_source_attribution_enabled,
+            audio::recording_commands::set_cloud_transcription_enabled,
+            audio::recording_commands::get_cloud_transcription_enabled,
             // Reload sync commands (retrieve transcript history and meeting name)
             audio::recording_commands::get_transcript_history,
             audio::recording_commands::get_recording_meeting_name,
