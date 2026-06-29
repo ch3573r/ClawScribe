@@ -229,6 +229,14 @@ export default function RootLayout({
         return;
       }
 
+      if (reason === 'provider_output') {
+        toast.warning('Cloud transcript was not segmented', {
+          description: 'The selected cloud provider returned one large transcript block. ClawScribe transcribed locally instead.',
+          duration: 14000,
+        });
+        return;
+      }
+
       toast.warning('Cloud transcription unavailable', {
         description: 'ClawScribe transcribed locally instead. Try again later.',
         duration: 12000,

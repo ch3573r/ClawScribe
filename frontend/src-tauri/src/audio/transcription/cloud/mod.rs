@@ -44,6 +44,7 @@ pub enum CloudFallbackReasonCategory {
     Transient,
     AuthConfig,
     UploadTooLarge,
+    ProviderOutput,
 }
 
 impl CloudFallbackReasonCategory {
@@ -52,6 +53,7 @@ impl CloudFallbackReasonCategory {
             Self::Transient => "transient",
             Self::AuthConfig => "auth_config",
             Self::UploadTooLarge => "upload_too_large",
+            Self::ProviderOutput => "provider_output",
         }
     }
 }
@@ -80,6 +82,13 @@ impl CloudTranscriptionError {
     pub fn upload_too_large(message: impl Into<String>) -> Self {
         Self {
             category: CloudFallbackReasonCategory::UploadTooLarge,
+            message: message.into(),
+        }
+    }
+
+    pub fn provider_output(message: impl Into<String>) -> Self {
+        Self {
+            category: CloudFallbackReasonCategory::ProviderOutput,
             message: message.into(),
         }
     }
