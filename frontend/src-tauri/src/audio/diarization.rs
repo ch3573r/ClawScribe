@@ -44,7 +44,7 @@ const SPLIT_BOUNDARY_SEARCH_WORDS: usize = 8;
 const LEGACY_ESTIMATED_WORD_TIMESTAMP_TOLERANCE_SECONDS: f64 = 0.05;
 const MIN_EXPLICIT_RETRY_SPEAKER_SECONDS: f64 = 2.0;
 const AUTO_MAX_CONFIDENT_SPEAKER_LANES: usize = 4;
-const AUTO_SIGNIFICANT_SPEAKER_MIN_SECONDS: f64 = 6.0;
+const AUTO_SIGNIFICANT_SPEAKER_THRESHOLD_CAP_SECONDS: f64 = 6.0;
 const AUTO_SIGNIFICANT_SPEAKER_DOMINANT_SHARE: f64 = 0.06;
 const DEFAULT_MIN_DURATION_ON_SECONDS: f32 = 0.3;
 const DEFAULT_MIN_DURATION_OFF_SECONDS: f32 = 0.5;
@@ -2994,7 +2994,7 @@ fn turn_speaker_quality(turns: &[DiarizationTurn]) -> Option<TurnSpeakerQuality>
         return None;
     }
     let dominant_seconds = seconds_by_speaker.values().copied().fold(0.0f64, f64::max);
-    let significant_threshold_seconds = AUTO_SIGNIFICANT_SPEAKER_MIN_SECONDS
+    let significant_threshold_seconds = AUTO_SIGNIFICANT_SPEAKER_THRESHOLD_CAP_SECONDS
         .min(dominant_seconds * AUTO_SIGNIFICANT_SPEAKER_DOMINANT_SHARE);
     let significant_speakers = seconds_by_speaker
         .values()
@@ -5111,6 +5111,45 @@ mod tests {
 
         assert!(attempt.quality.dominant_share > 0.92);
         assert_eq!(auto_diarization_low_confidence_reason(&attempt), None);
+    }
+
+    #[test]
+    fn auto_diarization_recovery_caps_significant_speaker_threshold_for_long_meetings() {
+        let mut mapped_segments = vec![
+            transcript("dominant", Some(0.0), Some(420.0)),
+            transcript("meaningful-a", Some(420.0), Some(427.0)),
+            transcript("meaningful-b", Some(427.0), Some(434.0)),
+            transcript("micro-a", Some(434.0), Some(435.0)),
+            transcript("micro-b", Some(435.0), Some(436.0)),
+            transcript("micro-c", Some(436.0), Some(437.0)),
+            transcript("micro-d", Some(437.0), Some(438.0)),
+        ];
+        for (index, segment) in mapped_segments.iter_mut().enumerate() {
+            segment.speaker = Some(format!("Speaker {}", index + 1));
+        }
+        let attempt = test_mapping_attempt(
+            vec![
+                turn(0.0, 420.0, 0),
+                turn(420.0, 427.0, 1),
+                turn(427.0, 434.0, 2),
+                turn(434.0, 435.0, 3),
+                turn(435.0, 436.0, 4),
+                turn(436.0, 437.0, 5),
+                turn(437.0, 438.0, 6),
+            ],
+            mapped_segments,
+            7,
+        );
+
+        let turn_quality = turn_speaker_quality(&attempt.turns).unwrap();
+        assert_eq!(
+            turn_quality.significant_threshold_seconds,
+            AUTO_SIGNIFICANT_SPEAKER_THRESHOLD_CAP_SECONDS
+        );
+        assert_eq!(turn_quality.significant_speakers, 3);
+        assert!(auto_diarization_low_confidence_reason(&attempt).is_some());
+        let recovery = auto_diarization_recovery_target(&attempt).unwrap();
+        assert_eq!(recovery.speaker_count, 3);
     }
 
     #[test]
