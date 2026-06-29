@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useCloudTranscription } from '@/hooks/useCloudTranscription';
 
 export interface RawModelInfo {
   name: string;
@@ -8,7 +9,7 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet' | 'nemotron';
+  provider: 'whisper' | 'parakeet' | 'nemotron' | 'cloud-whisper' | 'mai-transcribe';
   name: string;
   displayName: string;
   size_mb: number;
@@ -32,6 +33,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('');
   const [loadingModels, setLoadingModels] = useState(false);
+  const cloudTranscriptionEnabled = useCloudTranscription();
   // Track whether the user has manually changed the model selection
   const userSelectedRef = useRef(false);
 
@@ -93,6 +95,23 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Nemotron models:', err);
     }
 
+    if (cloudTranscriptionEnabled) {
+      allModels.push({
+        provider: 'cloud-whisper',
+        name: transcriptModelConfig?.provider === 'cloud-whisper'
+          ? transcriptModelConfig?.model || 'whisper-1'
+          : 'whisper-1',
+        displayName: `☁️ Hosted Whisper: ${transcriptModelConfig?.provider === 'cloud-whisper' ? transcriptModelConfig?.model || 'whisper-1' : 'whisper-1'}`,
+        size_mb: 0,
+      });
+      allModels.push({
+        provider: 'mai-transcribe',
+        name: 'mai-transcribe-1.5',
+        displayName: '☁️ MAI-Transcribe: mai-transcribe-1.5',
+        size_mb: 0,
+      });
+    }
+
     setAvailableModels(allModels);
 
     // Set default model based on user's saved configuration
@@ -105,7 +124,9 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       (m) =>
         (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
         (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
-        (configuredProvider === 'nemotron' && m.provider === 'nemotron' && m.name === configuredModel)
+        (configuredProvider === 'nemotron' && m.provider === 'nemotron' && m.name === configuredModel) ||
+        (configuredProvider === 'cloud-whisper' && m.provider === 'cloud-whisper' && m.name === configuredModel) ||
+        (configuredProvider === 'mai-transcribe' && m.provider === 'mai-transcribe' && m.name === configuredModel)
     );
 
     // Only set default model if user hasn't manually selected one
@@ -120,7 +141,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     }
 
     setLoadingModels(false);
-  }, [transcriptModelConfig]);
+  }, [transcriptModelConfig, cloudTranscriptionEnabled]);
 
   // Reset user selection tracking (call when dialog opens fresh)
   const resetSelection = useCallback(() => {

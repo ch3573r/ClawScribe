@@ -85,6 +85,9 @@ export default function SettingsPage() {
             provider: config.provider || "localWhisper",
             model: config.model || "large-v3",
             apiKey: config.apiKey || null,
+            baseUrl: config.baseUrl || null,
+            endpoint: config.endpoint || null,
+            region: config.region || null,
           });
         }
       } catch (error) {

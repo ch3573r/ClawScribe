@@ -9,12 +9,17 @@ import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { NemotronModelManager } from './NemotronModelManager';
 import { WhisperAccelerationStatus } from './WhisperAccelerationStatus';
+import { useCloudTranscription } from '@/hooks/useCloudTranscription';
+import { toast } from 'sonner';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'nemotron' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'nemotron' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai' | 'cloud-whisper' | 'mai-transcribe';
     model: string;
     apiKey?: string | null;
+    baseUrl?: string | null;
+    endpoint?: string | null;
+    region?: string | null;
 }
 
 export interface TranscriptSettingsProps {
@@ -29,6 +34,12 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [cloudModel, setCloudModel] = useState<string>(transcriptModelConfig.model || 'whisper-1');
+    const [cloudWhisperBaseUrl, setCloudWhisperBaseUrl] = useState<string>(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
+    const [maiEndpoint, setMaiEndpoint] = useState<string>(transcriptModelConfig.endpoint || '');
+    const [maiRegion, setMaiRegion] = useState<string>(transcriptModelConfig.region || '');
+    const cloudTranscriptionEnabled = useCloudTranscription();
+    const isCloudProvider = uiProvider === 'cloud-whisper' || uiProvider === 'mai-transcribe';
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -40,6 +51,19 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
+
+    useEffect(() => {
+        setCloudModel(transcriptModelConfig.model || (transcriptModelConfig.provider === 'mai-transcribe' ? 'mai-transcribe-1.5' : 'whisper-1'));
+        setCloudWhisperBaseUrl(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
+        setMaiEndpoint(transcriptModelConfig.endpoint || '');
+        setMaiRegion(transcriptModelConfig.region || '');
+    }, [transcriptModelConfig]);
+
+    useEffect(() => {
+        if (!cloudTranscriptionEnabled && isCloudProvider) {
+            setUiProvider('parakeet');
+        }
+    }, [cloudTranscriptionEnabled, isCloudProvider]);
 
     const fetchApiKey = async (provider: string) => {
         try {
@@ -60,8 +84,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
         openai: ['gpt-4o'],
+        'cloud-whisper': ['whisper-1'],
+        'mai-transcribe': ['mai-transcribe-1.5'],
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
+    const requiresApiKey = uiProvider === 'deepgram' || uiProvider === 'elevenLabs' || uiProvider === 'openai' || uiProvider === 'groq' || isCloudProvider;
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -109,6 +135,40 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
+    const handleSaveCloudProvider = async () => {
+        const model = uiProvider === 'mai-transcribe'
+            ? (cloudModel.trim() || 'mai-transcribe-1.5')
+            : (cloudModel.trim() || 'whisper-1');
+        const nextConfig: TranscriptModelProps = {
+            ...transcriptModelConfig,
+            provider: uiProvider,
+            model,
+            apiKey: apiKey || null,
+            baseUrl: uiProvider === 'cloud-whisper' ? cloudWhisperBaseUrl.trim() || 'https://api.openai.com/v1' : null,
+            endpoint: uiProvider === 'mai-transcribe' ? maiEndpoint.trim() || null : null,
+            region: uiProvider === 'mai-transcribe' ? maiRegion.trim() || null : null,
+        };
+
+        try {
+            await invoke('api_save_transcript_config', {
+                provider: nextConfig.provider,
+                model: nextConfig.model,
+                apiKey: nextConfig.apiKey,
+                baseUrl: nextConfig.baseUrl,
+                endpoint: nextConfig.endpoint,
+                region: nextConfig.region,
+            });
+            setTranscriptModelConfig(nextConfig);
+            toast.success('Transcription settings saved');
+            if (onModelSelect) {
+                onModelSelect();
+            }
+        } catch (err) {
+            console.error('Failed to save cloud transcription settings:', err);
+            toast.error('Failed to save transcription settings');
+        }
+    };
+
     return (
         <div>
             <div>
@@ -129,6 +189,15 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'nemotron') {
                                         fetchApiKey(provider);
                                     }
+                                    if (provider === 'cloud-whisper') {
+                                        setCloudModel(transcriptModelConfig.provider === 'cloud-whisper' ? transcriptModelConfig.model : 'whisper-1');
+                                        setCloudWhisperBaseUrl(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
+                                    }
+                                    if (provider === 'mai-transcribe') {
+                                        setCloudModel('mai-transcribe-1.5');
+                                        setMaiEndpoint(transcriptModelConfig.endpoint || '');
+                                        setMaiRegion(transcriptModelConfig.region || '');
+                                    }
                                 }}
                             >
                                 <SelectTrigger className='focus:ring-1 focus:ring-ring focus:border-primary'>
@@ -141,12 +210,17 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         <SelectItem value="localWhisper">Whisper &middot; highest accuracy</SelectItem>
                                         <SelectItem value="nemotron">Nemotron &middot; streaming, multilingual (beta)</SelectItem>
                                     </SelectGroup>
-                                    {/* Cloud STT (Deepgram/ElevenLabs/Groq/OpenAI) is wired but disabled
-                                        for now — it would go in a "Cloud APIs" group here. */}
+                                    {cloudTranscriptionEnabled && (
+                                        <SelectGroup>
+                                            <SelectLabel>Cloud APIs</SelectLabel>
+                                            <SelectItem value="cloud-whisper">Hosted Whisper &middot; OpenAI-compatible</SelectItem>
+                                            <SelectItem value="mai-transcribe">MAI-Transcribe &middot; Azure Speech</SelectItem>
+                                        </SelectGroup>
+                                    )}
                                 </SelectContent>
                             </Select>
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'nemotron' && (
+                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'nemotron' && !isCloudProvider && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -199,6 +273,75 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
+                    {uiProvider === 'cloud-whisper' && cloudTranscriptionEnabled && (
+                        <div className="mt-6 space-y-4">
+                            <div>
+                                <Label className="block text-sm font-medium text-foreground mb-1">
+                                    Base URL
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    value={cloudWhisperBaseUrl}
+                                    onChange={(e) => setCloudWhisperBaseUrl(e.target.value)}
+                                    placeholder="https://api.openai.com/v1"
+                                />
+                            </div>
+                            <div>
+                                <Label className="block text-sm font-medium text-foreground mb-1">
+                                    Model
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    value={cloudModel}
+                                    onChange={(e) => setCloudModel(e.target.value)}
+                                    placeholder="whisper-1"
+                                />
+                            </div>
+                        </div>
+                    )}
+
+                    {uiProvider === 'mai-transcribe' && cloudTranscriptionEnabled && (
+                        <div className="mt-6 space-y-4">
+                            <div>
+                                <Label className="block text-sm font-medium text-foreground mb-1">
+                                    Azure Speech endpoint
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    value={maiEndpoint}
+                                    onChange={(e) => setMaiEndpoint(e.target.value)}
+                                    placeholder="https://your-resource.cognitiveservices.azure.com"
+                                />
+                            </div>
+                            <div>
+                                <Label className="block text-sm font-medium text-foreground mb-1">
+                                    Region
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    value={maiRegion}
+                                    onChange={(e) => setMaiRegion(e.target.value)}
+                                    placeholder="eastus"
+                                />
+                            </div>
+                            <div>
+                                <Label className="block text-sm font-medium text-foreground mb-1">
+                                    Model
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    value={cloudModel}
+                                    onChange={(e) => setCloudModel(e.target.value)}
+                                    placeholder="mai-transcribe-1.5"
+                                />
+                            </div>
+                            <p className="mx-1 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+                                This model provides sentence-level timing only; speaker
+                                splitting will be less precise.
+                            </p>
+                        </div>
+                    )}
+
 
                     {requiresApiKey && (
                         <div>
@@ -244,6 +387,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     </Button>
                                 </div>
                             </div>
+                        </div>
+                    )}
+
+                    {isCloudProvider && cloudTranscriptionEnabled && (
+                        <div className="flex justify-end">
+                            <Button type="button" onClick={handleSaveCloudProvider}>
+                                Save
+                            </Button>
                         </div>
                     )}
                 </div>

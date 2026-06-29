@@ -2,13 +2,24 @@
 
 import { useEffect, useState } from "react";
 import { Switch } from "./ui/switch";
-import { AlertCircle, Cpu, Users } from "lucide-react";
+import { AlertCircle, Cloud, Cpu, Users } from "lucide-react";
+import { Button } from "./ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
 import { getParakeetDirectml, setParakeetDirectml } from "@/lib/parakeetAccel";
 import {
   getRecordingAudioSavingEnabled,
   refreshSourceAttributionAvailability,
   setSourceAttribution,
 } from "@/lib/sourceAttribution";
+import { setCloudTranscription } from "@/lib/cloudTranscription";
+import { useCloudTranscription } from "@/hooks/useCloudTranscription";
 import { useSourceAttribution } from "@/hooks/useSourceAttribution";
 
 export function BetaSettings() {
@@ -52,6 +63,20 @@ export function BetaSettings() {
     if (checked && !enabled) {
       setAudioSavingEnabled(false);
     }
+  };
+
+  const cloudTranscription = useCloudTranscription();
+  const [cloudConsentOpen, setCloudConsentOpen] = useState(false);
+  const onToggleCloudTranscription = (checked: boolean) => {
+    if (checked) {
+      setCloudConsentOpen(true);
+      return;
+    }
+    void setCloudTranscription(false);
+  };
+  const confirmCloudTranscription = () => {
+    setCloudConsentOpen(false);
+    void setCloudTranscription(true);
   };
 
   return (
@@ -130,6 +155,59 @@ export function BetaSettings() {
           </div>
         </div>
       </div>
+
+      {/* Cloud transcription - experimental, opt-in with consent */}
+      <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div className="flex-1">
+            <div className="mb-2 flex items-center gap-2">
+              <Cloud className="h-5 w-5 text-muted-foreground" />
+              <h3 className="text-lg font-semibold text-foreground">
+                Cloud transcription
+              </h3>
+              <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
+                BETA
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Cloud transcription uploads your meeting audio to the selected
+              third-party service for processing. Off by default; local
+              transcription keeps audio on-device.
+            </p>
+          </div>
+          <div className="ml-6">
+            <Switch
+              checked={cloudTranscription}
+              onCheckedChange={onToggleCloudTranscription}
+            />
+          </div>
+        </div>
+      </div>
+
+      <Dialog open={cloudConsentOpen} onOpenChange={setCloudConsentOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Enable cloud transcription?</DialogTitle>
+            <DialogDescription>
+              Cloud transcription uploads your meeting audio to the selected
+              third-party service for processing. Off by default; local
+              transcription keeps audio on-device.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCloudConsentOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={confirmCloudTranscription}>
+              Enable
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

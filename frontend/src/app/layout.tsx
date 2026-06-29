@@ -33,6 +33,7 @@ import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { installTeamsDetectionDebugBridge } from '@/services/teamsDetectionService'
+import { useRouter } from 'next/navigation'
 import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { TeamsAutoRecord } from '@/components/TeamsAutoRecord'
@@ -102,6 +103,7 @@ export default function RootLayout({
 }: {
   children: React.ReactNode
 }) {
+  const router = useRouter()
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [onboardingCompleted, setOnboardingCompleted] = useState(false)
 
@@ -124,6 +126,12 @@ export default function RootLayout({
     // Push the stored source-attribution (Me/Participants) preference to the
     // backend on startup. Default off until the heuristic is production-quality.
     void import('@/lib/sourceAttribution').then((m) => m.applySourceAttribution())
+  }, [])
+
+  useEffect(() => {
+    // Push the stored cloud-transcription Beta preference to the backend on
+    // startup. Default off until the user has consented to uploading audio.
+    void import('@/lib/cloudTranscription').then((m) => m.applyCloudTranscription())
   }, [])
 
   useEffect(() => {
@@ -190,6 +198,39 @@ export default function RootLayout({
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{
+      meeting_id?: string | null;
+      provider?: string;
+      reason_category?: string;
+    }>('transcription-fell-back-to-local', (event) => {
+      const reason = event.payload?.reason_category;
+      if (reason === 'auth_config') {
+        toast.warning('Cloud transcription failed', {
+          description: 'Check your API key or endpoint. ClawScribe transcribed locally instead.',
+          duration: 14000,
+          action: {
+            label: 'Open settings',
+            onClick: () => {
+              router.push('/settings?tab=transcription');
+              window.dispatchEvent(new CustomEvent('open-settings-tab', { detail: 'transcription' }));
+            },
+          },
+        });
+        return;
+      }
+
+      toast.warning('Cloud transcription unavailable', {
+        description: 'ClawScribe transcribed locally instead. Try again later.',
+        duration: 12000,
+      });
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [router]);
 
   // Handle file drop for audio import
   const handleFileDrop = useCallback((paths: string[]) => {
