@@ -1,10 +1,16 @@
 use log::{debug as log_debug, error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
 
 use crate::{
+    audio::transcription::cloud::{
+        mai_transcribe::MaiTranscribeProvider, mime_type_for_path,
+        openai_whisper::OpenAiWhisperProvider, CloudTranscriptSegment, CloudTranscriptionProvider,
+        DEFAULT_CLOUD_WHISPER_MODEL, DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER,
+        PROVIDER_MAI_TRANSCRIBE,
+    },
     database::{
         models::MeetingModel,
         repositories::{
@@ -121,6 +127,20 @@ pub struct SaveTranscriptConfigRequest {
     pub base_url: Option<String>,
     pub endpoint: Option<String>,
     pub region: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TranscriptProviderTestResult {
+    pub provider: String,
+    pub model: String,
+    #[serde(rename = "segmentCount")]
+    pub segment_count: usize,
+    #[serde(rename = "wordTimestampCount")]
+    pub word_timestamp_count: usize,
+    #[serde(rename = "requiresLocalTimingGrid")]
+    pub requires_local_timing_grid: bool,
+    #[serde(rename = "previewText")]
+    pub preview_text: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -806,6 +826,184 @@ pub async fn api_get_transcript_api_key<R: Runtime>(
             Err(e.to_string())
         }
     }
+}
+
+#[tauri::command]
+pub async fn api_test_transcript_provider<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    model: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    endpoint: Option<String>,
+    _region: Option<String>,
+    audio_path: String,
+    language: Option<String>,
+    _auth_token: Option<String>,
+) -> Result<TranscriptProviderTestResult, String> {
+    log_info!(
+        "api_test_transcript_provider called (native) for provider '{}'",
+        &provider
+    );
+    let audio_path = Path::new(&audio_path);
+    let audio = tokio::fs::read(audio_path)
+        .await
+        .map_err(|e| format!("Failed to read test audio file: {e}"))?;
+    if audio.is_empty() {
+        return Err("Test audio file is empty".to_string());
+    }
+
+    let pool = state.db_manager.pool();
+    let saved_config = SettingsRepository::get_transcript_config(pool)
+        .await
+        .map_err(|e| format!("Failed to read saved transcript settings: {e}"))?;
+    let api_key = match clean_optional(api_key.as_deref()).map(str::to_string) {
+        Some(key) => key,
+        None => SettingsRepository::get_transcript_api_key(pool, &provider)
+            .await
+            .map_err(|e| format!("Failed to read saved cloud transcription key: {e}"))?
+            .and_then(|value| clean_string(Some(value)))
+            .ok_or_else(|| "Cloud transcription API key is missing".to_string())?,
+    };
+
+    let file_name = audio_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("test-audio.wav");
+    let mime_type = mime_type_for_path(audio_path);
+    let language = clean_optional(language.as_deref());
+
+    match provider.as_str() {
+        PROVIDER_CLOUD_WHISPER => {
+            let base_url = clean_string(base_url)
+                .or_else(|| {
+                    saved_config
+                        .as_ref()
+                        .and_then(|config| {
+                            (config.provider == PROVIDER_CLOUD_WHISPER)
+                                .then(|| config.cloud_whisper_base_url.clone())
+                                .flatten()
+                        })
+                        .and_then(|value| clean_string(Some(value)))
+                })
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let model = clean_string(Some(model))
+                .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.to_string());
+            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone());
+            let segments = provider_client
+                .transcribe_file(audio, file_name, mime_type, language)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Hosted Whisper test failed ({}): {error}",
+                        error.category().as_str()
+                    )
+                })?;
+            build_cloud_test_result(PROVIDER_CLOUD_WHISPER, &model, &segments, true)
+        }
+        PROVIDER_MAI_TRANSCRIBE => {
+            let endpoint = clean_string(endpoint)
+                .or_else(|| {
+                    saved_config
+                        .as_ref()
+                        .and_then(|config| {
+                            (config.provider == PROVIDER_MAI_TRANSCRIBE)
+                                .then(|| config.mai_transcribe_endpoint.clone())
+                                .flatten()
+                        })
+                        .and_then(|value| clean_string(Some(value)))
+                })
+                .ok_or_else(|| "Azure Speech endpoint is missing".to_string())?;
+            let model = clean_string(Some(model))
+                .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
+            let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone());
+            let segments = provider_client
+                .transcribe_file(audio, file_name, mime_type, language)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "MAI-Transcribe test failed ({}): {error}",
+                        error.category().as_str()
+                    )
+                })?;
+            build_cloud_test_result(PROVIDER_MAI_TRANSCRIBE, &model, &segments, false)
+        }
+        _ => Err(format!(
+            "Provider '{}' does not support hosted transcription testing",
+            provider
+        )),
+    }
+}
+
+fn build_cloud_test_result(
+    provider: &str,
+    model: &str,
+    segments: &[CloudTranscriptSegment],
+    expect_word_timestamps: bool,
+) -> Result<TranscriptProviderTestResult, String> {
+    if segments.is_empty() {
+        return Err("Provider returned no transcript segments".to_string());
+    }
+    if !segments
+        .iter()
+        .any(|segment| !segment.text.trim().is_empty())
+    {
+        return Err("Provider returned only empty transcript text".to_string());
+    }
+
+    let word_timestamp_count = segments
+        .iter()
+        .map(|segment| segment.words.as_ref().map_or(0, Vec::len))
+        .sum::<usize>();
+    if expect_word_timestamps && word_timestamp_count == 0 {
+        return Err(
+            "Hosted Whisper returned text but no word timestamps; diarization would lose real word timing"
+                .to_string(),
+        );
+    }
+    if !expect_word_timestamps && word_timestamp_count > 0 {
+        return Err(
+            "MAI-Transcribe returned word timestamps; ClawScribe must not promote them to Real"
+                .to_string(),
+        );
+    }
+
+    Ok(TranscriptProviderTestResult {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        segment_count: segments.len(),
+        word_timestamp_count,
+        requires_local_timing_grid: segments
+            .iter()
+            .any(|segment| segment.requires_local_timing_grid),
+        preview_text: preview_text(segments),
+    })
+}
+
+fn preview_text(segments: &[CloudTranscriptSegment]) -> String {
+    let joined = segments
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut preview = joined.chars().take(180).collect::<String>();
+    if joined.chars().count() > preview.chars().count() {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn clean_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn clean_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[tauri::command]

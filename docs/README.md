@@ -1,12 +1,13 @@
 # ClawScribe Docs
 
-Current shipped version: `0.5.30`.
+Current shipped version: `0.5.31`.
 
 Current product docs:
 
 - [Architecture](architecture.md)
 - [Building](BUILDING.md)
 - [Windows release](windows-release.md)
+- [Hosted transcription smoke test](hosted-transcription-smoke.md)
 - [GPU acceleration](GPU_ACCELERATION.md)
 - [Teams detection](teams-detection.md)
 - [OpenClaw handoff](openclaw-handoff.md)

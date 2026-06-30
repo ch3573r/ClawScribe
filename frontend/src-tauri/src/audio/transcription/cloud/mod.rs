@@ -344,7 +344,7 @@ pub fn should_retry_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
-fn mime_type_for_path(path: &Path) -> &'static str {
+pub(crate) fn mime_type_for_path(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -433,5 +433,218 @@ mod tests {
         assert!(should_retry_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!should_retry_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!should_retry_status(reqwest::StatusCode::PAYLOAD_TOO_LARGE));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod live_smoke {
+    use super::{
+        cloud_segments_to_transcribed_segments, mai_transcribe::MaiTranscribeProvider,
+        mime_type_for_path, openai_whisper::OpenAiWhisperProvider, CloudTranscriptSegment,
+        CloudTranscriptionProvider, CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL,
+        DEFAULT_MAI_TRANSCRIBE_MODEL,
+    };
+    use crate::api::TranscriptWordTimestampSource;
+    use std::{
+        env,
+        path::{Path, PathBuf},
+    };
+
+    const ENV_AUDIO: &str = "CLAWSCRIBE_SMOKE_AUDIO";
+    const ENV_LANGUAGE: &str = "CLAWSCRIBE_SMOKE_LANGUAGE";
+    const ENV_OPENAI_API_KEY: &str = "CLAWSCRIBE_SMOKE_OPENAI_API_KEY";
+    const ENV_OPENAI_BASE_URL: &str = "CLAWSCRIBE_SMOKE_OPENAI_BASE_URL";
+    const ENV_OPENAI_MODEL: &str = "CLAWSCRIBE_SMOKE_OPENAI_MODEL";
+    const ENV_MAI_API_KEY: &str = "CLAWSCRIBE_SMOKE_MAI_API_KEY";
+    const ENV_MAI_ENDPOINT: &str = "CLAWSCRIBE_SMOKE_MAI_ENDPOINT";
+    const ENV_MAI_MODEL: &str = "CLAWSCRIBE_SMOKE_MAI_MODEL";
+
+    #[tokio::test]
+    #[ignore = "requires hosted transcription credentials and a short real audio file"]
+    async fn hosted_api_transcription_live_smoke() {
+        let audio_path = required_path(ENV_AUDIO);
+        let audio = tokio::fs::read(&audio_path)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read {ENV_AUDIO}: {error}"));
+        assert!(
+            !audio.is_empty(),
+            "{ENV_AUDIO} must point to a non-empty audio file"
+        );
+
+        let file_name = audio_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("smoke-audio.wav");
+        let mime_type = mime_type_for_path(&audio_path);
+        let language = optional_env(ENV_LANGUAGE);
+        let language = language.as_deref();
+        let mut providers_run = 0;
+
+        if let Some(api_key) = optional_env(ENV_OPENAI_API_KEY) {
+            providers_run += 1;
+            let base_url = optional_env(ENV_OPENAI_BASE_URL)
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let model = optional_env(ENV_OPENAI_MODEL)
+                .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.into());
+            let provider = OpenAiWhisperProvider::new(base_url, api_key, model);
+            let segments = transcribe_or_panic(
+                "Hosted Whisper",
+                &provider,
+                audio.clone(),
+                file_name,
+                mime_type,
+                language,
+            )
+            .await;
+
+            assert_basic_segments("Hosted Whisper", &segments);
+            assert_hosted_whisper_word_timestamps(&segments);
+            print_summary("Hosted Whisper", &segments);
+        }
+
+        match (
+            optional_env(ENV_MAI_ENDPOINT),
+            optional_env(ENV_MAI_API_KEY),
+        ) {
+            (Some(endpoint), Some(api_key)) => {
+                providers_run += 1;
+                let model = optional_env(ENV_MAI_MODEL)
+                    .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.into());
+                let provider = MaiTranscribeProvider::new(endpoint, api_key, model);
+                let segments = transcribe_or_panic(
+                    "MAI-Transcribe",
+                    &provider,
+                    audio,
+                    file_name,
+                    mime_type,
+                    language,
+                )
+                .await;
+
+                assert_basic_segments("MAI-Transcribe", &segments);
+                assert_mai_never_emits_word_timestamps(&segments);
+                print_summary("MAI-Transcribe", &segments);
+            }
+            (Some(_), None) => panic!("{ENV_MAI_ENDPOINT} is set but {ENV_MAI_API_KEY} is missing"),
+            (None, Some(_)) => panic!("{ENV_MAI_API_KEY} is set but {ENV_MAI_ENDPOINT} is missing"),
+            (None, None) => {}
+        }
+
+        assert!(
+            providers_run > 0,
+            "set {ENV_OPENAI_API_KEY} and/or both {ENV_MAI_ENDPOINT} + {ENV_MAI_API_KEY}"
+        );
+    }
+
+    async fn transcribe_or_panic<P: CloudTranscriptionProvider>(
+        label: &str,
+        provider: &P,
+        audio: Vec<u8>,
+        file_name: &str,
+        mime_type: &str,
+        language: Option<&str>,
+    ) -> Vec<CloudTranscriptSegment> {
+        provider
+            .transcribe_file(audio, file_name, mime_type, language)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{label} smoke transcription failed: category={}, error={error}",
+                    error.category().as_str()
+                )
+            })
+    }
+
+    fn assert_basic_segments(label: &str, segments: &[CloudTranscriptSegment]) {
+        assert!(
+            !segments.is_empty(),
+            "{label} returned no transcript segments"
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|segment| !segment.text.trim().is_empty()),
+            "{label} returned only empty transcript text"
+        );
+        for segment in segments {
+            assert!(
+                segment.start_seconds >= 0.0,
+                "{label} returned a negative segment start"
+            );
+            assert!(
+                segment.end_seconds >= segment.start_seconds,
+                "{label} returned an inverted segment time range"
+            );
+        }
+    }
+
+    fn assert_hosted_whisper_word_timestamps(segments: &[CloudTranscriptSegment]) {
+        let mapped = cloud_segments_to_transcribed_segments(segments, CloudWordPolicy::Real);
+        let word_count: usize = mapped
+            .iter()
+            .map(|segment| segment.word_timestamps.as_ref().map_or(0, Vec::len))
+            .sum();
+        assert!(
+            word_count > 0,
+            "Hosted Whisper returned no word timestamps; diarization would lose real word timing"
+        );
+        for segment in mapped {
+            if let Some(words) = segment.word_timestamps {
+                for word in words {
+                    assert_eq!(
+                        word.timestamp_source,
+                        Some(TranscriptWordTimestampSource::Real),
+                        "Hosted Whisper words must be marked as real acoustic timing"
+                    );
+                    assert!(
+                        word.end >= word.start,
+                        "Hosted Whisper returned an inverted word time range"
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_mai_never_emits_word_timestamps(segments: &[CloudTranscriptSegment]) {
+        assert!(
+            segments.iter().all(|segment| segment.words.is_none()),
+            "MAI-Transcribe returned word timestamps; mapping must not promote them to Real"
+        );
+        let mapped = cloud_segments_to_transcribed_segments(segments, CloudWordPolicy::None);
+        assert!(
+            mapped
+                .iter()
+                .all(|segment| segment.word_timestamps.is_none()),
+            "MAI-Transcribe mapped output must keep word_timestamps empty"
+        );
+    }
+
+    fn print_summary(label: &str, segments: &[CloudTranscriptSegment]) {
+        let collapsed = segments
+            .iter()
+            .any(|segment| segment.requires_local_timing_grid);
+        let words: usize = segments
+            .iter()
+            .map(|segment| segment.words.as_ref().map_or(0, Vec::len))
+            .sum();
+        eprintln!(
+            "{label}: segments={}, word_timestamps={}, requires_local_timing_grid={collapsed}",
+            segments.len(),
+            words
+        );
+    }
+
+    fn required_path(name: &str) -> PathBuf {
+        let value = optional_env(name).unwrap_or_else(|| panic!("{name} is required"));
+        let path = Path::new(&value);
+        assert!(path.exists(), "{name} does not exist: {value}");
+        path.to_path_buf()
+    }
+
+    fn optional_env(name: &str) -> Option<String> {
+        env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 }

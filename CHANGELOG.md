@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.31
+
+- Added an in-app hosted transcription provider smoke test in Settings ->
+  Transcription, so Hosted Whisper and MAI credentials can be checked against a
+  selected audio file before running a full retranscription.
+- Fixed the Test button by granting the desktop file-picker permission and
+  routing picker/provider failures through visible toast errors instead of
+  failing silently before the backend command runs.
+- Documented the hosted transcription smoke-test flow, including the CLI
+  live-smoke environment variables and the in-app audio-file picker.
+- `latest.json` advertises runtime version `0.5.31`, so installed `0.5.30`
+  clients can discover this update.
+
 ## 0.5.30
 
 - Clarified the auto speaker-diarization significant-speaker threshold as a

@@ -1,6 +1,6 @@
 # ClawScribe Frontend
 
-The Next.js UI and Tauri desktop shell for ClawScribe `0.5.30`.
+The Next.js UI and Tauri desktop shell for ClawScribe `0.5.31`.
 ClawScribe records, transcribes, summarizes, and exports meetings from the
 local desktop app.
 
@@ -160,6 +160,16 @@ Services credentials. It returns sentence-level timing only, so ClawScribe does
 not fabricate word timestamps. Collapsed MAI output can be remapped to the
 local VAD timing grid for readable rows, but the timing is approximate and
 speaker diarization remains conservative.
+
+For live hosted-provider verification with real credentials and a short audio
+file:
+
+```bash
+pnpm run test:cloud-live
+```
+
+See [Hosted Transcription Smoke Test](../docs/hosted-transcription-smoke.md)
+for the required environment variables.
 
 For build and acceleration details, see:
 

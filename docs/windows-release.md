@@ -91,7 +91,7 @@ If you do not have a Windows build machine, use GitHub Actions instead:
 5. For a validation-only run, set `check-only=true`; for a publish run, keep
    `check-only=false`.
 6. Set `build-ref` to the annotated release tag when publishing, for example
-   `v0.5.30`.
+   `v0.5.31`.
 7. Leave `publish=false` for a test artifact, or set `publish=true` only when
    the version, release notes, and updater behavior are ready.
 8. For non-publish runs, download the `clawscribe-windows-<feature>` artifact
@@ -131,8 +131,8 @@ frontend\src-tauri\target\release\bundle\BUILD-METRICS.json
 Expected artifact names currently look like:
 
 ```text
-ClawScribe_0.5.30_x64_en-US.msi
-ClawScribe_0.5.30_x64-setup.exe
+ClawScribe_0.5.31_x64_en-US.msi
+ClawScribe_0.5.31_x64-setup.exe
 SHA256SUMS.txt
 BUILD-METADATA.txt
 BUILD-METRICS.json
@@ -150,7 +150,7 @@ elapsed seconds, and release build elapsed seconds.
 
 The release script generates `SHA256SUMS.txt` after a successful installer
 build. Checksum entries are relative to the bundle root, for example
-`msi/ClawScribe_0.5.30_x64_en-US.msi`, so this command verifies cleanly
+`msi/ClawScribe_0.5.31_x64_en-US.msi`, so this command verifies cleanly
 from `frontend\src-tauri\target\release\bundle`:
 
 ```powershell
@@ -219,12 +219,13 @@ ClawScribe build first.
    already downloaded.
 6. Generate a summary for the smoke recording and confirm the meeting detail
    page shows a non-empty summary plus action items.
-7. Optional cloud transcription smoke: enable the cloud transcription beta,
-   run a short Hosted Whisper retranscription, and confirm real word timestamps
-   are present when the provider returns them. Then run a short MAI-Transcribe
-   retranscription and confirm rows are saved without word timestamps; if Azure
-   collapses the transcript, verify the VAD timing-grid remap creates readable
-   rows and the UI does not claim local fallback.
+7. Optional cloud transcription smoke: run
+   [hosted-transcription-smoke.md](hosted-transcription-smoke.md) against a
+   short audio file for Hosted Whisper and/or MAI-Transcribe. Then enable the
+   cloud transcription beta in the installed app and run one UI retranscription
+   to confirm the provider result saves cleanly; if Azure collapses MAI output,
+   verify the VAD timing-grid remap creates readable rows and the UI does not
+   claim local fallback.
 8. Optional cloud fallback smoke: run an oversized Hosted Whisper upload or a
    deliberately invalid cloud credential and confirm ClawScribe notifies the
    user and falls back to local transcription without losing the meeting.

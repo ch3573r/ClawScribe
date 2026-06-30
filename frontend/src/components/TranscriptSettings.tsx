@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
-import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
+import { Eye, EyeOff, FlaskConical, Loader2, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { NemotronModelManager } from './NemotronModelManager';
@@ -20,6 +21,15 @@ export interface TranscriptModelProps {
     baseUrl?: string | null;
     endpoint?: string | null;
     region?: string | null;
+}
+
+interface TranscriptProviderTestResult {
+    provider: string;
+    model: string;
+    segmentCount: number;
+    wordTimestampCount: number;
+    requiresLocalTimingGrid: boolean;
+    previewText: string;
 }
 
 export interface TranscriptSettingsProps {
@@ -38,6 +48,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [cloudWhisperBaseUrl, setCloudWhisperBaseUrl] = useState<string>(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
     const [maiEndpoint, setMaiEndpoint] = useState<string>(transcriptModelConfig.endpoint || '');
     const [maiRegion, setMaiRegion] = useState<string>(transcriptModelConfig.region || '');
+    const [isTestingProvider, setIsTestingProvider] = useState<boolean>(false);
     const cloudTranscriptionEnabled = useCloudTranscription();
     const isCloudProvider = uiProvider === 'cloud-whisper' || uiProvider === 'mai-transcribe';
 
@@ -135,11 +146,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
-    const handleSaveCloudProvider = async () => {
+    const getCloudProviderConfig = (): TranscriptModelProps => {
         const model = uiProvider === 'mai-transcribe'
             ? (cloudModel.trim() || 'mai-transcribe-1.5')
             : (cloudModel.trim() || 'whisper-1');
-        const nextConfig: TranscriptModelProps = {
+        return {
             ...transcriptModelConfig,
             provider: uiProvider,
             model,
@@ -148,6 +159,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             endpoint: uiProvider === 'mai-transcribe' ? maiEndpoint.trim() || null : null,
             region: uiProvider === 'mai-transcribe' ? maiRegion.trim() || null : null,
         };
+    };
+
+    const handleSaveCloudProvider = async () => {
+        const nextConfig = getCloudProviderConfig();
 
         try {
             await invoke('api_save_transcript_config', {
@@ -166,6 +181,58 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         } catch (err) {
             console.error('Failed to save cloud transcription settings:', err);
             toast.error('Failed to save transcription settings');
+        }
+    };
+
+    const handleTestCloudProvider = async () => {
+        const nextConfig = getCloudProviderConfig();
+        if (!nextConfig.apiKey) {
+            toast.error('Enter an API key before testing');
+            return;
+        }
+        if (nextConfig.provider === 'mai-transcribe' && !nextConfig.endpoint) {
+            toast.error('Enter an Azure Speech endpoint before testing');
+            return;
+        }
+
+        setIsTestingProvider(true);
+        try {
+            const selected = await open({
+                multiple: false,
+                filters: [
+                    {
+                        name: 'Audio and video',
+                        extensions: ['aac', 'flac', 'm4a', 'mkv', 'mp3', 'mp4', 'ogg', 'opus', 'wav', 'webm', 'wma'],
+                    },
+                ],
+            });
+            const audioPath = Array.isArray(selected) ? selected[0] : selected;
+            if (!audioPath) {
+                return;
+            }
+
+            const result = await invoke<TranscriptProviderTestResult>('api_test_transcript_provider', {
+                provider: nextConfig.provider,
+                model: nextConfig.model,
+                apiKey: nextConfig.apiKey,
+                baseUrl: nextConfig.baseUrl,
+                endpoint: nextConfig.endpoint,
+                region: nextConfig.region,
+                audioPath,
+                language: null,
+            });
+            const timingNote = result.requiresLocalTimingGrid
+                ? ' MAI returned collapsed output; local timing-grid remap is required.'
+                : '';
+            toast.success(
+                `Provider test passed: ${result.segmentCount} segment${result.segmentCount === 1 ? '' : 's'}, ${result.wordTimestampCount} word timestamp${result.wordTimestampCount === 1 ? '' : 's'}.${timingNote}`,
+                { duration: 7000 }
+            );
+        } catch (err) {
+            console.error('Hosted transcription provider test failed:', err);
+            toast.error(`Provider test failed: ${String(err)}`, { duration: 9000 });
+        } finally {
+            setIsTestingProvider(false);
         }
     };
 
@@ -395,8 +462,21 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                     )}
 
                     {isCloudProvider && cloudTranscriptionEnabled && (
-                        <div className="flex justify-end">
-                            <Button type="button" onClick={handleSaveCloudProvider}>
+                        <div className="flex justify-end gap-2">
+                            <Button
+                                type="button"
+                                variant="gray"
+                                onClick={handleTestCloudProvider}
+                                disabled={isTestingProvider}
+                            >
+                                {isTestingProvider ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                    <FlaskConical className="h-4 w-4" />
+                                )}
+                                Test
+                            </Button>
+                            <Button type="button" onClick={handleSaveCloudProvider} disabled={isTestingProvider}>
                                 Save
                             </Button>
                         </div>

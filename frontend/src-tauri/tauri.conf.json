@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "ClawScribe",
-    "version": "0.5.30",
+    "version": "0.5.31",
     "identifier": "net.rismondo.openclaw.clawscribe",
     "build": {
         "frontendDist": "../out",
@@ -59,6 +59,7 @@
                         "store:default",
                         "notification:default",
                         "notification:allow-is-permission-granted",
+                        "dialog:allow-open",
                         "updater:default",
                         "process:default"
                     ]
