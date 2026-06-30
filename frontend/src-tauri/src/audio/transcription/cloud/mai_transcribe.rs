@@ -1,6 +1,6 @@
 use super::{
-    classify_status, should_retry_status, CloudTranscriptSegment, CloudTranscriptionError,
-    CloudTranscriptionProvider,
+    classify_status_with_body, should_retry_status, CloudTranscriptSegment,
+    CloudTranscriptionError, CloudTranscriptionProvider,
 };
 use async_trait::async_trait;
 use reqwest::multipart::{Form, Part};
@@ -103,7 +103,8 @@ impl CloudTranscriptionProvider for MaiTranscribeProvider {
                 }
                 Ok(response) => {
                     let status = response.status();
-                    let error = classify_status(status, "Azure Speech");
+                    let body = response.text().await.unwrap_or_default();
+                    let error = classify_status_with_body(status, "Azure Speech", &body);
                     if attempt < MAX_ATTEMPTS && should_retry_status(status) {
                         tokio::time::sleep(retry_delay(attempt)).await;
                         continue;

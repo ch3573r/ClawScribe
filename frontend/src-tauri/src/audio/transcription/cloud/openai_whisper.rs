@@ -1,5 +1,5 @@
 use super::{
-    classify_status, should_retry_status, CloudTranscriptSegment, CloudTranscriptWord,
+    classify_status_with_body, should_retry_status, CloudTranscriptSegment, CloudTranscriptWord,
     CloudTranscriptionError, CloudTranscriptionProvider,
 };
 use async_trait::async_trait;
@@ -89,7 +89,8 @@ impl CloudTranscriptionProvider for OpenAiWhisperProvider {
                 }
                 Ok(response) => {
                     let status = response.status();
-                    let error = classify_status(status, "OpenAI-compatible");
+                    let body = response.text().await.unwrap_or_default();
+                    let error = classify_status_with_body(status, "OpenAI-compatible", &body);
                     if attempt < MAX_ATTEMPTS && should_retry_status(status) {
                         tokio::time::sleep(retry_delay(attempt)).await;
                         continue;

@@ -7,7 +7,7 @@ interviews, and long-form audio. It captures microphone and system audio from
 your own session, transcribes speech on device, and turns the result into
 meeting notes, summaries, action items, and export-ready artifacts.
 
-Current version: `0.5.31`
+Current version: `0.5.32`
 
 ClawScribe is based on Meetily Community Edition `0.4.0`. Upstream attribution
 and license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -212,7 +212,7 @@ cd frontend
 The current published Windows build uses the `windows-gpu` feature set, which
 combines Whisper Vulkan support with DirectML for ONNX/sherpa paths. The Tauri
 updater manifest is published as `latest.json` on the GitHub Release and
-advertises runtime version `0.5.31`.
+advertises runtime version `0.5.32`.
 
 GPU-specific developer scripts live in `frontend/`:
 

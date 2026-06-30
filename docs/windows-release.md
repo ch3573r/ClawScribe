@@ -91,7 +91,7 @@ If you do not have a Windows build machine, use GitHub Actions instead:
 5. For a validation-only run, set `check-only=true`; for a publish run, keep
    `check-only=false`.
 6. Set `build-ref` to the annotated release tag when publishing, for example
-   `v0.5.31`.
+   `v0.5.32`.
 7. Leave `publish=false` for a test artifact, or set `publish=true` only when
    the version, release notes, and updater behavior are ready.
 8. For non-publish runs, download the `clawscribe-windows-<feature>` artifact
@@ -131,8 +131,8 @@ frontend\src-tauri\target\release\bundle\BUILD-METRICS.json
 Expected artifact names currently look like:
 
 ```text
-ClawScribe_0.5.31_x64_en-US.msi
-ClawScribe_0.5.31_x64-setup.exe
+ClawScribe_0.5.32_x64_en-US.msi
+ClawScribe_0.5.32_x64-setup.exe
 SHA256SUMS.txt
 BUILD-METADATA.txt
 BUILD-METRICS.json
@@ -150,7 +150,7 @@ elapsed seconds, and release build elapsed seconds.
 
 The release script generates `SHA256SUMS.txt` after a successful installer
 build. Checksum entries are relative to the bundle root, for example
-`msi/ClawScribe_0.5.31_x64_en-US.msi`, so this command verifies cleanly
+`msi/ClawScribe_0.5.32_x64_en-US.msi`, so this command verifies cleanly
 from `frontend\src-tauri\target\release\bundle`:
 
 ```powershell

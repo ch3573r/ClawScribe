@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.32
+
+- Preflight OpenAI Hosted Whisper retranscription uploads against the 25 MB
+  request limit, so oversized recordings skip the doomed cloud call and switch
+  to local transcription with the `upload_too_large` category.
+- Classify provider error bodies that mention maximum file or content size as
+  `upload_too_large` even when the HTTP status is not 413.
+- Reworded cloud fallback toasts to say ClawScribe is switching to local
+  transcription, avoiding a premature success claim before fallback completes.
+- `latest.json` advertises runtime version `0.5.32`, so installed `0.5.31`
+  clients can discover this update.
+
 ## 0.5.31
 
 - Added an in-app hosted transcription provider smoke test in Settings ->

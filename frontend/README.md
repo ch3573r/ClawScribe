@@ -1,6 +1,6 @@
 # ClawScribe Frontend
 
-The Next.js UI and Tauri desktop shell for ClawScribe `0.5.31`.
+The Next.js UI and Tauri desktop shell for ClawScribe `0.5.32`.
 ClawScribe records, transcribes, summarizes, and exports meetings from the
 local desktop app.
 

@@ -16,6 +16,7 @@ pub const PROVIDER_CLOUD_WHISPER: &str = "cloud-whisper";
 pub const PROVIDER_MAI_TRANSCRIBE: &str = "mai-transcribe";
 pub const DEFAULT_CLOUD_WHISPER_MODEL: &str = "whisper-1";
 pub const DEFAULT_MAI_TRANSCRIBE_MODEL: &str = "mai-transcribe-1.5";
+const OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES: u64 = 25_000_000;
 
 #[derive(Debug, Clone)]
 pub struct CloudTranscriptWord {
@@ -151,9 +152,12 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
             CloudTranscriptionError::auth_config("Cloud transcription API key is missing")
         })?;
 
-    let audio = tokio::fs::read(audio_path).await.map_err(|e| {
-        CloudTranscriptionError::auth_config(format!("Failed to read audio file: {e}"))
-    })?;
+    let audio_size_bytes = tokio::fs::metadata(audio_path)
+        .await
+        .map_err(|e| {
+            CloudTranscriptionError::auth_config(format!("Failed to inspect audio file: {e}"))
+        })?
+        .len();
     let file_name = audio_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -178,6 +182,14 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 })
                 .unwrap_or(DEFAULT_CLOUD_WHISPER_MODEL)
                 .to_string();
+            validate_provider_upload_size(
+                PROVIDER_CLOUD_WHISPER,
+                Some(base_url),
+                audio_size_bytes,
+            )?;
+            let audio = tokio::fs::read(audio_path).await.map_err(|e| {
+                CloudTranscriptionError::auth_config(format!("Failed to read audio file: {e}"))
+            })?;
             let client = openai_whisper::OpenAiWhisperProvider::new(
                 base_url.to_string(),
                 api_key,
@@ -219,6 +231,14 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 })
                 .unwrap_or(DEFAULT_MAI_TRANSCRIBE_MODEL)
                 .to_string();
+            validate_provider_upload_size(
+                PROVIDER_MAI_TRANSCRIBE,
+                Some(endpoint),
+                audio_size_bytes,
+            )?;
+            let audio = tokio::fs::read(audio_path).await.map_err(|e| {
+                CloudTranscriptionError::auth_config(format!("Failed to read audio file: {e}"))
+            })?;
             let client = mai_transcribe::MaiTranscribeProvider::new(
                 endpoint.to_string(),
                 api_key,
@@ -340,8 +360,80 @@ pub fn classify_status(status: reqwest::StatusCode, provider: &str) -> CloudTran
     }
 }
 
+pub fn classify_status_with_body(
+    status: reqwest::StatusCode,
+    provider: &str,
+    body: &str,
+) -> CloudTranscriptionError {
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE || response_body_mentions_upload_size(body)
+    {
+        CloudTranscriptionError::upload_too_large(format!(
+            "{provider} cloud transcription upload is too large (HTTP {status})"
+        ))
+    } else {
+        classify_status(status, provider)
+    }
+}
+
 pub fn should_retry_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+pub(crate) fn validate_provider_upload_size(
+    provider: &str,
+    endpoint_or_base_url: Option<&str>,
+    file_size_bytes: u64,
+) -> Result<(), CloudTranscriptionError> {
+    if provider == PROVIDER_CLOUD_WHISPER
+        && endpoint_or_base_url
+            .map(is_official_openai_api_url)
+            .unwrap_or(true)
+        && file_size_bytes > OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES
+    {
+        return Err(CloudTranscriptionError::upload_too_large(format!(
+            "OpenAI Hosted Whisper accepts audio uploads up to 25 MB; this file is {}",
+            format_megabytes(file_size_bytes)
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_official_openai_api_url(value: &str) -> bool {
+    reqwest::Url::parse(value)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
+        })
+        .unwrap_or_else(|| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "https://api.openai.com"
+                || normalized.starts_with("https://api.openai.com/")
+        })
+}
+
+fn response_body_mentions_upload_size(body: &str) -> bool {
+    let normalized = body.to_ascii_lowercase();
+    normalized.contains("413")
+        || normalized.contains("payload too large")
+        || normalized.contains("request entity too large")
+        || normalized.contains("file too large")
+        || normalized.contains("content too large")
+        || normalized.contains("content size limit")
+        || (normalized.contains("maximum")
+            && normalized.contains("size")
+            && (normalized.contains("file")
+                || normalized.contains("content")
+                || normalized.contains("upload")))
+        || normalized.contains("25 mb")
+        || normalized.contains("25mb")
+        || normalized.contains("26214400")
+        || normalized.contains("25000000")
+}
+
+fn format_megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 pub(crate) fn mime_type_for_path(path: &Path) -> &'static str {
@@ -433,6 +525,47 @@ mod tests {
         assert!(should_retry_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!should_retry_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!should_retry_status(reqwest::StatusCode::PAYLOAD_TOO_LARGE));
+    }
+
+    #[test]
+    fn status_body_classification_catches_size_errors_without_413() {
+        let error = classify_status_with_body(
+            reqwest::StatusCode::BAD_REQUEST,
+            "OpenAI-compatible",
+            r#"{"error":{"message":"Maximum content size limit (26214400) exceeded"}}"#,
+        );
+
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UploadTooLarge
+        );
+    }
+
+    #[test]
+    fn openai_hosted_upload_preflight_rejects_files_over_25_mb() {
+        let error = validate_provider_upload_size(
+            PROVIDER_CLOUD_WHISPER,
+            Some("https://api.openai.com/v1"),
+            25_000_001,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UploadTooLarge
+        );
+        assert!(validate_provider_upload_size(
+            PROVIDER_CLOUD_WHISPER,
+            Some("https://example.test/v1"),
+            250_000_000,
+        )
+        .is_ok());
+        assert!(validate_provider_upload_size(
+            PROVIDER_MAI_TRANSCRIBE,
+            Some("https://example.cognitiveservices.azure.com"),
+            250_000_000,
+        )
+        .is_ok());
     }
 }
 

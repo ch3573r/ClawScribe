@@ -7,9 +7,9 @@ use tauri_plugin_store::StoreExt;
 use crate::{
     audio::transcription::cloud::{
         mai_transcribe::MaiTranscribeProvider, mime_type_for_path,
-        openai_whisper::OpenAiWhisperProvider, CloudTranscriptSegment, CloudTranscriptionProvider,
-        DEFAULT_CLOUD_WHISPER_MODEL, DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER,
-        PROVIDER_MAI_TRANSCRIBE,
+        openai_whisper::OpenAiWhisperProvider, validate_provider_upload_size,
+        CloudTranscriptSegment, CloudTranscriptionProvider, DEFAULT_CLOUD_WHISPER_MODEL,
+        DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER, PROVIDER_MAI_TRANSCRIBE,
     },
     database::{
         models::MeetingModel,
@@ -847,10 +847,11 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         &provider
     );
     let audio_path = Path::new(&audio_path);
-    let audio = tokio::fs::read(audio_path)
+    let audio_size_bytes = tokio::fs::metadata(audio_path)
         .await
-        .map_err(|e| format!("Failed to read test audio file: {e}"))?;
-    if audio.is_empty() {
+        .map_err(|e| format!("Failed to inspect test audio file: {e}"))?
+        .len();
+    if audio_size_bytes == 0 {
         return Err("Test audio file is empty".to_string());
     }
 
@@ -890,6 +891,20 @@ pub async fn api_test_transcript_provider<R: Runtime>(
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.to_string());
+            validate_provider_upload_size(
+                PROVIDER_CLOUD_WHISPER,
+                Some(&base_url),
+                audio_size_bytes,
+            )
+            .map_err(|error| {
+                format!(
+                    "Hosted Whisper test failed ({}): {error}",
+                    error.category().as_str()
+                )
+            })?;
+            let audio = tokio::fs::read(audio_path)
+                .await
+                .map_err(|e| format!("Failed to read test audio file: {e}"))?;
             let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone());
             let segments = provider_client
                 .transcribe_file(audio, file_name, mime_type, language)
@@ -917,6 +932,20 @@ pub async fn api_test_transcript_provider<R: Runtime>(
                 .ok_or_else(|| "Azure Speech endpoint is missing".to_string())?;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
+            validate_provider_upload_size(
+                PROVIDER_MAI_TRANSCRIBE,
+                Some(&endpoint),
+                audio_size_bytes,
+            )
+            .map_err(|error| {
+                format!(
+                    "MAI-Transcribe test failed ({}): {error}",
+                    error.category().as_str()
+                )
+            })?;
+            let audio = tokio::fs::read(audio_path)
+                .await
+                .map_err(|e| format!("Failed to read test audio file: {e}"))?;
             let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone());
             let segments = provider_client
                 .transcribe_file(audio, file_name, mime_type, language)

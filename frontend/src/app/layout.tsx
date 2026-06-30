@@ -208,7 +208,7 @@ export default function RootLayout({
       const reason = event.payload?.reason_category;
       if (reason === 'auth_config') {
         toast.warning('Cloud transcription failed', {
-          description: 'Check your API key or endpoint. ClawScribe transcribed locally instead.',
+          description: 'Check your API key or endpoint. ClawScribe is switching to local transcription.',
           duration: 14000,
           action: {
             label: 'Open settings',
@@ -223,7 +223,7 @@ export default function RootLayout({
 
       if (reason === 'upload_too_large') {
         toast.warning('Recording too large for cloud transcription', {
-          description: 'The selected cloud provider rejected the upload size. ClawScribe transcribed locally instead.',
+          description: 'The selected cloud provider rejected the upload size. ClawScribe is switching to local transcription.',
           duration: 14000,
         });
         return;
@@ -231,14 +231,14 @@ export default function RootLayout({
 
       if (reason === 'provider_output') {
         toast.warning('Cloud transcript could not be used', {
-          description: 'ClawScribe transcribed locally instead.',
+          description: 'ClawScribe is switching to local transcription.',
           duration: 14000,
         });
         return;
       }
 
       toast.warning('Cloud transcription unavailable', {
-        description: 'ClawScribe transcribed locally instead. Try again later.',
+        description: 'ClawScribe is switching to local transcription. Try again later.',
         duration: 12000,
       });
     });

@@ -1,6 +1,6 @@
 # ClawScribe Docs
 
-Current shipped version: `0.5.31`.
+Current shipped version: `0.5.32`.
 
 Current product docs:
 
