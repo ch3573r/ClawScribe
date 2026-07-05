@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.34
+
+- Fixed `0.5.33` failing to open the meeting database on machines whose
+  database was stamped by builds with different migration-file line endings
+  ("migration was previously applied but has been modified"). The app now
+  reconciles stored migration checksums that match the same SQL under either
+  line-ending convention, while genuinely modified migrations still fail.
+- The release workflow now force-refreshes migration files after checkout so
+  every build embeds the canonical LF migration bytes regardless of runner
+  workspace history.
+- `latest.json` advertises runtime version `0.5.34`, so installed `0.5.33`
+  clients can discover this update.
+
 ## 0.5.33
 
 - Convert audio formats Azure MAI-Transcribe does not accept (for example
