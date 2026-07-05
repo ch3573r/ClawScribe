@@ -72,17 +72,14 @@ function formatRecordingTime(seconds: number | undefined): string {
     return `[${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
 }
 
-// Helper function to remove filler words and repetitions
+// Filler-word removal. Precompiled at module scope: this runs for every
+// visible row on every render, and per-render RegExp construction was a
+// measurable cost on low-end CPUs.
+const STOP_WORD_PATTERN = /\b(?:uh|um|er|ah|hmm|hm|eh|oh)\b[,\s]*/gi;
+const WHITESPACE_PATTERN = /\s+/g;
+
 function cleanStopWords(text: string): string {
-    const stopWords = ['uh', 'um', 'er', 'ah', 'hmm', 'hm', 'eh', 'oh'];
-
-    let cleanedText = text;
-    stopWords.forEach(word => {
-        const pattern = new RegExp(`\\b${word}\\b[,\\s]*`, 'gi');
-        cleanedText = cleanedText.replace(pattern, ' ');
-    });
-
-    return cleanedText.replace(/\s+/g, ' ').trim();
+    return text.replace(STOP_WORD_PATTERN, ' ').replace(WHITESPACE_PATTERN, ' ').trim();
 }
 
 function normalizeSpeakerOption(speaker: string | null | undefined): string | null {
@@ -109,7 +106,6 @@ function collectSpeakerOptions(segments: TranscriptSegmentData[]): string[] {
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
     timestamp,
-    endTime,
     text,
     confidence,
     speaker,
@@ -119,12 +115,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSpeakerChange,
     onApplySpeakerToMatching,
     speakerOptions,
-    activeTime,
+    isActive,
     onSeekToTime,
 }: {
     id: string;
     timestamp: number;
-    endTime?: number;
     text: string;
     confidence?: number;
     speaker?: string;
@@ -134,7 +129,9 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSpeakerChange?: (segmentId: string, speaker: string | null) => Promise<void> | void;
     onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number> | number | void;
     speakerOptions: string[];
-    activeTime?: number;
+    /** Whether playback is currently inside this segment. Computed by the
+     * parent so a clock tick only re-renders the rows whose state flips. */
+    isActive: boolean;
     onSeekToTime?: (seconds: number) => void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
@@ -151,10 +148,6 @@ const TranscriptSegment = memo(function TranscriptSegment({
     );
     const replacementVerb = canReplaceMatching ? "Replace" : "Set";
     const canSeek = Boolean(onSeekToTime && Number.isFinite(timestamp));
-    const isActive =
-        activeTime !== undefined &&
-        activeTime >= timestamp &&
-        activeTime < (endTime ?? timestamp + 0.75);
 
     const seekToSegment = () => {
         if (canSeek) {
@@ -492,6 +485,20 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
     const speakerOptions = useMemo(() => collectSpeakerOptions(segments), [segments]);
 
+    // Resolve the playback position to a single active segment id, so clock
+    // ticks re-render at most the two rows whose highlight state changes
+    // instead of every visible (memo-broken) row.
+    const activeSegmentId = useMemo(() => {
+        if (activeTime === undefined) return null;
+        for (const segment of segments) {
+            const end = segment.endTime ?? segment.timestamp + 0.75;
+            if (activeTime >= segment.timestamp && activeTime < end) {
+                return segment.id;
+            }
+        }
+        return null;
+    }, [segments, activeTime]);
+
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
@@ -561,7 +568,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
-                                        endTime={segment.endTime}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
@@ -571,7 +577,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerOptions={speakerOptions}
-                                        activeTime={activeTime}
+                                        isActive={segment.id === activeSegmentId}
                                         onSeekToTime={onSeekToTime}
                                     />
                                 </div>
@@ -625,7 +631,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
-                                        endTime={segment.endTime}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
@@ -635,7 +640,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerOptions={speakerOptions}
-                                        activeTime={activeTime}
+                                        isActive={segment.id === activeSegmentId}
                                         onSeekToTime={onSeekToTime}
                                     />
                                 </motion.div>

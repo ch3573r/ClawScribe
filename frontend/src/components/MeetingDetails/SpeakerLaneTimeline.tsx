@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { Activity, Pause, Play } from "lucide-react";
 import { TranscriptSegmentData } from "@/types";
 
@@ -21,7 +21,13 @@ interface TimelineSegment {
   speaker: string;
   start: number;
   end: number;
-  text: string;
+  opacity: number;
+}
+
+interface TimelineLane {
+  speaker: string;
+  color: string;
+  items: TimelineSegment[];
 }
 
 const LANE_COLORS = [
@@ -34,6 +40,8 @@ const LANE_COLORS = [
   "#0ea5e9",
   "#ec4899",
 ];
+
+const MAX_VISIBLE_LANES = 6;
 
 function normalizeSpeaker(speaker: string | undefined): string {
   const label = speaker?.trim().replace(/\s+/g, " ");
@@ -59,12 +67,13 @@ function buildTimeline(segments: TranscriptSegmentData[]) {
     .map((segment) => {
       const start = segment.timestamp;
       const end = segment.endTime ?? segment.timestamp;
+      const wordCount = Math.max(1, segment.text.trim().split(/\s+/).filter(Boolean).length);
       return {
         id: segment.id,
         speaker: normalizeSpeaker(segment.speaker),
         start,
         end,
-        text: segment.text,
+        opacity: Math.min(0.95, 0.48 + wordCount / 80),
       };
     })
     .filter((segment): segment is TimelineSegment =>
@@ -85,8 +94,57 @@ function buildTimeline(segments: TranscriptSegmentData[]) {
 
   const duration = items.reduce((max, item) => Math.max(max, item.end), 0);
 
-  return { items, speakers, duration };
+  const lanes: TimelineLane[] = speakers.slice(0, MAX_VISIBLE_LANES).map((speaker, index) => ({
+    speaker,
+    color: LANE_COLORS[index % LANE_COLORS.length],
+    items: items.filter((item) => item.speaker === speaker),
+  }));
+
+  return { itemCount: items.length, lanes, duration };
 }
+
+// The per-segment bars are by far the heaviest DOM in this component (one
+// node per transcript row per lane). Memoized so playhead ticks reconcile
+// only the thin playhead spans, not thousands of bars.
+const LaneBars = memo(function LaneBars({
+  lane,
+  timelineDuration,
+}: {
+  lane: TimelineLane;
+  timelineDuration: number;
+}) {
+  return (
+    <>
+      {lane.items.map((item) => {
+        const left = Math.max(0, Math.min(100, (item.start / timelineDuration) * 100));
+        const width = Math.max(0.3, Math.min(100 - left, ((item.end - item.start) / timelineDuration) * 100));
+
+        return (
+          <div
+            key={item.id}
+            className="absolute top-1/2 h-3 -translate-y-1/2 overflow-hidden rounded-[2px]"
+            style={{
+              left: `${left}%`,
+              width: `${width}%`,
+              color: lane.color,
+              backgroundColor: lane.color,
+              opacity: item.opacity,
+            }}
+            title={`${lane.speaker} ${formatDuration(item.start)}-${formatDuration(item.end)}`}
+          >
+            <div
+              className="h-full w-full opacity-55"
+              style={{
+                backgroundImage:
+                  "repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 6px)",
+              }}
+            />
+          </div>
+        );
+      })}
+    </>
+  );
+});
 
 export function SpeakerLaneTimeline({
   segments,
@@ -99,9 +157,9 @@ export function SpeakerLaneTimeline({
   onPlayPause,
   onSeek,
 }: SpeakerLaneTimelineProps) {
-  const { items, speakers, duration } = useMemo(() => buildTimeline(segments), [segments]);
+  const { itemCount, lanes, duration } = useMemo(() => buildTimeline(segments), [segments]);
 
-  if (items.length === 0 || speakers.length === 0 || duration <= 0) {
+  if (itemCount === 0 || lanes.length === 0 || duration <= 0) {
     return null;
   }
 
@@ -111,7 +169,7 @@ export function SpeakerLaneTimeline({
   const visibleCount = loadedCount ?? segments.length;
   const countLabel = totalCount && totalCount > visibleCount
     ? `${visibleCount}/${totalCount}`
-    : `${items.length}`;
+    : `${itemCount}`;
 
   return (
     <section className="border-b border-border bg-card/70 px-4 py-3">
@@ -143,67 +201,34 @@ export function SpeakerLaneTimeline({
       </div>
 
       <div className="space-y-1.5">
-        {speakers.slice(0, 6).map((speaker, index) => {
-          const color = LANE_COLORS[index % LANE_COLORS.length];
-          const speakerItems = items.filter((item) => item.speaker === speaker);
-
-          return (
-            <div key={speaker} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
-              <div className="min-w-0 truncate font-mono text-[11px] font-medium uppercase tracking-normal text-muted-foreground">
-                {speaker}
-              </div>
-              <button
-                type="button"
-                disabled={!canSeek}
-                className={`relative h-5 w-full overflow-hidden rounded-[3px] bg-muted/45 text-left focus:outline-none focus:ring-2 focus:ring-ring ${canSeek ? "cursor-pointer hover:bg-muted/70" : "cursor-default"}`}
-                onClick={(event) => {
-                  if (!onSeek) return;
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  const ratio = (event.clientX - rect.left) / rect.width;
-                  onSeek(Math.max(0, Math.min(timelineDuration, ratio * timelineDuration)));
-                }}
-                aria-label={`Seek ${speaker} timeline`}
-              >
-                {speakerItems.map((item) => {
-                  const left = Math.max(0, Math.min(100, (item.start / timelineDuration) * 100));
-                  const width = Math.max(0.3, Math.min(100 - left, ((item.end - item.start) / timelineDuration) * 100));
-                  const wordCount = Math.max(1, item.text.trim().split(/\s+/).filter(Boolean).length);
-                  const opacity = Math.min(0.95, 0.48 + wordCount / 80);
-
-                  return (
-                    <div
-                      key={item.id}
-                      className="absolute top-1/2 h-3 -translate-y-1/2 overflow-hidden rounded-[2px]"
-                      style={{
-                        left: `${left}%`,
-                        width: `${width}%`,
-                        color,
-                        backgroundColor: color,
-                        opacity,
-                      }}
-                      title={`${speaker} ${formatDuration(item.start)}-${formatDuration(item.end)}`}
-                    >
-                      <div
-                        className="h-full w-full opacity-55"
-                        style={{
-                          backgroundImage:
-                            "repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 6px)",
-                        }}
-                      />
-                    </div>
-                  );
-                })}
-                {canSeek && (
-                  <span
-                    className="pointer-events-none absolute top-0 h-full w-px bg-foreground/80 shadow-[0_0_0_1px_rgba(255,255,255,0.22)]"
-                    style={{ left: `${playheadLeft}%` }}
-                    aria-hidden="true"
-                  />
-                )}
-              </button>
+        {lanes.map((lane) => (
+          <div key={lane.speaker} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
+            <div className="min-w-0 truncate font-mono text-[11px] font-medium uppercase tracking-normal text-muted-foreground">
+              {lane.speaker}
             </div>
-          );
-        })}
+            <button
+              type="button"
+              disabled={!canSeek}
+              className={`relative h-5 w-full overflow-hidden rounded-[3px] bg-muted/45 text-left focus:outline-none focus:ring-2 focus:ring-ring ${canSeek ? "cursor-pointer hover:bg-muted/70" : "cursor-default"}`}
+              onClick={(event) => {
+                if (!onSeek) return;
+                const rect = event.currentTarget.getBoundingClientRect();
+                const ratio = (event.clientX - rect.left) / rect.width;
+                onSeek(Math.max(0, Math.min(timelineDuration, ratio * timelineDuration)));
+              }}
+              aria-label={`Seek ${lane.speaker} timeline`}
+            >
+              <LaneBars lane={lane} timelineDuration={timelineDuration} />
+              {canSeek && (
+                <span
+                  className="pointer-events-none absolute top-0 h-full w-px bg-foreground/80 shadow-[0_0_0_1px_rgba(255,255,255,0.22)]"
+                  style={{ left: `${playheadLeft}%` }}
+                  aria-hidden="true"
+                />
+              )}
+            </button>
+          </div>
+        ))}
       </div>
     </section>
   );

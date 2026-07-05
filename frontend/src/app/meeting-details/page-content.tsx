@@ -196,9 +196,12 @@ export default function PageContent({
     };
   }, [meeting.folder_path]);
 
+  // Depend on the individual player functions (stable identities from
+  // useAudioPlayer), not the whole player object, which changes identity on
+  // every clock tick during playback.
   const handleTimelineSeek = useCallback((seconds: number) => {
     void audioPlayer.seek(seconds);
-  }, [audioPlayer]);
+  }, [audioPlayer.seek]);
 
   const handleTimelinePlayPause = useCallback(() => {
     if (audioPlayer.isPlaying) {
@@ -206,7 +209,7 @@ export default function PageContent({
     } else {
       void audioPlayer.play();
     }
-  }, [audioPlayer]);
+  }, [audioPlayer.isPlaying, audioPlayer.pause, audioPlayer.play]);
 
   // Track page view
   useEffect(() => {

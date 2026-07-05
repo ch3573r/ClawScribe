@@ -228,9 +228,12 @@ fn get_transcription_status() -> TranscriptionStatus {
 }
 
 #[tauri::command]
-fn read_audio_file(file_path: String) -> Result<Vec<u8>, String> {
-    match std::fs::read(&file_path) {
-        Ok(data) => Ok(data),
+async fn read_audio_file(file_path: String) -> Result<tauri::ipc::Response, String> {
+    // Return raw bytes over IPC. The default Vec<u8> path serializes to a
+    // JSON number array, which multiplies transfer size ~4-5x and blocks the
+    // webview parsing it for large recordings.
+    match tokio::fs::read(&file_path).await {
+        Ok(data) => Ok(tauri::ipc::Response::new(data)),
         Err(e) => Err(format!("Failed to read audio file: {}", e)),
     }
 }

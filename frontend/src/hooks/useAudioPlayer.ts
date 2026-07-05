@@ -1,5 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+
+// Re-render cadence for the playback clock. The rAF loop tracks time
+// precisely, but React state only updates when the time crosses a bucket
+// boundary — 60fps state updates re-render the whole meeting page and are
+// the main source of playback jank on low-end CPUs.
+const CLOCK_TICKS_PER_SECOND = 4;
 
 export const useAudioPlayer = (audioPath: string | null) => {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -13,6 +19,11 @@ export const useAudioPlayer = (audioPath: string | null) => {
   const rafRef = useRef<number>();
   const seekTimeRef = useRef<number>(0);
   const manualStopRef = useRef(false);
+  // Mirror state into refs so play/pause/seek keep stable identities across
+  // renders; unstable identities cascade re-renders into memoized children.
+  const durationRef = useRef(0);
+  const isPlayingRef = useRef(false);
+  const lastClockBucketRef = useRef(-1);
 
   const initAudioContext = async () => {
     try {
@@ -31,7 +42,7 @@ export const useAudioPlayer = (audioPath: string | null) => {
         await audioRef.current.resume();
         console.log('AudioContext resumed:', audioRef.current.state);
       }
-      
+
       setError(null);
       return true;
     } catch (error) {
@@ -72,23 +83,28 @@ export const useAudioPlayer = (audioPath: string | null) => {
       }
 
       console.log('Loading audio from:', audioPath);
-      
-      // Read the file using Tauri command
-      const result = await invoke<number[]>('read_audio_file', { 
-        filePath: audioPath 
+
+      // The command returns raw bytes (tauri::ipc::Response). Keep the
+      // number[] fallback so a stale backend build still plays audio.
+      const result = await invoke<ArrayBuffer | Uint8Array | number[]>('read_audio_file', {
+        filePath: audioPath,
       });
-      
-      if (!result || result.length === 0) {
+
+      let audioData: ArrayBuffer;
+      if (result instanceof ArrayBuffer) {
+        audioData = result;
+      } else if (result instanceof Uint8Array) {
+        audioData = result.slice().buffer;
+      } else {
+        audioData = new Uint8Array(result).buffer;
+      }
+
+      if (audioData.byteLength === 0) {
         throw new Error('Empty audio data received');
       }
-      
-      console.log('Audio file read, size:', result.length, 'bytes');
-      
-      // Create a copy of the audio data
-      const audioData = new Uint8Array(result).buffer;
-      
-      console.log('Created audio buffer, size:', audioData.byteLength, 'bytes');
-      
+
+      console.log('Audio file read, size:', audioData.byteLength, 'bytes');
+
       // Decode the audio data
       const audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
         audioRef.current!.decodeAudioData(
@@ -108,8 +124,9 @@ export const useAudioPlayer = (audioPath: string | null) => {
           }
         );
       });
-      
+
       audioBufferRef.current = audioBuffer;
+      durationRef.current = audioBuffer.duration;
       setDuration(audioBuffer.duration);
       setCurrentTime(0);
       setError(null);
@@ -133,9 +150,10 @@ export const useAudioPlayer = (audioPath: string | null) => {
     if (audioPath) {
       loadAudio();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioPath]);
 
-  const stopPlayback = () => {
+  const stopPlayback = useCallback(() => {
     console.log('Stopping playback');
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
@@ -151,12 +169,13 @@ export const useAudioPlayer = (audioPath: string | null) => {
       }
       sourceRef.current = null;
     }
+    isPlayingRef.current = false;
     setIsPlaying(false);
-  };
+  }, []);
 
-  const play = async () => {
+  const play = useCallback(async () => {
     console.log('Play requested');
-    
+
     try {
       // Initialize context if needed
       const initialized = await initAudioContext();
@@ -180,16 +199,8 @@ export const useAudioPlayer = (audioPath: string | null) => {
       console.log('Creating new audio source');
       sourceRef.current = audioRef.current.createBufferSource();
       sourceRef.current.buffer = audioBufferRef.current;
-      
-      console.log('Audio buffer details:', {
-        duration: audioBufferRef.current.duration,
-        sampleRate: audioBufferRef.current.sampleRate,
-        numberOfChannels: audioBufferRef.current.numberOfChannels,
-        length: audioBufferRef.current.length
-      });
-      
       sourceRef.current.connect(audioRef.current.destination);
-      
+
       // Setup ended callback
       sourceRef.current.onended = () => {
         if (manualStopRef.current) {
@@ -201,82 +212,89 @@ export const useAudioPlayer = (audioPath: string | null) => {
         setCurrentTime(0);
         seekTimeRef.current = 0;
       };
-      
+
       // Start playback from the seek time
       const startTime = seekTimeRef.current;
       startTimeRef.current = audioRef.current.currentTime - startTime;
-      console.log('Starting playback', {
-        startTime,
-        contextTime: audioRef.current.currentTime,
-        seekTime: seekTimeRef.current
-      });
-      
+
       sourceRef.current.start(0, startTime);
+      isPlayingRef.current = true;
       setIsPlaying(true);
       setError(null);
+      lastClockBucketRef.current = -1;
 
-      // Setup time update
+      // Track time every frame, but only push a React state update when the
+      // clock crosses a bucket boundary (~4 Hz). Re-rendering the meeting
+      // page at 60 fps makes playback stutter on slower machines.
       const updateTime = () => {
         if (!audioRef.current || !sourceRef.current) {
           console.log('Update cancelled - context or source is null');
           return;
         }
-        
+
         const newTime = audioRef.current.currentTime - startTimeRef.current;
-        
-        if (newTime >= duration) {
+
+        if (newTime >= durationRef.current) {
           console.log('Playback finished');
           stopPlayback();
           setCurrentTime(0);
           seekTimeRef.current = 0;
         } else {
-          setCurrentTime(newTime);
           seekTimeRef.current = newTime;
+          const bucket = Math.floor(newTime * CLOCK_TICKS_PER_SECOND);
+          if (bucket !== lastClockBucketRef.current) {
+            lastClockBucketRef.current = bucket;
+            setCurrentTime(newTime);
+          }
           rafRef.current = requestAnimationFrame(updateTime);
         }
       };
-      
+
       rafRef.current = requestAnimationFrame(updateTime);
     } catch (error) {
       console.error('Error during playback:', error);
       setError('Failed to play audio');
       stopPlayback();
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopPlayback]);
 
-  const seek = async (time: number) => {
+  const seek = useCallback(async (time: number) => {
     console.log('Seek requested:', time);
     if (time < 0) time = 0;
-    if (time > duration) time = duration;
-    
-    const wasPlaying = isPlaying;
-    
+    if (time > durationRef.current) time = durationRef.current;
+
+    const wasPlaying = isPlayingRef.current;
+
     // Stop current playback
     stopPlayback();
-    
+
     // Update both current time and seek time reference
     seekTimeRef.current = time;
     setCurrentTime(time);
-    
+
     // If it was playing before, restart playback at new position
     if (wasPlaying) {
       console.log('Restarting playback at:', time);
       await play();
     }
-  };
+  }, [play, stopPlayback]);
 
-  const pause = () => {
+  const pause = useCallback(() => {
     console.log('Pause requested');
     stopPlayback();
-  };
+  }, [stopPlayback]);
 
-  return {
-    isPlaying,
-    currentTime,
-    duration,
-    error,
-    play,
-    pause,
-    seek
-  };
+  return useMemo(
+    () => ({
+      isPlaying,
+      currentTime,
+      duration,
+      error,
+      play,
+      pause,
+      seek,
+    }),
+    [isPlaying, currentTime, duration, error, play, pause, seek]
+  );
 };
