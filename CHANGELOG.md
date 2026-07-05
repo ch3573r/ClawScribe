@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.33
+
+- Convert audio formats Azure MAI-Transcribe does not accept (for example
+  M4A/MP4 recordings) to 16 kHz mono WAV locally before cloud upload, so
+  retranscription of voice files no longer fails with a misleading
+  API-key error.
+- Preflight MAI-Transcribe uploads against Azure's 300 MB limit and classify
+  provider rejections honestly: size and duration limits report as
+  `upload_too_large`, unsupported formats use a new `unsupported_media`
+  fallback toast, and the provider's error detail is kept in logs for
+  diagnosis instead of being discarded.
+- Fixed meeting-screen playback jank on slower systems: the playback clock no
+  longer re-renders the whole meeting page 60 times per second, transcript
+  rows only re-render when their highlight changes, and the speaker timeline
+  reconciles only the playhead per tick instead of every segment bar.
+- Load meeting audio over binary IPC instead of a JSON number array, removing
+  a multi-second UI stall when opening meetings with large recordings.
+- `latest.json` advertises runtime version `0.5.33`, so installed `0.5.32`
+  clients can discover this update.
+
 ## 0.5.32
 
 - Preflight OpenAI Hosted Whisper retranscription uploads against the 25 MB
