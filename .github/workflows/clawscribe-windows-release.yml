@@ -68,6 +68,19 @@ jobs:
         run: |
           git checkout --detach "${{ inputs['build-ref'] }}"
 
+      - name: Normalize migration line endings
+        shell: pwsh
+        run: |
+          # SQLx embeds migration files at compile time and records their
+          # checksums in every installed client's database. A reused runner
+          # workspace can hold CRLF copies written by checkouts that predate
+          # .gitattributes, and git never rewrites unchanged files when
+          # attributes change. Force a fresh checkout of the migrations so the
+          # build always embeds the canonical LF bytes.
+          Remove-Item frontend/src-tauri/migrations/*.sql -Force
+          git checkout -- frontend/src-tauri/migrations
+          git ls-files --eol frontend/src-tauri/migrations
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
