@@ -232,9 +232,10 @@ async fn run_retranscription<R: Runtime>(
                 }
                 Err(error) => {
                     warn!(
-                        "Cloud retranscription failed for provider '{}' (category={}); falling back to local",
+                        "Cloud retranscription failed for provider '{}' (category={}): {}; falling back to local",
                         provider_id,
-                        error.category().as_str()
+                        error.category().as_str(),
+                        error
                     );
                     super::transcription::cloud::emit_fallback_event(
                         &app,

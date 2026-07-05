@@ -48,9 +48,14 @@ and [LICENSE.md](LICENSE.md).
   from Microsoft Graph sign-in. It has sentence-level timing only, so
   ClawScribe keeps word timestamps empty and maps collapsed output onto the
   local VAD timing grid as approximate row timing.
-- Cloud calls are whole-file requests. If a cloud request fails or the OpenAI
-  25 MB upload limit is hit, ClawScribe falls back to local transcription and
-  notifies the user.
+- Azure MAI-Transcribe accepts WAV, MP3, and FLAC uploads only. ClawScribe
+  converts other audio formats (for example M4A/MP4 recordings) to 16 kHz mono
+  WAV locally before upload, within Azure's 300 MB upload limit.
+- Cloud calls are whole-file requests. If a cloud request fails or a provider
+  upload limit is hit (25 MB for OpenAI-hosted Whisper, 300 MB for
+  MAI-Transcribe), ClawScribe falls back to local transcription and notifies
+  the user with the rejection reason (too large or too long, unsupported
+  format, credentials, or provider outage).
 
 ### AI Notes
 
@@ -102,7 +107,7 @@ and [LICENSE.md](LICENSE.md).
 | Nemotron | Beta multilingual path for NVIDIA Nemotron 3.5 ASR. Ships fp16 and int8 variants; fp16 is CPU-capable, while int8 is intended for DirectML-capable GPU builds. |
 | Whisper | Broad compatibility path through whisper.cpp/whisper-rs with local model management. |
 | Hosted Whisper | Beta cloud retranscription through OpenAI-compatible file transcription. OpenAI-hosted uploads are limited to 25 MB and fall back locally when too large. |
-| MAI-Transcribe | Beta Azure Speech Fast Transcription path. Uses separate Cognitive Services credentials and approximate VAD-row timing when Azure returns collapsed output. |
+| MAI-Transcribe | Beta Azure Speech Fast Transcription path. Uses separate Cognitive Services credentials and approximate VAD-row timing when Azure returns collapsed output. Non-WAV/MP3/FLAC audio is converted to WAV locally before upload (300 MB limit). |
 
 Model downloads are managed inside the app. The downloader validates expected
 large-file sizes so CDN errors, partial downloads, and LFS pointer stubs do not

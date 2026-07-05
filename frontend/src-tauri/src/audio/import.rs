@@ -424,9 +424,10 @@ async fn run_import<R: Runtime>(
                 }
                 Err(error) => {
                     warn!(
-                        "Cloud transcription failed for provider '{}' (category={}); falling back to local",
+                        "Cloud transcription failed for provider '{}' (category={}): {}; falling back to local",
                         provider_id,
-                        error.category().as_str()
+                        error.category().as_str(),
+                        error
                     );
                     super::transcription::cloud::emit_fallback_event(
                         &app,

@@ -7,6 +7,7 @@ use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use anyhow::anyhow;
 use async_trait::async_trait;
+use log::info;
 use serde::Serialize;
 use std::fmt;
 use std::path::Path;
@@ -17,6 +18,11 @@ pub const PROVIDER_MAI_TRANSCRIBE: &str = "mai-transcribe";
 pub const DEFAULT_CLOUD_WHISPER_MODEL: &str = "whisper-1";
 pub const DEFAULT_MAI_TRANSCRIBE_MODEL: &str = "mai-transcribe-1.5";
 const OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES: u64 = 25_000_000;
+/// Azure MAI-Transcribe (LLM Speech) documented upload cap.
+const MAI_TRANSCRIBE_MAX_UPLOAD_BYTES: u64 = 300_000_000;
+/// Containers Azure MAI-Transcribe accepts natively. Other formats (M4A/MP4,
+/// OGG, WMA, ...) are rejected by the service and must be converted first.
+const MAI_NATIVE_EXTENSIONS: &[&str] = &["wav", "mp3", "flac"];
 
 #[derive(Debug, Clone)]
 pub struct CloudTranscriptWord {
@@ -47,6 +53,7 @@ pub enum CloudFallbackReasonCategory {
     Transient,
     AuthConfig,
     UploadTooLarge,
+    UnsupportedMedia,
     ProviderOutput,
 }
 
@@ -56,6 +63,7 @@ impl CloudFallbackReasonCategory {
             Self::Transient => "transient",
             Self::AuthConfig => "auth_config",
             Self::UploadTooLarge => "upload_too_large",
+            Self::UnsupportedMedia => "unsupported_media",
             Self::ProviderOutput => "provider_output",
         }
     }
@@ -85,6 +93,13 @@ impl CloudTranscriptionError {
     pub fn upload_too_large(message: impl Into<String>) -> Self {
         Self {
             category: CloudFallbackReasonCategory::UploadTooLarge,
+            message: message.into(),
+        }
+    }
+
+    pub fn unsupported_media(message: impl Into<String>) -> Self {
+        Self {
+            category: CloudFallbackReasonCategory::UnsupportedMedia,
             message: message.into(),
         }
     }
@@ -231,21 +246,31 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 })
                 .unwrap_or(DEFAULT_MAI_TRANSCRIBE_MODEL)
                 .to_string();
-            validate_provider_upload_size(
-                PROVIDER_MAI_TRANSCRIBE,
-                Some(endpoint),
-                audio_size_bytes,
-            )?;
-            let audio = tokio::fs::read(audio_path).await.map_err(|e| {
-                CloudTranscriptionError::auth_config(format!("Failed to read audio file: {e}"))
-            })?;
+            let (audio, upload_file_name, upload_mime_type) = if mai_supports_container(audio_path)
+            {
+                validate_provider_upload_size(
+                    PROVIDER_MAI_TRANSCRIBE,
+                    Some(endpoint),
+                    audio_size_bytes,
+                )?;
+                let audio = tokio::fs::read(audio_path).await.map_err(|e| {
+                    CloudTranscriptionError::auth_config(format!("Failed to read audio file: {e}"))
+                })?;
+                (audio, file_name.to_string(), mime_type)
+            } else {
+                info!(
+                    "Converting audio to WAV for MAI-Transcribe upload; Azure accepts WAV/MP3/FLAC only"
+                );
+                let audio = transcode_to_mai_wav(audio_path).await?;
+                (audio, "audio.wav".to_string(), "audio/wav")
+            };
             let client = mai_transcribe::MaiTranscribeProvider::new(
                 endpoint.to_string(),
                 api_key,
                 model.clone(),
             );
             let cloud_segments = client
-                .transcribe_file(audio, file_name, mime_type, language)
+                .transcribe_file(audio, &upload_file_name, upload_mime_type, language)
                 .await?;
             Ok(CloudTranscriptionOutcome {
                 provider: PROVIDER_MAI_TRANSCRIBE.to_string(),
@@ -365,13 +390,28 @@ pub fn classify_status_with_body(
     provider: &str,
     body: &str,
 ) -> CloudTranscriptionError {
-    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE || response_body_mentions_upload_size(body)
+    let detail = sanitized_body_snippet(body);
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
+        || response_body_mentions_upload_size(body)
+        || response_body_mentions_duration_limit(body)
     {
         CloudTranscriptionError::upload_too_large(format!(
-            "{provider} cloud transcription upload is too large (HTTP {status})"
+            "{provider} cloud transcription rejected the audio as too large or too long (HTTP {status}){detail}"
+        ))
+    } else if status == reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        || response_body_mentions_unsupported_media(body)
+    {
+        CloudTranscriptionError::unsupported_media(format!(
+            "{provider} cloud transcription rejected the audio format (HTTP {status}){detail}"
+        ))
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        CloudTranscriptionError::transient(format!(
+            "{provider} cloud transcription returned HTTP {status}{detail}"
         ))
     } else {
-        classify_status(status, provider)
+        CloudTranscriptionError::auth_config(format!(
+            "{provider} cloud transcription returned HTTP {status}{detail}"
+        ))
     }
 }
 
@@ -396,7 +436,86 @@ pub(crate) fn validate_provider_upload_size(
         )));
     }
 
+    if provider == PROVIDER_MAI_TRANSCRIBE && file_size_bytes > MAI_TRANSCRIBE_MAX_UPLOAD_BYTES {
+        return Err(CloudTranscriptionError::upload_too_large(format!(
+            "Azure MAI-Transcribe accepts audio uploads up to 300 MB; this file is {}",
+            format_megabytes(file_size_bytes)
+        )));
+    }
+
     Ok(())
+}
+
+fn mai_supports_container(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            MAI_NATIVE_EXTENSIONS.contains(&extension.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// Decode any locally supported audio file and re-encode it as 16 kHz mono
+/// PCM16 WAV so Azure MAI-Transcribe (WAV/MP3/FLAC only) can accept it.
+async fn transcode_to_mai_wav(audio_path: &Path) -> Result<Vec<u8>, CloudTranscriptionError> {
+    let path = audio_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let decoded = crate::audio::decoder::decode_audio_file(&path).map_err(|e| {
+            CloudTranscriptionError::unsupported_media(format!(
+                "Could not decode audio for cloud upload: {e}"
+            ))
+        })?;
+        let samples = decoded.to_whisper_format();
+        mai_wav_upload_from_samples(&samples)
+    })
+    .await
+    .map_err(|e| {
+        CloudTranscriptionError::transient(format!("Audio conversion task failed: {e}"))
+    })?
+}
+
+fn mai_wav_upload_from_samples(samples: &[f32]) -> Result<Vec<u8>, CloudTranscriptionError> {
+    validate_mai_wav_estimate(samples.len())?;
+    Ok(encode_wav_pcm16_mono_16k(samples))
+}
+
+fn validate_mai_wav_estimate(sample_count: usize) -> Result<(), CloudTranscriptionError> {
+    let estimated_bytes = 44_u64 + sample_count as u64 * 2;
+    if estimated_bytes > MAI_TRANSCRIBE_MAX_UPLOAD_BYTES {
+        return Err(CloudTranscriptionError::upload_too_large(format!(
+            "Audio converted to WAV for MAI-Transcribe would be {}; Azure accepts uploads up to 300 MB",
+            format_megabytes(estimated_bytes)
+        )));
+    }
+    Ok(())
+}
+
+fn encode_wav_pcm16_mono_16k(samples: &[f32]) -> Vec<u8> {
+    const SAMPLE_RATE: u32 = 16_000;
+    let data_len = (samples.len() * 2) as u32;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+
+    for sample in samples {
+        let value = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    bytes
 }
 
 fn is_official_openai_api_url(value: &str) -> bool {
@@ -430,6 +549,59 @@ fn response_body_mentions_upload_size(body: &str) -> bool {
         || normalized.contains("25mb")
         || normalized.contains("26214400")
         || normalized.contains("25000000")
+}
+
+/// Provider error bodies that reject the audio for its duration rather than
+/// its byte size (e.g. long voice recordings against LLM-based models).
+fn response_body_mentions_duration_limit(body: &str) -> bool {
+    let normalized = body.to_ascii_lowercase();
+    normalized.contains("too long")
+        || normalized.contains("audio duration")
+        || normalized.contains("duration limit")
+        || (normalized.contains("maximum")
+            && (normalized.contains("duration") || normalized.contains("length")))
+        || (normalized.contains("exceed")
+            && (normalized.contains("duration")
+                || normalized.contains("length")
+                || normalized.contains("hours")))
+}
+
+/// Provider error bodies that reject the audio format/codec/container.
+fn response_body_mentions_unsupported_media(body: &str) -> bool {
+    let normalized = body.to_ascii_lowercase();
+    if normalized.contains("unsupported media type") {
+        return true;
+    }
+    let mentions_media = normalized.contains("audio")
+        || normalized.contains("codec")
+        || normalized.contains("media type")
+        || normalized.contains("content type")
+        || normalized.contains("container");
+    let mentions_rejection = normalized.contains("unsupported")
+        || normalized.contains("not supported")
+        || normalized.contains("invalid format")
+        || normalized.contains("unrecognized format")
+        || normalized.contains("failed to decode")
+        || normalized.contains("cannot decode")
+        || normalized.contains("could not decode")
+        || normalized.contains("invalidaudio");
+    mentions_media && mentions_rejection
+}
+
+/// Keep a short, whitespace-collapsed slice of the provider error body so
+/// logs explain *why* a request was rejected without dumping full payloads.
+fn sanitized_body_snippet(body: &str) -> String {
+    let cleaned = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    let snippet: String = cleaned.chars().take(200).collect();
+    let ellipsis = if cleaned.chars().count() > 200 {
+        "…"
+    } else {
+        ""
+    };
+    format!(": {snippet}{ellipsis}")
 }
 
 fn format_megabytes(bytes: u64) -> String {
@@ -566,6 +738,129 @@ mod tests {
             250_000_000,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn mai_upload_preflight_rejects_files_over_300_mb() {
+        let error = validate_provider_upload_size(
+            PROVIDER_MAI_TRANSCRIBE,
+            Some("https://example.cognitiveservices.azure.com"),
+            300_000_001,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UploadTooLarge
+        );
+    }
+
+    #[test]
+    fn duration_limit_bodies_classify_as_upload_too_large() {
+        for body in [
+            r#"{"code":"InvalidRequest","message":"The audio is too long."}"#,
+            r#"{"error":{"message":"Audio duration exceeds the maximum supported length"}}"#,
+            r#"{"message":"audio duration limit exceeded for this model"}"#,
+        ] {
+            let error =
+                classify_status_with_body(reqwest::StatusCode::BAD_REQUEST, "Azure Speech", body);
+            assert_eq!(
+                error.category(),
+                CloudFallbackReasonCategory::UploadTooLarge,
+                "body not classified as upload_too_large: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_format_bodies_classify_as_unsupported_media() {
+        for body in [
+            r#"{"code":"InvalidRequest","message":"The audio format is not supported."}"#,
+            r#"{"error":{"message":"Unsupported audio codec in uploaded file"}}"#,
+            r#"{"message":"failed to decode audio content"}"#,
+        ] {
+            let error =
+                classify_status_with_body(reqwest::StatusCode::BAD_REQUEST, "Azure Speech", body);
+            assert_eq!(
+                error.category(),
+                CloudFallbackReasonCategory::UnsupportedMedia,
+                "body not classified as unsupported_media: {body}"
+            );
+        }
+
+        let error = classify_status_with_body(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Azure Speech",
+            "",
+        );
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UnsupportedMedia
+        );
+    }
+
+    #[test]
+    fn classification_keeps_provider_error_detail_for_logs() {
+        let error = classify_status_with_body(
+            reqwest::StatusCode::BAD_REQUEST,
+            "Azure Speech",
+            "{\"code\":\"InvalidRequest\",\n  \"message\":\"Something specific went wrong\"}",
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("Something specific went wrong"),
+            "provider error body detail missing from message: {message}"
+        );
+    }
+
+    #[test]
+    fn mai_container_support_matches_azure_supported_formats() {
+        assert!(mai_supports_container(Path::new("C:/rec/audio.mp3")));
+        assert!(mai_supports_container(Path::new("C:/rec/audio.WAV")));
+        assert!(mai_supports_container(Path::new("C:/rec/audio.flac")));
+        assert!(!mai_supports_container(Path::new("C:/rec/audio.m4a")));
+        assert!(!mai_supports_container(Path::new("C:/rec/audio.mp4")));
+        assert!(!mai_supports_container(Path::new("C:/rec/audio.ogg")));
+        assert!(!mai_supports_container(Path::new("C:/rec/audio")));
+    }
+
+    #[test]
+    fn encoded_wav_has_valid_pcm16_mono_16k_header() {
+        let samples = vec![0.0_f32, 0.5, -0.5, 1.0, -1.0];
+        let wav = encode_wav_pcm16_mono_16k(&samples);
+
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1, "PCM format");
+        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1, "mono");
+        assert_eq!(
+            u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
+            16_000,
+            "sample rate"
+        );
+        assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16, "bit depth");
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(wav.len(), 44 + samples.len() * 2);
+
+        // First sample 0.0 -> 0, clipped samples stay in i16 range.
+        assert_eq!(i16::from_le_bytes([wav[44], wav[45]]), 0);
+        assert_eq!(i16::from_le_bytes([wav[50], wav[51]]), i16::MAX);
+        assert_eq!(i16::from_le_bytes([wav[52], wav[53]]), -i16::MAX);
+    }
+
+    #[test]
+    fn mai_wav_upload_rejects_conversions_over_300_mb() {
+        let over_cap_sample_count = ((MAI_TRANSCRIBE_MAX_UPLOAD_BYTES - 44) / 2 + 1) as usize;
+        let error = validate_mai_wav_estimate(over_cap_sample_count).unwrap_err();
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UploadTooLarge
+        );
+
+        let under_cap_sample_count = ((MAI_TRANSCRIBE_MAX_UPLOAD_BYTES - 44) / 2) as usize;
+        assert!(validate_mai_wav_estimate(under_cap_sample_count).is_ok());
+        assert!(mai_wav_upload_from_samples(&[0.0_f32; 16]).is_ok());
     }
 }
 

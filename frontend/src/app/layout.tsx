@@ -223,7 +223,15 @@ export default function RootLayout({
 
       if (reason === 'upload_too_large') {
         toast.warning('Recording too large for cloud transcription', {
-          description: 'The selected cloud provider rejected the upload size. ClawScribe is switching to local transcription.',
+          description: 'The selected cloud provider rejected this recording as too large or too long. ClawScribe is switching to local transcription.',
+          duration: 14000,
+        });
+        return;
+      }
+
+      if (reason === 'unsupported_media') {
+        toast.warning('Audio format not supported by cloud provider', {
+          description: 'The selected cloud provider rejected this audio format. ClawScribe is switching to local transcription.',
           duration: 14000,
         });
         return;
