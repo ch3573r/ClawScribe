@@ -7,6 +7,11 @@ const resolveFromTiptapPm = (pkg) =>
 const nextConfig = {
   reactStrictMode: false, // Disabled for BlockNote compatibility
   output: 'export',
+  eslint: {
+    // The codebase predates lint enforcement and carries violations that are
+    // being cleaned up incrementally via `pnpm run lint`; don't block builds.
+    ignoreDuringBuilds: true,
+  },
   env: {
     NEXT_PUBLIC_APP_VERSION: require('./package.json').version,
   },

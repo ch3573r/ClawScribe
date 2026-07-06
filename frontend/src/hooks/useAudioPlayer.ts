@@ -16,7 +16,7 @@ export const useAudioPlayer = (audioPath: string | null) => {
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const startTimeRef = useRef<number>(0);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
-  const rafRef = useRef<number>();
+  const rafRef = useRef<number | undefined>(undefined);
   const seekTimeRef = useRef<number>(0);
   const manualStopRef = useRef(false);
   // Mirror state into refs so play/pause/seek keep stable identities across

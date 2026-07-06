@@ -90,7 +90,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 20 reached end-of-life April 2026; 24 is the active LTS and
+          # matches local development.
+          node-version: 24
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 

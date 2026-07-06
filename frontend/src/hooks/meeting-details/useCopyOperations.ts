@@ -11,7 +11,7 @@ interface UseCopyOperationsProps {
   transcripts: Transcript[];
   meetingTitle: string;
   aiSummary: Summary | null;
-  blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef>;
+  blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef | null>;
   includeSpeakerLabels?: boolean;
 }
 
