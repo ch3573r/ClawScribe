@@ -146,6 +146,33 @@ jobs:
           }
           Write-Host "Updater guard OK: $installerVersion > published $publishedVersion."
 
+      - name: Guard against republishing an existing tag
+        # Publishing tags the release as v<package.json version>. If that tag
+        # already exists on a different commit, a publish from newer main would
+        # silently replace the released binaries while latest.json keeps the
+        # same runtime version — installed clients would never see the change
+        # as an update. Fail fast and require a version bump. Republishing the
+        # exact tagged commit stays allowed so failed uploads can be retried.
+        if: ${{ inputs.publish && !inputs['check-only'] }}
+        shell: pwsh
+        run: |
+          $version = $env:CLAWSCRIBE_SOURCE_VERSION
+          $tagRef = "refs/tags/v$version"
+          $remote = git ls-remote origin $tagRef "$tagRef^{}"
+          if (-not $remote) {
+            Write-Host "Tag v$version does not exist yet; publish will create it."
+            exit 0
+          }
+          $lines = @($remote -split "`r?`n" | Where-Object { $_ })
+          $peeled = $lines | Where-Object { $_ -match [regex]::Escape("$tagRef^{}") } | Select-Object -First 1
+          $line = if ($peeled) { $peeled } else { $lines[0] }
+          $tagSha = ($line -split "\s+")[0]
+          $headSha = (git rev-parse HEAD).Trim()
+          if ($tagSha -ne $headSha) {
+            throw "Tag v$version already exists at $tagSha, but this build is at $headSha. Publishing would ship different code under the already-released version and installed clients would never see it as an update. Bump the version in frontend/package.json (and Cargo.toml/tauri.conf.json) before publishing."
+          }
+          Write-Host "Tag v$version already points at $headSha; republishing the same commit is allowed."
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

@@ -7,3 +7,12 @@ overrides:
   prosemirror-view: 1.41.3
   prosemirror-transform: 1.10.4
   prosemirror-tables: 1.8.1
+
+# pnpm 10 refuses dependency build scripts without an explicit decision and
+# can fail installs/builds on unapproved ones. Neither script is needed:
+# sharp only backs Next.js image optimization (disabled here: static export
+# with unoptimized images) and unrs-resolver only accelerates eslint import
+# resolution.
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver

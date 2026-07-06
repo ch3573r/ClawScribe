@@ -500,9 +500,14 @@ pub fn decode_audio_file_with_progress(
 
     // Decode all packets. Preallocate from metadata when plausible: repeated
     // growth reallocations copy GB-scale buffers and spike peak memory.
-    const MAX_PREALLOC_SAMPLES: usize = 512 * 1024 * 1024; // 2 GB of f32
-    let mut all_samples: Vec<f32> =
-        Vec::with_capacity(expected_samples.unwrap_or(0).min(MAX_PREALLOC_SAMPLES));
+    // Metadata is untrusted (bogus n_frames must not abort the process), so
+    // reserve fallibly and fall back to normal growth if the allocation is
+    // refused.
+    const MAX_PREALLOC_SAMPLES: usize = 256 * 1024 * 1024; // 1 GiB of f32
+    let mut all_samples: Vec<f32> = Vec::new();
+    if let Some(expected) = expected_samples {
+        let _ = all_samples.try_reserve_exact(expected.min(MAX_PREALLOC_SAMPLES));
+    }
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
 
     let mut last_progress = 0u32;
