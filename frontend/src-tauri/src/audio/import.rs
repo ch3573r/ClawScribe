@@ -654,8 +654,10 @@ async fn run_import<R: Runtime>(
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
     // for the lowest-energy window near the target split point and cut there.
+    // Consume the VAD segments by value: cloning them would double the resident
+    // memory of the meeting's entire speech audio.
     let mut processable_segments: Vec<crate::audio::vad::SpeechSegment> = Vec::new();
-    for segment in &speech_segments {
+    for segment in speech_segments {
         if segment.samples.len() > MAX_TRANSCRIPTION_SEGMENT_SAMPLES {
             debug!(
                 "Splitting large segment ({:.0}ms, {} samples) at silence boundaries",
@@ -663,11 +665,12 @@ async fn run_import<R: Runtime>(
                 segment.samples.len()
             );
 
-            let sub_segments = split_segment_at_silence(segment, MAX_TRANSCRIPTION_SEGMENT_SAMPLES);
+            let sub_segments =
+                split_segment_at_silence(&segment, MAX_TRANSCRIPTION_SEGMENT_SAMPLES);
             debug!("Split into {} sub-segments", sub_segments.len());
             processable_segments.extend(sub_segments);
         } else {
-            processable_segments.push(segment.clone());
+            processable_segments.push(segment);
         }
     }
 

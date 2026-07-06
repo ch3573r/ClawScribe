@@ -33,12 +33,16 @@ impl OpenAiWhisperProvider {
 
     fn form(
         &self,
-        audio: Vec<u8>,
+        audio: bytes::Bytes,
         file_name: &str,
         mime_type: &str,
         language: Option<&str>,
     ) -> Result<Form, CloudTranscriptionError> {
-        let part = Part::bytes(audio)
+        // Bytes clones are refcounted, so retries never duplicate the audio
+        // buffer (uploads can be hundreds of MB). stream_with_length keeps a
+        // Content-Length header instead of switching to chunked encoding.
+        let length = audio.len() as u64;
+        let part = Part::stream_with_length(reqwest::Body::from(audio), length)
             .file_name(file_name.to_string())
             .mime_str(mime_type)
             .map_err(|e| {
@@ -66,6 +70,7 @@ impl CloudTranscriptionProvider for OpenAiWhisperProvider {
         mime_type: &str,
         language: Option<&str>,
     ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
+        let audio = bytes::Bytes::from(audio);
         for attempt in 1..=MAX_ATTEMPTS {
             let response = self
                 .client

@@ -2,7 +2,6 @@
     "name": "clawscribe",
     "version": "0.5.34",
     "private": true,
-    "main": "electron/main.js",
     "scripts": {
         "dev": "next dev -p 3118",
         "build": "next build",

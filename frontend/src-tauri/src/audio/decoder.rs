@@ -490,17 +490,20 @@ pub fn decode_audio_file_with_progress(
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| anyhow!("Failed to create decoder: {}", e))?;
 
-    // Decode all packets
-    let mut all_samples: Vec<f32> = Vec::new();
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
-
-    // Calculate expected samples for progress tracking
+    // Calculate expected samples for progress tracking and preallocation
     let expected_duration = track
         .codec_params
         .n_frames
         .map(|frames| frames as f64 / sample_rate as f64);
     let expected_samples =
         expected_duration.map(|dur| (dur * sample_rate as f64 * channels as f64) as usize);
+
+    // Decode all packets. Preallocate from metadata when plausible: repeated
+    // growth reallocations copy GB-scale buffers and spike peak memory.
+    const MAX_PREALLOC_SAMPLES: usize = 512 * 1024 * 1024; // 2 GB of f32
+    let mut all_samples: Vec<f32> =
+        Vec::with_capacity(expected_samples.unwrap_or(0).min(MAX_PREALLOC_SAMPLES));
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
 
     let mut last_progress = 0u32;
 

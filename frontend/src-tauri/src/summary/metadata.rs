@@ -43,6 +43,10 @@ pub(crate) fn write_detected_summary_language_to_metadata(
     write_language_field_to_metadata(folder, DETECTED_SUMMARY_LANGUAGE_FIELD, summary_language)
 }
 
+/// Production code writes this field through the import/retranscription
+/// metadata writers; this helper only backs the reader's field-separation
+/// tests.
+#[cfg(test)]
 pub(crate) fn write_transcription_source_language_to_metadata(
     folder: &Path,
     source_language: Option<&str>,

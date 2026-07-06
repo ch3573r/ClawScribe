@@ -89,16 +89,28 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     try {
       const backendState = await recordingService.getRecordingState();
 
-      setState(prev => ({
-        ...prev,
-        isRecording: backendState.is_recording,
-        isPaused: backendState.is_paused,
-        isActive: backendState.is_active,
-        recordingDuration: backendState.recording_duration,
-        activeDuration: backendState.active_duration,
-      }));
-
-      console.log('[RecordingStateContext] Synced with backend:', backendState);
+      // This runs every 500ms while recording. Bail out with the previous
+      // object when nothing changed so context consumers don't re-render
+      // twice a second for the entire meeting.
+      setState(prev => {
+        if (
+          prev.isRecording === backendState.is_recording &&
+          prev.isPaused === backendState.is_paused &&
+          prev.isActive === backendState.is_active &&
+          prev.recordingDuration === backendState.recording_duration &&
+          prev.activeDuration === backendState.active_duration
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          isRecording: backendState.is_recording,
+          isPaused: backendState.is_paused,
+          isActive: backendState.is_active,
+          recordingDuration: backendState.recording_duration,
+          activeDuration: backendState.active_duration,
+        };
+      });
     } catch (error) {
       console.error('[RecordingStateContext] Failed to sync with backend:', error);
       // Don't update state on error - keep current state
