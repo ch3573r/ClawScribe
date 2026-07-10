@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.35
+
+- Reworked Home into a focused capture workspace with a clearer recording
+  console, an explicit microphone-to-transcription signal path, recent
+  meetings, and faster access to import and configuration actions.
+- Fixed preferred microphone and system-audio devices staying stale on Home
+  after they were changed in Settings. Home and recording startup now consume
+  the same shared device state immediately after the backend accepts a change.
+- Made long recordings more resilient under transcription load. Live speech
+  segments are staged in a memory-bounded, disk-backed queue, queue progress is
+  reported during stop, and the app preserves the recording and warns clearly
+  if queued transcription cannot be written or fully drained.
+- Reduced peak memory and steady-state overhead by removing redundant audio
+  buffer copies during import, retranscription, and hosted-provider retries;
+  limiting decoder preallocation from untrusted media metadata; and removing
+  high-frequency no-change logging/state updates.
+- Updated the bundled Codex app-server to `0.144.1`, made `gpt-5.6-sol` the
+  default Advanced Codex summary model, and populated the summary model picker
+  from the runtime's live model catalog with reasoning-effort choices.
+- Fixed meeting chat occasionally showing a Codex answer twice when streamed
+  deltas and the completed response snapshot both carried the same output.
+- Improved transcription language selection with system-locale defaults and
+  clearer explicit-language behavior, including German.
+- Upgraded the UI runtime to supported Next.js 15 / React 19 releases and added
+  release guards for public-repository safety, immutable version tags, and
+  repeatable pnpm 10 builds.
+- `latest.json` advertises runtime version `0.5.35`, so installed `0.5.34`
+  clients can discover this update.
+
 ## 0.5.34
 
 - Fixed `0.5.33` failing to open the meeting database on machines whose
