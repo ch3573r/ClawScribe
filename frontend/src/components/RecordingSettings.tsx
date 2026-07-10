@@ -6,6 +6,8 @@ import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
+import { useConfig } from '@/contexts/ConfigContext';
+import { selectedDevicesFromPreferences } from '@/lib/audioDevicePreferences';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -20,6 +22,7 @@ interface RecordingSettingsProps {
 }
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
+  const { setSelectedDevices } = useConfig();
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
@@ -37,6 +40,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       try {
         const prefs = await invoke<RecordingPreferences>('get_recording_preferences');
         setPreferences(prefs);
+        setSelectedDevices(selectedDevicesFromPreferences(prefs));
       } catch (error) {
         console.error('Failed to load recording preferences:', error);
         // If loading fails, get default folder path
@@ -52,7 +56,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     };
 
     loadPreferences();
-  }, []);
+  }, [setSelectedDevices]);
 
   // Load recording notification preference
   useEffect(() => {
@@ -166,6 +170,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setSaving(true);
     try {
       await invoke('set_recording_preferences', { preferences: prefs });
+      // Home, recording start, and Settings all consume the same device state.
+      // Keep it in sync only after the backend accepted the preference update.
+      setSelectedDevices(selectedDevicesFromPreferences(prefs));
       onSave?.(prefs);
 
       toast.success(toastOptions?.successTitle || "Recording preferences saved", {

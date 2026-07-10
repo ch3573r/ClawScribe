@@ -7,15 +7,13 @@ import { AudioBackendSelector } from './AudioBackendSelector';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import Analytics from '@/lib/analytics';
+import type { SelectedDevices } from '@/lib/audioDevicePreferences';
+
+export type { SelectedDevices } from '@/lib/audioDevicePreferences';
 
 export interface AudioDevice {
   name: string;
   device_type: 'Input' | 'Output';
-}
-
-export interface SelectedDevices {
-  micDevice: string | null;
-  systemDevice: string | null;
 }
 
 export interface AudioLevelData {
