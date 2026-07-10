@@ -10,16 +10,16 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as TokioCommand};
 use tokio::time::{sleep, timeout};
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const LEGACY_DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 600;
-const CODEX_RUNTIME_VERSION: &str = "0.139.0";
+const CODEX_RUNTIME_VERSION: &str = "0.144.1";
 const CODEX_RUNTIME_TARGET: &str = "x86_64-pc-windows-msvc";
-const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.139.0-win32-x64";
+const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.144.1-win32-x64";
 const CODEX_RUNTIME_SOURCE_URL: &str =
-    "https://registry.npmjs.org/@openai/codex/-/codex-0.139.0-win32-x64.tgz";
+    "https://registry.npmjs.org/@openai/codex/-/codex-0.144.1-win32-x64.tgz";
 const CODEX_RUNTIME_SHA256: &str =
-    "77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10";
+    "cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4";
 const CODEX_APP_SERVER_MISSING: &str =
     "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
@@ -138,6 +138,68 @@ mod app_server_tests {
         assert_eq!(browser_login["params"]["type"], "chatgpt");
         assert_eq!(device_login["params"]["type"], "chatgptDeviceCode");
         assert_eq!(logout["method"], "account/logout");
+    }
+
+    #[test]
+    fn app_server_model_list_parser_accepts_current_catalog_shape() {
+        let models = parse_codex_model_list(&serde_json::json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "hidden": false,
+                    "defaultReasoningEffort": "low",
+                    "supportedReasoningEfforts": [{
+                        "reasoningEffort": "low",
+                        "description": "Lower latency"
+                    }],
+                    "inputModalities": ["text", "image"],
+                    "isDefault": true
+                },
+                {
+                    "id": "hidden-model",
+                    "displayName": "Hidden",
+                    "hidden": true
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert_eq!(models[0].display_name, "GPT-5.6-Sol");
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            models[0].supported_reasoning_efforts[0].reasoning_effort,
+            "low"
+        );
+        assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn app_server_model_list_parser_accepts_legacy_catalog_shape() {
+        let models = parse_codex_model_list(&serde_json::json!({
+            "models": [{
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "visibility": "list",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [{
+                    "effort": "medium",
+                    "description": "Balanced"
+                }]
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.5");
+        assert_eq!(models[0].input_modalities, vec!["text", "image"]);
+        assert_eq!(
+            models[0].supported_reasoning_efforts[0].reasoning_effort,
+            "medium"
+        );
     }
 
     #[test]
@@ -305,6 +367,8 @@ for line in sys.stdin:
         send({{"method": "account/updated", "params": {{"account": {{"email": "alex@example.test"}}}}}})
     elif method == "account/logout":
         send({{"id": mid, "result": {{"ok": True}}}})
+    elif method == "model/list":
+        send({{"id": mid, "result": {{"data": [{{"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol", "hidden": False, "defaultReasoningEffort": "low", "supportedReasoningEfforts": [{{"reasoningEffort": "low", "description": "Lower latency"}}], "inputModalities": ["text", "image"], "isDefault": True}}], "nextCursor": None}}}})
     elif method == "thread/start":
         send({{"id": mid, "result": {{"thread": {{"id": "thread-1"}}}}}})
     elif method == "turn/start":
@@ -395,6 +459,18 @@ for line in sys.stdin:
         .unwrap();
         assert!(!log.contains("Bundle Codex"));
         assert!(!log.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_lists_picker_visible_models() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "ok");
+        let models = provider.list_models().await.unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert!(models[0].is_default);
     }
 
     #[cfg(unix)]
@@ -511,6 +587,25 @@ pub struct CodexCommandStatus {
     pub stdout: String,
     pub stderr: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningEffort {
+    pub reasoning_effort: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelInfo {
+    pub id: String,
+    pub display_name: String,
+    pub hidden: bool,
+    pub is_default: bool,
+    pub default_reasoning_effort: Option<String>,
+    pub supported_reasoning_efforts: Vec<CodexReasoningEffort>,
+    pub input_modalities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -784,6 +879,21 @@ impl CodexAppServerProvider {
         })
     }
 
+    pub async fn list_models(&self) -> Result<Vec<CodexModelInfo>, String> {
+        validate_codex_runtime_file(&self.app_server_binary)?;
+        let mut session = AppServerSession::start(self).await?;
+        let result = session
+            .request(
+                "model/list",
+                serde_json::json!({
+                    "limit": 100,
+                    "includeHidden": false,
+                }),
+            )
+            .await?;
+        parse_codex_model_list(&result)
+    }
+
     pub async fn test_processing(
         &self,
         _scratch_parent: Option<&Path>,
@@ -977,6 +1087,13 @@ pub async fn codex_check_installation<R: Runtime>(
             .codex,
     );
     codex_installation_status_for_config(&app, config).await
+}
+
+#[tauri::command]
+pub async fn codex_list_models<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<CodexModelInfo>, String> {
+    provider_from_app(&app)?.list_models().await
 }
 
 #[tauri::command]
@@ -1898,6 +2015,92 @@ fn parse_account_state(value: &Value) -> CodexAccountState {
         account_email: email,
         plan_type: plan,
         rate_limit_state: rate_limit,
+    }
+}
+
+fn parse_codex_model_list(value: &Value) -> Result<Vec<CodexModelInfo>, String> {
+    let entries = value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex app-server model/list returned no model catalog".to_string())?;
+    let mut models = Vec::new();
+
+    for entry in entries {
+        let id = json_string_at(entry, &["id"])
+            .or_else(|| json_string_at(entry, &["model"]))
+            .or_else(|| json_string_at(entry, &["slug"]));
+        let Some(id) = id.filter(|id| !id.trim().is_empty()) else {
+            continue;
+        };
+        let hidden = entry
+            .get("hidden")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                json_string_at(entry, &["visibility"])
+                    .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
+            });
+        if hidden {
+            continue;
+        }
+
+        let supported_reasoning_efforts = entry
+            .get("supportedReasoningEfforts")
+            .or_else(|| entry.get("supported_reasoning_efforts"))
+            .or_else(|| entry.get("supported_reasoning_levels"))
+            .and_then(Value::as_array)
+            .map(|efforts| {
+                efforts
+                    .iter()
+                    .filter_map(|effort| {
+                        let reasoning_effort = json_string_at(effort, &["reasoningEffort"])
+                            .or_else(|| json_string_at(effort, &["reasoning_effort"]))
+                            .or_else(|| json_string_at(effort, &["effort"]))?;
+                        Some(CodexReasoningEffort {
+                            reasoning_effort,
+                            description: json_string_at(effort, &["description"]),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let input_modalities = entry
+            .get("inputModalities")
+            .or_else(|| entry.get("input_modalities"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty())
+            .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
+
+        models.push(CodexModelInfo {
+            display_name: json_string_at(entry, &["displayName"])
+                .or_else(|| json_string_at(entry, &["display_name"]))
+                .unwrap_or_else(|| id.clone()),
+            id,
+            hidden: false,
+            is_default: entry
+                .get("isDefault")
+                .or_else(|| entry.get("is_default"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            default_reasoning_effort: json_string_at(entry, &["defaultReasoningEffort"])
+                .or_else(|| json_string_at(entry, &["default_reasoning_effort"]))
+                .or_else(|| json_string_at(entry, &["default_reasoning_level"])),
+            supported_reasoning_efforts,
+            input_modalities,
+        });
+    }
+
+    if models.is_empty() {
+        Err("Codex app-server model/list returned no picker-visible models".to_string())
+    } else {
+        Ok(models)
     }
 }
 

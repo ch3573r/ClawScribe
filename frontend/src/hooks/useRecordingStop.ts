@@ -174,6 +174,19 @@ export function useRecordingStop(
             break;
           }
 
+          // The backend owns the drain and explicitly stops a worker after its
+          // safety deadline. Do not wait another minute when no worker exists;
+          // the original audio remains available for retranscription.
+          if (!status.is_processing && status.chunks_in_queue > 0) {
+            console.warn('Transcription worker stopped with queued audio remaining', status);
+            setStatus(
+              RecordingStatus.PROCESSING_TRANSCRIPTS,
+              `Live transcript incomplete (${status.chunks_in_queue} chunks); audio preserved`
+            );
+            transcriptionComplete = true;
+            break;
+          }
+
           // If no activity for more than 8 seconds and no chunks in queue, consider it done (increased from 5s to 8s)
           if (status.last_activity_ms > 8000 && status.chunks_in_queue === 0) {
             console.log('Transcription likely complete - no recent activity and empty queue');
@@ -183,8 +196,13 @@ export function useRecordingStop(
 
           // Update user with current status
           if (status.chunks_in_queue > 0) {
-            console.log(`Processing ${status.chunks_in_queue} remaining audio chunks...`);
-            setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, `Processing ${status.chunks_in_queue} remaining chunks...`);
+            const eta = status.estimated_seconds_remaining != null
+              ? ` (~${Math.ceil(status.estimated_seconds_remaining)}s)`
+              : '';
+            setStatus(
+              RecordingStatus.PROCESSING_TRANSCRIPTS,
+              `Processing ${status.chunks_in_queue} remaining chunks${eta}...`
+            );
           }
 
           // Wait before next check
@@ -204,9 +222,9 @@ export function useRecordingStop(
         console.warn('⏰ Transcription wait timeout reached after', elapsedTime, 'ms');
       } else {
         console.log('✅ Transcription completed after', elapsedTime, 'ms');
-        // Wait longer for any late transcript segments (increased from 1s to 4s)
-        console.log('⏳ Waiting for late transcript segments...');
-        await new Promise(resolve => setTimeout(resolve, 4000));
+        // Rust has already joined the worker before stop_recording returns; only
+        // allow one UI tick for the final event handlers to settle.
+        await new Promise(resolve => setTimeout(resolve, 250));
       }
 
       // Final buffer flush: process ALL remaining transcripts regardless of timing

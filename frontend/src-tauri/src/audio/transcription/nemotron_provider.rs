@@ -17,6 +17,27 @@ impl NemotronProvider {
     }
 }
 
+pub(crate) fn resolve_requested_language(
+    language: Option<&str>,
+    system_locale: Option<&str>,
+) -> std::result::Result<String, TranscriptionError> {
+    match language.map(str::trim).filter(|language| !language.is_empty()) {
+        Some("auto-translate") => Err(TranscriptionError::UnsupportedLanguage(
+            "auto-translate (Nemotron transcribes but does not translate)".to_string(),
+        )),
+        Some("auto") | None => system_locale
+            .map(|locale| locale.replace('_', "-").to_ascii_lowercase())
+            .filter(|locale| !locale.is_empty())
+            .ok_or_else(|| {
+                TranscriptionError::EngineFailed(
+                    "Nemotron needs an explicit transcription language because the system locale could not be detected"
+                        .to_string(),
+                )
+            }),
+        Some(language) => Ok(language.replace('_', "-").to_ascii_lowercase()),
+    }
+}
+
 #[async_trait]
 impl TranscriptionProvider for NemotronProvider {
     async fn transcribe(
@@ -24,9 +45,12 @@ impl TranscriptionProvider for NemotronProvider {
         audio: Vec<f32>,
         language: Option<String>,
     ) -> std::result::Result<TranscriptResult, TranscriptionError> {
-        // Language selects the encoder prompt slot (one-hot language_mask) via
-        // languages.json; "auto"/unknown falls back to English.
-        match self.engine.transcribe_audio(audio, language).await {
+        // Nemotron has prompt-conditioned language slots, not language
+        // detection. Resolve Auto from the OS locale rather than silently using
+        // the English slot for every multilingual meeting.
+        let language =
+            resolve_requested_language(language.as_deref(), sys_locale::get_locale().as_deref())?;
+        match self.engine.transcribe_audio(audio, Some(language)).await {
             Ok(text) => Ok(TranscriptResult {
                 text: text.trim().to_string(),
                 confidence: None,  // RNN-T greedy decode provides no confidence
@@ -47,5 +71,30 @@ impl TranscriptionProvider for NemotronProvider {
 
     fn provider_name(&self) -> &'static str {
         "Nemotron"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_uses_system_locale_instead_of_english_fallback() {
+        assert_eq!(
+            resolve_requested_language(Some("auto"), Some("de-DE")).unwrap(),
+            "de-de"
+        );
+        assert_eq!(
+            resolve_requested_language(None, Some("de_AT")).unwrap(),
+            "de-at"
+        );
+    }
+
+    #[test]
+    fn translation_mode_is_rejected_for_nemotron() {
+        assert!(matches!(
+            resolve_requested_language(Some("auto-translate"), Some("de-DE")),
+            Err(TranscriptionError::UnsupportedLanguage(_))
+        ));
     }
 }

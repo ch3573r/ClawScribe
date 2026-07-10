@@ -1,9 +1,11 @@
 use crate::api::TranscriptWord;
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -66,6 +68,9 @@ pub struct RecordingSaver {
     meeting_name: Option<String>,
     metadata: Option<MeetingMetadata>,
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
+    transcript_updates_since_flush: AtomicUsize,
+    transcript_snapshot_written: AtomicBool,
+    last_transcript_flush: Mutex<Instant>,
     chunk_receiver: Option<mpsc::UnboundedReceiver<AudioChunk>>,
     is_saving: Arc<Mutex<bool>>,
     transcription_provider: Option<String>,
@@ -82,6 +87,9 @@ impl RecordingSaver {
             meeting_name: None,
             metadata: None,
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
+            transcript_updates_since_flush: AtomicUsize::new(0),
+            transcript_snapshot_written: AtomicBool::new(false),
+            last_transcript_flush: Mutex::new(Instant::now()),
             chunk_receiver: None,
             is_saving: Arc::new(Mutex::new(false)),
             transcription_provider: None,
@@ -139,7 +147,7 @@ impl RecordingSaver {
                 .find(|s| s.sequence_id == segment.sequence_id)
             {
                 *existing = segment.clone();
-                info!(
+                debug!(
                     "Updated transcript segment {} (seq: {}) - total segments: {}",
                     segment.id,
                     segment.sequence_id,
@@ -148,7 +156,7 @@ impl RecordingSaver {
             } else {
                 // New segment, add it
                 segments.push(segment.clone());
-                info!(
+                debug!(
                     "Added new transcript segment {} (seq: {}) - total segments: {}",
                     segment.id,
                     segment.sequence_id,
@@ -162,10 +170,38 @@ impl RecordingSaver {
             );
         }
 
-        // NEW: Save incrementally to disk
-        if let Some(folder) = &self.meeting_folder {
-            if let Err(e) = self.write_transcripts_json(folder) {
-                warn!("Failed to write incremental transcript update: {}", e);
+        let pending_updates = self
+            .transcript_updates_since_flush
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        let elapsed = self
+            .last_transcript_flush
+            .lock()
+            .map(|last_flush| last_flush.elapsed())
+            .unwrap_or(Duration::MAX);
+        let snapshot_due = transcript_snapshot_due(
+            self.transcript_snapshot_written.load(Ordering::Acquire),
+            pending_updates,
+            elapsed,
+        );
+
+        // Keep a crash-recovery snapshot, but coalesce updates. Rewriting the
+        // entire growing JSON document for every segment is cumulative O(n²)
+        // work over a long meeting.
+        if snapshot_due {
+            if let Some(folder) = &self.meeting_folder {
+                match self.write_transcripts_json(folder) {
+                    Ok(()) => {
+                        self.transcript_updates_since_flush
+                            .store(0, Ordering::Release);
+                        self.transcript_snapshot_written
+                            .store(true, Ordering::Release);
+                        if let Ok(mut last_flush) = self.last_transcript_flush.lock() {
+                            *last_flush = Instant::now();
+                        }
+                    }
+                    Err(e) => warn!("Failed to write incremental transcript update: {}", e),
+                }
             }
         }
     }
@@ -367,7 +403,7 @@ impl RecordingSaver {
             return Err(anyhow::anyhow!("Failed to lock transcript segments"));
         };
 
-        info!(
+        debug!(
             "Writing {} transcript segments to JSON",
             segments_clone.len()
         );
@@ -384,7 +420,7 @@ impl RecordingSaver {
         });
 
         // Serialize to pretty JSON string
-        let json_string = serde_json::to_string_pretty(&json).map_err(|e| {
+        let json_string = serde_json::to_string(&json).map_err(|e| {
             error!("Failed to serialize transcripts to JSON: {}", e);
             anyhow::anyhow!("JSON serialization failed: {}", e)
         })?;
@@ -419,7 +455,7 @@ impl RecordingSaver {
             anyhow::anyhow!("Failed to rename transcript file: {}", e)
         })?;
 
-        info!(
+        debug!(
             "✅ Successfully wrote transcripts.json with {} segments",
             segments_clone.len()
         );
@@ -573,6 +609,40 @@ impl RecordingSaver {
     /// Get meeting name (for reload sync)
     pub fn get_meeting_name(&self) -> Option<String> {
         self.meeting_name.clone()
+    }
+}
+
+const TRANSCRIPT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(15);
+const TRANSCRIPT_SNAPSHOT_MAX_UPDATES: usize = 32;
+
+fn transcript_snapshot_due(
+    snapshot_written: bool,
+    pending_updates: usize,
+    elapsed: Duration,
+) -> bool {
+    !snapshot_written
+        || pending_updates >= TRANSCRIPT_SNAPSHOT_MAX_UPDATES
+        || elapsed >= TRANSCRIPT_SNAPSHOT_INTERVAL
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn transcript_snapshots_are_coalesced_but_first_update_is_durable() {
+        assert!(transcript_snapshot_due(false, 1, Duration::ZERO));
+        assert!(!transcript_snapshot_due(true, 1, Duration::from_secs(1)));
+        assert!(transcript_snapshot_due(
+            true,
+            TRANSCRIPT_SNAPSHOT_MAX_UPDATES,
+            Duration::from_secs(1)
+        ));
+        assert!(transcript_snapshot_due(
+            true,
+            1,
+            TRANSCRIPT_SNAPSHOT_INTERVAL
+        ));
     }
 }
 

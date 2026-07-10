@@ -13,6 +13,12 @@ export interface TranscriptionStatus {
   chunks_in_queue: number;
   is_processing: boolean;
   last_activity_ms: number;
+  queued_audio_seconds: number;
+  processing_realtime_factor: number | null;
+  estimated_seconds_remaining: number | null;
+  spool_bytes: number;
+  total_chunks_queued: number;
+  total_chunks_completed: number;
 }
 
 export interface TranscriptionErrorPayload {

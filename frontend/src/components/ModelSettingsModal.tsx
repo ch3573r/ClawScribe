@@ -134,6 +134,21 @@ interface CodexCommandStatus {
   message: string;
 }
 
+interface CodexReasoningEffort {
+  reasoningEffort: string;
+  description?: string | null;
+}
+
+interface CodexModelInfo {
+  id: string;
+  displayName: string;
+  hidden: boolean;
+  isDefault: boolean;
+  defaultReasoningEffort?: string | null;
+  supportedReasoningEfforts: CodexReasoningEffort[];
+  inputModalities: string[];
+}
+
 interface CodexInstallCommand {
   label: string;
   shell: string;
@@ -147,6 +162,46 @@ interface CodexInstallRepairPlan {
   recommended: CodexInstallCommand;
   alternatives: CodexInstallCommand[];
 }
+
+const CODEX_DEFAULT_MODEL = 'gpt-5.6-sol';
+const CODEX_FALLBACK_MODELS: CodexModelInfo[] = [
+  {
+    id: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6-Sol',
+    hidden: false,
+    isDefault: true,
+    defaultReasoningEffort: 'low',
+    supportedReasoningEfforts: [],
+    inputModalities: ['text', 'image'],
+  },
+  {
+    id: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6-Terra',
+    hidden: false,
+    isDefault: false,
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: [],
+    inputModalities: ['text', 'image'],
+  },
+  {
+    id: 'gpt-5.6-luna',
+    displayName: 'GPT-5.6-Luna',
+    hidden: false,
+    isDefault: false,
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: [],
+    inputModalities: ['text', 'image'],
+  },
+  {
+    id: 'gpt-5.5',
+    displayName: 'GPT-5.5',
+    hidden: false,
+    isDefault: false,
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: [],
+    inputModalities: ['text', 'image'],
+  },
+];
 
 interface AnthropicModel {
   id: string;
@@ -272,12 +327,15 @@ export function ModelSettingsModal({
     codexHomePath: null,
     useExistingUserCodexSession: false,
     codexBinaryPath: null,
-    model: 'gpt-5.5',
+    model: CODEX_DEFAULT_MODEL,
     timeoutSeconds: 600,
   });
   const [codexStatus, setCodexStatus] = useState<CodexInstallationStatus | null>(null);
   const [codexLastResult, setCodexLastResult] = useState<string>('');
   const [isCodexBusy, setIsCodexBusy] = useState<boolean>(false);
+  const [codexModels, setCodexModels] = useState<CodexModelInfo[]>(CODEX_FALLBACK_MODELS);
+  const [codexModelError, setCodexModelError] = useState<string>('');
+  const [isLoadingCodexModels, setIsLoadingCodexModels] = useState<boolean>(false);
 
   // Use global download context instead of local state
   const { isDownloading, getProgress, downloadingModels } = useOllamaDownload();
@@ -336,6 +394,22 @@ export function ModelSettingsModal({
     }
   }, [apiKey]);
 
+  const configuredCodexModel = codexConfig.model || modelConfig.model || CODEX_DEFAULT_MODEL;
+  const codexPickerModels = codexModels.some((model) => model.id === configuredCodexModel)
+    ? codexModels
+    : [
+        {
+          id: configuredCodexModel,
+          displayName: configuredCodexModel,
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: null,
+          supportedReasoningEfforts: [],
+          inputModalities: ['text', 'image'],
+        },
+        ...codexModels,
+      ];
+
   const modelOptions: Record<string, string[]> = {
     ollama: models.map((model) => model.name),
     claude: claudeModels.length > 0 ? claudeModels : CLAUDE_FALLBACK_MODELS,
@@ -345,7 +419,7 @@ export function ModelSettingsModal({
     'builtin-ai': builtinAiModels.map((m) => m.name),
     'custom-openai': [customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL],
     openclaw: ['openclaw-managed'],
-    codex: [codexConfig.model || modelConfig.model || 'gpt-5.5'],
+    codex: codexPickerModels.map((model) => model.id),
   };
 
   const requiresApiKey =
@@ -764,6 +838,25 @@ export function ModelSettingsModal({
     }
   };
 
+  const loadCodexModels = async () => {
+    setIsLoadingCodexModels(true);
+    setCodexModelError('');
+    try {
+      const models = (await invoke('codex_list_models')) as CodexModelInfo[];
+      if (models.length === 0) {
+        throw new Error('Codex app-server returned no picker-visible models');
+      }
+      setCodexModels(models);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Failed to load Codex model catalog:', err);
+      setCodexModels(CODEX_FALLBACK_MODELS);
+      setCodexModelError(message);
+    } finally {
+      setIsLoadingCodexModels(false);
+    }
+  };
+
   const checkCodexInstallation = async (nextConfig?: CodexProviderConfig) => {
     setIsCodexBusy(true);
     try {
@@ -776,6 +869,7 @@ export function ModelSettingsModal({
       setCodexStatus(status);
       setCodexLastResult(status.message);
       if (status.found) {
+        await loadCodexModels();
         toast.success(`Codex app-server runtime found: ${status.version || status.path || 'installed'}`);
       } else {
         toast.error(status.message || 'Bundled Codex runtime is missing or damaged');
@@ -798,6 +892,7 @@ export function ModelSettingsModal({
       setCodexLastResult(status.message);
       if (status.found && status.path) {
         setCodexConfig((prev) => ({ ...prev, codexBinaryPath: null }));
+        await loadCodexModels();
         toast.success(`Codex app-server runtime found: ${status.version || status.path}`);
       } else {
         toast.error(status.message || 'Bundled Codex runtime is missing or damaged');
@@ -842,7 +937,7 @@ export function ModelSettingsModal({
       codexHomeMode: 'clawscribe-isolated' as const,
       useExistingUserCodexSession: false,
       codexBinaryPath: null,
-      model: nextConfig.model.trim() || 'gpt-5.5',
+      model: nextConfig.model.trim() || CODEX_DEFAULT_MODEL,
       timeoutSeconds: nextConfig.timeoutSeconds || 600,
     };
     const saved = (await invoke('codex_save_config', { config: normalized })) as { processing?: { codex?: CodexProviderConfig } };
@@ -921,7 +1016,7 @@ export function ModelSettingsModal({
     if (cachedModel && providerModels.includes(cachedModel)) {
       setModelConfig((prev: ModelConfig) => ({ ...prev, model: cachedModel }));
     }
-  }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
+  }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, codexModels, modelConfig.provider]);
 
   const handleSave = async () => {
     // For custom-openai provider, save the custom config first
@@ -1019,7 +1114,7 @@ export function ModelSettingsModal({
       try {
         const savedCodexConfig = await saveCodexConfig({
           ...codexConfig,
-          model: codexConfig.model.trim() || updatedConfig.model || 'gpt-5.5',
+          model: codexConfig.model.trim() || updatedConfig.model || CODEX_DEFAULT_MODEL,
         });
         updatedConfig.model = savedCodexConfig.model;
         setModelConfig(updatedConfig);
@@ -1622,17 +1717,32 @@ export function ModelSettingsModal({
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_140px]">
               <div>
                 <Label htmlFor="codex-model">Codex model</Label>
-                <Input
-                  id="codex-model"
+                <Select
                   value={codexConfig.model}
-                  onChange={(e) => {
-                    const model = e.target.value;
+                  onValueChange={(model) => {
                     setCodexConfig((prev) => ({ ...prev, model }));
                     setModelConfig((prev: ModelConfig) => ({ ...prev, model }));
                   }}
-                  placeholder="gpt-5.5"
-                  className="mt-1"
-                />
+                  disabled={isLoadingCodexModels}
+                >
+                  <SelectTrigger id="codex-model" className="mt-1">
+                    <SelectValue placeholder={isLoadingCodexModels ? 'Loading models...' : 'Select Codex model'} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {codexPickerModels.map((model) => (
+                      <SelectItem key={model.id} value={model.id}>
+                        {model.displayName} · {model.id}{model.isDefault ? ' · Recommended' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {isLoadingCodexModels
+                    ? 'Loading the model catalog from Codex app-server...'
+                    : codexModelError
+                      ? 'The live catalog is unavailable; showing bundled fallback choices.'
+                      : 'Models are loaded from the bundled Codex app-server catalog.'}
+                </p>
               </div>
               <div>
                 <Label htmlFor="codex-timeout">Timeout</Label>

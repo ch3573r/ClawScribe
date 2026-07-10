@@ -41,7 +41,7 @@ ClawScribe must not launch or suggest:
       "codexHomeMode": "clawscribe-isolated",
       "codexHomePath": "%APPDATA%\\ClawScribe\\codex",
       "useExistingUserCodexSession": false,
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "timeoutSeconds": 600
     }
   }
@@ -62,6 +62,7 @@ start Codex app-server with stdio transport
 send initialize
 send initialized
 send account/read
+send model/list for picker-visible Summary models
 ```
 
 Login:
@@ -99,6 +100,10 @@ Meeting processing:
 thread/start
 turn/start
 ```
+
+Codex remains a Summary provider. It is not offered as a transcription engine;
+the transcription model picker continues to manage Whisper, Parakeet,
+Nemotron, Hosted Whisper, and MAI-Transcribe independently.
 
 Each meeting must use a fresh thread/turn. The only meeting content sent to
 Codex is the normalized transcript, metadata, and strict output instructions.

@@ -125,7 +125,7 @@ export function About() {
                     ClawScribe is an OpenClaw fork of Meetily Community Edition. Meetily is copyright Zackriya Solutions and contributors under the MIT License.
                 </p>
                 <p className="text-xs text-muted-foreground mt-2">
-                    Advanced Codex app-server bundles @openai/codex 0.139.0 for Windows x64 under Apache-2.0. Runtime SHA256: 77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10.
+                    Advanced Codex app-server bundles @openai/codex 0.144.1 for Windows x64 under Apache-2.0. Runtime SHA256: cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4.
                 </p>
             </div>
 

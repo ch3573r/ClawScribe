@@ -4,13 +4,20 @@
 
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
+use super::queue::{
+    QueuedAudioChunk, TranscriptionMetrics, TranscriptionMetricsSnapshot,
+    TranscriptionQueueReceiver,
+};
 use crate::api::TranscriptWord;
 use crate::audio::AudioChunk;
 use log::{debug, error, info, warn};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Runtime};
+use tokio_util::sync::CancellationToken;
 
 // Sequence counter for transcript updates
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -22,6 +29,69 @@ static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
 /// attribution. Set via `set_source_attribution_enabled`. When off, segments
 /// carry no speaker label so nothing mislabels who spoke.
 pub static SOURCE_ATTRIBUTION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+static ACTIVE_TRANSCRIPTION_METRICS: Lazy<StdMutex<Option<Arc<TranscriptionMetrics>>>> =
+    Lazy::new(|| StdMutex::new(None));
+
+pub struct TranscriptionTask {
+    pub handle: tokio::task::JoinHandle<()>,
+    cancellation: CancellationToken,
+    metrics: Arc<TranscriptionMetrics>,
+}
+
+impl TranscriptionTask {
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub fn mark_stopped(&self) {
+        self.metrics.set_worker_active(false);
+    }
+}
+
+pub fn current_transcription_metrics() -> Option<TranscriptionMetricsSnapshot> {
+    ACTIVE_TRANSCRIPTION_METRICS
+        .lock()
+        .ok()
+        .and_then(|metrics| metrics.as_ref().map(|metrics| metrics.snapshot()))
+}
+
+struct ProcessingMetricsGuard {
+    metrics: Arc<TranscriptionMetrics>,
+    audio_ms: u64,
+    spool_bytes: u64,
+    started: Instant,
+    completed: bool,
+}
+
+impl ProcessingMetricsGuard {
+    fn new(metrics: Arc<TranscriptionMetrics>, item: &QueuedAudioChunk) -> Self {
+        metrics.mark_processing_started();
+        Self {
+            metrics,
+            audio_ms: item.audio_ms(),
+            spool_bytes: item.spool_bytes(),
+            started: Instant::now(),
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        if !self.completed {
+            self.metrics
+                .mark_completed(self.audio_ms, self.spool_bytes, self.started.elapsed());
+            self.completed = true;
+        }
+    }
+}
+
+impl Drop for ProcessingMetricsGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.metrics.mark_processing_stopped();
+        }
+    }
+}
 
 /// Reset the speech detected flag for a new recording session
 pub fn reset_speech_detected_flag() {
@@ -52,13 +122,21 @@ pub struct TranscriptUpdate {
 // NOTE: get_transcript_history and get_recording_meeting_name functions
 // have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
 
-/// Optimized parallel transcription task ensuring ZERO chunk loss
+/// Start the serial, memory-bounded transcription task.
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
-    transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
+    transcription_receiver: TranscriptionQueueReceiver,
+) -> TranscriptionTask {
+    let metrics = transcription_receiver.metrics();
+    metrics.set_worker_active(true);
+    if let Ok(mut active_metrics) = ACTIVE_TRANSCRIPTION_METRICS.lock() {
+        *active_metrics = Some(metrics.clone());
+    }
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task_metrics = metrics.clone();
+    let handle = tokio::spawn(async move {
+        info!("Starting memory-bounded transcription task");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
         let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await
@@ -71,13 +149,24 @@ pub fn start_transcription_task<R: Runtime>(
                     "userMessage": "Recording failed: Unable to initialize speech recognition. Please check your model settings.",
                     "actionable": true
                 }));
+                task_metrics.set_worker_active(false);
+                let _ = app.emit(
+                    "transcription-complete",
+                    serde_json::json!({
+                        "cancelled": false,
+                        "failed": true,
+                        "error": e
+                    }),
+                );
                 return;
             }
         };
 
-        // Create parallel workers for faster processing while preserving ALL chunks
-        const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
-        let (work_sender, work_receiver) = tokio::sync::mpsc::unbounded_channel::<AudioChunk>();
+        // Serial processing keeps transcript emission in chronological order.
+        const NUM_WORKERS: usize = 1;
+        // A single buffered item plus the item currently in inference bounds the
+        // worker-side memory. The remaining backlog stays in the disk queue.
+        let (work_sender, work_receiver) = tokio::sync::mpsc::channel::<QueuedAudioChunk>(1);
         let work_receiver = Arc::new(tokio::sync::Mutex::new(work_receiver));
 
         // Track completion: AtomicU64 for chunks queued, AtomicU64 for chunks completed
@@ -92,7 +181,7 @@ pub fn start_transcription_task<R: Runtime>(
         );
 
         // Spawn worker tasks
-        let mut worker_handles = Vec::new();
+        let mut worker_handles = tokio::task::JoinSet::new();
         for worker_id in 0..NUM_WORKERS {
             let engine_clone = match &transcription_engine {
                 TranscriptionEngine::Whisper(e) => TranscriptionEngine::Whisper(e.clone()),
@@ -104,8 +193,9 @@ pub fn start_transcription_task<R: Runtime>(
             let chunks_completed_clone = chunks_completed.clone();
             let input_finished_clone = input_finished.clone();
             let chunks_queued_clone = chunks_queued.clone();
+            let metrics_clone = task_metrics.clone();
 
-            let worker_handle = tokio::spawn(async move {
+            worker_handles.spawn(async move {
                 info!("👷 Worker {} started", worker_id);
 
                 // PRE-VALIDATE model state to avoid repeated async calls per chunk
@@ -137,7 +227,10 @@ pub fn start_transcription_task<R: Runtime>(
                     };
 
                     match chunk {
-                        Some(chunk) => {
+                        Some(queued_chunk) => {
+                            let mut metrics_guard =
+                                ProcessingMetricsGuard::new(metrics_clone.clone(), &queued_chunk);
+                            let chunk = queued_chunk.chunk;
                             // PERFORMANCE OPTIMIZATION: Reduce logging in hot path
                             // Only log every 10th chunk per worker to reduce I/O overhead
                             let should_log_this_chunk = chunk.chunk_id % 10 == 0;
@@ -156,6 +249,7 @@ pub fn start_transcription_task<R: Runtime>(
                                 warn!("⚠️ Worker {}: Model unloaded, but continuing to preserve chunk {}", worker_id, chunk.chunk_id);
                                 // Still count as completed even if we can't process
                                 chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                metrics_guard.complete();
                                 continue;
                             }
 
@@ -298,6 +392,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             // Skip silently, this is expected for very short chunks
                                             info!("Worker {}: {}", worker_id, e);
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                            metrics_guard.complete();
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
@@ -306,6 +401,7 @@ pub fn start_transcription_task<R: Runtime>(
                                                 worker_id
                                             );
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                            metrics_guard.complete();
                                             continue;
                                         }
                                         _ => {
@@ -323,6 +419,7 @@ pub fn start_transcription_task<R: Runtime>(
                             // Mark chunk as completed
                             let completed =
                                 chunks_completed_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                            metrics_guard.complete();
                             let queued = chunks_queued_clone.load(Ordering::SeqCst);
 
                             // PERFORMANCE: Only log progress every 5th chunk to reduce I/O overhead
@@ -336,20 +433,24 @@ pub fn start_transcription_task<R: Runtime>(
                                 );
                             }
 
-                            // Emit progress event for frontend
-                            let progress_percentage = if queued > 0 {
-                                (completed as f64 / queued as f64 * 100.0) as u32
-                            } else {
-                                100
-                            };
+                            // Avoid a WebView event and serialization round-trip
+                            // for every segment. Exact status remains available
+                            // through get_transcription_status.
+                            if completed % 5 == 0 || should_log_this_chunk {
+                                let progress_percentage = if queued > 0 {
+                                    (completed as f64 / queued as f64 * 100.0) as u32
+                                } else {
+                                    100
+                                };
 
-                            let _ = app_clone.emit("transcription-progress", serde_json::json!({
-                                "worker_id": worker_id,
-                                "chunks_completed": completed,
-                                "chunks_queued": queued,
-                                "progress_percentage": progress_percentage,
-                                "message": format!("Worker {} processing... ({}/{})", worker_id, completed, queued)
-                            }));
+                                let _ = app_clone.emit("transcription-progress", serde_json::json!({
+                                    "worker_id": worker_id,
+                                    "chunks_completed": completed,
+                                    "chunks_queued": queued,
+                                    "progress_percentage": progress_percentage,
+                                    "message": format!("Worker {} processing... ({}/{})", worker_id, completed, queued)
+                                }));
+                            }
                         }
                         None => {
                             // No more chunks available
@@ -379,22 +480,42 @@ pub fn start_transcription_task<R: Runtime>(
 
                 info!("👷 Worker {} completed", worker_id);
             });
-
-            worker_handles.push(worker_handle);
         }
 
         // Main dispatcher: receive chunks and distribute to workers
         let mut receiver = transcription_receiver;
-        while let Some(chunk) = receiver.recv().await {
-            let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
-            info!(
-                "📥 Dispatching chunk {} to workers (total queued: {})",
-                chunk.chunk_id, queued
-            );
+        loop {
+            let next_item = tokio::select! {
+                _ = task_cancellation.cancelled() => break,
+                item = receiver.recv() => item,
+            };
 
-            if let Err(_) = work_sender.send(chunk) {
-                error!("❌ Failed to send chunk to workers - this should not happen!");
-                break;
+            match next_item {
+                Ok(Some(item)) => {
+                    let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
+                    debug!(
+                        "Dispatching chunk {} to transcription worker (total queued: {})",
+                        item.chunk.chunk_id, queued
+                    );
+                    let send_result = tokio::select! {
+                        _ = task_cancellation.cancelled() => break,
+                        result = work_sender.send(item) => result,
+                    };
+                    if send_result.is_err() {
+                        error!("Failed to send chunk to transcription worker");
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    error!("Failed to read transcription queue: {}", error);
+                    let _ = app.emit("transcription-error", serde_json::json!({
+                        "error": error.to_string(),
+                        "userMessage": "A staged audio segment could not be read. The recording audio is still preserved.",
+                        "actionable": false
+                    }));
+                    break;
+                }
             }
         }
 
@@ -413,12 +534,14 @@ pub fn start_transcription_task<R: Runtime>(
         }));
 
         // Wait for all workers to complete
-        for (worker_id, handle) in worker_handles.into_iter().enumerate() {
-            if let Err(e) = handle.await {
-                error!("❌ Worker {} panicked: {:?}", worker_id, e);
+        let mut finished_worker_id = 0usize;
+        while let Some(result) = worker_handles.join_next().await {
+            if let Err(e) = result {
+                error!("❌ Worker {} panicked: {:?}", finished_worker_id, e);
             } else {
-                info!("✅ Worker {} completed successfully", worker_id);
+                info!("✅ Worker {} completed successfully", finished_worker_id);
             }
+            finished_worker_id += 1;
         }
 
         // Final verification with retry logic to catch any stragglers
@@ -429,7 +552,13 @@ pub fn start_transcription_task<R: Runtime>(
             let final_queued = chunks_queued.load(Ordering::SeqCst);
             let final_completed = chunks_completed.load(Ordering::SeqCst);
 
-            if final_queued == final_completed {
+            if task_cancellation.is_cancelled() {
+                warn!(
+                    "Transcription cancelled with {}/{} dispatched chunks completed",
+                    final_completed, final_queued
+                );
+                break;
+            } else if final_queued == final_completed {
                 info!(
                     "🎉 ALL {} chunks processed successfully - ZERO chunks lost!",
                     final_completed
@@ -462,8 +591,25 @@ pub fn start_transcription_task<R: Runtime>(
             }
         }
 
-        info!("✅ Parallel transcription task completed - all workers finished, ready for model unload");
-    })
+        task_metrics.set_worker_active(false);
+        let status = task_metrics.snapshot();
+        let _ = app.emit(
+            "transcription-complete",
+            serde_json::json!({
+                "cancelled": task_cancellation.is_cancelled(),
+                "failed": false,
+                "chunks_remaining": status.chunks_in_queue,
+                "chunks_completed": status.total_chunks_completed
+            }),
+        );
+        info!("✅ Transcription task completed - worker stopped, ready for model unload");
+    });
+
+    TranscriptionTask {
+        handle,
+        cancellation,
+        metrics,
+    }
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)

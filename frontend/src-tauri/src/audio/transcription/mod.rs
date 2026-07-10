@@ -7,6 +7,7 @@ pub mod engine;
 pub mod nemotron_provider;
 pub mod parakeet_provider;
 pub mod provider;
+pub mod queue;
 pub mod whisper_provider;
 pub mod worker;
 
@@ -19,4 +20,7 @@ pub use nemotron_provider::NemotronProvider;
 pub use parakeet_provider::ParakeetProvider;
 pub use provider::{TranscriptResult, TranscriptionError, TranscriptionProvider};
 pub use whisper_provider::WhisperProvider;
-pub use worker::{reset_speech_detected_flag, start_transcription_task, TranscriptUpdate};
+pub use worker::{
+    current_transcription_metrics, reset_speech_detected_flag, start_transcription_task,
+    TranscriptUpdate, TranscriptionTask,
+};

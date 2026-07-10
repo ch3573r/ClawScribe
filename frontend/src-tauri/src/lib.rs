@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 // Removed unused import
@@ -74,20 +74,14 @@ use tokio::sync::RwLock;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
-// Global language preference storage (default to "auto-translate" for automatic translation to English)
+// Default to transcription in the original language. The frontend normally
+// synchronizes this value at startup, but recording can begin before that sync.
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
-    std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
+    std::sync::LazyLock::new(|| StdMutex::new("auto".to_string()));
 
 #[derive(Debug, Deserialize)]
 struct RecordingArgs {
     save_path: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-struct TranscriptionStatus {
-    chunks_in_queue: usize,
-    is_processing: bool,
-    last_activity_ms: u64,
 }
 
 #[tauri::command]
@@ -219,12 +213,8 @@ async fn is_recording() -> bool {
 }
 
 #[tauri::command]
-fn get_transcription_status() -> TranscriptionStatus {
-    TranscriptionStatus {
-        chunks_in_queue: 0,
-        is_processing: false,
-        last_activity_ms: 0,
-    }
+async fn get_transcription_status() -> audio::recording_commands::TranscriptionStatus {
+    audio::recording_commands::get_transcription_status().await
 }
 
 #[tauri::command]
@@ -853,6 +843,7 @@ pub fn run() {
             summary::codex_provider::codex_get_config,
             summary::codex_provider::codex_save_config,
             summary::codex_provider::codex_check_installation,
+            summary::codex_provider::codex_list_models,
             summary::codex_provider::codex_find_automatically,
             summary::codex_provider::codex_browse_for_binary,
             summary::codex_provider::codex_prepare_install_command,

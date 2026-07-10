@@ -14,8 +14,9 @@ use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 use super::devices::{default_input_device, default_output_device};
 use super::pipeline::AudioPipelineManager;
 use super::recording_saver::RecordingSaver;
-use super::recording_state::{AudioChunk, DeviceType as RecordingDeviceType, RecordingState};
+use super::recording_state::{DeviceType as RecordingDeviceType, RecordingState};
 use super::stream::AudioStreamManager;
+use super::transcription::queue::{transcription_queue, TranscriptionQueueReceiver};
 
 /// Stream manager type enumeration
 pub enum StreamManagerType {
@@ -66,12 +67,12 @@ impl RecordingManager {
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
-    ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
+    ) -> Result<TranscriptionQueueReceiver> {
         info!("Starting recording manager (auto_save: {})", auto_save);
 
-        // Set up transcription channel
-        let (transcription_sender, transcription_receiver) =
-            mpsc::unbounded_channel::<AudioChunk>();
+        // Stage VAD segments on disk. Slow inference must not retain an
+        // unbounded number of large f32 buffers in memory or stall capture.
+        let (transcription_sender, transcription_receiver, _) = transcription_queue()?;
 
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
@@ -184,7 +185,7 @@ impl RecordingManager {
     pub async fn start_recording_with_defaults_and_auto_save(
         &mut self,
         auto_save: bool,
-    ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
+    ) -> Result<TranscriptionQueueReceiver> {
         #[cfg(target_os = "macos")]
         {
             info!("🎙️ [macOS] Starting recording with smart device selection (Bluetooth override enabled)");

@@ -106,7 +106,12 @@ if ($CheckOnly) {
 
 pnpm build
 
-$bundleRoot = Join-Path $tauriRoot "target\release\bundle"
+$cargoMetadata = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $tauriRoot "Cargo.toml") |
+    ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not $cargoMetadata.target_directory) {
+    throw "Failed to resolve the Cargo workspace target directory."
+}
+$bundleRoot = Join-Path $cargoMetadata.target_directory "release\bundle"
 Remove-Item -LiteralPath (Join-Path $bundleRoot "msi") -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $bundleRoot "nsis") -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -156,11 +161,11 @@ $metadata = @(
     "build_commit=$commit",
     "build_commit_short=$shortCommit",
     "build_date_utc=$buildDateUtc",
-    "codex_runtime_version=0.139.0",
+    "codex_runtime_version=0.144.1",
     "codex_runtime_target=$windowsTarget",
-    "codex_runtime_source_package=@openai/codex@0.139.0-win32-x64",
-    "codex_runtime_source_url=https://registry.npmjs.org/@openai/codex/-/codex-0.139.0-win32-x64.tgz",
-    "codex_runtime_sha256=77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10",
+    "codex_runtime_source_package=@openai/codex@0.144.1-win32-x64",
+    "codex_runtime_source_url=https://registry.npmjs.org/@openai/codex/-/codex-0.144.1-win32-x64.tgz",
+    "codex_runtime_sha256=cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4",
     "codex_runtime_license=Apache-2.0"
 )
 $metadata | Set-Content -LiteralPath $metadataPath -Encoding ascii

@@ -15,6 +15,7 @@ use super::audio_processing::{
 };
 use super::devices::AudioDevice;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
+use super::transcription::queue::TranscriptionQueueSender;
 use super::vad::ContinuousVadProcessor;
 
 /// Ring buffer for synchronized audio mixing
@@ -744,7 +745,7 @@ impl AudioCapture {
 /// Uses Voice Activity Detection to segment speech in real-time and send only speech to Whisper
 pub struct AudioPipeline {
     receiver: mpsc::UnboundedReceiver<AudioChunk>,
-    transcription_sender: mpsc::UnboundedSender<AudioChunk>,
+    transcription_sender: TranscriptionQueueSender,
     state: Arc<RecordingState>,
     vad_processor: ContinuousVadProcessor,
     sample_rate: u32,
@@ -764,7 +765,7 @@ pub struct AudioPipeline {
 impl AudioPipeline {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
-        transcription_sender: mpsc::UnboundedSender<AudioChunk>,
+        transcription_sender: TranscriptionQueueSender,
         state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
@@ -900,7 +901,7 @@ impl AudioPipeline {
                             "📥 Received FLUSH signal #{} - flushing VAD processor",
                             u64::MAX - chunk.chunk_id
                         );
-                        self.flush_remaining_audio()?;
+                        self.flush_remaining_audio().await?;
                         // Continue processing to handle any remaining chunks
                         continue;
                     }
@@ -1036,8 +1037,10 @@ impl AudioPipeline {
                                                 device_type: segment_source.clone(),
                                             };
 
-                                            if let Err(e) =
-                                                self.transcription_sender.send(transcription_chunk)
+                                            if let Err(e) = self
+                                                .transcription_sender
+                                                .send(transcription_chunk)
+                                                .await
                                             {
                                                 warn!("Failed to send VAD segment: {}", e);
                                             } else {
@@ -1106,13 +1109,13 @@ impl AudioPipeline {
         }
 
         // Flush any remaining VAD segments
-        self.flush_remaining_audio()?;
+        self.flush_remaining_audio().await?;
 
         info!("VAD-driven audio pipeline ended");
         Ok(())
     }
 
-    fn flush_remaining_audio(&mut self) -> Result<()> {
+    async fn flush_remaining_audio(&mut self) -> Result<()> {
         info!(
             "Flushing remaining audio from pipeline (processed {} chunks)",
             self.processed_chunks
@@ -1140,7 +1143,7 @@ impl AudioPipeline {
                             device_type: DeviceType::Microphone,
                         };
 
-                        if let Err(e) = self.transcription_sender.send(transcription_chunk) {
+                        if let Err(e) = self.transcription_sender.send(transcription_chunk).await {
                             warn!("Failed to send final VAD segment: {}", e);
                         } else {
                             self.chunk_id_counter += 1;
@@ -1181,7 +1184,7 @@ impl AudioPipelineManager {
     pub fn start(
         &mut self,
         state: Arc<RecordingState>,
-        transcription_sender: mpsc::UnboundedSender<AudioChunk>,
+        transcription_sender: TranscriptionQueueSender,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
         recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,

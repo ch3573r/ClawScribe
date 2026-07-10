@@ -12,7 +12,6 @@ use std::sync::{
 };
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::task::JoinHandle;
 
 use super::{
     default_input_device,  // Get default microphone
@@ -38,10 +37,58 @@ static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
-static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static TRANSCRIPTION_TASK: Mutex<Option<transcription::TranscriptionTask>> = Mutex::new(None);
+static PENDING_TRANSCRIPT_SEGMENTS: Mutex<Vec<crate::audio::recording_saver::TranscriptSegment>> =
+    Mutex::new(Vec::new());
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
+
+fn transcript_segment_from_update(
+    update: TranscriptUpdate,
+) -> crate::audio::recording_saver::TranscriptSegment {
+    crate::audio::recording_saver::TranscriptSegment {
+        id: format!("seg_{}", update.sequence_id),
+        text: update.text,
+        speaker: match update.source.as_str() {
+            "Me" | "Participants" => Some(update.source),
+            _ => None,
+        },
+        audio_start_time: update.audio_start_time,
+        audio_end_time: update.audio_end_time,
+        duration: update.duration,
+        display_time: update.timestamp,
+        confidence: update.confidence,
+        sequence_id: update.sequence_id,
+        word_timestamps: update.word_timestamps,
+    }
+}
+
+fn persist_transcript_update(update: TranscriptUpdate) {
+    let segment = transcript_segment_from_update(update);
+    if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
+        if let Some(manager) = manager_guard.as_ref() {
+            manager.add_transcript_segment(segment);
+        } else if let Ok(mut pending) = PENDING_TRANSCRIPT_SEGMENTS.lock() {
+            pending.push(segment);
+        }
+    }
+}
+
+fn store_recording_manager(manager: RecordingManager) {
+    let mut manager_guard = RECORDING_MANAGER.lock().unwrap();
+    *manager_guard = Some(manager);
+
+    // Keep the manager lock while draining so a listener cannot observe None,
+    // then enqueue a segment after this flush has already completed.
+    if let (Some(manager), Ok(mut pending)) =
+        (manager_guard.as_ref(), PENDING_TRANSCRIPT_SEGMENTS.lock())
+    {
+        for segment in pending.drain(..) {
+            manager.add_transcript_segment(segment);
+        }
+    }
+}
 
 // ============================================================================
 // PUBLIC TYPES
@@ -57,6 +104,12 @@ pub struct TranscriptionStatus {
     pub chunks_in_queue: usize,
     pub is_processing: bool,
     pub last_activity_ms: u64,
+    pub queued_audio_seconds: f64,
+    pub processing_realtime_factor: Option<f64>,
+    pub estimated_seconds_remaining: Option<f64>,
+    pub spool_bytes: u64,
+    pub total_chunks_queued: u64,
+    pub total_chunks_completed: u64,
 }
 
 // ============================================================================
@@ -283,8 +336,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Store the manager globally to keep it alive
     {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        *global_manager = Some(manager);
+        PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
+        store_recording_manager(manager);
     }
 
     // Set recording flag and reset speech detection flag
@@ -306,31 +359,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     {
         use tauri::Listener;
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    speaker: match update.source.as_str() {
-                        "Me" | "Participants" => Some(update.source.clone()),
-                        _ => None,
-                    },
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                    word_timestamps: update.word_timestamps.clone(),
-                };
-
-                // Save to recording manager
-                if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                    if let Some(manager) = manager_guard.as_ref() {
-                        manager.add_transcript_segment(segment);
-                    }
-                }
+                persist_transcript_update(update);
             }
         });
         let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
@@ -342,9 +372,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     app.emit(
         "recording-started",
         serde_json::json!({
-            "message": "Recording started successfully with parallel processing",
+            "message": "Recording started successfully with bounded transcription",
             "devices": ["Default Microphone", "Default System Audio"],
-            "workers": 3
+            "workers": 1
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -497,8 +527,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Store the manager globally to keep it alive
     {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        *global_manager = Some(manager);
+        PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
+        store_recording_manager(manager);
     }
 
     // Set recording flag and reset speech detection flag
@@ -520,31 +550,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     {
         use tauri::Listener;
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    speaker: match update.source.as_str() {
-                        "Me" | "Participants" => Some(update.source.clone()),
-                        _ => None,
-                    },
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                    word_timestamps: update.word_timestamps.clone(),
-                };
-
-                // Save to recording manager
-                if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                    if let Some(manager) = manager_guard.as_ref() {
-                        manager.add_transcript_segment(segment);
-                    }
-                }
+                persist_transcript_update(update);
             }
         });
         let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
@@ -556,12 +563,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     app.emit(
         "recording-started",
         serde_json::json!({
-            "message": "Recording started with custom devices and parallel processing",
+            "message": "Recording started with custom devices and bounded transcription",
             "devices": [
                 mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
                 system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
             ],
-            "workers": 3
+            "workers": 1
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -620,7 +627,7 @@ pub async fn stop_recording<R: Runtime>(
         (Ok(()), None)
     };
 
-    let (stop_result, manager_for_cleanup) = stop_result;
+    let (stop_result, mut manager_for_cleanup) = stop_result;
 
     match stop_result {
         Ok(_) => {
@@ -628,18 +635,18 @@ pub async fn stop_recording<R: Runtime>(
         }
         Err(e) => {
             error!("❌ Failed to stop audio streams: {}", e);
+            if let Some(manager) = manager_for_cleanup.take() {
+                store_recording_manager(manager);
+            }
             return Err(format!("Failed to stop audio streams: {}", e));
         }
     }
 
-    // Step 1.5: Clean up transcript listener to release microphone
-    // Unlisten transcript-update event to prevent lingering references
-    {
-        use tauri::Listener;
-        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
-            app.unlisten(listener_id);
-            info!("✅ Transcript-update listener removed");
-        }
+    // Put the stopped manager back while queued transcript updates drain. The
+    // listener persists into this manager, so taking it out here used to discard
+    // every segment produced during post-meeting catch-up.
+    if let Some(manager) = manager_for_cleanup.take() {
+        store_recording_manager(manager);
     }
 
     // Step 2: Signal transcription workers to finish processing ALL queued chunks
@@ -658,8 +665,16 @@ pub async fn stop_recording<R: Runtime>(
         global_task.take()
     };
 
-    if let Some(task_handle) = transcription_task {
-        info!("⏳ Waiting for ALL transcription chunks to be processed (no timeout - preserving every chunk)");
+    let mut transcription_incomplete = false;
+    if let Some(mut task) = transcription_task {
+        const TRANSCRIPTION_DRAIN_TIMEOUT: tokio::time::Duration =
+            tokio::time::Duration::from_secs(120);
+        const TRANSCRIPTION_CANCEL_GRACE: tokio::time::Duration =
+            tokio::time::Duration::from_secs(5);
+        info!(
+            "⏳ Draining transcription queue (maximum {:?})",
+            TRANSCRIPTION_DRAIN_TIMEOUT
+        );
 
         // Enhanced progress monitoring during shutdown
         let progress_app = app.clone();
@@ -669,46 +684,97 @@ pub async fn stop_recording<R: Runtime>(
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
+                let status = transcription::current_transcription_metrics();
+                let remaining = status
+                    .as_ref()
+                    .map(|status| status.chunks_in_queue)
+                    .unwrap_or(0);
+                let estimated_seconds = status
+                    .as_ref()
+                    .and_then(|status| status.estimated_seconds_remaining);
+
                 // Emit periodic progress updates during shutdown
                 let elapsed = last_update.elapsed().as_secs();
                 let _ = progress_app.emit(
                     "recording-shutdown-progress",
                     serde_json::json!({
                         "stage": "processing_transcripts",
-                        "message": format!("Processing transcripts... ({}s elapsed)", elapsed),
+                        "message": format!("Processing {} remaining transcript chunks...", remaining),
                         "progress": 40,
                         "detailed": true,
-                        "elapsed_seconds": elapsed
+                        "elapsed_seconds": elapsed,
+                        "chunks_remaining": remaining,
+                        "estimated_seconds_remaining": estimated_seconds
                     }),
                 );
             }
         });
 
-        // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(600), // 10 minutes max
-            task_handle,
-        )
-        .await
-        {
+        // Borrow the handle through the timeout. If it expires, retaining the
+        // handle lets us cancel and join/abort instead of detaching the task.
+        match tokio::time::timeout(TRANSCRIPTION_DRAIN_TIMEOUT, &mut task.handle).await {
             Ok(Ok(())) => {
                 info!("✅ ALL transcription chunks processed successfully - no data lost");
             }
             Ok(Err(e)) => {
                 warn!("⚠️ Transcription task completed with error: {:?}", e);
-                // Continue anyway - the worker may have processed most chunks
+                transcription_incomplete = true;
             }
             Err(_) => {
-                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
-                // Continue shutdown even on timeout - better to lose some chunks than hang forever
+                transcription_incomplete = true;
+                let status = transcription::current_transcription_metrics();
+                let remaining = status
+                    .as_ref()
+                    .map(|status| status.chunks_in_queue)
+                    .unwrap_or(0);
+                warn!(
+                    "Transcription drain exceeded 120 seconds with {} chunks remaining; cancelling worker",
+                    remaining
+                );
+                let _ = app.emit("transcription-warning", format!(
+                    "Stopped transcription after two minutes with {remaining} audio chunks remaining. The recorded audio is preserved and can be retranscribed."
+                ));
+                task.cancel();
+
+                if tokio::time::timeout(TRANSCRIPTION_CANCEL_GRACE, &mut task.handle)
+                    .await
+                    .is_err()
+                {
+                    warn!("Transcription worker did not stop after cancellation; aborting it");
+                    task.handle.abort();
+                    let _ = (&mut task.handle).await;
+                }
             }
+        }
+        task.mark_stopped();
+        if transcription::current_transcription_metrics()
+            .is_some_and(|status| status.chunks_in_queue > 0)
+        {
+            transcription_incomplete = true;
         }
 
         // Stop progress monitoring
         progress_task.abort();
     } else {
         info!("ℹ️ No transcription task found to wait for");
+        if transcription::current_transcription_metrics()
+            .is_some_and(|status| status.chunks_in_queue > 0)
+        {
+            transcription_incomplete = true;
+        }
     }
+
+    // Remove the listener only after the worker has exited so every emitted
+    // catch-up segment has reached the recording saver.
+    {
+        use tauri::Listener;
+        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
+            app.unlisten(listener_id);
+            info!("✅ Transcript-update listener removed after transcription drain");
+        }
+    }
+
+    let manager_for_cleanup = RECORDING_MANAGER.lock().unwrap().take();
 
     // Step 3: Now safely unload Whisper model after ALL chunks are processed
     let _ = app.emit(
@@ -775,6 +841,32 @@ pub async fn stop_recording<R: Runtime>(
                 }
             } else {
                 warn!("⚠️ No Parakeet engine found to unload model");
+            }
+        }
+        Some("nemotron") => {
+            info!("🌊 Unloading Nemotron model...");
+            let engine_clone = {
+                let engine_guard = crate::nemotron_engine::commands::NEMOTRON_ENGINE
+                    .lock()
+                    .unwrap();
+                engine_guard.as_ref().cloned()
+            };
+
+            if let Some(engine) = engine_clone {
+                let current_model = engine
+                    .get_current_model()
+                    .await
+                    .unwrap_or_else(|| "unknown".to_string());
+                if engine.unload_model().await {
+                    info!(
+                        "✅ Nemotron model '{}' unloaded successfully",
+                        current_model
+                    );
+                } else {
+                    warn!("⚠️ Failed to unload Nemotron model '{}'", current_model);
+                }
+            } else {
+                warn!("⚠️ No Nemotron engine found to unload model");
             }
         }
         _ => {
@@ -1006,9 +1098,14 @@ pub async fn stop_recording<R: Runtime>(
     app.emit(
         "recording-stopped",
         serde_json::json!({
-            "message": "Recording stopped - frontend will save after all transcripts received",
+            "message": if transcription_incomplete {
+                "Recording stopped; some queued audio still needs retranscription"
+            } else {
+                "Recording stopped - frontend will save after all transcripts received"
+            },
             "folder_path": folder_path_str,
-            "meeting_name": meeting_name_str
+            "meeting_name": meeting_name_str,
+            "transcription_incomplete": transcription_incomplete
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -1022,7 +1119,11 @@ pub async fn stop_recording<R: Runtime>(
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);
 
-    info!("🎉 Recording stopped successfully with ZERO transcript chunks lost");
+    if transcription_incomplete {
+        warn!("Recording stopped with an incomplete live transcript; audio was preserved");
+    } else {
+        info!("🎉 Recording stopped successfully with all transcript chunks processed");
+    }
     Ok(())
 }
 
@@ -1033,10 +1134,29 @@ pub async fn is_recording() -> bool {
 
 /// Get recording statistics
 pub async fn get_transcription_status() -> TranscriptionStatus {
-    TranscriptionStatus {
-        chunks_in_queue: 0,
-        is_processing: IS_RECORDING.load(Ordering::SeqCst),
-        last_activity_ms: 0,
+    match transcription::current_transcription_metrics() {
+        Some(status) => TranscriptionStatus {
+            chunks_in_queue: status.chunks_in_queue,
+            is_processing: status.is_processing,
+            last_activity_ms: status.last_activity_ms,
+            queued_audio_seconds: status.queued_audio_seconds,
+            processing_realtime_factor: status.processing_realtime_factor,
+            estimated_seconds_remaining: status.estimated_seconds_remaining,
+            spool_bytes: status.spool_bytes,
+            total_chunks_queued: status.total_chunks_queued,
+            total_chunks_completed: status.total_chunks_completed,
+        },
+        None => TranscriptionStatus {
+            chunks_in_queue: 0,
+            is_processing: false,
+            last_activity_ms: 0,
+            queued_audio_seconds: 0.0,
+            processing_realtime_factor: None,
+            estimated_seconds_remaining: None,
+            spool_bytes: 0,
+            total_chunks_queued: 0,
+            total_chunks_completed: 0,
+        },
     }
 }
 
@@ -1391,7 +1511,18 @@ async fn resolve_transcription_info<R: Runtime>(
     let source_language = super::common::transcription_source_language_hint(
         Some(provider.as_str()),
         language_preference.as_deref(),
-    );
+    )
+    .or_else(|| {
+        (provider == "nemotron")
+            .then(|| {
+                super::transcription::nemotron_provider::resolve_requested_language(
+                    language_preference.as_deref(),
+                    sys_locale::get_locale().as_deref(),
+                )
+                .ok()
+            })
+            .flatten()
+    });
 
     (Some(provider), Some(model), source_language)
 }

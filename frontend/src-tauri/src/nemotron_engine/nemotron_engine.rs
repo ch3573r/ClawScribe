@@ -273,7 +273,17 @@ impl NemotronEngine {
         let model = guard
             .as_mut()
             .ok_or_else(|| anyhow!("No Nemotron model loaded"))?;
-        let slot = model.resolve_lang_slot(language.as_deref());
+        let requested_language = language
+            .as_deref()
+            .ok_or_else(|| anyhow!("Nemotron requires an explicit transcription language"))?;
+        let slot = model
+            .resolve_lang_slot(Some(requested_language))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Nemotron does not have a prompt slot for language '{}'",
+                    requested_language
+                )
+            })?;
         model
             .transcribe_samples(samples, slot)
             .map_err(|e| anyhow!("Nemotron transcription failed: {}", e))

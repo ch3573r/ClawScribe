@@ -56,8 +56,6 @@ const N_LOGITS: usize = 13088;
 const MAX_SYMBOLS: usize = 10;
 /// soniqo's log-mel guard: ln(x + 2^-24).
 const LOG_FLOOR: f32 = 1.0 / (1u32 << 24) as f32;
-/// Fallback language prompt slot (en-US) when the requested code isn't known.
-const DEFAULT_LANG_SLOT: i64 = 0;
 
 #[derive(thiserror::Error, Debug)]
 pub enum NemotronError {
@@ -73,6 +71,8 @@ pub enum NemotronError {
     OutputNotFound(String),
     #[error("This Nemotron model needs a DirectML-capable GPU (its int8 ops have no CPU implementation). Use a DirectML build/GPU, or pick the fp16 Nemotron or another engine.")]
     CpuUnsupported,
+    #[error("Invalid Nemotron model: {0}")]
+    InvalidModel(String),
 }
 
 pub struct NemotronModel {
@@ -120,26 +120,14 @@ impl NemotronModel {
         let (decoder, joint) =
             Self::load_decode_sessions(dir, cpu_capable, decode_threads, &decode_mode)?;
         let vocab = Self::load_vocab(dir)?;
-        // Degrading to an empty slot map is survivable (every language falls back
-        // to DEFAULT_LANG_SLOT), but it silently ignores the user's language
-        // selection — so make the failure visible rather than swallowing it.
-        let lang_slots = match Self::load_lang_slots(dir) {
-            Ok(slots) if !slots.is_empty() => slots,
-            Ok(_) => {
-                log::warn!(
-                    "Nemotron: languages.json had no usable promptDictionary entries; \
-                     language selection will be ignored (all audio uses default slot {DEFAULT_LANG_SLOT})"
-                );
-                HashMap::new()
-            }
-            Err(e) => {
-                log::warn!(
-                    "Nemotron: failed to load languages.json ({e}); language selection \
-                     will be ignored (all audio uses default slot {DEFAULT_LANG_SLOT})"
-                );
-                HashMap::new()
-            }
-        };
+        // Prompt slots are required. Loading without them used to silently map
+        // every language to English and produce plausible but incorrect text.
+        let lang_slots = Self::load_lang_slots(dir)?;
+        if lang_slots.is_empty() {
+            return Err(NemotronError::InvalidModel(
+                "languages.json has no usable promptDictionary entries".to_string(),
+            ));
+        }
         log::info!(
             "Loaded Nemotron: {} vocab tokens, {} language slots, blank_id={}",
             vocab.len(),
@@ -787,16 +775,15 @@ impl NemotronModel {
     }
 
     /// Map a language code (e.g. "de", "en", "de-DE") to its prompt slot.
-    pub fn resolve_lang_slot(&self, code: Option<&str>) -> i64 {
+    pub fn resolve_lang_slot(&self, code: Option<&str>) -> Option<i64> {
         let code = match code {
             Some(c) if !c.is_empty() && c != "auto" => c.to_ascii_lowercase(),
-            _ => return DEFAULT_LANG_SLOT,
+            _ => return None,
         };
         self.lang_slots
             .get(&code)
             .or_else(|| self.lang_slots.get(code.split('-').next().unwrap_or(&code)))
             .copied()
-            .unwrap_or(DEFAULT_LANG_SLOT)
     }
 
     /// Transcribe a mono 16 kHz speech segment in the given language slot.

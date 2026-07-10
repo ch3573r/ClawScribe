@@ -130,12 +130,15 @@ export function LanguageSelection({
   const [saving, setSaving] = useState(false);
   const { setSelectedLanguage } = useConfig();
 
-  // Parakeet is auto-detect only. Nemotron is prompt-conditioned: it DOES take a
-  // language (selects the encoder prompt slot), so allow the picker for it.
+  // Parakeet is auto-detect only. Nemotron is prompt-conditioned and therefore
+  // requires a concrete language rather than a misleading Auto option.
   const isAutoOnlyEngine = provider === 'parakeet';
+  const isNemotron = provider === 'nemotron';
   const availableLanguages = isAutoOnlyEngine
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
-    : LANGUAGES;
+    : isNemotron
+      ? LANGUAGES.filter(lang => lang.code !== 'auto' && lang.code !== 'auto-translate')
+      : LANGUAGES;
 
   const handleLanguageChange = async (languageCode: string) => {
     setSaving(true);
@@ -168,6 +171,23 @@ export function LanguageSelection({
       setSaving(false);
     }
   };
+
+  useEffect(() => {
+    if (!isNemotron || (selectedLanguage !== 'auto' && selectedLanguage !== 'auto-translate')) {
+      return;
+    }
+
+    const localeLanguage = typeof navigator !== 'undefined'
+      ? navigator.language.split(/[-_]/)[0].toLowerCase()
+      : 'en';
+    const explicitLanguage = LANGUAGES.some(language => language.code === localeLanguage)
+      ? localeLanguage
+      : 'en';
+    onLanguageChange(explicitLanguage);
+    toast.info('Nemotron needs a specific language', {
+      description: `Transcription language set to ${LANGUAGES.find(language => language.code === explicitLanguage)?.name ?? explicitLanguage} from your system locale.`
+    });
+  }, [isNemotron, onLanguageChange, selectedLanguage]);
 
   // Find the selected language name for display
   const selectedLanguageName = LANGUAGES.find(
@@ -203,6 +223,13 @@ export function LanguageSelection({
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
             <p className="font-medium">ℹ️ Parakeet Language Support</p>
             <p className="mt-1 text-xs">Parakeet currently only supports automatic language detection. Manual language selection is not available. Use Whisper or Nemotron if you need to specify a particular language.</p>
+          </div>
+        )}
+
+        {isNemotron && (
+          <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
+            <p className="font-medium">Nemotron language prompt</p>
+            <p className="mt-1 text-xs">Nemotron does not auto-detect the spoken language. Choose German for German meetings to avoid an English prompt.</p>
           </div>
         )}
 

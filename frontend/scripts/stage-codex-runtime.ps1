@@ -4,12 +4,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$runtimeVersion = "0.139.0"
+$runtimeVersion = "0.144.1"
 $target = "x86_64-pc-windows-msvc"
 $sourcePackage = "@openai/codex@$runtimeVersion-win32-x64"
 $sourceUrl = "https://registry.npmjs.org/@openai/codex/-/codex-$runtimeVersion-win32-x64.tgz"
-$sourceSha256 = "99698e69d6acf91c75703669fdfd00d54f4b249beabc7d32a03404e8c2c3b2c7"
-$runtimeSha256 = "77a84f8078400467ade4301d827b8bcea2d29b6838c9cd162bf3573b7ef97e10"
+$sourceSha256 = "d6d1c36f4c5c921724c28500ba89e1e840fd791ec5cc8aca2de256695e1c1c17"
+$runtimeSha256 = "cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4"
 
 function Assert-Command {
     param([Parameter(Mandatory=$true)][string]$Name)
