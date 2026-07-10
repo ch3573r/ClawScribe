@@ -24,6 +24,23 @@ use super::vad::ContinuousVadProcessor;
 /// recording start; the pipeline reads it when creating the VAD. Lower = lower
 /// live latency. Default 6s (Parakeet/Whisper).
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
+const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
+
+#[derive(Default)]
+struct QueueWriteFailureTracker {
+    consecutive: u32,
+}
+
+impl QueueWriteFailureTracker {
+    fn record_failure(&mut self) -> bool {
+        self.consecutive = self.consecutive.saturating_add(1);
+        self.consecutive == TRANSCRIPTION_QUEUE_WARNING_THRESHOLD
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive = 0;
+    }
+}
 
 /// Choose the live VAD segment cap for the active transcription provider.
 /// Nemotron transcribes each VAD segment offline at only ~2.5x realtime, so a 6s
@@ -760,6 +777,7 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    queue_write_failures: QueueWriteFailureTracker,
 }
 
 impl AudioPipeline {
@@ -848,6 +866,25 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_sender_for_mixed: None, // Will be set by manager
+            queue_write_failures: QueueWriteFailureTracker::default(),
+        }
+    }
+
+    async fn enqueue_transcription_chunk(&mut self, chunk: AudioChunk) -> bool {
+        match self.transcription_sender.send(chunk).await {
+            Ok(()) => {
+                self.queue_write_failures.record_success();
+                true
+            }
+            Err(error) => {
+                warn!("Failed to spool live transcription segment: {}", error);
+                if self.queue_write_failures.record_failure() {
+                    self.state.report_warning(
+                        "Live transcription cannot write queued audio to disk. The recording is still being preserved, but the transcript will be incomplete and should be regenerated after the meeting. Check available disk space.",
+                    );
+                }
+                false
+            }
         }
     }
 
@@ -1037,13 +1074,10 @@ impl AudioPipeline {
                                                 device_type: segment_source.clone(),
                                             };
 
-                                            if let Err(e) = self
-                                                .transcription_sender
-                                                .send(transcription_chunk)
+                                            if self
+                                                .enqueue_transcription_chunk(transcription_chunk)
                                                 .await
                                             {
-                                                warn!("Failed to send VAD segment: {}", e);
-                                            } else {
                                                 self.chunk_id_counter += 1;
                                             }
                                         } else {
@@ -1143,9 +1177,7 @@ impl AudioPipeline {
                             device_type: DeviceType::Microphone,
                         };
 
-                        if let Err(e) = self.transcription_sender.send(transcription_chunk).await {
-                            warn!("Failed to send final VAD segment: {}", e);
-                        } else {
+                        if self.enqueue_transcription_chunk(transcription_chunk).await {
                             self.chunk_id_counter += 1;
                         }
                     } else {
@@ -1306,5 +1338,24 @@ impl AudioPipelineManager {
 impl Default for AudioPipelineManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod queue_failure_tests {
+    use super::*;
+
+    #[test]
+    fn queue_write_warning_is_throttled_and_resets_after_recovery() {
+        let mut tracker = QueueWriteFailureTracker::default();
+        assert!(!tracker.record_failure());
+        assert!(!tracker.record_failure());
+        assert!(tracker.record_failure());
+        assert!(!tracker.record_failure());
+
+        tracker.record_success();
+        assert!(!tracker.record_failure());
+        assert!(!tracker.record_failure());
+        assert!(tracker.record_failure());
     }
 }

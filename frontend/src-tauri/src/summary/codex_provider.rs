@@ -81,7 +81,7 @@ mod app_server_tests {
     #[test]
     fn windowsapps_codex_path_is_rejected() {
         let err = discover_codex_app_server_from(
-            Some(r"C:\Users\user\AppData\Local\Microsoft\WindowsApps\codex.exe"),
+            Some(r"C:\Users\<username>\AppData\Local\Microsoft\WindowsApps\codex.exe"),
             None,
         )
         .unwrap_err();
@@ -280,6 +280,32 @@ mod app_server_tests {
                 .as_deref(),
             Some("first second")
         );
+    }
+
+    #[test]
+    fn rpc_response_fallback_does_not_duplicate_streamed_deltas() {
+        let mut output = TurnOutputCollector::default();
+        output.collect_response(&serde_json::json!({ "text": "answer" }));
+        output.collect_delta(&serde_json::json!({ "delta": "answer" }));
+
+        assert_eq!(
+            output
+                .finish(&serde_json::json!({ "status": "completed" }))
+                .as_deref(),
+            Some("answer")
+        );
+    }
+
+    #[test]
+    fn untyped_completed_items_are_not_trusted_as_agent_messages() {
+        let mut output = TurnOutputCollector::default();
+        output.collect_completed_item(&serde_json::json!({
+            "item": { "text": "untyped output" }
+        }));
+
+        assert!(output
+            .finish(&serde_json::json!({ "status": "completed" }))
+            .is_none());
     }
 
     #[tokio::test]
@@ -2140,13 +2166,14 @@ fn is_auth_failure_message(value: &str) -> bool {
 
 #[derive(Default)]
 struct TurnOutputCollector {
+    response_fallback: String,
     streamed: String,
     completed_items: String,
 }
 
 impl TurnOutputCollector {
     fn collect_response(&mut self, value: &Value) {
-        collect_output_text(value, &mut self.streamed);
+        collect_output_text(value, &mut self.response_fallback);
     }
 
     fn collect_delta(&mut self, value: &Value) {
@@ -2154,12 +2181,15 @@ impl TurnOutputCollector {
     }
 
     fn collect_completed_item(&mut self, value: &Value) {
-        let item = value
-            .get("item")
-            .or_else(|| value.get("agentMessage"))
-            .or_else(|| value.get("agent_message"));
-        if let Some(text) = item.and_then(agent_message_text) {
+        if let Some(text) = value.get("item").and_then(agent_message_text) {
             append_output_segment(&mut self.completed_items, text);
+            return;
+        }
+        for key in ["agentMessage", "agent_message"] {
+            if let Some(text) = value.get(key).and_then(legacy_agent_message_text) {
+                append_output_segment(&mut self.completed_items, text);
+                return;
+            }
         }
     }
 
@@ -2172,6 +2202,8 @@ impl TurnOutputCollector {
             Some(self.completed_items.clone())
         } else if !self.streamed.trim().is_empty() {
             Some(self.streamed.clone())
+        } else if !self.response_fallback.trim().is_empty() {
+            Some(self.response_fallback.clone())
         } else {
             None
         }
@@ -2179,12 +2211,19 @@ impl TurnOutputCollector {
 }
 
 fn agent_message_text(item: &Value) -> Option<&str> {
-    if let Some(item_type) = item.get("type").and_then(Value::as_str) {
-        if item_type != "agentMessage" && item_type != "agent_message" {
-            return None;
-        }
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("agentMessage" | "agent_message")
+    ) {
+        return None;
     }
     item.get("text").and_then(Value::as_str)
+}
+
+fn legacy_agent_message_text(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("text").and_then(Value::as_str))
 }
 
 fn collect_turn_agent_messages(value: &Value, output: &mut String) {

@@ -35,6 +35,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
+      - name: Reject private paths and committed secrets
+        run: node scripts/verify-public-repo-safety.mjs
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
@@ -102,6 +105,7 @@ jobs:
           echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Checks" >> $GITHUB_STEP_SUMMARY
+          echo "- Public repository safety scan completed" >> $GITHUB_STEP_SUMMARY
           echo "- Removed legacy backend guard completed" >> $GITHUB_STEP_SUMMARY
           echo "- Frontend typecheck completed" >> $GITHUB_STEP_SUMMARY
           echo "- Frontend helper tests completed" >> $GITHUB_STEP_SUMMARY

@@ -185,11 +185,11 @@ export default function RootLayout({
     };
   }, [showOnboarding]);
 
-  // Surface non-fatal system-audio warnings (e.g. the selected loopback device
-  // is silent) raised by the recording pipeline.
+  // Surface non-fatal warnings raised by the recording pipeline.
   useEffect(() => {
-    const unlisten = listen<string>('system-audio-warning', (event) => {
-      toast.warning('No system audio detected', {
+    const unlisten = listen<string>('recording-warning', (event) => {
+      const isTranscriptionWarning = event.payload.startsWith('Live transcription');
+      toast.warning(isTranscriptionWarning ? 'Live transcription incomplete' : 'Recording warning', {
         description: event.payload,
         duration: 12000,
       });

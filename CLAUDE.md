@@ -5,6 +5,12 @@ Keep it evergreen and safe to commit. Do not add private infrastructure names,
 internal IP addresses, credentials, local usernames, personal workspace paths,
 or temporary handoff notes.
 
+Before committing, run `node scripts/verify-public-repo-safety.mjs`. CI and the
+Windows release preflight run the same tracked-file scan and reject personal
+home/workspace paths, private keys, provider tokens, and literal credential
+assignments. Use environment-variable references and explicit placeholders in
+public examples.
+
 ## Product Context
 
 ClawScribe is a local-first desktop meeting recorder and summarizer. It is based

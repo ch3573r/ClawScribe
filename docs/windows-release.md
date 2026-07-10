@@ -210,6 +210,10 @@ ClawScribe build first.
    `OpenClaw` where the installer surface exposes it.
 3. Launch `ClawScribe`, select the local transcription model, and start a short
    recording that captures both microphone and system audio.
+   Confirm both sources are audible in the saved recording, stop completes
+   cleanly, and a second recording can start. When publishing from the Windows
+   release workflow, set `capture-smoke-confirmed` only after completing this
+   test on the exact `cpal` revision in `Cargo.lock`.
 4. Stop the recording and confirm a new folder appears under
    `%USERPROFILE%\Music\ClawScribe` with `metadata.json`,
    `transcripts.json`, and audio artifacts.

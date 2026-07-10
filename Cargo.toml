@@ -18,6 +18,12 @@ serde_json = "1.0"
 tokio = { version = "1.32.0", features = ["full"] }
 
 # Workspace-level patches apply to every member. Cargo ignores patches placed
-# in frontend/src-tauri because it is not the workspace root.
+# in frontend/src-tauri because it is not the workspace root. Changing this
+# active cpal revision requires a real Windows microphone + system-audio capture
+# smoke before publishing a release.
 [patch.crates-io]
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
+
+# esaxx-rs intentionally remains on crates.io. A former patch in the member
+# manifest was never active; enabling a replacement now would be a separate
+# dependency behavior change that needs its own review and Windows validation.

@@ -112,3 +112,4 @@ docs/internal/
 
 # Local/personal agent notes — committed CLAUDE.md stays evergreen & public
 CLAUDE.local.md
+docs/claude-code-handoff-*.md

@@ -30,6 +30,7 @@
         "release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1",
         "release:windows:cpu": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1 -Feature cpu",
         "release:windows:gpu": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1 -Feature windows-gpu",
+        "verify:public-repo": "node ../scripts/verify-public-repo-safety.mjs",
         "verify:icons": "powershell -ExecutionPolicy Bypass -File scripts/verify-brand-icons.ps1",
         "lint": "next lint",
         "test": "node --test tests/lib/blocknote-markdown.test.mjs tests/lib/cloud-transcription.test.mjs tests/lib/onboarding-summary-model.test.mjs tests/lib/summary-language-preferences.test.mjs",

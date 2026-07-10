@@ -35,6 +35,11 @@ on:
         required: false
         type: boolean
         default: false
+      capture-smoke-confirmed:
+        description: Confirm a real Windows recording captured both microphone and system audio, stopped cleanly, and produced playable audio.
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: clawscribe-windows-release-${{ github.ref }}
@@ -67,6 +72,14 @@ jobs:
         shell: pwsh
         run: |
           git checkout --detach "${{ inputs['build-ref'] }}"
+
+      - name: Require dual-source capture smoke before publishing
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        run: |
+          if ("${{ inputs['capture-smoke-confirmed'] }}" -ne "true") {
+            throw "Publishing requires a real Windows microphone + system-audio recording smoke after the active cpal revision changed."
+          }
 
       - name: Normalize migration line endings
         shell: pwsh

@@ -317,10 +317,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Surface non-fatal warnings (e.g. the chosen system-audio device is silent).
+    // Surface non-fatal recording warnings (for example silent system audio or
+    // a transcription spool that cannot write to disk).
     let app_for_warning = app.clone();
     manager.set_warning_callback(move |message| {
-        let _ = app_for_warning.emit("system-audio-warning", message);
+        let _ = app_for_warning.emit("recording-warning", message);
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
@@ -508,10 +509,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Surface non-fatal warnings (e.g. the chosen system-audio device is silent).
+    // Surface non-fatal recording warnings (for example silent system audio or
+    // a transcription spool that cannot write to disk).
     let app_for_warning = app.clone();
     manager.set_warning_callback(move |message| {
-        let _ = app_for_warning.emit("system-audio-warning", message);
+        let _ = app_for_warning.emit("recording-warning", message);
     });
 
     // Start recording with specified devices and auto_save setting

@@ -46,6 +46,24 @@ impl TranscriptionTask {
 
     pub fn mark_stopped(&self) {
         self.metrics.set_worker_active(false);
+        if let Ok(mut active_metrics) = ACTIVE_TRANSCRIPTION_METRICS.lock() {
+            clear_metrics_if_current(&mut active_metrics, &self.metrics);
+        }
+    }
+}
+
+fn clear_metrics_if_current(
+    active_metrics: &mut Option<Arc<TranscriptionMetrics>>,
+    completed_metrics: &Arc<TranscriptionMetrics>,
+) -> bool {
+    if active_metrics
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, completed_metrics))
+    {
+        *active_metrics = None;
+        true
+    } else {
+        false
     }
 }
 
@@ -839,4 +857,23 @@ fn format_recording_time(seconds: f64) -> String {
     let secs = total_seconds % 60;
 
     format!("[{:02}:{:02}]", minutes, secs)
+}
+
+#[cfg(test)]
+mod metrics_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn completed_session_only_clears_its_own_metrics() {
+        let completed = Arc::new(TranscriptionMetrics::default());
+        let replacement = Arc::new(TranscriptionMetrics::default());
+        let mut active = Some(replacement.clone());
+
+        assert!(!clear_metrics_if_current(&mut active, &completed));
+        assert!(active
+            .as_ref()
+            .is_some_and(|metrics| Arc::ptr_eq(metrics, &replacement)));
+        assert!(clear_metrics_if_current(&mut active, &replacement));
+        assert!(active.is_none());
+    }
 }

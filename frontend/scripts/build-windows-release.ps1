@@ -67,6 +67,12 @@ Assert-Command "pnpm"
 Assert-Command "cargo"
 Assert-VulkanSdk
 
+$repoRoot = Resolve-Path (Join-Path $frontendRoot "..")
+node (Join-Path $repoRoot "scripts\verify-public-repo-safety.mjs")
+if ($LASTEXITCODE -ne 0) {
+    throw "Public-repository safety check failed. Remove private paths or secrets before building."
+}
+
 & (Join-Path $PSScriptRoot "verify-brand-icons.ps1") -FrontendRoot $frontendRoot
 $sherpaRuntime = if ($Feature -in @("directml", "windows-gpu")) { "directml" } else { "cpu" }
 & (Join-Path $PSScriptRoot "stage-sherpa-runtime.ps1") -TauriRoot $tauriRoot -Runtime $sherpaRuntime

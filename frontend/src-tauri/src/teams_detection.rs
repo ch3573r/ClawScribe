@@ -1187,7 +1187,7 @@ mod tests {
         let update_process = process_with_context(
             13,
             "Update.exe",
-            Some(r"C:\Users\user\AppData\Local\Microsoft\Teams\Update.exe"),
+            Some(r"C:\Users\<username>\AppData\Local\Microsoft\Teams\Update.exe"),
             &["Update.exe", "--processStart", "Teams.exe"],
         );
 
