@@ -174,6 +174,52 @@ mod app_server_tests {
             .contains("executive_summary"));
     }
 
+    #[test]
+    fn completed_agent_message_snapshot_replaces_streamed_deltas() {
+        let answer = "The transcript does not explain what S-Bomb is.";
+        let completed_item = serde_json::json!({
+            "item": {
+                "id": "message-1",
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": answer
+            }
+        });
+        let turn_completed = serde_json::json!({
+            "turn": {
+                "id": "turn-1",
+                "status": "completed",
+                "items": [completed_item["item"].clone()]
+            }
+        });
+        let mut output = TurnOutputCollector::default();
+
+        output.collect_delta(&serde_json::json!({ "delta": answer }));
+        output.collect_completed_item(&completed_item);
+
+        assert_eq!(
+            output
+                .finish(&serde_json::json!({ "status": "completed" }))
+                .as_deref(),
+            Some(answer)
+        );
+        assert_eq!(output.finish(&turn_completed).as_deref(), Some(answer));
+    }
+
+    #[test]
+    fn streamed_deltas_remain_the_legacy_fallback() {
+        let mut output = TurnOutputCollector::default();
+        output.collect_delta(&serde_json::json!({ "delta": "first " }));
+        output.collect_delta(&serde_json::json!({ "delta": "second" }));
+
+        assert_eq!(
+            output
+                .finish(&serde_json::json!({ "status": "completed" }))
+                .as_deref(),
+            Some("first second")
+        );
+    }
+
     #[tokio::test]
     async fn app_server_actions_do_not_fall_back_to_codex_exec() {
         let temp = tempfile::tempdir().unwrap();
@@ -1617,7 +1663,7 @@ impl AppServerSession {
 
     async fn read_turn_result(&mut self, id: u64) -> Result<String, String> {
         let mut response_seen = false;
-        let mut output = String::new();
+        let mut output = TurnOutputCollector::default();
         loop {
             let message = self.read_message().await?;
             if message.get("id").and_then(Value::as_u64) == Some(id) {
@@ -1625,16 +1671,19 @@ impl AppServerSession {
                     return Err(app_server_error_message(error));
                 }
                 response_seen = true;
-                collect_output_text(message.get("result").unwrap_or(&Value::Null), &mut output);
+                output.collect_response(message.get("result").unwrap_or(&Value::Null));
                 continue;
             }
             if let Some(method) = message.get("method").and_then(Value::as_str) {
-                if method == "item/agentMessage/delta" || method == "item/completed" {
-                    collect_output_text(message.get("params").unwrap_or(&Value::Null), &mut output);
+                let params = message.get("params").unwrap_or(&Value::Null);
+                if method == "item/agentMessage/delta" {
+                    output.collect_delta(params);
+                }
+                if method == "item/completed" {
+                    output.collect_completed_item(params);
                 }
                 if method == "turn/completed" {
-                    collect_output_text(message.get("params").unwrap_or(&Value::Null), &mut output);
-                    if !output.trim().is_empty() {
+                    if let Some(output) = output.finish(params) {
                         return Ok(strip_json_fence(&output));
                     }
                     if response_seen {
@@ -1884,6 +1933,91 @@ fn is_auth_failure_message(value: &str) -> bool {
         || lower.contains("unauthorized")
         || lower.contains("not authenticated")
         || lower.contains("sign in")
+}
+
+#[derive(Default)]
+struct TurnOutputCollector {
+    streamed: String,
+    completed_items: String,
+}
+
+impl TurnOutputCollector {
+    fn collect_response(&mut self, value: &Value) {
+        collect_output_text(value, &mut self.streamed);
+    }
+
+    fn collect_delta(&mut self, value: &Value) {
+        collect_output_text(value, &mut self.streamed);
+    }
+
+    fn collect_completed_item(&mut self, value: &Value) {
+        let item = value
+            .get("item")
+            .or_else(|| value.get("agentMessage"))
+            .or_else(|| value.get("agent_message"));
+        if let Some(text) = item.and_then(agent_message_text) {
+            append_output_segment(&mut self.completed_items, text);
+        }
+    }
+
+    fn finish(&self, turn_completed: &Value) -> Option<String> {
+        let mut turn_snapshot = String::new();
+        collect_turn_agent_messages(turn_completed, &mut turn_snapshot);
+        if !turn_snapshot.trim().is_empty() {
+            Some(turn_snapshot)
+        } else if !self.completed_items.trim().is_empty() {
+            Some(self.completed_items.clone())
+        } else if !self.streamed.trim().is_empty() {
+            Some(self.streamed.clone())
+        } else {
+            None
+        }
+    }
+}
+
+fn agent_message_text(item: &Value) -> Option<&str> {
+    if let Some(item_type) = item.get("type").and_then(Value::as_str) {
+        if item_type != "agentMessage" && item_type != "agent_message" {
+            return None;
+        }
+    }
+    item.get("text").and_then(Value::as_str)
+}
+
+fn collect_turn_agent_messages(value: &Value, output: &mut String) {
+    let items = value
+        .pointer("/turn/items")
+        .or_else(|| value.get("items"))
+        .and_then(Value::as_array);
+    let Some(items) = items else {
+        for key in ["lastAgentMessage", "last_agent_message"] {
+            if let Some(text) = value.get(key).and_then(Value::as_str) {
+                append_output_segment(output, text);
+                return;
+            }
+        }
+        return;
+    };
+
+    let has_final_answer = items.iter().any(|item| {
+        agent_message_text(item).is_some()
+            && item.get("phase").and_then(Value::as_str) == Some("final_answer")
+    });
+    for item in items {
+        if has_final_answer && item.get("phase").and_then(Value::as_str) != Some("final_answer") {
+            continue;
+        }
+        if let Some(text) = agent_message_text(item) {
+            append_output_segment(output, text);
+        }
+    }
+}
+
+fn append_output_segment(output: &mut String, text: &str) {
+    if !output.is_empty() && !output.ends_with('\n') && !text.starts_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(text);
 }
 
 fn collect_output_text(value: &Value, output: &mut String) {
