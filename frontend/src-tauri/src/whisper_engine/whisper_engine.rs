@@ -621,8 +621,8 @@ impl WhisperEngine {
             // Suppressor dropped here, stderr restored
         };
         let mut result = String::new();
-        let mut total_confidence = 0.0;
-        let mut segment_count = 0;
+        let mut token_prob_sum = 0.0f64;
+        let mut token_count = 0u64;
 
         let num_segments = num_segments?;
         for i in 0..num_segments {
@@ -631,15 +631,18 @@ impl WhisperEngine {
                 Err(_) => continue,
             };
 
-            // Calculate confidence based on segment length and duration (simplified approach)
-            let segment_length = segment_text.len() as f32;
-            let segment_confidence = if segment_length > 0.0 {
-                (segment_length / 100.0).min(0.9) + 0.1 // 0.1 to 1.0 confidence based on text length
-            } else {
-                0.1
-            };
-            total_confidence += segment_confidence;
-            segment_count += 1;
+            // Real model confidence: mean token probability reported by
+            // whisper.cpp. The previous heuristic derived "confidence" from
+            // output text LENGTH, which scored short valid utterances ("Ja",
+            // names, numbers) near zero and got them discarded downstream.
+            if let Ok(n_tokens) = state.full_n_tokens(i) {
+                for t in 0..n_tokens {
+                    if let Ok(p) = state.full_get_token_prob(i, t) {
+                        token_prob_sum += f64::from(p);
+                        token_count += 1;
+                    }
+                }
+            }
 
             let cleaned_text = segment_text.trim();
             if !cleaned_text.is_empty() {
@@ -653,11 +656,7 @@ impl WhisperEngine {
         let final_result = result.trim().to_string();
         let cleaned_result = Self::clean_repetitive_text(&final_result);
 
-        let avg_confidence = if segment_count > 0 {
-            total_confidence / segment_count as f32
-        } else {
-            0.0
-        };
+        let avg_confidence = mean_token_probability(token_prob_sum, token_count);
 
         Ok((cleaned_result, avg_confidence, is_partial))
     }
@@ -1284,5 +1283,37 @@ impl WhisperEngine {
         }
 
         Ok(())
+    }
+}
+
+/// Mean token probability across a transcription, clamped to [0.0, 1.0].
+/// Returns 1.0 when no token data is available so downstream consumers treat
+/// the result as "no confidence signal" rather than "low confidence".
+fn mean_token_probability(prob_sum: f64, token_count: u64) -> f32 {
+    if token_count == 0 {
+        return 1.0;
+    }
+    (prob_sum / token_count as f64).clamp(0.0, 1.0) as f32
+}
+
+#[cfg(test)]
+mod confidence_tests {
+    use super::mean_token_probability;
+
+    #[test]
+    fn averages_token_probabilities() {
+        assert!((mean_token_probability(2.7, 3) - 0.9).abs() < 1e-6);
+        assert!((mean_token_probability(0.3, 3) - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_token_data_reads_as_no_signal_not_low_confidence() {
+        assert_eq!(mean_token_probability(0.0, 0), 1.0);
+    }
+
+    #[test]
+    fn clamps_out_of_range_sums() {
+        assert_eq!(mean_token_probability(9.0, 3), 1.0);
+        assert_eq!(mean_token_probability(-1.0, 2), 0.0);
     }
 }

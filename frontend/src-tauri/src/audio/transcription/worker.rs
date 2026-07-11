@@ -301,26 +301,20 @@ pub fn start_transcription_task<R: Runtime>(
                                     is_partial,
                                     provider_word_timestamps,
                                 )) => {
-                                    // Provider-aware confidence threshold
-                                    let confidence_threshold = match &engine_clone {
-                                        TranscriptionEngine::Whisper(_)
-                                        | TranscriptionEngine::Provider(_) => 0.3,
-                                        TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
-                                    };
-
                                     let confidence_str = match confidence_opt {
                                         Some(c) => format!("{:.2}", c),
                                         None => "N/A".to_string(),
                                     };
 
-                                    debug!("Worker {} transcription result: text='{}', confidence={}, partial={}, threshold={:.2}",
-                                          worker_id, transcript, confidence_str, is_partial, confidence_threshold);
+                                    debug!("Worker {} transcription result: text='{}', confidence={}, partial={}",
+                                          worker_id, transcript, confidence_str, is_partial);
 
-                                    // Check confidence threshold (or accept if no confidence provided)
-                                    let meets_threshold =
-                                        confidence_opt.map_or(true, |c| c >= confidence_threshold);
-
-                                    if !transcript.trim().is_empty() && meets_threshold {
+                                    // Every non-empty transcript is kept. A confidence
+                                    // threshold used to discard results below 0.3 here, but
+                                    // Whisper's "confidence" was derived from text LENGTH,
+                                    // which silently dropped short valid utterances ("Ja",
+                                    // "Nein", names, numbers). Confidence is display-only.
+                                    if !transcript.trim().is_empty() {
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         debug!("Worker {} transcribed: {} (confidence: {}, partial: {})",
                                               worker_id, transcript, confidence_str, is_partial);

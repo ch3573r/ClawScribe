@@ -116,33 +116,140 @@ impl PersistedToken {
     }
 }
 
-/// Plaintext file fallback used when the OS keychain is unavailable or rejects
-/// the write (e.g. the Windows Credential Manager size limit). Lives in the
-/// per-user app config dir.
+/// Encrypted file fallback used when the OS keychain is unavailable or rejects
+/// the write. On Windows this is the steady state: Microsoft refresh tokens
+/// exceed the Credential Manager 2560-byte blob cap, so every save lands here.
+/// The file is DPAPI-encrypted for the current user; plaintext is never
+/// written. Lives in the per-user app config dir.
 fn fallback_token_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("ClawScribe").join("ms-token.bin"))
+}
+
+/// Pre-0.5.36 plaintext fallback location. Read once for migration, then
+/// deleted; never written again.
+fn legacy_plaintext_token_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("ClawScribe").join("ms-token.json"))
 }
 
-fn save_to_file(json: &str) -> Result<(), TokenStoreError> {
-    let path = fallback_token_path()
-        .ok_or_else(|| TokenStoreError::KeyringError("no config dir for token fallback".into()))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
+#[cfg(target_os = "windows")]
+fn protect_bytes(plaintext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: u32::try_from(plaintext.len())
+            .map_err(|_| TokenStoreError::SerializationError("token too large".into()))?,
+        pbData: plaintext.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        CryptProtectData(&input, None, None, None, None, 0, &mut output)
+            .map_err(|e| TokenStoreError::SerializationError(format!("DPAPI protect: {e}")))?;
+        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        let _ = LocalFree(HLOCAL(output.pbData.cast()));
+        Ok(bytes)
     }
-    std::fs::write(&path, json).map_err(|e| TokenStoreError::SerializationError(e.to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn unprotect_bytes(ciphertext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: u32::try_from(ciphertext.len())
+            .map_err(|_| TokenStoreError::SerializationError("token blob too large".into()))?,
+        pbData: ciphertext.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        CryptUnprotectData(&input, None, None, None, None, 0, &mut output)
+            .map_err(|e| TokenStoreError::SerializationError(format!("DPAPI unprotect: {e}")))?;
+        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        let _ = LocalFree(HLOCAL(output.pbData.cast()));
+        Ok(bytes)
+    }
+}
+
+fn save_to_file(json: &str) -> Result<(), TokenStoreError> {
+    #[cfg(target_os = "windows")]
+    {
+        let path = fallback_token_path().ok_or_else(|| {
+            TokenStoreError::KeyringError("no config dir for token fallback".into())
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
+        }
+        let encrypted = protect_bytes(json.as_bytes())?;
+        std::fs::write(&path, encrypted)
+            .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
+        // The encrypted file supersedes any pre-0.5.36 plaintext copy.
+        delete_legacy_plaintext_file();
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Fail closed: no per-user encryption primitive is wired up on this
+        // platform, and writing the refresh token in plaintext is worse than
+        // asking the user to sign in again next session. The in-memory token
+        // still works for the current session.
+        let _ = json;
+        Err(TokenStoreError::KeyringError(
+            "OS keychain rejected the token and no encrypted fallback is available on this platform"
+                .into(),
+        ))
+    }
 }
 
 fn load_from_file() -> Option<PersistedToken> {
-    let path = fallback_token_path()?;
-    let json = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&json).ok()
+    #[cfg(target_os = "windows")]
+    if let Some(path) = fallback_token_path() {
+        if let Ok(encrypted) = std::fs::read(&path) {
+            match unprotect_bytes(&encrypted)
+                .ok()
+                .and_then(|json| serde_json::from_slice::<PersistedToken>(&json).ok())
+            {
+                Some(token) => return Some(token),
+                None => log::warn!(
+                    "Stored Microsoft token fallback could not be decrypted; ignoring it"
+                ),
+            }
+        }
+    }
+
+    // Pre-0.5.36 plaintext fallback: migrate to the encrypted format on
+    // first read and delete the plaintext file.
+    let legacy_path = legacy_plaintext_token_path()?;
+    let json = std::fs::read_to_string(&legacy_path).ok()?;
+    let token: PersistedToken = serde_json::from_str(&json).ok()?;
+    log::warn!("Migrating Microsoft token from plaintext fallback to encrypted storage");
+    match save_to_file(&json) {
+        Ok(()) => {}
+        Err(e) => {
+            // Windows: keep the plaintext copy only if re-encryption failed,
+            // otherwise the sign-in would be lost. Non-Windows fails closed on
+            // write, so the legacy file is intentionally left for a later
+            // platform-specific migration.
+            log::warn!("Could not migrate Microsoft token to encrypted storage: {e}");
+            return Some(token);
+        }
+    }
+    delete_legacy_plaintext_file();
+    Some(token)
+}
+
+fn delete_legacy_plaintext_file() {
+    if let Some(path) = legacy_plaintext_token_path() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn delete_file() {
     if let Some(path) = fallback_token_path() {
         let _ = std::fs::remove_file(path);
     }
+    delete_legacy_plaintext_file();
 }
 
 pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
@@ -255,4 +362,29 @@ pub async fn ensure_valid_token(
         log::warn!("Failed to persist refreshed Microsoft token: {e}");
     }
     Ok(updated)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod dpapi_tests {
+    use super::*;
+
+    #[test]
+    fn protect_round_trips_token_json() {
+        let json = r#"{"refresh_token":"0.AAAA-example-not-a-real-token","user_id":"u"}"#;
+        let encrypted = protect_bytes(json.as_bytes()).unwrap();
+        assert_ne!(encrypted.as_slice(), json.as_bytes());
+        assert!(
+            !encrypted
+                .windows(json.len())
+                .any(|window| window == json.as_bytes()),
+            "ciphertext must not embed the plaintext"
+        );
+        let decrypted = unprotect_bytes(&encrypted).unwrap();
+        assert_eq!(decrypted, json.as_bytes());
+    }
+
+    #[test]
+    fn unprotect_rejects_garbage() {
+        assert!(unprotect_bytes(b"not a dpapi blob").is_err());
+    }
 }

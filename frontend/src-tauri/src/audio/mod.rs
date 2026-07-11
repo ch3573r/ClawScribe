@@ -18,7 +18,6 @@ pub mod ffmpeg_mixer; // NEW: FFmpeg-style adaptive audio mixer
 
 // New simplified audio system
 pub mod async_logger;
-pub mod batch_processor;
 pub mod buffer_pool;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
 pub mod hardware_detector;
