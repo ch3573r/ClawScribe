@@ -389,9 +389,7 @@ jobs:
           if ("${{ inputs.directml }}" -eq "true" -and "${{ inputs.feature }}" -notin @("windows-gpu", "directml")) { $featureList += "directml" }
           $featureArgs = @()
           if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
-          foreach ($filter in @("summary::processor::tests", "summary::chunking::tests", "audio::async_logger::tests", "audio::hardware_detector::tests")) {
-            cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml @featureArgs --lib $filter -- --test-threads=1
-          }
+          .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",")
 
       - name: Write build metadata
         if: ${{ !inputs['check-only'] }}
