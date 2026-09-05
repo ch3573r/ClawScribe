@@ -36,8 +36,9 @@ export function useAutoScroll({
     const autoScrollRef = useRef(true);
     const isProgrammaticScrollRef = useRef(false);
     const prevSegmentCountRef = useRef(segments.length);
-    const resetTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
-    const settleTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+    // These are browser timers; Node's ambient overload can mislead ReturnType.
+    const resetTimerRef = useRef<number | null>(null);
+    const settleTimerRef = useRef<number | null>(null);
 
     const setAutoScroll = useCallback((value: boolean) => {
         // Update immediately: another transcript event can arrive before React renders.
