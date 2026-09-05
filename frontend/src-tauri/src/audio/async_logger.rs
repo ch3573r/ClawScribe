@@ -1,12 +1,13 @@
 use log::{Level, Record};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Async logger for performance-critical audio processing
-/// Buffers log messages and writes them asynchronously to avoid blocking audio threads
+/// Best-effort diagnostics for performance-critical audio processing.
+/// Bound both the queue and batch; overload drops logs, never audio samples.
 pub struct AsyncLogger {
-    sender: mpsc::UnboundedSender<LogMessage>,
+    sender: mpsc::Sender<LogMessage>,
     _handle: JoinHandle<()>,
 }
 
@@ -15,119 +16,142 @@ struct LogMessage {
     level: Level,
     target: String,
     message: String,
-    #[allow(dead_code)]
-    timestamp: std::time::Instant,
 }
 
 impl AsyncLogger {
-    /// Create a new async logger with specified buffer size
+    /// Create a bounded logger. A zero-sized request is clamped to one message.
     pub fn new(buffer_size: usize) -> Self {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<LogMessage>();
-
-        // Spawn background task to process log messages
+        let capacity = buffer_size.max(1);
+        let (sender, mut receiver) = mpsc::channel::<LogMessage>(capacity);
         let handle = tokio::spawn(async move {
-            let mut buffered_messages = Vec::with_capacity(buffer_size);
-            let mut last_flush = std::time::Instant::now();
+            let mut buffered_messages = Vec::with_capacity(capacity);
+            let mut flush_interval = tokio::time::interval(Duration::from_millis(100));
+            flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // interval's first tick is immediate; subsequent ticks flush quiet batches.
+            flush_interval.tick().await;
 
-            while let Some(message) = receiver.recv().await {
-                buffered_messages.push(message);
-
-                // Flush buffer when full or after timeout (100ms)
-                if buffered_messages.len() >= buffer_size || last_flush.elapsed().as_millis() >= 100
-                {
-                    Self::flush_messages(&mut buffered_messages);
-                    last_flush = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    message = receiver.recv() => {
+                        match message {
+                            Some(message) => {
+                                buffered_messages.push(message);
+                                if buffered_messages.len() >= capacity {
+                                    Self::flush_messages(&mut buffered_messages);
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = flush_interval.tick() => {
+                        Self::flush_messages(&mut buffered_messages);
+                    }
                 }
             }
-
-            // Flush any remaining messages on shutdown
-            if !buffered_messages.is_empty() {
-                Self::flush_messages(&mut buffered_messages);
-            }
+            Self::flush_messages(&mut buffered_messages);
         });
-
-        Self {
-            sender,
-            _handle: handle,
-        }
+        Self { sender, _handle: handle }
     }
 
-    /// Log a message asynchronously (non-blocking)
+    /// Never wait for log I/O or queue space on the audio producer thread.
     pub fn log(&self, level: Level, target: &str, message: String) {
-        let log_msg = LogMessage {
+        if !log::log_enabled!(target: target, level) {
+            return;
+        }
+        let _ = self.sender.try_send(LogMessage {
             level,
             target: target.to_string(),
             message,
-            timestamp: std::time::Instant::now(),
-        };
-
-        // Non-blocking send - if channel is full, drop the message to avoid blocking
-        let _ = self.sender.send(log_msg);
+        });
     }
 
-    /// Flush buffered messages to the actual logger
     fn flush_messages(messages: &mut Vec<LogMessage>) {
         for msg in messages.drain(..) {
-            // Use the standard log crate to actually write the message
-            log::logger().log(
-                &Record::builder()
-                    .args(format_args!("{}", msg.message))
-                    .level(msg.level)
-                    .target(&msg.target)
-                    .build(),
-            );
+            // Respect current filtering even if configuration changed while queued.
+            if log::log_enabled!(target: &msg.target, msg.level) {
+                log::logger().log(
+                    &Record::builder()
+                        .args(format_args!("{}", msg.message))
+                        .level(msg.level)
+                        .target(&msg.target)
+                        .build(),
+                );
+            }
         }
     }
 }
 
-/// Thread-safe async logger instance for audio components
 static ASYNC_LOGGER: once_cell::sync::OnceCell<Arc<AsyncLogger>> = once_cell::sync::OnceCell::new();
 
-/// Initialize the global async logger (only if tokio runtime is available)
 pub fn init_async_logger() {
-    // Only initialize if we're in a tokio runtime context
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let logger = AsyncLogger::new(1000); // Buffer up to 1000 messages
-        ASYNC_LOGGER.set(Arc::new(logger)).ok();
-    }
+    let _ = get_async_logger();
 }
 
-/// Get the global async logger instance (lazy initialization)
 pub fn get_async_logger() -> Option<Arc<AsyncLogger>> {
-    // Lazy initialization - only create logger when first needed and tokio runtime is available
-    if ASYNC_LOGGER.get().is_none() && tokio::runtime::Handle::try_current().is_ok() {
-        let logger = AsyncLogger::new(1000);
-        let _ = ASYNC_LOGGER.set(Arc::new(logger));
+    if let Some(logger) = ASYNC_LOGGER.get() {
+        return Some(Arc::clone(logger));
     }
-    ASYNC_LOGGER.get().cloned()
+    if tokio::runtime::Handle::try_current().is_err() {
+        return None;
+    }
+    Some(Arc::clone(ASYNC_LOGGER.get_or_init(|| Arc::new(AsyncLogger::new(1000)))))
 }
 
-/// Macro for async debug logging in performance-critical paths
+// Check filtering before allocating formatted strings or initializing the logger.
 #[macro_export]
 macro_rules! async_debug {
     ($($arg:tt)*) => {
-        if let Some(logger) = $crate::audio::async_logger::get_async_logger() {
-            logger.log(log::Level::Debug, module_path!(), format!($($arg)*));
+        if log::log_enabled!(log::Level::Debug) {
+            if let Some(logger) = $crate::audio::async_logger::get_async_logger() {
+                logger.log(log::Level::Debug, module_path!(), format!($($arg)*));
+            }
         }
     };
 }
 
-/// Macro for async info logging that doesn't block
 #[macro_export]
 macro_rules! async_info {
     ($($arg:tt)*) => {
-        if let Some(logger) = $crate::audio::async_logger::get_async_logger() {
-            logger.log(log::Level::Info, module_path!(), format!($($arg)*));
+        if log::log_enabled!(log::Level::Info) {
+            if let Some(logger) = $crate::audio::async_logger::get_async_logger() {
+                logger.log(log::Level::Info, module_path!(), format!($($arg)*));
+            }
         }
     };
 }
 
-/// Macro for async warning logging
 #[macro_export]
 macro_rules! async_warn {
     ($($arg:tt)*) => {
-        if let Some(logger) = $crate::audio::async_logger::get_async_logger() {
-            logger.log(log::Level::Warn, module_path!(), format!($($arg)*));
+        if log::log_enabled!(log::Level::Warn) {
+            if let Some(logger) = $crate::audio::async_logger::get_async_logger() {
+                logger.log(log::Level::Warn, module_path!(), format!($($arg)*));
+            }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message() -> LogMessage {
+        LogMessage { level: Level::Info, target: "test".into(), message: "test".into() }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn logging_queue_is_bounded_and_never_waits_for_capacity() {
+        // No await: the consumer cannot drain the queue before these assertions.
+        let logger = AsyncLogger::new(2);
+        assert!(logger.sender.try_send(message()).is_ok());
+        assert!(logger.sender.try_send(message()).is_ok());
+        assert!(matches!(logger.sender.try_send(message()), Err(mpsc::error::TrySendError::Full(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_capacity_is_safe() {
+        let logger = AsyncLogger::new(0);
+        assert!(logger.sender.try_send(message()).is_ok());
+        assert!(matches!(logger.sender.try_send(message()), Err(mpsc::error::TrySendError::Full(_))));
+    }
 }

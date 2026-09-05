@@ -4,6 +4,7 @@ import { useRef, useReducer, startTransition, useEffect, useState, memo, useMemo
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
+import { formatTranscriptDisplayText } from "@/lib/transcriptDisplay";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import {
@@ -72,16 +73,6 @@ function formatRecordingTime(seconds: number | undefined): string {
     return `[${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
 }
 
-// Filler-word removal. Precompiled at module scope: this runs for every
-// visible row on every render, and per-render RegExp construction was a
-// measurable cost on low-end CPUs.
-const STOP_WORD_PATTERN = /\b(?:uh|um|er|ah|hmm|hm|eh|oh)\b[,\s]*/gi;
-const WHITESPACE_PATTERN = /\s+/g;
-
-function cleanStopWords(text: string): string {
-    return text.replace(STOP_WORD_PATTERN, ' ').replace(WHITESPACE_PATTERN, ' ').trim();
-}
-
 function normalizeSpeakerOption(speaker: string | null | undefined): string | null {
     const label = speaker?.trim().replace(/\s+/g, " ");
     return label || null;
@@ -134,7 +125,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     isActive: boolean;
     onSeekToTime?: (seconds: number) => void;
 }) {
-    const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+    const displayText = formatTranscriptDisplayText(text);
     // "Me" = your microphone, "Participants" = system audio. Color-code so the
     // two sides of the conversation are scannable.
     const currentSpeaker = showSpeakerLabels ? normalizeSpeakerOption(speaker) : null;
