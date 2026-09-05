@@ -60,14 +60,18 @@ From the repository root, with the native prerequisites and sidecars installed:
 
 ```powershell
 cargo check --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu
-cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib summary::processor::tests
-cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib summary::chunking::tests
-cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib audio::async_logger::tests
-cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib audio::hardware_detector::tests
+.\frontend\scripts\stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml
+.\frontend\scripts\test-windows-native.ps1 -Features windows-gpu
 ```
 
-Omit GPU features only for a deliberate CPU-path test. The production chunker
-can also be tested without desktop dependencies:
+The native test helper builds the real library test executable in the release
+profile, discovers it through Cargo JSON, and places the staged runtime DLLs
+beside it. It runs all four required groups and rejects zero-test matches. Bare
+`cargo test` can otherwise fail at startup with `STATUS_DLL_NOT_FOUND` outside
+the installer layout. For a deliberate CPU-path test, stage the CPU runtime and
+pass an empty `-Features` value; do not mix CPU and DirectML runtime sets.
+
+The production chunker can also be tested without desktop dependencies:
 
 ```powershell
 rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o summary-chunking-tests.exe
