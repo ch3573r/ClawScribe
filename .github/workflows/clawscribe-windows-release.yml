@@ -1,6 +1,34 @@
 name: ClawScribe Windows Release
 
 on:
+  workflow_call:
+    inputs:
+      feature:
+        type: string
+        default: windows-gpu
+      check-only:
+        type: boolean
+        default: false
+      build-ref:
+        type: string
+        default: ""
+      directml:
+        type: boolean
+        default: false
+      publish:
+        type: boolean
+        default: false
+      draft-release:
+        type: boolean
+        default: false
+      capture-smoke-confirmed:
+        type: boolean
+        default: false
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
   workflow_dispatch:
     inputs:
       feature:
@@ -35,6 +63,11 @@ on:
         required: false
         type: boolean
         default: false
+      draft-release:
+        description: Stage a draft release for testing without publishing or changing the stable updater.
+        required: false
+        type: boolean
+        default: false
       capture-smoke-confirmed:
         description: Confirm a real Windows recording captured both microphone and system audio, stopped cleanly, and produced playable audio.
         required: false
@@ -53,6 +86,7 @@ jobs:
   build:
     name: Build ClawScribe Windows installers
     runs-on: [self-hosted, windows, clawscribe]
+    timeout-minutes: 90
     permissions:
       contents: write # create/update GitHub Releases when publish=true
 
@@ -71,12 +105,28 @@ jobs:
         if: ${{ inputs['build-ref'] != '' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           git checkout --detach "${{ inputs['build-ref'] }}"
+
+      - name: Validate release mode and identify exact build commit
+        id: build_identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ("${{ inputs.publish }}" -eq "true" -and "${{ inputs['draft-release'] }}" -eq "true") {
+            throw "Select either publication or a draft, not both."
+          }
+          $commit = (git rev-parse HEAD).Trim()
+          "commit=$commit" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Require dual-source capture smoke before publishing
         if: ${{ inputs.publish }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           if ("${{ inputs['capture-smoke-confirmed'] }}" -ne "true") {
             throw "Publishing requires a real Windows microphone + system-audio recording smoke after the active cpal revision changed."
           }
@@ -84,6 +134,8 @@ jobs:
       - name: Normalize migration line endings
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           # SQLx embeds migration files at compile time and records their
           # checksums in every installed client's database. A reused runner
           # workspace can hold CRLF copies written by checkouts that predate
@@ -113,6 +165,8 @@ jobs:
         if: ${{ !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $sourceVersion = node -p "require('./frontend/package.json').version"
           $installerVersion = $sourceVersion -replace "-.*$", ""
           if ($sourceVersion -ne $installerVersion) {
@@ -133,9 +187,11 @@ jobs:
         # never see the update. Fail fast — before the long build — when a
         # prerelease publish would not advance the stripped updater version past
         # what's already published.
-        if: ${{ inputs.publish && !inputs['check-only'] }}
+        if: ${{ (inputs.publish || inputs['draft-release']) && !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $sourceVersion = $env:CLAWSCRIBE_SOURCE_VERSION
           $installerVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
           if ($sourceVersion -eq $installerVersion) {
@@ -166,9 +222,11 @@ jobs:
         # same runtime version — installed clients would never see the change
         # as an update. Fail fast and require a version bump. Republishing the
         # exact tagged commit stays allowed so failed uploads can be retried.
-        if: ${{ inputs.publish && !inputs['check-only'] }}
+        if: ${{ (inputs.publish || inputs['draft-release']) && !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $version = $env:CLAWSCRIBE_SOURCE_VERSION
           $tagRef = "refs/tags/v$version"
           $remote = git ls-remote origin $tagRef "$tagRef^{}"
@@ -199,6 +257,8 @@ jobs:
       - name: Install LLVM
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           # Pin LLVM 20.x: bindgen 0.69 (via whisper-rs-sys) mis-parses the
           # whisper_full_params struct with clang 21+, dropping fields and
           # failing the build. 20.1.8 matches the GitHub-hosted image.
@@ -211,6 +271,8 @@ jobs:
         if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           choco install 7zip -y --no-progress
 
       - name: Install Vulkan SDK
@@ -224,6 +286,8 @@ jobs:
         if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $vulkanSdk = $env:VULKAN_SDK
           Write-Host "VULKAN_SDK: $vulkanSdk"
           if (-not $vulkanSdk -or -not (Test-Path $vulkanSdk)) {
@@ -244,7 +308,9 @@ jobs:
       - name: Build llama-helper sidecar
         shell: pwsh
         run: |
-          cargo build -p llama-helper --release --target x86_64-pc-windows-msvc
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
           New-Item -ItemType Directory -Force -Path frontend\src-tauri\binaries | Out-Null
           Copy-Item target\x86_64-pc-windows-msvc\release\llama-helper.exe frontend\src-tauri\binaries\llama-helper-x86_64-pc-windows-msvc.exe -Force
 
@@ -252,11 +318,15 @@ jobs:
         if: ${{ !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           .\frontend\scripts\stage-codex-runtime.ps1 -TauriRoot "frontend\src-tauri"
 
       - name: Verify app and installer icons
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           .\frontend\scripts\verify-brand-icons.ps1 -FrontendRoot "frontend"
 
       - name: Build release installers
@@ -270,6 +340,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $buildStartedAt = Get-Date
           $feature = "${{ inputs.feature }}"
           # cpu is the implicit default (no GPU feature); others map 1:1.
@@ -287,20 +359,38 @@ jobs:
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\nsis" -Recurse -Force -ErrorAction SilentlyContinue
           cd frontend
           pnpm install --frozen-lockfile
-          pnpm build
+          pnpm typecheck
+          pnpm test
           if ($features) {
-            pnpm exec tauri build -- --features $features
+            pnpm exec tauri build -- --locked --features $features
           } else {
-            pnpm exec tauri build
+            pnpm exec tauri build -- --locked
           }
           $buildElapsedSeconds = [Math]::Round(((Get-Date) - $buildStartedAt).TotalSeconds, 3)
           $buildElapsedSecondsText = $buildElapsedSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
           "build_elapsed_seconds=$buildElapsedSecondsText" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+      - name: Run native summary and resource regression tests
+        if: ${{ !inputs['check-only'] }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $featureList = @()
+          if ("${{ inputs.feature }}" -ne "cpu") { $featureList += "${{ inputs.feature }}" }
+          if ("${{ inputs.directml }}" -eq "true" -and "${{ inputs.feature }}" -notin @("windows-gpu", "directml")) { $featureList += "directml" }
+          $featureArgs = @()
+          if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
+          foreach ($filter in @("summary::processor::tests", "summary::chunking::tests", "audio::async_logger::tests", "audio::hardware_detector::tests")) {
+            cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml @featureArgs --lib $filter -- --test-threads=1
+          }
+
       - name: Write build metadata
         if: ${{ !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $bundleRoot = "frontend\src-tauri\target\release\bundle"
           $sourceVersion = $env:CLAWSCRIBE_SOURCE_VERSION
           $installerVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
@@ -397,6 +487,8 @@ jobs:
         if: ${{ inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           cd frontend
           .\scripts\build-windows-release.ps1 -Feature ${{ inputs.feature }} -CheckOnly
 
@@ -404,7 +496,7 @@ jobs:
         # Skip on publish runs: the GitHub Release is the distribution there, so
         # we avoid the Actions-artifact quota entirely. Dev (non-publish) runs
         # still get a downloadable artifact.
-        if: ${{ !inputs['check-only'] && !inputs.publish }}
+        if: ${{ !inputs['check-only'] && !inputs.publish && !inputs['draft-release'] }}
         uses: actions/upload-artifact@v4
         with:
           # Stable per-variant name (no per-commit sha) + overwrite so each
@@ -426,9 +518,11 @@ jobs:
           retention-days: 7
 
       - name: Prepare release notes
-        if: ${{ inputs.publish && !inputs['check-only'] }}
+        if: ${{ (inputs.publish || inputs['draft-release']) && !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $bundleRoot = "frontend\src-tauri\target\release\bundle"
           $version = $env:CLAWSCRIBE_SOURCE_VERSION
           $runtimeVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
@@ -470,6 +564,10 @@ jobs:
             "### What's changed",
             ""
           )
+          if ("${{ inputs['draft-release'] }}" -eq "true") {
+            $lines += "> DRAFT: native build and automated checks only. Real dual-source recording, installer interaction, and target-notebook performance must be verified before publication."
+            $lines += ""
+          }
           $lines += $changelog
           $lines += @(
             "",
@@ -490,9 +588,11 @@ jobs:
           $lines | Set-Content -LiteralPath (Join-Path $bundleRoot "RELEASE-NOTES.md") -Encoding utf8
 
       - name: Generate updater manifest (latest.json)
-        if: ${{ inputs.publish && !inputs['check-only'] }}
+        if: ${{ (inputs.publish || inputs['draft-release']) && !inputs['check-only'] }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $bundleRoot = "frontend\src-tauri\target\release\bundle"
           $sourceVersion = $env:CLAWSCRIBE_SOURCE_VERSION
           $manifestVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
@@ -523,18 +623,37 @@ jobs:
           }
           $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $bundleRoot "latest.json") -Encoding utf8
 
+      - name: Refuse to turn a published version into a draft
+        if: ${{ inputs['draft-release'] && !inputs['check-only'] }}
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: v${{ env.CLAWSCRIBE_SOURCE_VERSION }}
+        with:
+          script: |
+            try {
+              const { data: release } = await github.rest.repos.getReleaseByTag({
+                ...context.repo, tag: process.env.RELEASE_TAG
+              });
+              if (!release.draft) core.setFailed('This version is already published. Bump the version; never replace a public release with a draft.');
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
       - name: Publish GitHub Release
-        if: ${{ inputs.publish && !inputs['check-only'] }}
+        if: ${{ (inputs.publish || inputs['draft-release']) && !inputs['check-only'] }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.CLAWSCRIBE_SOURCE_VERSION }}
           name: ClawScribe v${{ env.CLAWSCRIBE_SOURCE_VERSION }}
           body_path: frontend/src-tauri/target/release/bundle/RELEASE-NOTES.md
+          target_commitish: ${{ steps.build_identity.outputs.commit }}
+          draft: ${{ inputs['draft-release'] }}
+          # Drafts never advance the installed stable updater.
           # The app updater points at /releases/latest/download/latest.json.
           # GitHub excludes prereleases from that route, so alpha builds must be
           # published as normal releases while this is the active update channel.
           prerelease: false
-          make_latest: true
+          make_latest: ${{ inputs['draft-release'] && 'false' || 'true' }}
           fail_on_unmatched_files: true
           files: |
             frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64_en-US.msi

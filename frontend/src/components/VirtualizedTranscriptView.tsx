@@ -1,10 +1,11 @@
 'use client';
 
-import { useRef, useReducer, startTransition, useEffect, useState, memo, useMemo } from "react";
+import { useRef, useReducer, startTransition, useEffect, useState, memo, useMemo, useId } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
 import { formatTranscriptDisplayText } from "@/lib/transcriptDisplay";
+import { toast } from "sonner";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import {
@@ -64,7 +65,7 @@ const SPEAKER_PRESET_LABELS = ["Me", "Participants"];
 
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
-    if (seconds === undefined) return '[--:--]';
+    if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '[--:--]';
 
     const totalSeconds = Math.floor(seconds);
     const minutes = Math.floor(totalSeconds / 60);
@@ -132,13 +133,15 @@ const TranscriptSegment = memo(function TranscriptSegment({
     const isMe = currentSpeaker === "Me";
     const [customSpeaker, setCustomSpeaker] = useState("");
     const [isSaving, setIsSaving] = useState(false);
+    const savingRef = useRef(false);
+    const speakerInputId = useId();
     const canReplaceMatching = Boolean(currentSpeaker && onApplySpeakerToMatching);
     const presetOptions = SPEAKER_PRESET_LABELS.filter((label) => label !== currentSpeaker);
     const existingSpeakerOptions = speakerOptions.filter(
         (label) => label !== currentSpeaker && !SPEAKER_PRESET_LABELS.includes(label)
     );
     const replacementVerb = canReplaceMatching ? "Replace" : "Set";
-    const canSeek = Boolean(onSeekToTime && Number.isFinite(timestamp));
+    const canSeek = Boolean(onSeekToTime && Number.isFinite(timestamp) && timestamp >= 0);
 
     const seekToSegment = () => {
         if (canSeek) {
@@ -146,43 +149,38 @@ const TranscriptSegment = memo(function TranscriptSegment({
         }
     };
 
-    const saveSpeaker = async (nextSpeaker: string | null) => {
-        if (!onSpeakerChange) return;
+    const persistSpeakerChange = async (operation: () => Promise<unknown> | unknown): Promise<boolean> => {
+        if (savingRef.current) return false;
+        savingRef.current = true;
         setIsSaving(true);
         try {
-            await onSpeakerChange(id, nextSpeaker);
-        } catch (error) {
-            console.error("Failed to save speaker label:", error);
+            await operation();
+            return true;
+        } catch {
+            toast.error("Could not save the speaker label. Please try again.");
+            return false;
         } finally {
+            savingRef.current = false;
             setIsSaving(false);
         }
     };
 
-    const applyMatching = async (nextSpeaker: string | null) => {
-        if (!onApplySpeakerToMatching) return;
-        setIsSaving(true);
-        try {
-            await onApplySpeakerToMatching(currentSpeaker, nextSpeaker);
-        } catch (error) {
-            console.error("Failed to apply matching speaker labels:", error);
-        } finally {
-            setIsSaving(false);
-        }
+    const saveSpeaker = (nextSpeaker: string | null): Promise<boolean> => {
+        if (!onSpeakerChange) return Promise.resolve(false);
+        return persistSpeakerChange(() => onSpeakerChange(id, nextSpeaker));
     };
 
-    const replaceSpeaker = async (nextSpeaker: string | null) => {
-        if (canReplaceMatching) {
-            await applyMatching(nextSpeaker);
-        } else {
-            await saveSpeaker(nextSpeaker);
+    const replaceSpeaker = (nextSpeaker: string | null): Promise<boolean> => {
+        if (canReplaceMatching && onApplySpeakerToMatching) {
+            return persistSpeakerChange(() => onApplySpeakerToMatching(currentSpeaker, nextSpeaker));
         }
+        return saveSpeaker(nextSpeaker);
     };
 
     const saveCustomSpeaker = async () => {
         const nextSpeaker = customSpeaker.trim().replace(/\s+/g, " ");
         if (!nextSpeaker) return;
-        await replaceSpeaker(nextSpeaker);
-        setCustomSpeaker("");
+        if (await replaceSpeaker(nextSpeaker)) setCustomSpeaker("");
     };
 
     const speakerClass = isMe
@@ -194,25 +192,20 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            role={canSeek ? "button" : undefined}
-            tabIndex={canSeek ? 0 : undefined}
-            onClick={seekToSegment}
-            onKeyDown={(event) => {
-                if (!canSeek) return;
-                if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    seekToSegment();
-                }
-            }}
-            className={`mb-4 rounded-[4px] px-1 py-0.5 outline-none transition ${canSeek ? "cursor-pointer hover:bg-muted/35 focus:ring-2 focus:ring-ring" : ""} ${isActive ? "bg-accent/10 ring-1 ring-accent/30" : ""}`}
-            aria-label={canSeek ? `Seek transcript to ${formatRecordingTime(timestamp)}` : undefined}
+            className={`mb-4 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isActive ? "bg-accent/10 ring-1 ring-accent/30" : ""}`}
         >
             <div className="flex items-start gap-3">
                 <Tooltip>
-                    <TooltipTrigger>
-                        <span className="mt-1 flex min-w-[3.25rem] flex-shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+                    <TooltipTrigger asChild>
+                        <button
+                            type="button"
+                            disabled={!canSeek}
+                            onClick={seekToSegment}
+                            aria-label={`Play recording from ${formatRecordingTime(timestamp)}`}
+                            className="flex min-h-8 min-w-[3.5rem] flex-shrink-0 items-center rounded font-mono text-[11px] tabular-nums text-muted-foreground enabled:hover:bg-muted enabled:hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default"
+                        >
                             {formatRecordingTime(timestamp)}
-                        </span>
+                        </button>
                     </TooltipTrigger>
                     <TooltipContent>
                         {confidence !== undefined && showConfidence && (
@@ -273,11 +266,13 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                     onClick={(e) => e.stopPropagation()}
                                     onKeyDown={(e) => e.stopPropagation()}
                                 >
-                                    <label className="text-xs font-medium text-muted-foreground">
+                                    <label htmlFor={speakerInputId} className="text-xs font-medium text-muted-foreground">
                                         {canReplaceMatching ? "Custom replacement" : "Custom label"}
                                     </label>
                                     <div className="flex gap-1.5">
                                         <input
+                                            id={speakerInputId}
+                                            disabled={isSaving}
                                             value={customSpeaker}
                                             onChange={(e) => setCustomSpeaker(e.target.value)}
                                             onKeyDown={(e) => {
@@ -293,7 +288,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                         <button
                                             type="button"
                                             onClick={() => void saveCustomSpeaker()}
-                                            disabled={!customSpeaker.trim()}
+                                            disabled={isSaving || !customSpeaker.trim()}
                                             className="rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
                                         >
                                             {replacementVerb}
@@ -399,7 +394,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     });
 
     // Custom hook for auto-scrolling (supports both virtualized and non-virtualized)
-    useAutoScroll({
+    const { autoScroll, scrollToBottom } = useAutoScroll({
         scrollRef,
         segments,
         isRecording,
@@ -670,6 +665,17 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 </>
             )}
             </div>
+            {isRecording && !disableAutoScroll && !autoScroll && segments.length > 0 && (
+                <div className="sticky bottom-3 z-20 flex justify-end pt-2 pointer-events-none">
+                    <button
+                        type="button"
+                        onClick={scrollToBottom}
+                        className="pointer-events-auto min-h-9 rounded-full border border-border bg-card px-4 text-sm font-medium text-foreground shadow-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                        Jump to live transcript
+                    </button>
+                </div>
+            )}
         </div>
     );
 };

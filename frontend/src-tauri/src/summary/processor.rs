@@ -306,6 +306,9 @@ pub async fn generate_meeting_summary(
             return Err("Summary generation was cancelled".to_string());
         }
     }
+    if text.trim().is_empty() {
+        return Err("No transcript is available to summarize. Record or import speech first.".to_string());
+    }
     info!(
         "Starting summary generation with provider: {:?}, model: {}",
         provider, model_name
@@ -674,6 +677,19 @@ async fn normalize_markdown_to_english(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn empty_transcript_is_rejected_before_any_provider_request() {
+        let template = Template {
+            name: "Test".into(), description: "Test".into(), sections: vec![],
+        };
+        let result = generate_meeting_summary(
+            &Client::new(), &LLMProvider::Ollama, "test", "", "  \n", "", "test",
+            &template, 4000, None, None, None, None, None, None, None,
+            Some("en"), Some("en"), None,
+        ).await;
+        assert!(result.unwrap_err().starts_with("No transcript is available"));
+    }
 
     #[test]
     fn failed_summary_chunk_is_not_silently_omitted() {

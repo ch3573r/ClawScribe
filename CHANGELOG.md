@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.36
+
+- Preserve all transcript content at summary chunk boundaries, including Unicode.
+- Reject failed or empty summary chunks rather than silently publishing incomplete notes.
+- Ground summaries in stated facts, distinguish proposals from decisions, and retain uncertainty.
+- Preserve meaningful multilingual words in the transcript display.
+- Improve live-follow scrolling, user interruption, cleanup, and reduced-motion navigation.
+- Add a visible jump-to-live control and accessible timestamp playback buttons.
+- Preserve custom speaker input on failed saves, show an actionable error, and prevent duplicate submissions.
+- Detect physical RAM instead of assuming 8 GB; cap Windows Whisper threads conservatively on 8 GB notebooks.
+- Bound diagnostic logging and flush quiet batches without dropping audio.
+- Include the previously unreleased token-storage encryption and short-utterance preservation fixes.
+- Make Windows build failures fatal, require both current-version installers, and run native regression tests before staging release assets.
+- Support draft Windows releases without changing the stable updater or bypassing the real audio-capture publication gate.
+
 ## 0.5.35
 
 - Reworked Home into a focused capture workspace with a clearer recording

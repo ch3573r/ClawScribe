@@ -65,6 +65,7 @@ if (-not $isWindowsHost) {
 Assert-Command "node"
 Assert-Command "pnpm"
 Assert-Command "cargo"
+Assert-Command "git"
 Assert-VulkanSdk
 
 $repoRoot = Resolve-Path (Join-Path $frontendRoot "..")
@@ -91,6 +92,7 @@ $env:TAURI_BUNDLE_TARGETS = "msi,nsis"
 
 if (-not $SkipInstall) {
     pnpm install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed." }
 }
 
 $featureArgs = @()
@@ -101,16 +103,25 @@ if ($Feature -ne "cpu") {
 if ($CheckOnly) {
     Push-Location $tauriRoot
     try {
-        cargo check @featureArgs
+        cargo check --locked @featureArgs
+        if ($LASTEXITCODE -ne 0) { throw "Native Rust validation failed." }
     } finally {
         Pop-Location
     }
 
     pnpm exec tsc --noEmit
+    if ($LASTEXITCODE -ne 0) { throw "Frontend typecheck failed." }
+    pnpm test
+    if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
     exit 0
 }
 
+pnpm exec tsc --noEmit
+if ($LASTEXITCODE -ne 0) { throw "Frontend typecheck failed." }
+pnpm test
+if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
 pnpm build
+if ($LASTEXITCODE -ne 0) { throw "Frontend production build failed." }
 
 $cargoMetadata = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $tauriRoot "Cargo.toml") |
     ConvertFrom-Json
@@ -122,10 +133,12 @@ Remove-Item -LiteralPath (Join-Path $bundleRoot "msi") -Recurse -Force -ErrorAct
 Remove-Item -LiteralPath (Join-Path $bundleRoot "nsis") -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($Feature -eq "cpu") {
-    pnpm exec tauri build
+    pnpm exec tauri build -- --locked
 } else {
-    pnpm exec tauri build -- @featureArgs
+    pnpm exec tauri build -- @featureArgs --locked
 }
+
+if ($LASTEXITCODE -ne 0) { throw "Windows installer build failed." }
 
 $sourceVersion = (node -p "require('./package.json').version").Trim()
 $commit = (git -C (Join-Path $frontendRoot "..") rev-parse HEAD).Trim()
@@ -147,15 +160,19 @@ foreach ($pattern in $artifactPatterns) {
     }
 }
 
-if ($artifactFiles.Count -eq 0) {
-    throw "No Windows release artifacts were found under '$bundleRoot'."
+$expectedMsi = "ClawScribe_${sourceVersion}_x64_en-US.msi"
+$expectedNsis = "ClawScribe_${sourceVersion}_x64-setup.exe"
+foreach ($expected in @($expectedMsi, $expectedNsis)) {
+    if (-not ($artifactFiles | Where-Object { $_.Name -eq $expected -and $_.Length -gt 0 })) {
+        throw "Required current-version installer '$expected' is missing or empty."
+    }
 }
 
 $checksumPath = Join-Path $bundleRoot "SHA256SUMS.txt"
 $resolvedBundleRoot = (Resolve-Path -LiteralPath $bundleRoot).Path
 $checksumLines = foreach ($artifact in $artifactFiles | Sort-Object FullName) {
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $artifact.FullName
-    $relativePath = [System.IO.Path]::GetRelativePath($resolvedBundleRoot, $artifact.FullName).Replace("\", "/")
+    $relativePath = $artifact.FullName.Substring($resolvedBundleRoot.Length).TrimStart([char]92, [char]47).Replace("\", "/")
     "$($hash.Hash.ToLowerInvariant())  $relativePath"
 }
 $checksumLines | Set-Content -LiteralPath $checksumPath -Encoding ascii
