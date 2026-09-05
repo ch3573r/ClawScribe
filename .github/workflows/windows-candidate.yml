@@ -1,0 +1,42 @@
+name: Stage Windows release candidate
+
+on:
+  push:
+    branches: ['release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/verify-public-repo-safety.mjs
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: pnpm typecheck && pnpm test
+        working-directory: frontend
+  stage:
+    needs: validate
+    uses: ./.github/workflows/clawscribe-windows-release.yml
+    with:
+      feature: windows-gpu
+      hosted-runner: true
+      build-ref: ${{ github.sha }}
+      publish: false
+      draft-release: true
+      capture-smoke-confirmed: false
+    secrets: inherit

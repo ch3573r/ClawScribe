@@ -105,16 +105,34 @@ impl HardwareProfile {
         (false, GpuType::None)
     }
 
-    /// Detect available system memory in GB
+    /// Detect total physical system memory in GiB (cached with the profile)
     fn detect_memory_gb() -> u8 {
-        // Simple memory detection - could be enhanced with system-specific calls
-        match std::env::var("MEMORY_GB") {
-            Ok(mem_str) => mem_str.parse().unwrap_or(8),
-            Err(_) => {
-                // Default estimates based on common configurations
-                8 // Conservative default
-            }
+        let override_value = std::env::var("MEMORY_GB").ok();
+        let mut system = sysinfo::System::new();
+        // Refresh only memory; enumerating all processes here is unnecessary.
+        system.refresh_memory();
+        Self::resolve_memory_gb(override_value.as_deref(), system.total_memory())
+    }
+
+    fn resolve_memory_gb(override_value: Option<&str>, total_bytes: u64) -> u8 {
+        if let Some(value) = override_value
+            .and_then(|value| value.trim().parse::<u8>().ok())
+            .filter(|value| *value > 0)
+        {
+            return value;
         }
+        if total_bytes == 0 {
+            // Unknown hardware must not be treated as a high-memory system.
+            return 4;
+        }
+        (total_bytes / (1024 * 1024 * 1024)).clamp(1, u8::MAX as u64) as u8
+    }
+
+    fn meeting_thread_limit(cpu_cores: u8, memory_gb: u8) -> usize {
+        // Leave capacity for the call, audio capture, and UI. This is a
+        // conservative starting policy, not a hardware performance guarantee.
+        let limit = if memory_gb <= 8 { 4 } else { 8 };
+        usize::from(cpu_cores.saturating_sub(1).max(1)).min(limit)
     }
 
     /// Calculate performance tier based on hardware
@@ -213,7 +231,7 @@ impl HardwareProfile {
                 beam_size: 2,
                 temperature: 0.2,
                 use_gpu: self.has_gpu_acceleration,
-                max_threads: Some(self.cpu_cores.min(8) as usize),
+                max_threads: Some(Self::meeting_thread_limit(self.cpu_cores, self.memory_gb)),
                 chunk_size_preference: ChunkSizePreference::Balanced,
             };
         }
@@ -280,6 +298,28 @@ impl HardwareProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_detection_uses_measured_bytes_and_valid_overrides() {
+        let gib = 1024 * 1024 * 1024;
+        assert_eq!(HardwareProfile::resolve_memory_gb(None, 8 * gib), 8);
+        assert_eq!(HardwareProfile::resolve_memory_gb(None, 32 * gib), 32);
+        assert_eq!(HardwareProfile::resolve_memory_gb(Some("16"), 8 * gib), 16);
+        for invalid in ["0", "-1", "bad", "256", ""] {
+            assert_eq!(HardwareProfile::resolve_memory_gb(Some(invalid), 8 * gib), 8);
+        }
+        assert_eq!(HardwareProfile::resolve_memory_gb(None, 0), 4);
+        assert_eq!(HardwareProfile::resolve_memory_gb(None, u64::MAX), 255);
+    }
+
+    #[test]
+    fn notebook_threads_leave_room_for_the_meeting() {
+        assert_eq!(HardwareProfile::meeting_thread_limit(12, 8), 4);
+        assert_eq!(HardwareProfile::meeting_thread_limit(12, 16), 8);
+        assert_eq!(HardwareProfile::meeting_thread_limit(2, 8), 1);
+        assert_eq!(HardwareProfile::meeting_thread_limit(1, 8), 1);
+        assert_eq!(HardwareProfile::meeting_thread_limit(0, 0), 1);
+    }
 
     #[test]
     fn test_hardware_detection() {

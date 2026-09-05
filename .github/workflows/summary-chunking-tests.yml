@@ -1,0 +1,31 @@
+name: Summary chunking regression tests
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/src-tauri/src/summary/**'
+      - '.github/workflows/summary-chunking-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/src-tauri/src/summary/**'
+      - '.github/workflows/summary-chunking-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chunking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile production chunker and its unit tests without desktop dependencies
+        shell: bash
+        run: |
+          rustc --version
+          rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o "$RUNNER_TEMP/summary-chunking-tests"
+      - name: Verify source coverage, Unicode, overlap, and token budgets
+        shell: bash
+        run: '"$RUNNER_TEMP/summary-chunking-tests"'
