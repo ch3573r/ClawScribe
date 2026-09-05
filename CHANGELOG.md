@@ -2,6 +2,7 @@
 
 ## 0.5.36
 
+- Fix native Windows test execution by explicitly loading the same staged sherpa/ONNX runtime DLLs as the installer; keep tests mandatory and run them against release-profile code.
 - Preserve all transcript content at summary chunk boundaries, including Unicode.
 - Reject failed or empty summary chunks rather than silently publishing incomplete notes.
 - Ground summaries in stated facts, distinguish proposals from decisions, and retain uncertainty.

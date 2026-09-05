@@ -1,0 +1,25 @@
+name: Windows script validation
+on:
+  pull_request:
+    paths: ['frontend/scripts/*.ps1', '.github/workflows/*windows*.yml']
+  push:
+    branches: ['release/**']
+permissions:
+  contents: read
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse native test and packaging scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('frontend/scripts/test-windows-native.ps1', 'frontend/scripts/build-windows-release.ps1')) {
+            $tokens = $null
+            $parseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          }
+      - run: node scripts/verify-public-repo-safety.mjs
