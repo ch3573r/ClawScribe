@@ -8,7 +8,8 @@ other summary providers.
 ## Current Capabilities
 
 - Interactive Microsoft sign-in.
-- Token storage through the platform credential store.
+- Refresh-token storage through the platform credential store, with a
+  current-user DPAPI-encrypted file fallback on Windows.
 - Calendar read for current/next meeting context and invited attendees.
 - OneNote notebook discovery/creation and export.
 - Planner plan/bucket discovery, optional bucket creation, task preview, and
@@ -45,8 +46,20 @@ Scope rules:
 ## Auth And Storage
 
 The sign-in flow is foreground and user-initiated. Logs may record connection
-state and sanitized Graph errors, but never bearer tokens, refresh tokens, auth
-codes, or callback URLs containing credentials.
+state and sanitized Graph errors, but must not record bearer tokens, refresh
+tokens, auth codes, or callback URLs containing credentials.
+
+The persisted Microsoft session contains the refresh token and account metadata,
+not the short-lived access token. When the Windows credential store cannot
+persist it, the fallback file is protected with DPAPI for the current Windows
+user. A legacy plaintext fallback is removed only after successful encrypted
+migration; failed migration can leave the legacy file in place. Non-Windows
+platforms do not write a new plaintext Microsoft-token fallback.
+
+This is not encryption of recordings or the meeting database and does not
+protect every other provider's key. Some AI/hosted transcription credentials
+remain in local settings/database storage. Treat application data and backups
+as sensitive. See [privacy and data handling](../../PRIVACY_POLICY.md).
 
 Expected connection states:
 
@@ -75,7 +88,7 @@ the next event list, including:
 
 The app uses the selected event to seed the next recording title and to prepend
 invited attendees to the generated summary as a checklist. The event body is not
-read for summary context.
+read for summary context. Invited attendees are not proof of actual attendance.
 
 ## OneNote
 

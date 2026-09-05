@@ -125,9 +125,10 @@ transcription or configure external summary/export processing. Data sent to an
 external provider is subject to that provider's configuration and policies.
 
 Microsoft refresh tokens use the platform credential store when possible. On
-Windows, the file fallback is DPAPI-encrypted for the current user; legacy
-plaintext fallback files migrate on successful read. Non-Windows platforms do
-not write a plaintext fallback. Access tokens are not persisted by this token
+Windows, the file fallback is DPAPI-encrypted for the current user. A legacy
+plaintext file is removed only after encrypted migration succeeds; if migration
+fails, that existing file may remain. Non-Windows platforms do not create a new
+plaintext fallback. Access tokens are not persisted by this token
 store. This protects that credential path; it does **not** mean all recordings,
 transcripts, or the meeting database are encrypted at rest.
 

@@ -50,6 +50,20 @@ its bundle root is `<cargo-target-directory>/release/bundle`. Do not assume the
 member crate has its own target directory. The GitHub workflow normalizes its
 artifacts into `frontend/src-tauri/target/release/bundle` before upload.
 
+## Native Windows Unit Tests
+
+From the repository root, after staging the required sidecars:
+
+```powershell
+.\frontend\scripts\stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml
+.\frontend\scripts\test-windows-native.ps1 -Features windows-gpu
+```
+
+The helper compiles the actual release-profile library test executable and loads
+the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
+DLLs, zero matched tests, and failing test results. It does not perform live
+capture, GUI interaction, or model-quality benchmarking.
+
 ## GitHub Actions
 
 **ClawScribe Windows Release** is the manual/reusable build workflow. Important
@@ -114,9 +128,11 @@ nonempty, their checksums match, and metadata identifies the expected commit
 and version before publication. A workflow status is not a substitute for
 checking the uploaded assets.
 
-The local checksum file uses paths relative to the local bundle root. The
-workflow uses release asset filenames. Run verification from the directory
-matching those entries:
+Both the local script and workflow write bundle-relative checksum paths,
+including `nsis/` and `msi/` directory prefixes. For a flat download from GitHub,
+place the installers in the subdirectories named by the checksum entries, or
+verify each downloaded asset against its corresponding hash explicitly. Run
+the following from the directory matching those entries:
 
 ```powershell
 Get-Content .\SHA256SUMS.txt | ForEach-Object {
@@ -149,6 +165,12 @@ version are not successive in-app updates. Reuse the verified binaries only
 when they are genuinely unchanged; otherwise increment the numeric version.
 
 ## Required Real-Device Acceptance
+
+These checks are required before stable-channel promotion. A clearly labeled
+public prerelease may be distributed for manual evaluation after the native
+build/tests and artifact integrity checks pass, without advancing the stable
+updater. Its notes must state the missing real-device acceptance. Publishing a
+preview must not assert `capture-smoke-confirmed` or claim stable readiness.
 
 Use a separate test profile or a backed-up installation; do not delete meeting
 data to test installation. Record the application commit, engine/model, Windows

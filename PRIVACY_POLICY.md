@@ -1,88 +1,111 @@
-# ClawScribe Privacy Policy
+# ClawScribe Privacy And Data Handling
 
-*Last updated: 2026-06-19 — applies to ClawScribe 0.5.0-alpha.4 and later.*
+*Updated: 2026-09-05 — implementation notes for ClawScribe 0.5.36.*
 
-ClawScribe is a local-first, open-source (MIT) meeting recorder and summarizer.
-Your meeting data stays on your device unless **you** explicitly configure a
-feature that sends it elsewhere. This policy describes exactly what stays local
-and what leaves the device, and only when.
+ClawScribe is a local-first meeting recorder and summarizer. Local recording and
+local transcription do not require a ClawScribe account. Optional providers,
+exports, model downloads, and update checks have separate network behavior.
+This page describes the application paths; it does not make guarantees about
+third-party providers, Windows, or a user's network and storage configuration.
 
-## Local-first by default
+## Local Meeting Data
 
-With no optional integrations configured, ClawScribe processes everything on your
-device and sends nothing off it:
+In local recording/transcription mode, microphone and system audio are processed
+on the device and saved to local recording files. Meeting metadata, transcripts,
+settings, and summaries use local files and a database. Local summary providers
+run on the device when their configured endpoint is local.
 
-- **Audio recording** — captured and stored locally; never uploaded.
-- **Transcription** — runs locally (Whisper / Parakeet / Nemotron models that you
-  download and run on your own machine).
-- **Storage** — meetings, transcripts, and summaries live in a local database and
-  local files under your user profile.
-- **You own your data** — export or delete it at any time; no account is required
-  to record, transcribe, or summarize.
+Local-first does not mean the application never makes a network request. Models
+must be downloaded, update checks contact the configured release service, and
+optional integrations make the requests described below. Disable or leave
+unconfigured external meeting-processing features when meeting content must
+remain on the device.
 
-## What leaves your device — only when you turn it on
+## Optional Off-Device Processing
 
-ClawScribe sends data off-device **only** for the optional features you configure.
-Each is off until you set it up:
+**Hosted transcription.** Cloud transcription is opt-in. A configured Hosted
+Whisper or MAI transcription request uploads the selected audio to the configured
+provider; local conversion can produce a WAV file for upload. This is distinct
+from local Whisper, Parakeet, and Nemotron inference. Provider retention and
+processing depend on the account, endpoint, and third party's terms.
 
-- **Cloud AI summaries.** If you choose a cloud summarization provider, your
-  transcript (and any context you add) is sent to that provider to generate the
-  summary. Providers you can choose include OpenAI, OpenAI-compatible endpoints,
-  an OpenClaw endpoint, and the bundled Codex/ChatGPT path. Built-in local AI and
-  local Ollama keep this on-device. Each third party handles your data under its
-  own privacy policy.
-- **OpenClaw handoff.** If enabled, completed meeting artifacts are sent to the
-  OpenClaw endpoint you configure.
-- **Microsoft 365 export (Microsoft Graph).** If you sign in and export, the
-  selected summary/notes/tasks are sent to Microsoft (OneNote/Planner) under your
-  own Microsoft account and Microsoft's privacy terms. ClawScribe uses a
-  delegated, public-client OAuth flow; sign-in tokens are stored in your OS
-  credential store, not transmitted to us.
-- **Model downloads.** Transcription models are downloaded at runtime from their
-  publishers (e.g. Hugging Face) the first time you select them.
+**Summary and meeting chat providers.** A remote provider receives transcript or
+meeting text and supplied context needed for the selected operation. OpenAI,
+OpenAI-compatible endpoints, Anthropic, Groq, OpenRouter, remote Ollama, managed
+OpenClaw, and the configured Codex path are not equivalent to local-only
+processing. A provider named Ollama is local only when its endpoint is local.
 
-We (the ClawScribe project) do not operate a backend that receives your meeting
-content. There is no ClawScribe account, license server, or activation check.
+**OpenClaw handoff.** When enabled, completed recording artifacts are handed to
+the configured endpoint. OpenClaw is optional; it is not required for standalone
+local recording or transcription.
 
-## Usage analytics (optional, off by default)
+**Microsoft Graph.** Signing in exchanges credentials with Microsoft and enables
+the delegated integration. Calendar features read meeting context and invited
+attendees. User-selected exports send notes/transcripts or tasks to OneNote,
+Planner, or Microsoft To Do under the signed-in account. Review the selected
+content and task assignments before exporting. Microsoft sign-in is separate
+from MAI transcription credentials and AI-provider credentials.
 
-If — and only if — you enable analytics in Settings, ClawScribe sends anonymized,
-aggregate usage data via [PostHog](https://posthog.com):
+**Confluence.** A browser draft uses copied content in the target browser. Direct
+publishing sends the chosen document to the configured Server/Data Center
+endpoint. Review the destination and content before publishing.
 
-**Collected when enabled:** feature-usage patterns, session frequency/duration,
-performance metrics (e.g. transcription timings, error/crash counts), and app
-version/platform — tied only to a generated random ID.
+**Downloads and updates.** Model publishers, release hosting, and configured
+provider services receive the network requests required for those operations.
+Automatic update checks are not meeting-content uploads.
 
-**Never collected:** meeting audio, transcripts, summaries, titles, file names,
-participant names, LLM prompts/responses, API keys, or any meeting content.
+## Credential Storage: Important Limits
 
-Analytics is **disabled until you opt in**, can be turned off again at any time,
-and the full implementation is open source for review.
+Microsoft session persistence stores the refresh token and associated account
+metadata, not the short-lived access token. It first uses the platform credential
+store. On Windows, the file fallback is DPAPI-encrypted for the current user.
+Legacy plaintext fallback is removed only after migration to encrypted storage
+succeeds; a failed migration can leave that existing file in place. Non-Windows
+platforms do not write a new plaintext Microsoft-token fallback.
 
-## Your rights
+This protection is specific to the Microsoft-token path. Several AI and hosted
+transcription API keys are stored in the application's local settings/database;
+they are not all migrated to the OS credential store or encrypted by the DPAPI
+change. Other integrations use their own configuration/authentication stores.
+Treat application settings, database files, authentication directories, and their
+backups as sensitive. Do not publish them as diagnostics or attach them to an
+issue without review and redaction.
 
-- **Access / export / delete** all local data at any time.
-- **Disable** every off-device feature; ClawScribe remains fully functional local-only.
-- **Inspect** everything — the source is MIT-licensed and public.
+DPAPI protection of one credential path does not encrypt meeting recordings,
+transcripts, summaries, logs, or the entire database. Local data relies on the
+Windows account, filesystem permissions, device/storage protection, and backup
+practices. Network transport for custom endpoints follows their configured URL;
+use protected remote endpoints rather than assuming all custom connections are
+TLS-encrypted.
 
-## Security
+## Application Analytics
 
-- Local data is protected by your operating system's file permissions.
-- Credentials (API keys, OAuth tokens, OpenClaw bearer tokens) are stored in the
-  OS credential store where available.
-- Network calls to the services above use TLS.
+In this version, the Tauri `init_analytics` command is a no-op and does not create
+a PostHog client. Legacy analytics interfaces remain for compatibility but do
+not initialize that client through the current application command path. This
+statement does not cover telemetry independently generated by the operating
+system or any external provider that you choose to use.
 
-## Changes
+## Review, Export, And Deletion
 
-Material changes are reflected in this document in the public repository and noted
-in release notes.
+Use the application's export/delete controls for meeting data and disconnect
+integrations that are no longer needed. Copies already exported, manually copied,
+backed up, or sent to third parties require separate handling. Review local
+recording folders and backups when removing sensitive meeting material; deleting
+one app record must not be assumed to erase every external copy.
 
-## Contact
+Follow your meeting's recording and data-sharing requirements. Review generated
+notes against the source before sharing them: recognition and model-generated
+content can be inaccurate.
 
-- **Issues / questions:** open an issue in the ClawScribe GitHub repository.
+## Implementation References
 
-## Open source
+- Microsoft tokens: `frontend/src-tauri/src/exports/token_store.rs`
+- Provider key settings: `frontend/src-tauri/src/database/repositories/setting.rs`
+- Analytics command initialization: `frontend/src-tauri/src/analytics/commands.rs`
+- [Meeting quality and processing limits](docs/meeting-quality.md)
+- [Microsoft Graph integration](docs/integrations/microsoft-graph.md)
+- [Windows release verification](docs/windows-release.md)
 
-ClawScribe is distributed under the MIT License (it is a fork of Meetily Community
-Edition; see `LICENSE.md`, `NOTICE.md`, and `UPSTREAM.md`). You may review, modify,
-self-host, and audit every part of its data handling.
+ClawScribe is distributed under the [MIT License](LICENSE.md). Upstream
+attribution is in [NOTICE.md](NOTICE.md) and [UPSTREAM.md](UPSTREAM.md).
