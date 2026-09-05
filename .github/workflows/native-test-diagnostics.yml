@@ -17,20 +17,29 @@ jobs:
             const response = await github.request('GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs', {
               ...context.repo, job_id: 101359767350
             });
-            const text = typeof response.data === 'string' ? response.data : Buffer.from(response.data).toString('utf8');
+            let text;
+            if (response.headers.location) {
+              const download = await fetch(response.headers.location);
+              if (!download.ok) throw new Error('Log download failed: ' + download.status);
+              text = await download.text();
+            } else {
+              text = typeof response.data === 'string' ? response.data : Buffer.from(response.data).toString('utf8');
+            }
+            text = text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
+            fs.writeFileSync('native-test-log.txt', text);
+            console.log('Downloaded log bytes: ' + text.length);
             const lines = text.split(/\r?\n/);
             const selected = new Set();
             for (let i = 0; i < lines.length; i++) {
-              if (/error\[E\d+\]|error: could not compile|test result:|FAILED|error: test failed/.test(lines[i])) {
+              if (/error\[E\d+\]|error: could not compile|test result:|FAILED|error: test failed|NativeCommandExitException/.test(lines[i])) {
                 for (let j = Math.max(0, i - 2); j < Math.min(lines.length, i + 22); j++) selected.add(j);
               }
             }
-            const result = [...selected].sort((a,b) => a-b).map(i => lines[i]).join('\n');
-            if (!result) throw new Error('No compiler or test diagnostics matched; inspect the full job log.');
+            const result = selected.size ? [...selected].sort((a,b) => a-b).map(i => lines[i]).join('\n') : lines.slice(-120).join('\n');
             fs.writeFileSync('native-test-errors.txt', result);
             console.log(result);
       - uses: actions/upload-artifact@v4
         with:
           name: native-test-errors
-          path: native-test-errors.txt
+          path: native-test-*.txt
           retention-days: 3
