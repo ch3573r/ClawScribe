@@ -92,10 +92,15 @@ module.exports = async ({ github, context, core }) => {
   }
   const text = name => downloaded.get(name).toString('utf8').replace(/^\uFEFF/, '');
   const checksums = new Map();
+  const checksumAssets = new Map([
+    [nsis, nsis], [msi, msi],
+    [`nsis/${nsis}`, nsis], [`msi/${msi}`, msi]
+  ]);
   for (const line of text('SHA256SUMS.txt').trim().split(/\r?\n/)) {
     const match = line.match(/^([a-fA-F0-9]{64})\s+\*?([^\r\n]+)$/);
-    if (!match || ![nsis, msi].includes(match[2]) || checksums.has(match[2])) throw new Error('Unexpected checksum manifest entry.');
-    checksums.set(match[2], match[1].toLowerCase());
+    const assetName = match && checksumAssets.get(match[2]);
+    if (!match || !assetName || checksums.has(assetName)) throw new Error('Unexpected checksum manifest entry.');
+    checksums.set(assetName, match[1].toLowerCase());
   }
   if (checksums.size !== 2 || [...checksums].some(([name, digest]) => digests[name] !== digest)) {
     throw new Error('Installer SHA-256 verification failed.');
