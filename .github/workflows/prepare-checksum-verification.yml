@@ -1,0 +1,73 @@
+name: Prepare checksum verification compatibility
+on:
+  push:
+    branches: ['tools/0.5.36-checksums']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test exact allowed checksum paths and prepare checked blobs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const vm = require('vm');
+            const assert = require('assert/strict');
+            const scriptPath = 'scripts/verify-0.5.36-preview.cjs';
+            let script = fs.readFileSync(scriptPath, 'utf8');
+            function once(text, before, after) {
+              if (text.split(before).length !== 2) throw new Error('Expected one replacement');
+              return text.replace(before, after);
+            }
+            const parser = `  const checksums = new Map();
+              const checksumAssets = new Map([
+                [nsis, nsis], [msi, msi],
+                [\`nsis/\${nsis}\`, nsis], [\`msi/\${msi}\`, msi]
+              ]);
+              for (const line of text('SHA256SUMS.txt').trim().split(/\\r?\\n/)) {
+                const match = line.match(/^([a-fA-F0-9]{64})\\s+\\*?([^\\r\\n]+)$/);
+                const assetName = match && checksumAssets.get(match[2]);
+                if (!match || !assetName || checksums.has(assetName)) throw new Error('Unexpected checksum manifest entry.');
+                checksums.set(assetName, match[1].toLowerCase());
+              }
+              if (checksums.size !== 2 || [...checksums].some(([name, digest]) => digests[name] !== digest)) {
+                throw new Error('Installer SHA-256 verification failed.');
+              }
+            `;
+            const start = script.indexOf('  const checksums = new Map();');
+            const end = script.indexOf('  const metadata = Object.fromEntries', start);
+            if (start < 0 || end < start) throw new Error('Checksum parser not found');
+            script = script.slice(0, start) + parser + script.slice(end);
+            const nsis = 'ClawScribe_0.5.36_x64-setup.exe';
+            const msi = 'ClawScribe_0.5.36_x64_en-US.msi';
+            const a = 'a'.repeat(64), b = 'b'.repeat(64);
+            function check(value) {
+              vm.runInNewContext(parser, {nsis, msi, digests:{[nsis]:a,[msi]:b}, text:() => value, Map});
+            }
+            for (const paths of [[nsis,msi], ['nsis/'+nsis,'msi/'+msi]]) {
+              assert.doesNotThrow(() => check(a+'  '+paths[0]+'\n'+b+'  '+paths[1]+'\n'));
+            }
+            for (const bad of [
+              a+'  ../'+nsis+'\n'+b+'  '+msi,
+              a+'  wrong/'+nsis+'\n'+b+'  '+msi,
+              a+'  '+nsis+'\n'+a+'  nsis/'+nsis,
+              a+'  '+nsis,
+              b+'  '+nsis+'\n'+b+'  '+msi,
+              a+'  '+nsis+'\n'+b+'  '+msi+'\n'+a+'  unexpected.exe'
+            ]) assert.throws(() => check(bad));
+            fs.writeFileSync(scriptPath, script);
+            require('child_process').execFileSync('node', ['--check', scriptPath]);
+            const {data: scriptBlob} = await github.rest.git.createBlob({...context.repo, content:script, encoding:'utf-8'});
+            const {data: docBlob} = await github.rest.git.getBlob({...context.repo, file_sha:'de4c1def84d46acabcddebebf4302cb927172a27'});
+            let doc = Buffer.from(docBlob.content.replace(/\s/g,''), 'base64').toString('utf8');
+            doc = once(doc, 'The local checksum file uses paths relative to the local bundle root. The\nworkflow uses release asset filenames. Run verification from the directory\nmatching those entries:', 'Both the local script and workflow write bundle-relative checksum paths,\nincluding `nsis/` and `msi/` directory prefixes. For a flat download from GitHub,\nplace the installers in the subdirectories named by the checksum entries, or\nverify each downloaded asset against its corresponding hash explicitly. Run\nthe following from the directory matching those entries:');
+            const {data: updatedDoc} = await github.rest.git.createBlob({...context.repo, content:doc, encoding:'utf-8'});
+            console.log('CHECKED_BLOBS='+JSON.stringify([
+              {path:scriptPath, mode:'100644',type:'blob',sha:scriptBlob.sha},
+              {path:'docs/windows-release.md', mode:'100644',type:'blob',sha:updatedDoc.sha}
+            ]));
+            console.log('Checksum parser: 2 valid layouts passed; 6 unsafe/incomplete/mismatched layouts rejected.');
