@@ -34,6 +34,7 @@ jobs:
     uses: ./.github/workflows/clawscribe-windows-release.yml
     with:
       feature: windows-gpu
+      hosted-runner: true
       build-ref: ${{ github.sha }}
       publish: false
       draft-release: true

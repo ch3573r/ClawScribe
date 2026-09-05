@@ -3,6 +3,9 @@ name: ClawScribe Windows Release
 on:
   workflow_call:
     inputs:
+      hosted-runner:
+        type: boolean
+        default: false
       feature:
         type: string
         default: windows-gpu
@@ -31,6 +34,11 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      hosted-runner:
+        description: Use an ephemeral GitHub-hosted Windows runner instead of the dedicated runner.
+        type: boolean
+        required: false
+        default: false
       feature:
         description: Build acceleration feature set
         required: true
@@ -85,7 +93,7 @@ env:
 jobs:
   build:
     name: Build ClawScribe Windows installers
-    runs-on: [self-hosted, windows, clawscribe]
+    runs-on: ${{ fromJSON(inputs['hosted-runner'] && '["windows-2022"]' || '["self-hosted","windows","clawscribe"]') }}
     timeout-minutes: 90
     permissions:
       contents: write # create/update GitHub Releases when publish=true
