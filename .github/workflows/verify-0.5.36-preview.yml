@@ -7,7 +7,7 @@ permissions:
   contents: write
 concurrency:
   group: verify-clawscribe-0.5.36-preview
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-latest
