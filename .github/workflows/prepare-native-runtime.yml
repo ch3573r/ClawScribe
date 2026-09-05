@@ -1,0 +1,40 @@
+name: Prepare native test runtime correction
+on:
+  push:
+    branches: ['diagnostics/0.5.36-native-tests']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 122e29e1e4edd7dc3ef9558d26934de4f123a484
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = '.github/workflows/clawscribe-windows-release.yml';
+            let source = fs.readFileSync(path, 'utf8');
+            const before = '          foreach ($filter in @("summary::processor::tests", "summary::chunking::tests", "audio::async_logger::tests", "audio::hardware_detector::tests")) {\n            cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml @featureArgs --lib $filter -- --test-threads=1\n          }';
+            if (source.split(before).length !== 2) throw new Error('Native test stage differs from reviewed source');
+            source = source.replace(before, '          .\\frontend\\scripts\\test-windows-native.ps1 -Features ($featureList -join ",")');
+            const edits = [[path, source]];
+            const change = '- Fix native Windows test execution by explicitly loading the same staged sherpa/ONNX runtime DLLs as the installer; keep tests mandatory and run them against release-profile code.\n';
+            let changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+            if (!changelog.includes('## 0.5.36\n\n')) throw new Error('Missing version section');
+            changelog = changelog.replace('## 0.5.36\n\n', '## 0.5.36\n\n' + change);
+            edits.push(['CHANGELOG.md', changelog]);
+            let notes = fs.readFileSync('docs/releases/0.5.36.md', 'utf8');
+            notes = notes.replace('## Build And Documentation\n\n', '## Build And Documentation\n\n' + change);
+            edits.push(['docs/releases/0.5.36.md', notes]);
+            const blobs = [];
+            for (const [path, content] of edits) {
+              const {data: blob} = await github.rest.git.createBlob({...context.repo, content, encoding:'utf-8'});
+              blobs.push({path, mode:'100644', type:'blob', sha:blob.sha});
+            }
+            console.log('REVIEWED_BLOBS=' + JSON.stringify(blobs));
+            // Only blobs are prepared here. The connected account performs the
+            // authorized tree/commit/ref update; no CI permission is expanded.
