@@ -1,153 +1,110 @@
 # Building ClawScribe
 
-This document covers the supported developer build paths for ClawScribe. The
-Windows Tauri desktop app is the primary release target. The old Linux-specific
-Meetily build guide has been removed because it no longer described the current
-product or release flow.
+The Windows x64 Tauri desktop app under `frontend/` is the primary release
+target. No standalone Python/FastAPI service, Docker component, or manually
+started whisper-server is required for local use.
 
-The supported runtime is the Tauri desktop app under `frontend/`. There is no
-standalone Python/FastAPI backend, Docker backend, or manually started
-whisper-server in the current build or release path.
+## Toolchain
 
-## Prerequisites
+Use Git, Node.js 24, pnpm 10, Rust stable with the MSVC target, PowerShell 7,
+Visual Studio Build Tools 2022 with C++/Windows SDK, WebView2, and CMake. Windows
+release automation pins LLVM 20.1.8 and Vulkan SDK 1.4.309.0 for relevant GPU
+builds. See [Windows releases](windows-release.md) for sidecar staging and full
+prerequisites; use the toolchain in the checked-out workflow for parity.
 
-For normal Windows development:
+## Development
 
-- Git
-- Rust stable with the MSVC target
-- Visual Studio Build Tools / Windows SDK
-- Node.js
-- pnpm
-- PowerShell
-- WebView2 runtime
-- LLVM when native dependencies require it
-
-Install frontend dependencies:
+From `frontend/`:
 
 ```powershell
-cd frontend
-pnpm install
-```
-
-## Development Builds
-
-Run the desktop app:
-
-```powershell
-cd frontend
+pnpm install --frozen-lockfile
 pnpm run tauri:dev
 ```
 
-Run only the Next.js frontend:
+Use `pnpm run dev` for the web UI only. It does not run native capture or validate
+Windows desktop integration. Use `pnpm run tauri:build` for a desktop build.
+The default scripts call `scripts/tauri-auto.js`; explicit scripts are available
+when validating an acceleration path:
 
 ```powershell
-cd frontend
-pnpm run dev
-```
-
-Run the default Tauri build:
-
-```powershell
-cd frontend
-pnpm run tauri:build
-```
-
-## Feature-Specific Builds
-
-The frontend package exposes explicit Tauri feature paths:
-
-```powershell
-cd frontend
-
 pnpm run tauri:dev:cpu
-pnpm run tauri:dev:vulkan
-pnpm run tauri:dev:directml
 pnpm run tauri:dev:windows-gpu
-pnpm run tauri:dev:cuda
-pnpm run tauri:dev:openblas
-
 pnpm run tauri:build:cpu
-pnpm run tauri:build:vulkan
-pnpm run tauri:build:directml
 pnpm run tauri:build:windows-gpu
-pnpm run tauri:build:cuda
-pnpm run tauri:build:openblas
 ```
 
-`pnpm run tauri:dev` and `pnpm run tauri:build` call
-`frontend/scripts/tauri-auto.js`, which selects the configured/default feature
-path. Use explicit scripts when validating a specific acceleration backend.
+Equivalent `vulkan`, `directml`, `cuda`, and `openblas` suffixes select those
+features. A feature in the binary is not proof that a specific machine or model
+will successfully use its GPU; validate the actual backend.
 
-DirectML support for ONNX transcription engines is controlled by the Rust
-`directml` feature and is normally exercised by the Windows release workflow or
-GPU-specific developer scripts.
-
-## Windows Release Build
-
-Use the release script for validation and packaging:
+## Frontend Checks
 
 ```powershell
-cd frontend
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm run verify:icons
+```
+
+Run these from `frontend/`; icon verification uses PowerShell. The configured
+helper/control suite includes transcript display, scrolling, and speaker-save
+regressions. Those deterministic tests do not replace rendered desktop checks.
+
+`pnpm run lint` still invokes the legacy `next lint` command. Lint is not an
+enforced, validated release gate in this branch; Next builds explicitly skip it.
+Do not report a lint pass from successful typechecking or bundling.
+
+## Native Checks
+
+From the repository root, with the native prerequisites and sidecars installed:
+
+```powershell
+cargo check --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu
+cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib summary::processor::tests
+cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib summary::chunking::tests
+cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib audio::async_logger::tests
+cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib audio::hardware_detector::tests
+```
+
+Omit GPU features only for a deliberate CPU-path test. The production chunker
+can also be tested without desktop dependencies:
+
+```powershell
+rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o summary-chunking-tests.exe
+.\summary-chunking-tests.exe
+Remove-Item .\summary-chunking-tests.exe
+```
+
+The isolated core CI harness is useful for rapid regressions, but it does not
+link the complete native application or exercise model inference. Preserve this
+distinction when reporting results.
+
+## Windows Installers
+
+Build and stage the `llama-helper` sidecar first, following
+[Windows releases](windows-release.md#build-prerequisites). Then from `frontend/`:
+
+```powershell
 .\scripts\build-windows-release.ps1 -CheckOnly
 .\scripts\build-windows-release.ps1
 ```
 
-The release script performs the Windows-specific staging work, including
-sidecars, bundled runtime metadata, icon verification, feature handling, and
-installer output under:
+The local script uses the Cargo metadata target directory for its
+`release/bundle` output and requires both current-version MSI and NSIS installers.
+The GitHub workflow normalizes upload paths separately. Do not infer a successful
+build from old files left in a reused workspace.
 
-```text
-frontend\src-tauri\target\release\bundle
-```
+## Repository Safety
 
-See [windows-release.md](windows-release.md) for release workflow details,
-signing notes, smoke checks, updater metadata, and GitHub Actions behavior.
-
-## Useful Validation Commands
-
-Frontend:
+From the repository root:
 
 ```powershell
-cd frontend
-pnpm run test
-pnpm run typecheck
-pnpm run build
-pnpm run verify:icons
+node scripts/verify-public-repo-safety.mjs
+git diff --check
 ```
 
-`pnpm run lint` currently invokes `next lint`, but ESLint has not been
-configured in this repository and Next.js prompts to create a new configuration.
-Do not treat lint as a release gate until ESLint is configured deliberately and
-the existing lint debt is paid down or triaged.
-
-Rust workspace:
-
-```powershell
-cargo check
-cargo test --lib
-```
-
-The CI validation workflow also guards against reintroducing the removed
-backend directory or stale archived whisper-server package/sample paths.
-
-Targeted Rust tests:
-
-```powershell
-cargo test --lib audio::diarization
-cargo test --lib exports::
-```
-
-Brand/icon verification:
-
-```powershell
-cd frontend
-pnpm run verify:icons
-```
-
-## Build Artifacts
-
-Do not commit generated installers, model files, logs, local databases, or build
-outputs. Keep those in ignored build directories or GitHub Actions artifacts.
-
-The normal user-facing installer names and updater metadata are generated by
-the release workflow, not by hand.
+Do not commit generated installers, models, logs, databases, keys, or private
+workspace paths. Release metadata and notes must match the exact source that
+produced the artifacts. See [meeting quality](meeting-quality.md) and
+[real-device acceptance](windows-release.md#required-real-device-acceptance)
+before treating a build as suitable for everyday meetings.

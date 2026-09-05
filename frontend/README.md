@@ -1,216 +1,113 @@
-# ClawScribe Frontend
+# ClawScribe Frontend And Desktop Shell
 
-The Next.js UI and Tauri desktop shell for ClawScribe `0.5.35`.
-ClawScribe records, transcribes, summarizes, and exports meetings from the
-local desktop app.
-
-## Features
-
-- Real-time audio recording from both microphone and system audio
-- Local transcription using Whisper, Parakeet, or Nemotron engines depending on
-  the selected model
-- Beta cloud retranscription through Hosted Whisper or Azure Speech
-  MAI-Transcribe when explicitly enabled
-- Native desktop integration using Tauri
-- Speaker diarization support
-- Rich text editor for note-taking
-- Privacy-focused defaults: recording and transcription are local unless a
-  cloud transcription beta provider, external summary provider, export, or
-  OpenClaw provider is configured
+The Next.js/React UI and Rust/Tauri desktop shell for source version **0.5.36**.
+Windows x64 is the primary release target. See the root [README](../README.md)
+for product features and [GitHub Releases](https://github.com/ch3573r/ClawScribe/releases)
+for actual installer availability and validation status.
 
 ## Prerequisites
 
-### For macOS:
-- Node.js (v20 recommended)
-- Rust (latest stable)
-- pnpm (v10 recommended)
-- [Xcode Command Line Tools](https://developer.apple.com/download/all/?q=xcode)
+Use Node.js 24, pnpm 10, Rust stable, PowerShell 7, Visual Studio Build Tools
+with C++/Windows SDK, and WebView2 on Windows. Native builds also require the
+LLVM/CMake and acceleration prerequisites described in
+[Building ClawScribe](../docs/BUILDING.md). Stage `llama-helper` before using the
+local Windows release script as documented in
+[Windows releases](../docs/windows-release.md).
 
-### For Windows:
-- Node.js (v20 recommended)
-- Rust (latest stable)
-- pnpm (v10 recommended)
-- Visual Studio Build Tools with C++ development tools
-- Windows 10 or later
+macOS source development additionally needs Xcode command-line tools; macOS and
+Linux code paths do not imply the same release validation as Windows. Use the
+package scripts rather than historical cleanup scripts for normal development.
 
+## Commands
 
-## Project Structure
+From this directory:
 
-```
-/frontend
-├── src/                   # Next.js frontend code
-├── src-tauri/             # Rust/Tauri app core
-├── public/                # Static assets
-└── package.json           # Project dependencies
-```
-
-## Installation
-
-### For macOS:
-
-1. Install prerequisites:
-   ```bash
-   # Install Homebrew if not already installed
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   
-   # Install Node.js
-   brew install node
-   
-   # Install Rust
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   
-   # Install pnpm
-   npm install -g pnpm
-   
-   # Install Xcode Command Line Tools
-   xcode-select --install
-   ```
-
-2. Clone the repository and navigate to the frontend directory:
-   ```bash
-   git clone https://github.com/ch3573r/ClawScribe
-   cd ClawScribe/frontend
-   ```
-  
-
-3. Install dependencies:
-   ```bash
-   pnpm install
-   ```
-
-### For Windows:
-
-1. Install prerequisites:
-   - Install [Node.js](https://nodejs.org/) (v18 or later)
-   - Install [Rust](https://www.rust-lang.org/tools/install)
-   - Install pnpm: `npm install -g pnpm`
-   - Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with C++ development tools
-
-2. Clone the repository and navigate to the frontend directory:
-   ```cmd
-   git clone https://github.com/ch3573r/ClawScribe
-   cd ClawScribe/frontend
-   ```
-
-3. Install dependencies:
-   ```cmd
-   pnpm install
-   ```
-
-## Running the App
-
-### For macOS:
-
-Use the package scripts to run the app in development mode:
-```bash
+```powershell
+pnpm install --frozen-lockfile
 pnpm run tauri:dev
 ```
 
-To build a production version:
-```bash
+Web UI only, without native recording:
+
+```powershell
+pnpm run dev
+```
+
+Frontend checks and static production output:
+
+```powershell
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+Desktop build:
+
+```powershell
 pnpm run tauri:build
 ```
 
-Legacy helper scripts such as `clean_run.sh` and `clean_build.sh` are still in
-the tree, but the package scripts are the current documented path.
+The default Tauri scripts use `scripts/tauri-auto.js`. For an explicit Windows
+GPU path use `pnpm run tauri:dev:windows-gpu` or
+`pnpm run tauri:build:windows-gpu`. CPU, Vulkan, DirectML, CUDA, and OpenBLAS
+variants also exist and require the matching native dependencies.
 
-GPU-specific helpers are also available:
+For reproducible installer validation and packaging:
 
-```bash
-./dev-gpu.sh
-./build-gpu.sh
+```powershell
+.\scripts\build-windows-release.ps1 -CheckOnly
+.\scripts\build-windows-release.ps1
 ```
 
-### For Windows:
+The release script checks command exit codes and requires both current-version
+installer formats. Tauri's `beforeBuildCommand` builds the frontend; a green
+TypeScript check alone is not a successful native release.
 
-Use the package scripts to run the app in development mode:
-```cmd
-pnpm run tauri:dev
+## Source Layout
+
+```text
+src/           React components, routes, hooks, and services
+src-tauri/     Native capture, transcription, persistence, summary, and exports
+public/        Static assets
+scripts/       Development, staging, and packaging utilities
+tests/lib/     Frontend helper/control regression tests
 ```
 
-To build a production version:
-```cmd
-pnpm run tauri:build
-```
+There is no separately started FastAPI service or whisper-server. Native
+operations flow through Tauri commands and events. The web-only UI cannot
+validate microphone capture, Windows permissions, or installed-app behavior.
 
-Windows GPU release-parity builds use the `windows-gpu` feature set:
+## Meeting Review
 
-```cmd
-pnpm run tauri:dev:windows-gpu
-pnpm run tauri:build:windows-gpu
-```
+The transcript view preserves recognized words, supports timestamp playback,
+and offers **Jump to live transcript** after scrolling back during recording.
+Speaker edits retain custom input on failure and prevent duplicate submissions.
+See [meeting quality](../docs/meeting-quality.md) for summary and notebook limits.
 
-Legacy helper scripts such as `clean_run_windows.bat` and
-`clean_build_windows.bat` are still in the tree, but the package scripts are
-the current documented path.
+Frontend control tests use deterministic hook/event mocks; they are not a browser
+or Windows accessibility certification. The shared Rust summary processor has
+its own unit tests, and release staging runs selected tests in the native crate.
 
-## Local Transcription
+## Cloud Verification
 
-Current ClawScribe does not require a separate FastAPI service, Docker backend, or manually started whisper-server process. Local transcription is handled by the Rust/Tauri desktop app.
+Hosted transcription is beta and opt-in. For an actual provider check:
 
-## Cloud Transcription Beta
-
-Cloud retranscription providers are opt-in and beta-gated. Hosted Whisper uses
-OpenAI-compatible file transcription and can provide real word timestamps. The
-OpenAI-hosted endpoint has a 25 MB upload limit; larger recordings fall back to
-local transcription.
-
-MAI-Transcribe uses Azure Speech Fast Transcription with separate Cognitive
-Services credentials. It returns sentence-level timing only, so ClawScribe does
-not fabricate word timestamps. Collapsed MAI output can be remapped to the
-local VAD timing grid for readable rows, but the timing is approximate and
-speaker diarization remains conservative.
-
-For live hosted-provider verification with real credentials and a short audio
-file:
-
-```bash
+```powershell
 pnpm run test:cloud-live
 ```
 
-See [Hosted Transcription Smoke Test](../docs/hosted-transcription-smoke.md)
-for the required environment variables.
-
-For build and acceleration details, see:
-
-- [Building from Source](../docs/BUILDING.md)
-- [GPU Acceleration](../docs/GPU_ACCELERATION.md)
-- [Architecture](../docs/architecture.md)
-
-## Development
-
-### Frontend (Next.js)
-- The frontend is built with Next.js and Tailwind CSS
-- Source code is in the `src/` directory
-- To run only the frontend: `pnpm run dev`
-
-### Backend (Tauri)
-- The Rust/Tauri app core is in the `src-tauri/` directory
-- Handles audio capture, file system access, transcription, storage, and native integrations
-- To run only the Tauri development server: `pnpm run tauri:dev`
+See [hosted transcription smoke](../docs/hosted-transcription-smoke.md) for the
+required audio file and local credential configuration. Never commit credentials
+or private meeting recordings as fixtures.
 
 ## Troubleshooting
 
-### Common Issues on macOS
-- If you encounter permission issues with scripts, make them executable:
-  ```bash
-  chmod +x clean_run.sh clean_build.sh
-  ```
-- For microphone access issues, ensure the app has microphone permissions in System Preferences
+For build failures, first check the failing command and the matching native
+prerequisites. For capture failures, check Windows microphone privacy settings
+and the meeting application's actual output device. Verify both sources in saved
+playback. Run the application as the normal user; elevation is not a general
+fix for audio or startup problems and may change the user's storage/credential
+context. Preserve existing meeting data when testing repairs.
 
-### Common Issues on Windows
-- If you encounter build errors, ensure Visual Studio Build Tools are properly installed
-- For audio capture issues, check Windows privacy settings for microphone access
-- If the app fails to start, try running Command Prompt as administrator
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+See [architecture](../docs/architecture.md), [GPU acceleration](../docs/GPU_ACCELERATION.md),
+and [contributing](../CONTRIBUTING.md). License: [MIT](../LICENSE.md).
