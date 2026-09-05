@@ -1,0 +1,78 @@
+name: Release readiness
+
+on:
+  push:
+    branches:
+      - 'review/meeting-reliability-2026-09-05'
+      - 'release/**'
+  pull_request:
+    paths:
+      - 'frontend/src-tauri/src/audio/async_logger.rs'
+      - 'frontend/src-tauri/src/audio/hardware_detector.rs'
+      - 'frontend/src-tauri/src/summary/**'
+      - '.github/workflows/release-readiness.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-readiness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Production core regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Public repository safety check
+        run: node scripts/verify-public-repo-safety.mjs
+      - name: Test production modules without desktop/native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_root="$RUNNER_TEMP/clawscribe-core-checks"
+          mkdir -p "$test_root"
+          cat > "$test_root/Cargo.toml" <<EOF
+          [package]
+          name = "clawscribe-core-checks"
+          version = "0.0.0"
+          edition = "2021"
+          [workspace]
+          [dependencies]
+          log = "0.4"
+          once_cell = "1"
+          tokio = { version = "1", features = ["full", "test-util"] }
+          tempfile = "3"
+          sysinfo = "0.32"
+          [[test]]
+          name = "chunking"
+          path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/summary/chunking.rs"
+          [[test]]
+          name = "async_logger"
+          path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/audio/async_logger.rs"
+          [[test]]
+          name = "hardware_detector"
+          path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/audio/hardware_detector.rs"
+          EOF
+          cargo test --manifest-path "$test_root/Cargo.toml" -- --nocapture
+      - name: Archive exact candidate source
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/clawscribe-source"
+          git archive --format=zip HEAD -o "$RUNNER_TEMP/clawscribe-source/ClawScribe-source.zip"
+          git rev-parse HEAD > "$RUNNER_TEMP/clawscribe-source/COMMIT.txt"
+      - name: Upload candidate source
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawscribe-candidate-source
+          path: ${{ runner.temp }}/clawscribe-source/*
+          retention-days: 3
+          if-no-files-found: error
