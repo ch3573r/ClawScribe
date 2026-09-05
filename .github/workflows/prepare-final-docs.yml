@@ -1,0 +1,94 @@
+name: Prepare final release documentation
+on:
+  push:
+    branches: ['diagnostics/0.5.36-native-tests']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 32db889f5a97045b2cc428c7bdf222f466502ef8
+      - name: Apply checked documentation-only clarifications
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+          root = Path.cwd()
+          def replace(file, old, new):
+              p = root / file
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise RuntimeError(f'Unexpected source for {file}')
+              p.write_text(text.replace(old, new))
+          replace('README.md', 'Windows, the file fallback is DPAPI-encrypted for the current user; legacy\nplaintext fallback files migrate on successful read. Non-Windows platforms do\nnot write a plaintext fallback.', 'Windows, the file fallback is DPAPI-encrypted for the current user. A legacy\nplaintext file is removed only after encrypted migration succeeds; if migration\nfails, that existing file may remain. Non-Windows platforms do not create a new\nplaintext fallback.')
+          old = '\n'.join('cargo test --locked --manifest-path frontend/src-tauri/Cargo.toml --features windows-gpu --lib ' + group for group in ['summary::processor::tests', 'summary::chunking::tests', 'audio::async_logger::tests', 'audio::hardware_detector::tests'])
+          replace('docs/BUILDING.md', old, '.\\frontend\\scripts\\stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml\n.\\frontend\\scripts\\test-windows-native.ps1 -Features windows-gpu')
+          replace('docs/BUILDING.md', 'Omit GPU features only for a deliberate CPU-path test. The production chunker\ncan also be tested without desktop dependencies:', 'The native test helper builds the real library test executable in the release\nprofile, discovers it through Cargo JSON, and places the staged runtime DLLs\nbeside it. It runs all four required groups and rejects zero-test matches. Bare\n`cargo test` can otherwise fail at startup with `STATUS_DLL_NOT_FOUND` outside\nthe installer layout. For a deliberate CPU-path test, stage the CPU runtime and\npass an empty `-Features` value; do not mix CPU and DirectML runtime sets.\n\nThe production chunker can also be tested without desktop dependencies:')
+          replace('docs/windows-release.md', '## GitHub Actions\n', '## Native Windows Unit Tests\n\nFrom the repository root, after staging the required sidecars:\n\n```powershell\n.\\frontend\\scripts\\stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml\n.\\frontend\\scripts\\test-windows-native.ps1 -Features windows-gpu\n```\n\nThe helper compiles the actual release-profile library test executable and loads\nthe same staged sherpa/ONNX DLL set used by the installer. It rejects missing\nDLLs, zero matched tests, and failing test results. It does not perform live\ncapture, GUI interaction, or model-quality benchmarking.\n\n## GitHub Actions\n')
+          replace('docs/windows-release.md', '## Required Real-Device Acceptance\n\n', '## Required Real-Device Acceptance\n\nThese checks are required before stable-channel promotion. A clearly labeled\npublic prerelease may be distributed for manual evaluation after the native\nbuild/tests and artifact integrity checks pass, without advancing the stable\nupdater. Its notes must state the missing real-device acceptance. Publishing a\npreview must not assert `capture-smoke-confirmed` or claim stable readiness.\n\n')
+          (root / 'docs/releases/0.5.36-validation.md').write_text('''# ClawScribe 0.5.36 Validation Records
+
+          Use the published release's `RELEASE-VERIFICATION.json`, installer checksums,
+          `BUILD-METADATA.txt`, and linked Windows workflow to identify the exact binaries
+          and checks. A source-version bump or a successful frontend job does not establish
+          native installer success. Release status is shown in
+          [GitHub Releases](https://github.com/ch3573r/ClawScribe/releases).
+
+          ## Evidence Scope
+
+          The source preparation passed frontend typechecking and 32 configured helper/control
+          tests. Isolated Rust module tests passed 43 distinct cases; the provider adapter
+          was stubbed and these were not whole-application or model-inference tests.
+
+          The Windows release pipeline must separately compile the complete application,
+          build both installers, execute the four required native library test groups, and
+          verify uploaded asset checksums, build identity, and the NSIS updater signature.
+          The native helper supplies the staged sherpa/ONNX runtime DLLs to the test binary;
+          a DLL-loader failure is not a passed test or a compiler assertion failure.
+
+          ## Prerelease Versus Stable
+
+          A prerelease is for manual evaluation and does not advance the stable updater.
+          It must disclose unconfirmed microphone/system-audio capture, graphical install
+          and upgrade acceptance, rendered accessibility/scaling, and notebook benchmarks.
+          Do not treat prompt changes or conservative thread limits as measured accuracy
+          or performance guarantees.
+
+          Stable promotion requires the real-device acceptance described in
+          [Windows releases](../windows-release.md#required-real-device-acceptance).
+          Never assert a physical capture test based only on mocks, unit tests, or successful
+          packaging. The binary commit remains the one recorded in build metadata even if
+          later documentation commits add clarification.
+          ''')
+          expected = {
+              'README.md': 'f40c824e8c674dda95c139b50273eeaac99abe8f',
+              'docs/BUILDING.md': '44efdfaf944abefaefb6dd3a55e888e6263f743e',
+              'docs/windows-release.md': 'de4c1def84d46acabcddebebf4302cb927172a27',
+              'docs/releases/0.5.36-validation.md': 'fa9f98c3a436ffa133fb590b4ffafc49d6e07a83'
+          }
+          for file, digest in expected.items():
+              data = (root / file).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if actual != digest:
+                  raise RuntimeError(f'Document differs from locally checked content: {file}: {actual}')
+          print('All four documentation files match the checked content.')
+      - name: Check repository safety and diff
+        run: |
+          node scripts/verify-public-repo-safety.mjs
+          git diff --check
+      - name: Prepare documentation blobs for authorized commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const files = ['README.md', 'docs/BUILDING.md', 'docs/windows-release.md', 'docs/releases/0.5.36-validation.md'];
+            const blobs = [];
+            for (const path of files) {
+              const {data: blob} = await github.rest.git.createBlob({...context.repo, content:fs.readFileSync(path, 'utf8'), encoding:'utf-8'});
+              blobs.push({path, mode:'100644', type:'blob', sha:blob.sha});
+            }
+            console.log('DOCUMENTATION_BLOBS=' + JSON.stringify(blobs));
