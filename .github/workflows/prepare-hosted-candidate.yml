@@ -1,0 +1,46 @@
+name: Prepare hosted Windows candidate
+on:
+  push:
+    branches: ['automation/hosted-0.5.36']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f5e9a91177807f8824dc494134371fbf394b806c
+      - name: Prepare workflow-only commit for the connected account to attach
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const base = 'f5e9a91177807f8824dc494134371fbf394b806c';
+            const releasePath = '.github/workflows/clawscribe-windows-release.yml';
+            const candidatePath = '.github/workflows/windows-candidate.yml';
+            function once(text, before, after) {
+              if (text.split(before).length !== 2) throw new Error('Expected exactly one matching workflow section');
+              return text.replace(before, after);
+            }
+            let release = fs.readFileSync(releasePath, 'utf8');
+            release = once(release, '  workflow_call:\n    inputs:\n', '  workflow_call:\n    inputs:\n      hosted-runner:\n        type: boolean\n        default: false\n');
+            release = once(release, '  workflow_dispatch:\n    inputs:\n', '  workflow_dispatch:\n    inputs:\n      hosted-runner:\n        description: Use an ephemeral GitHub-hosted Windows runner instead of the dedicated runner.\n        type: boolean\n        required: false\n        default: false\n');
+            release = once(release, '    runs-on: [self-hosted, windows, clawscribe]', '    runs-on: $' + '{{ fromJSON(inputs[\'hosted-runner\'] && \'["windows-2022"]\' || \'["self-hosted","windows","clawscribe"]\') }}');
+            let candidate = fs.readFileSync(candidatePath, 'utf8');
+            candidate = once(candidate, '      feature: windows-gpu\n', '      feature: windows-gpu\n      hosted-runner: true\n');
+            if (!release.includes('      - name: Require dual-source capture smoke before publishing\n        if: $' + '{{ inputs.publish }}')) throw new Error('Publication gate changed');
+            if (!candidate.includes('      publish: false\n      draft-release: true\n      capture-smoke-confirmed: false')) throw new Error('Draft-only mode changed');
+            const {data: parent} = await github.rest.git.getCommit({...context.repo, commit_sha: base});
+            const tree = [];
+            for (const [path, content] of [[releasePath, release], [candidatePath, candidate]]) {
+              const {data: blob} = await github.rest.git.createBlob({...context.repo, content, encoding: 'utf-8'});
+              tree.push({path, mode:'100644', type:'blob', sha:blob.sha});
+            }
+            const {data: builtTree} = await github.rest.git.createTree({...context.repo, base_tree: parent.tree.sha, tree});
+            const {data: commit} = await github.rest.git.createCommit({...context.repo, message:'ci: allow hosted Windows candidate builds without changing publication approval', tree:builtTree.sha, parents:[base]});
+            core.notice('Prepared candidate commit: ' + commit.sha);
+            await core.summary.addHeading('Prepared workflow-only candidate').addRaw(commit.sha).write();
+            // Do not write a branch with the CI token. The connected GitHub account
+            // must perform the authorized workflow-file ref update separately.
