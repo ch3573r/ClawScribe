@@ -1,0 +1,161 @@
+name: Apply validated release review
+
+on:
+  push:
+    branches: ['automation/clawscribe-release-0.5.36']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-clawscribe-release-review
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout preparation tools
+        uses: actions/checkout@v4
+        with:
+          path: preparation
+      - name: Checkout exact reviewed baseline
+        uses: actions/checkout@v4
+        with:
+          ref: c5b0eed1c8fb3ebacacccf3d0fd962128f8f2737
+          path: source
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Apply narrowly scoped source edits
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = c5b0eed1c8fb3ebacacccf3d0fd962128f8f2737
+          python ../preparation/automation/apply_release_review.py
+          python ../preparation/automation/prepare_windows_workflow.py
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          expected = json.loads(Path('../preparation/automation/expected-source-sha256.json').read_text())
+          for file, digest in expected.items():
+              actual = hashlib.sha256(Path(file).read_bytes()).hexdigest()
+              if actual != digest:
+                  raise SystemExit(f'Candidate differs from locally reviewed bytes: {file}: {actual}')
+          print(f'All {len(expected)} changed files match the locally reviewed candidate.')
+          PY
+          git diff --check
+          node scripts/verify-public-repo-safety.mjs
+      - name: Install exact frontend dependencies
+        working-directory: source/frontend
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and run all frontend regression tests
+        working-directory: source/frontend
+        run: pnpm typecheck && pnpm test
+      - name: Parse the Windows release script
+        working-directory: source
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path frontend/scripts/build-windows-release.ps1), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+      - name: Compile and test production core modules
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_root="$RUNNER_TEMP/clawscribe-review-tests"
+          mkdir -p "$test_root"
+          source_root="$PWD"
+          cat > "$test_root/Cargo.toml" <<EOF
+          [package]
+          name = "clawscribe-review-tests"
+          version = "0.0.0"
+          edition = "2021"
+          [workspace]
+          [dependencies]
+          log = "0.4"
+          once_cell = "1"
+          tokio = { version = "1", features = ["full", "test-util"] }
+          tokio-util = "0.7"
+          tempfile = "3"
+          sysinfo = "0.32"
+          regex = "1"
+          reqwest = { version = "0.11", features = ["json"] }
+          serde = { version = "1", features = ["derive"] }
+          serde_json = "1"
+          tracing = "0.1"
+          [[test]]
+          name = "chunking"
+          path = "$source_root/frontend/src-tauri/src/summary/chunking.rs"
+          [[test]]
+          name = "async_logger"
+          path = "$source_root/frontend/src-tauri/src/audio/async_logger.rs"
+          [[test]]
+          name = "hardware_detector"
+          path = "$source_root/frontend/src-tauri/src/audio/hardware_detector.rs"
+          [[test]]
+          name = "processor"
+          path = "processor.rs"
+          EOF
+          python - "$test_root" <<'PY'
+          import sys
+          from pathlib import Path
+          root = Path.cwd() / 'frontend/src-tauri/src/summary'
+          # Test actual processor and template code. The provider stub must never
+          # be reached by these pure/empty-input unit tests; no network call occurs.
+          stub = '''
+          pub mod summary {
+              #[path = "CHUNKING"] pub mod chunking;
+              #[path = "TEMPLATES"] pub mod templates;
+              pub mod llm_client {
+                  use reqwest::Client;
+                  use std::path::PathBuf;
+                  use tokio_util::sync::CancellationToken;
+                  #[derive(Debug, Clone, PartialEq)]
+                  pub enum LLMProvider { Ollama, BuiltInAI }
+                  pub async fn generate_summary(
+                      _: &Client, _: &LLMProvider, _: &str, _: &str, _: &str, _: &str,
+                      _: Option<&str>, _: Option<&str>, _: Option<u32>, _: Option<f32>,
+                      _: Option<f32>, _: Option<&PathBuf>, _: Option<&CancellationToken>
+                  ) -> Result<String, String> {
+                      panic!("A unit test unexpectedly attempted a provider request")
+                  }
+              }
+              #[path = "PROCESSOR"] pub mod processor;
+          }
+          '''
+          stub = stub.replace('CHUNKING', str(root / 'chunking.rs')).replace('TEMPLATES', str(root / 'templates/types.rs')).replace('PROCESSOR', str(root / 'processor.rs'))
+          (Path(sys.argv[1]) / 'processor.rs').write_text(stub)
+          PY
+          cargo test --manifest-path "$test_root/Cargo.toml" -- --nocapture
+      - name: Commit validated source to the review branch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, subprocess
+          from pathlib import Path
+          expected = json.loads(Path('../preparation/automation/expected-source-sha256.json').read_text())
+          for file, digest in expected.items():
+              if hashlib.sha256(Path(file).read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f'Validation changed candidate bytes: {file}')
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          untracked = set(subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).splitlines())
+          if changed | untracked != set(expected):
+              raise SystemExit(f'Unexpected changed-file set: {(changed | untracked) ^ set(expected)}')
+          subprocess.run(['git', 'add', '--', *expected], check=True)
+          PY
+          node scripts/verify-public-repo-safety.mjs
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "fix: harden meeting UX and prepare validated 0.5.36 candidate" -m "Frontend typecheck and helper suite, isolated production core tests, PowerShell parsing, and source-integrity checks passed in the preparation job. Native Windows packaging and actual capture smoke remain separate gates."
+          git push origin HEAD:refs/heads/review/meeting-reliability-2026-09-05
+          echo "Validated review commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
