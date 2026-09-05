@@ -1,0 +1,14 @@
+{
+  ".github/workflows/clawscribe-windows-release.yml": "0263a7fc713259f9f6fb2c021a83d61e9bded3d20778ebec943a5aa248d273c2",
+  ".github/workflows/windows-candidate.yml": "eb4f7edbbe1a0c864c688635ee68d78e1e1a50be27ce40c74e02cc453788523c",
+  "CHANGELOG.md": "b35eff2f2bec026bc639960fae869194b4d0dc46e49a66a6c6968e3c2b86c17e",
+  "Cargo.lock": "69473652b3d1dfed68102902c5f290739ba341f0421f899a9bffc3e1c0652bba",
+  "frontend/package.json": "f99e117d12cd16b9e8ac679f363c8b8f5bf42f56927037adfff2b2f531fa08cd",
+  "frontend/scripts/build-windows-release.ps1": "e6958403ba91aa2ddd4ebb90611d42f0570723d289f2b745c4f2e33e3162ed82",
+  "frontend/src-tauri/Cargo.toml": "e58c2e1ab5c75805e3b94db343da74862cf93217d5e0509ee75fe204dc9f1c35",
+  "frontend/src-tauri/src/audio/hardware_detector.rs": "8bf6f6cef9dece6f10eb876c37419bbc37803d985acaf04d48e6fe5044dddfff",
+  "frontend/src-tauri/src/summary/processor.rs": "ccbc4201552df3de6e02742a41848c35e3868ade65f2bb9766c0b6677693fc69",
+  "frontend/src-tauri/tauri.conf.json": "da246a749fb7ecec6a11d685b933ed3af23ef8a5ae6c055e6fbb26042712b431",
+  "frontend/src/components/VirtualizedTranscriptView.tsx": "8d951a1254a26f677eb156d709aa9e1b4855cf7061a523faa93939c94b9be255",
+  "frontend/tests/lib/transcript-interaction.test.mjs": "5b94feeff0228c27d6b12d47a15e3656c41022be4bea340fd272a8bb02e17c39"
+}
