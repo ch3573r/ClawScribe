@@ -50,6 +50,38 @@ its bundle root is `<cargo-target-directory>/release/bundle`. Do not assume the
 member crate has its own target directory. The GitHub workflow normalizes its
 artifacts into `frontend/src-tauri/target/release/bundle` before upload.
 
+## Windows Runtime Prerequisite
+
+The `windows-gpu` and `vulkan` builds have a load-time dependency on
+`vulkan-1.dll`. A machine without the loader can fail before the app opens or
+native tests are discovered, even if no GPU inference is requested. Use a
+supported GPU driver or the official LunarG Vulkan runtime. Do not download
+individual DLLs from third-party sites. The 0.5.36 installer does not install
+a GPU driver or the Vulkan runtime for you.
+
+Extracting the Vulkan SDK supplies headers, libraries, and build tools; it does
+not run its bundled `Helpers/VulkanRT.exe`. The release workflow explicitly
+runs the signed runtime installer and verifies the loader before building.
+This fixes the hosted runner prerequisite, not GPU availability or performance.
+
+From the repository root in **64-bit PowerShell 7**, probe without installing:
+
+```powershell
+.\frontend\scripts\ensure-windows-vulkan-runtime.ps1
+```
+
+On a development/build machine with the pinned SDK staged and `VULKAN_SDK` set,
+opt in to installation (administrative permission may be required):
+
+```powershell
+.\frontend\scripts\ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+```
+
+The helper requires a valid LunarG Authenticode signature, checks the installer's
+exit code, and verifies the loader export. Native-test invocation itself only
+probes and never installs prerequisites implicitly. Installing a loader does
+not establish a compatible GPU, successful inference, or live audio capture.
+
 ## Native Windows Unit Tests
 
 From the repository root, after staging the required sidecars:
