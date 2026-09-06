@@ -14,6 +14,7 @@ const PENDING_MARKER: &str = ".openclaw-pending.json";
 const SUBMITTED_MARKER: &str = ".openclaw-submitted.json";
 const FAILED_MARKER: &str = ".openclaw-failed.json";
 const PENDING_STALE_SECONDS: i64 = 15 * 60;
+static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // No prefilled endpoints — the user supplies their own OpenClaw URLs. (A
 // hardcoded dev IP must never ship as a default.)
 const DEFAULT_ENDPOINT: &str = "";
@@ -121,6 +122,9 @@ pub async fn save_openclaw_config<R: Runtime>(
     app: AppHandle<R>,
     config: OpenClawConfig,
 ) -> Result<(), String> {
+    let _guard = CONFIG_LOCK
+        .lock()
+        .map_err(|_| "Provider settings are unavailable")?;
     let path = config_path(&app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -128,12 +132,10 @@ pub async fn save_openclaw_config<R: Runtime>(
 
     let mut config = normalize_config(config);
     if config.bearer_token.is_empty() {
-        if let Ok(existing) = load_config(&app) {
-            config.bearer_token = existing.bearer_token;
-        }
+        config.bearer_token = load_config_unlocked(&app)?.bearer_token;
     }
-    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())
+    config.bearer_token = crate::credentials::seal("openclaw/bearer-token", &config.bearer_token)?;
+    write_config_atomically(&path, &config)
 }
 
 #[tauri::command]
@@ -158,8 +160,8 @@ pub fn submit_completed_recording<R: Runtime>(
 ) {
     let last_status_path = match last_status_path(&app) {
         Ok(path) => Some(path),
-        Err(e) => {
-            warn!("OpenClaw handoff status path could not be resolved: {}", e);
+        Err(_e) => {
+            warn!("OpenClaw handoff status path could not be resolved");
             None
         }
     };
@@ -183,7 +185,7 @@ pub fn submit_completed_recording<R: Runtime>(
     let config = match load_config(&app) {
         Ok(config) => config,
         Err(e) => {
-            error!("OpenClaw handoff config could not be loaded: {}", e);
+            error!("OpenClaw handoff config could not be loaded");
             let folder = PathBuf::from(&folder_path);
             let status = submission_status(
                 "failed",
@@ -230,10 +232,10 @@ pub fn submit_completed_recording<R: Runtime>(
                 if result.submitted {
                     info!("OpenClaw handoff complete: {}", result.message);
                 } else {
-                    warn!("OpenClaw handoff skipped: {}", result.message);
+                    warn!("OpenClaw handoff skipped");
                 }
             }
-            Err(e) => error!("OpenClaw handoff failed: {}", e),
+            Err(_e) => error!("OpenClaw handoff failed"),
         }
     });
 }
@@ -432,17 +434,13 @@ async fn submit_folder_with_config(
     } else {
         write_failed_marker(
             &folder,
-            response_text.clone(),
+            format!("OpenClaw endpoint returned HTTP {}", status.as_u16()),
             Some(status.as_u16()),
             &config,
             Some(&idempotency_key),
         )?;
         let _ = remove_marker(&folder.join(PENDING_MARKER));
-        let message = format!(
-            "OpenClaw endpoint returned HTTP {}: {}",
-            status.as_u16(),
-            response_text
-        );
+        let message = format!("OpenClaw endpoint returned HTTP {}", status.as_u16());
         let last_status = submission_status(
             "failed",
             Some(&folder),
@@ -459,12 +457,37 @@ async fn submit_folder_with_config(
 }
 
 pub(crate) fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
-    let mut config = match fs::read_to_string(config_path(app)?) {
+    let _guard = CONFIG_LOCK
+        .lock()
+        .map_err(|_| "Provider settings are unavailable")?;
+    load_config_unlocked(app)
+}
+
+fn load_config_unlocked<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
+    let path = config_path(app)?;
+    let mut config = match fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => {
             serde_json::from_str::<OpenClawConfig>(&content).map_err(|e| e.to_string())?
         }
-        _ => OpenClawConfig::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenClawConfig::default(),
+        _ => {
+            return Err(
+                "Provider settings could not be read. Existing settings were preserved.".into(),
+            )
+        }
     };
+
+    if !config.bearer_token.is_empty() {
+        if !crate::credentials::is_protected(&config.bearer_token) {
+            config.bearer_token =
+                crate::credentials::seal("openclaw/bearer-token", &config.bearer_token)?;
+            write_config_atomically(&path, &config)?;
+        }
+        if env::var("MEETILY_OPENCLAW_BEARER_TOKEN").is_err() {
+            config.bearer_token =
+                crate::credentials::open("openclaw/bearer-token", &config.bearer_token)?;
+        }
+    }
 
     if let Ok(value) = env::var("MEETILY_OPENCLAW_ENABLED") {
         config.enabled = matches!(
@@ -492,6 +515,23 @@ pub(crate) fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConf
     }
 
     Ok(normalize_config(config))
+}
+
+fn write_config_atomically(path: &Path, config: &OpenClawConfig) -> Result<(), String> {
+    let content =
+        serde_json::to_vec_pretty(config).map_err(|_| "Could not serialize provider settings")?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(&content)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result.map_err(|_| "Could not save protected provider settings".into())
 }
 
 fn normalize_config(mut config: OpenClawConfig) -> OpenClawConfig {
@@ -855,11 +895,11 @@ fn write_last_submission_status(path: Option<&Path>, status: &OpenClawSubmission
 
     match serde_json::to_value(status) {
         Ok(marker) => {
-            if let Err(e) = write_marker(path.to_path_buf(), &marker) {
-                warn!("OpenClaw handoff status could not be written: {}", e);
+            if let Err(_e) = write_marker(path.to_path_buf(), &marker) {
+                warn!("OpenClaw handoff status could not be written");
             }
         }
-        Err(e) => warn!("OpenClaw handoff status could not be serialized: {}", e),
+        Err(_e) => warn!("OpenClaw handoff status could not be serialized"),
     }
 }
 

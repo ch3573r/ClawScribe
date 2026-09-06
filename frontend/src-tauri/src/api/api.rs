@@ -2,7 +2,6 @@ use log::{debug as log_debug, error as log_error, info as log_info, warn as log_
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 use tauri::{AppHandle, Runtime};
-use tauri_plugin_store::StoreExt;
 
 use crate::{
     audio::transcription::cloud::{
@@ -278,32 +277,6 @@ pub struct Profile {
     pub is_licensed: bool,
 }
 
-// Helper function to get auth token from store (optional)
-#[allow(dead_code)]
-async fn get_auth_token<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
-    let store = match app.store("store.json") {
-        Ok(store) => store,
-        Err(_) => return None,
-    };
-
-    match store.get("authToken") {
-        Some(token) => {
-            if let Some(token_str) = token.as_str() {
-                let truncated = token_str.chars().take(20).collect::<String>();
-                log_info!("Found auth token: {}", truncated);
-                Some(token_str.to_string())
-            } else {
-                log_warn!("Auth token is not a string");
-                None
-            }
-        }
-        None => {
-            log_warn!("No auth token found in store");
-            None
-        }
-    }
-}
-
 // Helper function to get server address - now hardcoded
 async fn get_server_address<R: Runtime>(_app: &AppHandle<R>) -> Result<String, String> {
     log_info!("Using hardcoded server URL: {}", APP_SERVER_URL);
@@ -357,7 +330,7 @@ async fn make_api_request<R: Runtime, T: for<'de> Deserialize<'de>>(
 
     let response = request.send().await.map_err(|e| {
         let error_msg = format!("Request failed: {}", e);
-        log_error!("{}", error_msg);
+        log_error!("Provider request failed");
         error_msg
     })?;
 
@@ -370,23 +343,19 @@ async fn make_api_request<R: Runtime, T: for<'de> Deserialize<'de>>(
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
         let error_msg = format!("HTTP {}: {}", status, error_text);
-        log_error!("{}", error_msg);
+        log_error!("Provider returned an unsuccessful HTTP status");
         return Err(error_msg);
     }
 
     let response_text = response.text().await.map_err(|e| {
         let error_msg = format!("Failed to read response: {}", e);
-        log_error!("{}", error_msg);
+        log_error!("Failed to read provider response");
         error_msg
     })?;
 
-    // Safely truncate response for logging, respecting UTF-8 character boundaries
-    let truncated = response_text.chars().take(200).collect::<String>();
-    log_info!("Response body: {}", truncated);
-
     serde_json::from_str(&response_text).map_err(|e| {
         let error_msg = format!("Failed to parse JSON: {}", e);
-        log_error!("{}", error_msg);
+        log_error!("Failed to parse provider response JSON");
         error_msg
     })
 }
@@ -399,10 +368,8 @@ pub async fn api_get_meetings<R: Runtime>(
     state: tauri::State<'_, AppState>,
     auth_token: Option<String>,
 ) -> Result<Vec<Meeting>, String> {
-    log_info!(
-        "api_get_meetings called with auth_token(native) : {}",
-        auth_token.is_some()
-    );
+    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
+    log_info!("Listing local meetings");
     let pool = state.db_manager.pool();
     let meetings: Result<Vec<MeetingModel>, sqlx::Error> =
         MeetingsRepository::get_meetings(pool).await;
@@ -423,7 +390,7 @@ pub async fn api_get_meetings<R: Runtime>(
             Ok(result)
         }
         Err(e) => {
-            log_error!("Error getting meetings: {}", e);
+            log_error!("Error getting meetings");
             Err(e.to_string())
         }
     }
@@ -436,11 +403,8 @@ pub async fn api_search_transcripts<R: Runtime>(
     query: String,
     auth_token: Option<String>,
 ) -> Result<Vec<TranscriptSearchResult>, String> {
-    log_info!(
-        "api_search_transcripts called with query: '{}', auth_token: {}",
-        query,
-        auth_token.is_some()
-    );
+    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
+    log_info!("Searching local transcripts");
 
     let pool = state.db_manager.pool();
 
@@ -453,7 +417,7 @@ pub async fn api_search_transcripts<R: Runtime>(
             Ok(results)
         }
         Err(e) => {
-            log_error!("Error searching transcripts for query '{}': {}", query, e);
+            log_error!("Transcript search failed");
             Err(format!("Failed to search transcripts: {}", e))
         }
     }
@@ -466,11 +430,7 @@ pub async fn api_get_profile<R: Runtime>(
     license_key: String,
     auth_token: Option<String>,
 ) -> Result<Profile, String> {
-    log_info!(
-        "api_get_profile called for email: {}, auth_token: {}",
-        email,
-        auth_token.is_some()
-    );
+    log_info!("Loading profile");
 
     let profile_request = ProfileRequest { email, license_key };
     let body = serde_json::to_string(&profile_request).map_err(|e| e.to_string())?;
@@ -486,11 +446,7 @@ pub async fn api_save_profile<R: Runtime>(
     email: String,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_profile called for email: {}, auth_token: {}",
-        email,
-        auth_token.is_some()
-    );
+    log_info!("Saving profile");
 
     let save_request = SaveProfileRequest { id, email };
     let body = serde_json::to_string(&save_request).map_err(|e| e.to_string())?;
@@ -515,11 +471,7 @@ pub async fn api_update_profile<R: Runtime>(
     position: String,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_update_profile called for email: {}, auth_token: {}",
-        email,
-        auth_token.is_some()
-    );
+    log_info!("Updating profile");
 
     let update_request = UpdateProfileRequest {
         email,
@@ -570,11 +522,7 @@ pub async fn api_get_model_config<R: Runtime>(
                     }))
                 }
                 Err(e) => {
-                    log_error!(
-                        "Failed to get API key for provider {}: {}",
-                        &config.provider,
-                        e
-                    );
+                    log_error!("Failed to get API key for provider");
                     Err(e.to_string())
                 }
             }
@@ -584,7 +532,7 @@ pub async fn api_get_model_config<R: Runtime>(
             Ok(None)
         }
         Err(e) => {
-            log_error!("❌ Failed to get model config from database: {}", e);
+            log_error!("❌ Failed to get model config from database");
             Err(e.to_string())
         }
     }
@@ -619,7 +567,7 @@ pub async fn api_save_model_config<R: Runtime>(
     )
     .await
     {
-        log_error!("❌ Failed to save model config to database: {}", e);
+        log_error!("❌ Failed to save model config to database");
         return Err(e.to_string());
     }
 
@@ -632,7 +580,7 @@ pub async fn api_save_model_config<R: Runtime>(
         {
             log_info!("🔑 API key provided, saving...");
             if let Err(e) = SettingsRepository::save_api_key(pool, &provider, &key).await {
-                log_error!("❌ Failed to save API key: {}", e);
+                log_error!("❌ Failed to save API key");
                 return Err(e.to_string());
             }
         }
@@ -641,8 +589,8 @@ pub async fn api_save_model_config<R: Runtime>(
     // Trigger graceful shutdown of built-in AI sidecar if it's running
     // This ensures that if the user switched models/providers, the old one is cleaned up
     // The shutdown happens in the background, so it won't block the UI
-    if let Err(e) = crate::summary::summary_engine::client::shutdown_sidecar_gracefully().await {
-        log_warn!("Failed to initiate graceful sidecar shutdown: {}", e);
+    if let Err(_e) = crate::summary::summary_engine::client::shutdown_sidecar_gracefully().await {
+        log_warn!("Failed to initiate graceful sidecar shutdown");
     }
 
     log_info!("✅ Successfully saved model configuration to database");
@@ -671,7 +619,7 @@ pub async fn api_get_api_key<R: Runtime>(
             Ok(key.unwrap_or_default())
         }
         Err(e) => {
-            log_error!("Failed to get API key for provider '{}': {}", &provider, e);
+            log_error!("Failed to read provider credential");
             Err(e.to_string())
         }
     }
@@ -688,11 +636,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
 
     match SettingsRepository::get_transcript_config(pool).await {
         Ok(Some(config)) => {
-            log_info!(
-                "Found transcript config: provider={}, model={}",
-                &config.provider,
-                &config.model
-            );
+            log_info!("Loaded transcription configuration");
             match SettingsRepository::get_transcript_api_key(pool, &config.provider).await {
                 Ok(api_key) => {
                     log_info!("Successfully retrieved transcript config and API key.");
@@ -706,11 +650,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
                     }))
                 }
                 Err(e) => {
-                    log_error!(
-                        "Failed to get transcript API key for provider {}: {}",
-                        &config.provider,
-                        e
-                    );
+                    log_error!("Failed to get transcript API key for provider");
                     Err(e.to_string())
                 }
             }
@@ -727,7 +667,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
             }))
         }
         Err(e) => {
-            log_error!("Failed to get transcript config: {}", e);
+            log_error!("Failed to get transcript config");
             Err(e.to_string())
         }
     }
@@ -752,7 +692,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
     let pool = state.db_manager.pool();
 
     if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
-        log_error!("Failed to save transcript config: {}", e);
+        log_error!("Failed to save transcript config");
         return Err(e.to_string());
     }
 
@@ -777,7 +717,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
     )
     .await
     {
-        log_error!("Failed to save transcript provider config: {}", e);
+        log_error!("Failed to save transcript provider config");
         return Err(e.to_string());
     }
 
@@ -786,7 +726,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
             log_info!("API key provided, saving for transcript provider...");
             if let Err(e) = SettingsRepository::save_transcript_api_key(pool, &provider, &key).await
             {
-                log_error!("Failed to save transcript API key: {}", e);
+                log_error!("Failed to save transcript API key");
                 return Err(e.to_string());
             }
         }
@@ -811,18 +751,11 @@ pub async fn api_get_transcript_api_key<R: Runtime>(
     );
     match SettingsRepository::get_transcript_api_key(&state.db_manager.pool(), &provider).await {
         Ok(key) => {
-            log_info!(
-                "Successfully retrieved transcript API key for provider '{}'.",
-                &provider
-            );
+            log_info!("Transcription credential loaded");
             Ok(key.unwrap_or_default())
         }
         Err(e) => {
-            log_error!(
-                "Failed to get transcript API key for provider '{}': {}",
-                &provider,
-                e
-            );
+            log_error!("Failed to read transcription credential");
             Err(e.to_string())
         }
     }
@@ -1052,11 +985,7 @@ pub async fn api_delete_api_key<R: Runtime>(
             Ok(())
         }
         Err(e) => {
-            log_error!(
-                "Failed to delete API key for provider '{}': {}",
-                &provider,
-                e
-            );
+            log_error!("Failed to delete provider credential");
             Err(e.to_string())
         }
     }
@@ -1069,11 +998,8 @@ pub async fn api_delete_meeting<R: Runtime>(
     meeting_id: String,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_delete_meeting called for meeting_id(native): {}, auth_token: {}",
-        meeting_id,
-        auth_token.is_some()
-    );
+    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
+    log_info!("Deleting local meeting");
 
     let pool = state.db_manager.pool();
 
@@ -1086,14 +1012,14 @@ pub async fn api_delete_meeting<R: Runtime>(
             }))
         }
         Ok(false) => {
-            log_warn!("Meeting not found or already deleted: {}", meeting_id);
+            log_warn!("Meeting not found or already deleted");
             Err(format!(
                 "Meeting not found or could not be deleted: {}",
                 meeting_id
             ))
         }
         Err(e) => {
-            log_error!("Error deleting meeting {}: {}", meeting_id, e);
+            log_error!("Error deleting meeting");
             Err(format!("Failed to delete meeting: {}", e))
         }
     }
@@ -1106,11 +1032,8 @@ pub async fn api_get_meeting<R: Runtime>(
     state: tauri::State<'_, AppState>,
     auth_token: Option<String>,
 ) -> Result<MeetingDetails, String> {
-    log_info!(
-        "api_get_meeting called(native) for meeting_id: {}, auth_token: {}",
-        meeting_id,
-        auth_token.is_some()
-    );
+    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
+    log_info!("Loading local meeting");
 
     let pool = state.db_manager.pool();
 
@@ -1120,11 +1043,11 @@ pub async fn api_get_meeting<R: Runtime>(
             Ok(meeting)
         }
         Ok(None) => {
-            log_warn!("Meeting not found: {}", meeting_id);
+            log_warn!("Meeting not found");
             Err(format!("Meeting not found: {}", meeting_id))
         }
         Err(e) => {
-            log_error!("Error retrieving meeting {}: {}", meeting_id, e);
+            log_error!("Error retrieving meeting");
             Err(format!("Failed to retrieve meeting: {}", e))
         }
     }
@@ -1156,11 +1079,11 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
             })
         }
         Ok(None) => {
-            log_warn!("Meeting not found: {}", meeting_id);
+            log_warn!("Meeting not found");
             Err(format!("Meeting not found: {}", meeting_id))
         }
         Err(e) => {
-            log_error!("Error retrieving meeting metadata {}: {}", meeting_id, e);
+            log_error!("Error retrieving meeting metadata");
             Err(format!("Failed to retrieve meeting metadata: {}", e))
         }
     }
@@ -1219,11 +1142,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             })
         }
         Err(e) => {
-            log_error!(
-                "Error retrieving transcripts for meeting {}: {}",
-                meeting_id,
-                e
-            );
+            log_error!("Error retrieving transcripts for meeting");
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
@@ -1254,12 +1173,7 @@ pub async fn api_update_transcript_speaker<R: Runtime>(
             "speaker": speaker,
         })),
         Err(e) => {
-            log_error!(
-                "Failed to update speaker for transcript {} in meeting {}: {}",
-                transcript_id,
-                meeting_id,
-                e
-            );
+            log_error!("Failed to update speaker for transcript in meeting");
             Err(format!("Failed to update speaker label: {}", e))
         }
     }
@@ -1290,11 +1204,7 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
             "speaker": speaker,
         })),
         Err(e) => {
-            log_error!(
-                "Failed to update matching speaker labels in meeting {}: {}",
-                meeting_id,
-                e
-            );
+            log_error!("Failed to update matching speaker labels in meeting");
             Err(format!("Failed to update matching speaker labels: {}", e))
         }
     }
@@ -1308,11 +1218,8 @@ pub async fn api_save_meeting_title<R: Runtime>(
     title: String,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_meeting_title called for meeting_id: {}, auth_token: {}",
-        meeting_id,
-        auth_token.is_some()
-    );
+    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
+    log_info!("Saving meeting title");
     let pool = state.db_manager.pool();
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
         Ok(true) => {
@@ -1320,11 +1227,11 @@ pub async fn api_save_meeting_title<R: Runtime>(
             Ok(serde_json::json!({"message": "Meeting title saved successfully"}))
         }
         Ok(false) => {
-            log_error!("No meeting found with id {}", meeting_id);
+            log_error!("No meeting found with id");
             Err(format!("No meeting found with id {}", meeting_id))
         }
         Err(e) => {
-            log_error!("Failed to update meeting {}", e);
+            log_error!("Failed to update meeting");
             Err(format!("Failed to update meeting: {}", e))
         }
     }
@@ -1338,22 +1245,10 @@ pub async fn api_save_transcript<R: Runtime>(
     transcripts: Vec<serde_json::Value>,
     folder_path: Option<String>,
     auth_token: Option<String>,
+    recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_transcript called for meeting: {}, transcripts: {}, folder_path: {:?}, auth_token: {}",
-        meeting_title,
-        transcripts.len(),
-        folder_path,
-        auth_token.is_some()
-    );
-
-    // Log first transcript for debugging
-    if let Some(first) = transcripts.first() {
-        log_debug!(
-            "First transcript data: {}",
-            serde_json::to_string_pretty(first).unwrap_or_default()
-        );
-    }
+    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
+    log_info!("Saving meeting transcript");
 
     // Convert serde_json::Value to TranscriptSegment
     let transcripts_to_save: Vec<TranscriptSegment> = transcripts
@@ -1361,38 +1256,39 @@ pub async fn api_save_transcript<R: Runtime>(
         .map(serde_json::from_value)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
-            log_error!("Failed to parse transcript segments: {}", e);
+            log_error!("Failed to parse transcript segments");
             format!(
                 "Invalid transcript data format: {}. Please check the data structure.",
                 e
             )
         })?;
 
-    // Log parsed segments count and first segment details
-    if let Some(first_seg) = transcripts_to_save.first() {
-        log_debug!("First parsed segment: text='{}', audio_start_time={:?}, audio_end_time={:?}, duration={:?}",
-                   first_seg.text.chars().take(50).collect::<String>(),
-                   first_seg.audio_start_time,
-                   first_seg.audio_end_time,
-                   first_seg.duration);
+    let mut recording_outcome = recording_outcome.unwrap_or_default();
+    if let Some(folder) = folder_path.as_ref().map(std::path::PathBuf::from) {
+        let saved = tokio::task::spawn_blocking(move || {
+            crate::audio::outcome::RecordingOutcome::read(&folder)
+        })
+        .await
+        .map_err(|_| "Recording status reader failed")??;
+        if let Some(saved) = saved {
+            recording_outcome.audio_save_failed |= saved.audio_save_failed;
+            recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
+        }
     }
-
     let pool = state.db_manager.pool();
 
     // Now, call the repository with the correctly typed data.
-    match TranscriptsRepository::save_transcript(
+    match TranscriptsRepository::save_transcript_with_outcome(
         pool,
         &meeting_title,
         &transcripts_to_save,
         folder_path,
+        Some(&recording_outcome),
     )
     .await
     {
         Ok(meeting_id) => {
-            log_info!(
-                "Successfully saved transcript and created meeting with id: {}",
-                meeting_id
-            );
+            log_info!("Meeting and transcript saved");
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",
@@ -1400,11 +1296,7 @@ pub async fn api_save_transcript<R: Runtime>(
             }))
         }
         Err(e) => {
-            log_error!(
-                "Error saving transcript for meeting '{}': {}",
-                meeting_title,
-                e
-            );
+            log_error!("Failed to save meeting transcript");
             Err(format!("Failed to save transcript: {}", e))
         }
     }
@@ -1433,12 +1325,12 @@ pub async fn open_meeting_folder<R: Runtime>(
     match meeting {
         Some(m) => {
             if let Some(folder_path) = m.folder_path {
-                log_info!("Opening meeting folder: {}", folder_path);
+                log_info!("Opening meeting folder");
 
                 // Verify folder exists
                 let path = std::path::Path::new(&folder_path);
                 if !path.exists() {
-                    log_warn!("Folder path does not exist: {}", folder_path);
+                    log_warn!("Folder path does not exist");
                     return Err(format!("Recording folder not found: {}", folder_path));
                 }
 
@@ -1467,15 +1359,15 @@ pub async fn open_meeting_folder<R: Runtime>(
                         .map_err(|e| format!("Failed to open folder: {}", e))?;
                 }
 
-                log_info!("Successfully opened folder: {}", folder_path);
+                log_info!("Successfully opened folder");
                 Ok(())
             } else {
-                log_warn!("Meeting {} has no folder_path set", meeting_id);
+                log_warn!("Meeting has no folder_path set");
                 Err("Recording folder path not available for this meeting".to_string())
             }
         }
         None => {
-            log_warn!("Meeting not found: {}", meeting_id);
+            log_warn!("Meeting not found");
             Err("Meeting not found".to_string())
         }
     }
@@ -1525,7 +1417,7 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
             url
         }
         Err(e) => {
-            log_error!("✗ Failed to get server URL: {}", e);
+            log_error!("✗ Failed to get server URL");
             return Err(format!("Failed to get server URL: {}", e));
         }
     };
@@ -1546,7 +1438,7 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
             ))
         }
         Err(e) => {
-            log_error!("✗ Backend connection failed: {}", e);
+            log_error!("✗ Backend connection failed");
             Err(format!("Backend connection failed: {}", e))
         }
     }
@@ -1583,6 +1475,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
+    context_window: Option<usize>,
     temperature: Option<f32>,
     top_p: Option<f32>,
     timeout_seconds: Option<u64>,
@@ -1638,6 +1531,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
         organization: organization.filter(|value| !value.trim().is_empty()),
         project: project.filter(|value| !value.trim().is_empty()),
         max_tokens,
+        context_window,
         temperature,
         top_p,
     };
@@ -1656,7 +1550,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
             }))
         }
         Err(e) => {
-            log_error!("❌ Failed to save custom OpenAI config: {}", e);
+            log_error!("❌ Failed to save custom OpenAI config");
             Err(format!("Failed to save custom OpenAI configuration: {}", e))
         }
     }
@@ -1686,7 +1580,7 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
             Ok(config)
         }
         Err(e) => {
-            log_error!("❌ Failed to get custom OpenAI config: {}", e);
+            log_error!("❌ Failed to get custom OpenAI config");
             Err(format!("Failed to get custom OpenAI configuration: {}", e))
         }
     }
@@ -1701,6 +1595,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
+    context_window: Option<usize>,
     temperature: Option<f32>,
     top_p: Option<f32>,
     timeout_seconds: Option<u64>,
@@ -1721,6 +1616,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
         organization,
         project,
         max_tokens,
+        context_window,
         temperature,
         top_p,
     };
@@ -1746,6 +1642,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
+    context_window: Option<usize>,
     temperature: Option<f32>,
     top_p: Option<f32>,
     timeout_seconds: Option<u64>,
@@ -1760,6 +1657,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
         organization,
         project,
         max_tokens,
+        context_window,
         temperature,
         top_p,
     };

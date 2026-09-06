@@ -132,7 +132,7 @@ fn legacy_plaintext_token_path() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn protect_bytes(plaintext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
+pub(crate) fn protect_bytes(plaintext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
@@ -152,7 +152,7 @@ fn protect_bytes(plaintext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
 }
 
 #[cfg(target_os = "windows")]
-fn unprotect_bytes(ciphertext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
+pub(crate) fn unprotect_bytes(ciphertext: &[u8]) -> Result<Vec<u8>, TokenStoreError> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 

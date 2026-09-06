@@ -18,23 +18,35 @@ impl DatabaseManager {
 
         if !Path::new(tauri_db_path).exists() {
             if Path::new(backend_db_path).exists() {
-                log::info!(
-                    "Copying database from {} to {}",
-                    backend_db_path,
-                    tauri_db_path
-                );
+                log::info!("Migrating the legacy local database");
                 fs::copy(backend_db_path, tauri_db_path).map_err(|e| sqlx::Error::Io(e))?;
             } else {
-                log::info!("Creating database at {}", tauri_db_path);
+                log::info!("Creating the local database");
                 Sqlite::create_database(tauri_db_path).await?;
             }
         }
 
-        let pool = SqlitePool::connect(tauri_db_path).await?;
+        // Scrub replaced legacy credentials from database pages on every connection.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA secure_delete = ON")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(tauri_db_path)
+            .await?;
 
         let migrator = sqlx::migrate!("./migrations");
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
+        crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
+        // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await?;
 
         Ok(DatabaseManager { pool })
     }
@@ -80,11 +92,7 @@ impl DatabaseManager {
                 .iter()
                 .any(|variant| variant.as_slice() == stored.as_slice())
             {
-                log::warn!(
-                    "Repairing line-ending checksum drift for migration {} ({})",
-                    migration.version,
-                    migration.description
-                );
+                log::warn!("Repairing known migration line-ending checksum drift");
                 sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
                     .bind(migration.checksum.as_ref())
                     .bind(migration.version)
@@ -121,60 +129,19 @@ impl DatabaseManager {
             .to_string_lossy()
             .to_string();
 
-        // WAL file paths for defensive cleanup
-        let wal_path = app_data_dir.join("meeting_minutes.sqlite-wal");
-        let shm_path = app_data_dir.join("meeting_minutes.sqlite-shm");
-
-        log::info!("Tauri DB path: {}", tauri_db_path);
-        log::info!("Legacy backend DB path: {}", backend_db_path);
-
-        // Try to open database with defensive WAL handling
+        // WAL files can contain the only copy of committed transactions. Never
+        // remove them in response to an opening error; preserve the complete
+        // database for SQLite recovery or repair on a separate copy.
         match Self::new(&tauri_db_path, &backend_db_path).await {
             Ok(db_manager) => {
                 log::info!("Database opened successfully");
                 Ok(db_manager)
             }
             Err(e) => {
-                // Check if error is due to corrupted WAL file
-                let error_msg = e.to_string();
-                if error_msg.contains("malformed") || error_msg.contains("corrupt") {
-                    log::warn!("Database appears corrupted, likely due to orphaned WAL file. Attempting recovery...");
-                    log::warn!("Error details: {}", error_msg);
-
-                    // Delete potentially corrupted WAL/SHM files
-                    if wal_path.exists() {
-                        match fs::remove_file(&wal_path) {
-                            Ok(_) => log::info!("Removed orphaned WAL file: {:?}", wal_path),
-                            Err(e) => log::warn!("Failed to remove WAL file: {}", e),
-                        }
-                    }
-                    if shm_path.exists() {
-                        match fs::remove_file(&shm_path) {
-                            Ok(_) => log::info!("Removed orphaned SHM file: {:?}", shm_path),
-                            Err(e) => log::warn!("Failed to remove SHM file: {}", e),
-                        }
-                    }
-
-                    // Retry connection without WAL files
-                    log::info!("Retrying database connection after WAL cleanup...");
-                    match Self::new(&tauri_db_path, &backend_db_path).await {
-                        Ok(db_manager) => {
-                            log::info!("Database opened successfully after WAL recovery");
-                            Ok(db_manager)
-                        }
-                        Err(retry_err) => {
-                            log::error!(
-                                "Database connection failed even after WAL cleanup: {}",
-                                retry_err
-                            );
-                            Err(retry_err)
-                        }
-                    }
-                } else {
-                    // Not a WAL-related error, propagate original error
-                    log::error!("Database connection failed: {}", error_msg);
-                    Err(e)
-                }
+                log::error!(
+                    "Database could not be opened. Database and recovery files were preserved."
+                );
+                Err(e)
             }
         }
     }
@@ -207,11 +174,7 @@ impl DatabaseManager {
 
         // Copy legacy database to app data directory as meeting_minutes.db
         let target_legacy_path = app_data_dir.join("meeting_minutes.db");
-        log::info!(
-            "Copying legacy database from {} to {}",
-            legacy_db_path,
-            target_legacy_path.display()
-        );
+        log::info!("Copying legacy database to current storage");
 
         fs::copy(legacy_db_path, &target_legacy_path).map_err(|e| sqlx::Error::Io(e))?;
 
@@ -258,7 +221,7 @@ impl DatabaseManager {
             .await
         {
             Ok(_) => log::info!("WAL checkpoint completed successfully"),
-            Err(e) => log::warn!("WAL checkpoint failed (non-fatal): {}", e),
+            Err(_e) => log::warn!("WAL checkpoint failed (non-fatal)"),
         }
 
         // Close the connection pool gracefully
@@ -286,6 +249,49 @@ fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha384};
+
+    #[tokio::test]
+    async fn failed_open_preserves_committed_wal_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recovery.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .pragma("wal_autocheckpoint", "0");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE recovery_probe (value TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO recovery_probe VALUES ('synthetic committed data')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Force a genuine migration collision. The failing opener must not erase WAL.
+        sqlx::query("CREATE TABLE _sqlx_migrations (incompatible INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let wal = path.with_file_name("recovery.sqlite-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        assert!(DatabaseManager::new(
+            path.to_str().unwrap(),
+            directory.path().join("absent.db").to_str().unwrap()
+        )
+        .await
+        .is_err());
+        let value: String = sqlx::query_scalar("SELECT value FROM recovery_probe")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(value, "synthetic committed data");
+        assert!(wal.exists());
+    }
 
     async fn pool_with_migration_ledger() -> SqlitePool {
         let pool = SqlitePool::connect(":memory:").await.unwrap();

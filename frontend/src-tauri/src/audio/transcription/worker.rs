@@ -44,11 +44,13 @@ impl TranscriptionTask {
         self.cancellation.cancel();
     }
 
-    pub fn mark_stopped(&self) {
+    pub fn mark_stopped(&self) -> TranscriptionMetricsSnapshot {
         self.metrics.set_worker_active(false);
+        let snapshot = self.metrics.snapshot();
         if let Ok(mut active_metrics) = ACTIVE_TRANSCRIPTION_METRICS.lock() {
             clear_metrics_if_current(&mut active_metrics, &self.metrics);
         }
+        snapshot
     }
 }
 
@@ -106,6 +108,7 @@ impl ProcessingMetricsGuard {
 impl Drop for ProcessingMetricsGuard {
     fn drop(&mut self) {
         if !self.completed {
+            self.metrics.mark_failed();
             self.metrics.mark_processing_stopped();
         }
     }
@@ -128,7 +131,8 @@ pub struct TranscriptUpdate {
     pub sequence_id: u64,
     pub chunk_start_time: f64, // Legacy field, kept for compatibility
     pub is_partial: bool,
-    pub confidence: f32,
+    #[serde(default)]
+    pub confidence: Option<f32>,
     // NEW: Recording-relative timestamps for playback sync
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
@@ -161,12 +165,13 @@ pub fn start_transcription_task<R: Runtime>(
         {
             Ok(engine) => engine,
             Err(e) => {
-                error!("Failed to initialize transcription engine: {}", e);
+                error!("Failed to initialize transcription engine");
                 let _ = app.emit("transcription-error", serde_json::json!({
                     "error": e,
-                    "userMessage": "Recording failed: Unable to initialize speech recognition. Please check your model settings.",
+                    "userMessage": "Live transcription could not start. Stop and save the recording, check model settings, then retranscribe the saved audio.",
                     "actionable": true
                 }));
+                task_metrics.mark_failed();
                 task_metrics.set_worker_active(false);
                 let _ = app.emit(
                     "transcription-complete",
@@ -231,10 +236,7 @@ pub fn start_transcription_task<R: Runtime>(
                         worker_id, engine_name, current_model
                     );
                 } else {
-                    warn!(
-                        "⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped",
-                        worker_id, engine_name
-                    );
+                    warn!("⚠️ Worker pre-validation: model not loaded - chunks may be skipped");
                 }
 
                 loop {
@@ -264,8 +266,8 @@ pub fn start_transcription_task<R: Runtime>(
 
                             // Check if model is still loaded before processing
                             if !engine_clone.is_model_loaded().await {
-                                warn!("⚠️ Worker {}: Model unloaded, but continuing to preserve chunk {}", worker_id, chunk.chunk_id);
-                                // Still count as completed even if we can't process
+                                warn!("Transcription model unavailable; preserving queued audio");
+                                metrics_clone.mark_failed();
                                 chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                 metrics_guard.complete();
                                 continue;
@@ -301,13 +303,11 @@ pub fn start_transcription_task<R: Runtime>(
                                     is_partial,
                                     provider_word_timestamps,
                                 )) => {
-                                    let confidence_str = match confidence_opt {
-                                        Some(c) => format!("{:.2}", c),
-                                        None => "N/A".to_string(),
-                                    };
-
-                                    debug!("Worker {} transcription result: text='{}', confidence={}, partial={}",
-                                          worker_id, transcript, confidence_str, is_partial);
+                                    debug!("Transcription result: chars={}, confidence={:?}, partial={}", transcript.chars().count(), confidence_opt, is_partial);
+                                    if is_partial {
+                                        metrics_clone.mark_failed();
+                                        let _ = app_clone.emit("transcription-warning", "A speech segment is incomplete. Saved audio can be retranscribed after stopping.");
+                                    }
 
                                     // Every non-empty transcript is kept. A confidence
                                     // threshold used to discard results below 0.3 here, but
@@ -316,8 +316,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     // "Nein", names, numbers). Confidence is display-only.
                                     if !transcript.trim().is_empty() {
                                         // PERFORMANCE: Only log transcription results, not every processing step
-                                        debug!("Worker {} transcribed: {} (confidence: {}, partial: {})",
-                                              worker_id, transcript, confidence_str, is_partial);
+                                        debug!("Recognized speech retained");
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
                                         // This is lightweight and provides better user feedback
@@ -331,7 +330,7 @@ pub fn start_transcription_task<R: Runtime>(
                                                 "message": "Speech activity detected"
                                             })) {
                                                 Ok(_) => info!("🎤 ✅ First speech detected - successfully emitted speech-detected event"),
-                                                Err(e) => error!("🎤 ❌ Failed to emit speech-detected event: {}", e),
+                                                Err(_e) => error!("🎤 ❌ Failed to emit speech-detected event"),
                                             }
                                         }
 
@@ -373,7 +372,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             sequence_id,
                                             chunk_start_time: chunk_timestamp, // Legacy compatibility
                                             is_partial,
-                                            confidence: confidence_opt.unwrap_or(0.85), // Default for providers without confidence
+                                            confidence: confidence_opt,
                                             // NEW: Recording-relative timestamps for sync
                                             audio_start_time,
                                             audio_end_time,
@@ -381,12 +380,9 @@ pub fn start_transcription_task<R: Runtime>(
                                             word_timestamps,
                                         };
 
-                                        if let Err(e) = app_clone.emit("transcript-update", &update)
+                                        if let Err(_e) = app_clone.emit("transcript-update", &update)
                                         {
-                                            error!(
-                                                "Worker {}: Failed to emit transcript update: {}",
-                                                worker_id, e
-                                            );
+                                            error!("Failed to emit transcript update");
                                         }
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     } else if !transcript.trim().is_empty() && should_log_this_chunk
@@ -408,19 +404,15 @@ pub fn start_transcription_task<R: Runtime>(
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
-                                            warn!(
-                                                "Worker {}: Model unloaded during transcription",
-                                                worker_id
-                                            );
+                                            metrics_clone.mark_failed();
+                                            warn!("Model unloaded during transcription");
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             metrics_guard.complete();
                                             continue;
                                         }
                                         _ => {
-                                            warn!(
-                                                "Worker {}: Transcription failed: {}",
-                                                worker_id, e
-                                            );
+                                            metrics_clone.mark_failed();
+                                            warn!("Worker transcription failed");
                                             let _ = app_clone
                                                 .emit("transcription-warning", e.to_string());
                                         }
@@ -478,7 +470,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     );
                                     break;
                                 } else {
-                                    warn!("👷 Worker {} detected potential chunk loss: {}/{} completed, waiting...", worker_id, final_completed, final_queued);
+                                    warn!("Waiting for dispatched chunks: {final_completed}/{final_queued} completed");
                                     // AGGRESSIVE POLLING: Reduced from 50ms to 5ms for faster chunk detection during shutdown
                                     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
                                 }
@@ -520,7 +512,8 @@ pub fn start_transcription_task<R: Runtime>(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    error!("Failed to read transcription queue: {}", error);
+                    task_metrics.mark_failed();
+                    error!("Failed to read transcription queue");
                     let _ = app.emit("transcription-error", serde_json::json!({
                         "error": error.to_string(),
                         "userMessage": "A staged audio segment could not be read. The recording audio is still preserved.",
@@ -548,8 +541,9 @@ pub fn start_transcription_task<R: Runtime>(
         // Wait for all workers to complete
         let mut finished_worker_id = 0usize;
         while let Some(result) = worker_handles.join_next().await {
-            if let Err(e) = result {
-                error!("❌ Worker {} panicked: {:?}", finished_worker_id, e);
+            if let Err(_e) = result {
+                task_metrics.mark_failed();
+                error!("❌ Worker panicked");
             } else {
                 info!("✅ Worker {} completed successfully", finished_worker_id);
             }
@@ -565,29 +559,22 @@ pub fn start_transcription_task<R: Runtime>(
             let final_completed = chunks_completed.load(Ordering::SeqCst);
 
             if task_cancellation.is_cancelled() {
-                warn!(
-                    "Transcription cancelled with {}/{} dispatched chunks completed",
-                    final_completed, final_queued
-                );
+                warn!("Transcription cancelled with {final_completed}/{final_queued} dispatched chunks completed");
                 break;
             } else if final_queued == final_completed {
                 info!(
-                    "🎉 ALL {} chunks processed successfully - ZERO chunks lost!",
+                    "All {} dispatched chunks finished; checking failure metrics",
                     final_completed
                 );
                 break;
             } else if verification_attempts < MAX_VERIFICATION_ATTEMPTS {
                 verification_attempts += 1;
-                warn!("⚠️ Chunk count mismatch (attempt {}): {} queued, {} completed - waiting for stragglers...",
-                     verification_attempts, final_queued, final_completed);
+                warn!("Chunk count mismatch: {final_completed}/{final_queued} completed (attempt {verification_attempts})");
 
                 // Wait a bit for any remaining chunks to be processed
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             } else {
-                error!(
-                    "❌ CRITICAL: After {} attempts, chunk loss detected: {} queued, {} completed",
-                    MAX_VERIFICATION_ATTEMPTS, final_queued, final_completed
-                );
+                error!("Chunk loss after {verification_attempts} attempts: {final_completed}/{final_queued} completed");
 
                 // Emit critical error event
                 let _ = app.emit(
@@ -609,7 +596,8 @@ pub fn start_transcription_task<R: Runtime>(
             "transcription-complete",
             serde_json::json!({
                 "cancelled": task_cancellation.is_cancelled(),
-                "failed": false,
+                "failed": status.failed_chunks > 0 || status.chunks_in_queue > 0,
+                "failed_chunks": status.failed_chunks,
                 "chunks_remaining": status.chunks_in_queue,
                 "chunks_completed": status.total_chunks_completed
             }),
@@ -648,10 +636,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
 
     // Check for empty samples - improved error handling
     if speech_samples.is_empty() {
-        warn!(
-            "Audio chunk {} is empty, skipping transcription",
-            chunk.chunk_id
-        );
+        warn!("Audio chunk is empty, skipping transcription");
         return Err(TranscriptionError::AudioTooShort {
             samples: 0,
             minimum: 1600, // 100ms at 16kHz
@@ -681,21 +666,18 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 Ok((text, confidence, is_partial)) => {
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), Some(confidence), is_partial, None));
+                        return Ok((String::new(), confidence, is_partial, None));
                     }
 
                     debug!(
-                        "Whisper transcription complete for chunk {}: '{}' (confidence: {:.2}, partial: {})",
-                        chunk.chunk_id, cleaned_text, confidence, is_partial
+                        "Whisper transcription complete (confidence: {:?}, partial: {})",
+                        confidence, is_partial
                     );
 
-                    Ok((cleaned_text, Some(confidence), is_partial, None))
+                    Ok((cleaned_text, confidence, is_partial, None))
                 }
                 Err(e) => {
-                    error!(
-                        "Whisper transcription failed for chunk {}: {}",
-                        chunk.chunk_id, e
-                    );
+                    error!("Whisper transcription failed for chunk");
 
                     let transcription_error = TranscriptionError::EngineFailed(e.to_string());
                     let _ = app.emit(
@@ -722,10 +704,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         return Ok((String::new(), None, false, None));
                     }
 
-                    debug!(
-                        "Parakeet transcription complete for chunk {}: '{}'",
-                        chunk.chunk_id, cleaned_text
-                    );
+                    debug!("Parakeet transcription completed");
 
                     let word_timestamps =
                         crate::audio::common::transcript_words_from_token_timestamps(
@@ -741,10 +720,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                     Ok((cleaned_text, None, false, word_timestamps))
                 }
                 Err(e) => {
-                    error!(
-                        "Parakeet transcription failed for chunk {}: {}",
-                        chunk.chunk_id, e
-                    );
+                    error!("Parakeet transcription failed for chunk");
 
                     let transcription_error = TranscriptionError::EngineFailed(e.to_string());
                     let _ = app.emit(
@@ -771,17 +747,10 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         return Ok((String::new(), result.confidence, result.is_partial, None));
                     }
 
-                    let confidence_str = match result.confidence {
-                        Some(c) => format!("confidence: {:.2}", c),
-                        None => "no confidence".to_string(),
-                    };
-
                     debug!(
-                        "{} transcription complete for chunk {}: '{}' ({}, partial: {})",
-                        provider.provider_name(),
-                        chunk.chunk_id,
-                        cleaned_text,
-                        confidence_str,
+                        "Provider result: chars={}, confidence={:?}, partial={}",
+                        cleaned_text.chars().count(),
+                        result.confidence,
                         result.is_partial
                     );
 
@@ -793,12 +762,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                     ))
                 }
                 Err(e) => {
-                    error!(
-                        "{} transcription failed for chunk {}: {}",
-                        provider.provider_name(),
-                        chunk.chunk_id,
-                        e
-                    );
+                    error!("transcription failed for chunk");
 
                     let _ = app.emit(
                         "transcription-error",

@@ -31,7 +31,7 @@ impl TranscriptionProvider for WhisperProvider {
         {
             Ok((text, confidence, is_partial)) => Ok(TranscriptResult {
                 text: text.trim().to_string(),
-                confidence: Some(confidence),
+                confidence,
                 is_partial,
                 word_timestamps: None,
             }),

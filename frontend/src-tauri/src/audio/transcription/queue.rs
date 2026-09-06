@@ -31,12 +31,14 @@ pub struct TranscriptionMetricsSnapshot {
     pub spool_bytes: u64,
     pub total_chunks_queued: u64,
     pub total_chunks_completed: u64,
+    pub failed_chunks: u64,
 }
 
 #[derive(Debug, Default)]
 pub struct TranscriptionMetrics {
     queued_chunks: AtomicU64,
     completed_chunks: AtomicU64,
+    failed_chunks: AtomicU64,
     queued_audio_ms: AtomicU64,
     processed_audio_ms: AtomicU64,
     processing_wall_ms: AtomicU64,
@@ -47,6 +49,10 @@ pub struct TranscriptionMetrics {
 }
 
 impl TranscriptionMetrics {
+    pub fn mark_failed(&self) {
+        self.failed_chunks.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+    }
     fn touch(&self) {
         self.last_activity_epoch_ms
             .store(unix_epoch_ms(), Ordering::Release);
@@ -115,6 +121,7 @@ impl TranscriptionMetrics {
             spool_bytes: self.spool_bytes.load(Ordering::Acquire),
             total_chunks_queued: queued,
             total_chunks_completed: completed,
+            failed_chunks: self.failed_chunks.load(Ordering::Acquire),
         }
     }
 }
@@ -136,6 +143,7 @@ fn unix_epoch_ms() -> u64 {
 
 struct QueueShared {
     spool_dir: PathBuf,
+    retain_files: bool,
     next_write: AtomicU64,
     closed: AtomicBool,
     notify: Notify,
@@ -144,13 +152,12 @@ struct QueueShared {
 
 impl Drop for QueueShared {
     fn drop(&mut self) {
+        if self.retain_files {
+            return; // Recording recovery data belongs to the meeting, not this task.
+        }
         if let Err(error) = fs::remove_dir_all(&self.spool_dir) {
             if error.kind() != io::ErrorKind::NotFound {
-                log::warn!(
-                    "Failed to remove transcription spool {}: {}",
-                    self.spool_dir.display(),
-                    error
-                );
+                log::warn!("Failed to remove transcription spool");
             }
         }
     }
@@ -194,9 +201,34 @@ pub fn transcription_queue() -> io::Result<(
     let spool_dir = spool_root.join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(&spool_dir)?;
 
+    create_queue(spool_dir, false)
+}
+
+/// Preserve mixed capture on disk until final audio has been durably saved.
+pub fn recording_audio_queue(
+    folder: &Path,
+) -> io::Result<(
+    TranscriptionQueueSender,
+    TranscriptionQueueReceiver,
+    Arc<TranscriptionMetrics>,
+)> {
+    let spool_dir = folder.join(".audio-spool");
+    fs::create_dir(&spool_dir)?;
+    create_queue(spool_dir, true)
+}
+
+fn create_queue(
+    spool_dir: PathBuf,
+    retain_files: bool,
+) -> io::Result<(
+    TranscriptionQueueSender,
+    TranscriptionQueueReceiver,
+    Arc<TranscriptionMetrics>,
+)> {
     let metrics = Arc::new(TranscriptionMetrics::default());
     let shared = Arc::new(QueueShared {
         spool_dir,
+        retain_files,
         next_write: AtomicU64::new(0),
         closed: AtomicBool::new(false),
         notify: Notify::new(),
@@ -228,18 +260,18 @@ fn cleanup_stale_spools(spool_root: &Path) {
             .map(|age| age >= STALE_SPOOL_AGE)
             .unwrap_or(false);
         if is_stale {
-            if let Err(error) = fs::remove_dir_all(&path) {
-                log::warn!(
-                    "Failed to remove stale transcription spool {}: {}",
-                    path.display(),
-                    error
-                );
+            if let Err(_error) = fs::remove_dir_all(&path) {
+                log::warn!("Failed to remove stale transcription spool");
             }
         }
     }
 }
 
 impl TranscriptionQueueSender {
+    pub(crate) fn mark_failed(&self) {
+        self.shared.metrics.mark_failed();
+    }
+
     pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
@@ -260,9 +292,21 @@ impl TranscriptionQueueSender {
                 .saturating_mul(std::mem::size_of::<f32>() as u64),
         );
 
-        tokio::task::spawn_blocking(move || write_chunk(&temp_path, &final_path, &chunk))
-            .await
-            .map_err(|error| io::Error::other(format!("queue writer task failed: {error}")))??;
+        let written =
+            tokio::task::spawn_blocking(move || write_chunk(&temp_path, &final_path, &chunk))
+                .await
+                .map_err(|error| io::Error::other(format!("queue writer task failed: {error}")))
+                .and_then(|result| result);
+        if let Err(error) = written {
+            self.shared.metrics.mark_failed();
+            if self.shared.retain_files {
+                let _ = fs::write(
+                    self.shared.spool_dir.join(".incomplete"),
+                    b"capture incomplete",
+                );
+            }
+            return Err(error);
+        }
 
         self.shared
             .next_write
@@ -316,7 +360,9 @@ impl TranscriptionQueueReceiver {
         let chunk = tokio::task::spawn_blocking(move || read_chunk(&read_path))
             .await
             .map_err(|error| io::Error::other(format!("queue reader task failed: {error}")))??;
-        fs::remove_file(path)?;
+        if !self.shared.retain_files {
+            fs::remove_file(path)?;
+        }
         self.next_read += 1;
         let audio_ms = chunk_audio_ms(&chunk);
         Ok(QueuedAudioChunk {
@@ -358,12 +404,13 @@ fn write_chunk(temp_path: &Path, final_path: &Path, chunk: &AudioChunk) -> io::R
     )?;
     writer.write_all(bytemuck::cast_slice(&chunk.data))?;
     writer.flush()?;
+    writer.get_ref().sync_data()?;
     drop(writer);
     fs::rename(temp_path, final_path)?;
     Ok(())
 }
 
-fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
+pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut magic = [0u8; 4];

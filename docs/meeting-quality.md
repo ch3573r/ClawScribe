@@ -30,10 +30,27 @@ transcript** resumes following during recording. Speaker-name edits report
 failures visibly and retain custom input for retry. A manually assigned speaker
 label is not independently verified speaker identity.
 
-Live recognition uses a disk-backed queue so slow inference does not retain the
-entire recognition backlog in RAM. This does not make inference faster than real
-time, cap every audio/persistence queue, or eliminate disk-full risk. Allow
-queued transcription to finish before treating the transcript as complete.
+With audio saving enabled, captured mixed audio is staged in one-second batches under the meeting's
+`.audio-spool` folder while AAC checkpoints are encoded separately. Accepted
+spool chunks remain until final audio and metadata are saved successfully.
+Recovery reads the spool in sequence, includes an unconsumed tail, and retains
+originals. A process crash can still lose the in-memory fraction of the current
+second. Full disks or capture overrun stop capture with a visible warning; they
+cannot guarantee recovery of samples that never reached disk.
+
+The capture channel is bounded. Live recognition has a separate disk queue,
+and native inference runs outside the async executor. Stop ends capture before
+waiting for a bounded recognition drain. If work remains, the meeting is marked
+incomplete and the saved audio can be retranscribed. Whisper cancellation uses
+its native abort callback; Nemotron checks between streaming windows. A Parakeet
+native call may finish after cancellation, retaining its model/permit and
+blocking another job until it returns.
+
+Audio-save failures and incomplete transcription are saved with the meeting and
+in its recording folder. Automatic notes are withheld for these meetings. Empty
+retranscription is rejected before replacement, and a successful replacement
+retains the prior transcript as a database revision. Capture-loss warnings remain
+conservative: retranscribing available audio cannot restore missing samples.
 
 ## Notebook Resource Policy
 
@@ -55,6 +72,12 @@ No target-notebook benchmark is implied by unit tests. Cloud processing is an
 optional, explicitly configured privacy trade-off, not an automatic performance
 fix that should be enabled without the user's consent.
 
+Speaker diarization shares the exclusive job/engine gate, so it cannot compete
+with capture or transcription. Its current offline analysis still materializes
+the decoded recording and needs more memory than the bounded ASR preparation
+path. Long-recording diarization on an 8 GiB notebook needs separate measurement
+and a future bounded analysis path before it can be treated as low-memory work.
+
 ## Summary Reliability
 
 The shared summary processor now advances chunks from their actual emitted
@@ -63,11 +86,19 @@ an incomplete multi-chunk result as successful. It rejects empty transcript inpu
 Extraction/combination/report instructions preserve uncertainty and negation,
 distinguish proposals from decisions, and forbid invented owners and deadlines.
 
-These changes apply to the shared processor; dedicated OpenAI-compatible and
-Codex processing routes have separate implementations. They do not prove that
-all providers have identical validation or context-budget behavior. Provider-wide
-context budgeting, resumable reduction, and evidence-linked actions remain
-separate engineering work.
+The shared, compatible-API, and bundled Codex routes all reduce long inputs
+before their final prompt and reject incomplete reductions. Budgets reserve
+output and prompt overhead, use UTF-8 bytes conservatively, and limit reduction
+to eight passes. Unknown API limits default to 8,192 tokens; compatible provider
+settings can specify the actual context. Built-in and Ollama inference cap the
+requested context at 8,192 tokens to limit local memory use. These limits may
+increase the number of reduction requests; they do not prove factual accuracy.
+
+Meeting chat ranks excerpts across the entire transcript using the question,
+includes nearby context and timeline coverage, and labels when only selected
+excerpts fit. Lexical retrieval can miss synonyms or dispersed evidence. The
+assistant is instructed to cite timestamps and acknowledge insufficient evidence;
+review broad conclusions against the full transcript.
 
 Before exporting, check decisions, dates, names, quantities, owners, and deadlines
 against source audio/transcript. Missing information should remain unspecified.
@@ -76,10 +107,14 @@ reduce avoidable mistakes but cannot certify hallucination-free output.
 
 ## Credential Scope
 
-Microsoft refresh-token file fallback on Windows is protected with current-user
-DPAPI when the platform credential store cannot persist it. Access tokens are
-not stored by this persistence path. This is not encryption of all recordings,
-transcripts, logs, or databases; protect the Windows account and storage as well.
+Summary and transcription API keys use provider-specific OS credential-store
+references. On Windows, current-user DPAPI protects fallback bytes. Existing
+plaintext settings are migrated before use; a failed migration disables that
+provider until protected storage is available. Microsoft authentication remains
+independent. SQLite owns WAL recovery and checkpointing; ClawScribe does not
+delete WAL/SHM files to repair a failed open. Secure deletion is enabled for
+updated SQLite values, but old backups and storage snapshots are outside this
+migration. Recordings and transcripts remain local files, not encrypted vaults.
 
 See [Windows release acceptance](windows-release.md#required-real-device-acceptance)
 for the checks needed before recommending a build for everyday meetings.

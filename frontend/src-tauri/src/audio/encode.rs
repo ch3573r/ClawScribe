@@ -6,7 +6,6 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
 };
-use tracing::{debug, error};
 
 pub struct AudioInput {
     pub data: Arc<Vec<f32>>,
@@ -15,30 +14,58 @@ pub struct AudioInput {
     pub device: Arc<AudioDevice>,
 }
 
+/// Wait with a deadline and always reap the encoder, including on errors.
+pub(super) fn wait_for_encoder(child: &mut std::process::Child) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break Ok(()),
+            Ok(Some(status)) => {
+                break Err(anyhow::anyhow!(
+                    "Audio encoder exited unsuccessfully ({status})"
+                ))
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            Ok(None) => {
+                break Err(anyhow::anyhow!(
+                    "Audio encoder timed out; recovery files preserved"
+                ))
+            }
+            Err(_) => {
+                break Err(anyhow::anyhow!(
+                    "Audio encoder status unavailable; recovery files preserved"
+                ))
+            }
+        }
+    };
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
+}
+
 pub fn encode_single_audio(
     data: &[u8],
     sample_rate: u32,
     channels: u16,
     output_path: &PathBuf,
 ) -> anyhow::Result<()> {
-    debug!(
-        "Starting FFmpeg process for {} bytes of audio data",
-        data.len()
-    );
-
-    if data.is_empty() {
-        return Err(anyhow::anyhow!("No audio data provided for encoding"));
+    if data.is_empty() || sample_rate == 0 || channels == 0 {
+        return Err(anyhow::anyhow!("No valid audio data provided for encoding"));
     }
-
     let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
         anyhow::anyhow!("FFmpeg not found. Please install FFmpeg to save recordings.")
     })?;
-
-    debug!("Using FFmpeg at: {:?}", ffmpeg_path);
-
     let mut command = Command::new(ffmpeg_path);
     command
         .args([
+            "-nostats",
+            "-loglevel",
+            "error",
+            "-y",
             "-f",
             "f32le",
             "-ar",
@@ -50,56 +77,39 @@ pub fn encode_single_audio(
             "-c:a",
             "aac",
             "-b:a",
-            "192k", // Increased from 64k for better audio quality (especially for speech)
+            "192k",
             "-profile:a",
-            "aac_low", // Use AAC-LC profile for better compatibility
+            "aac_low",
             "-movflags",
-            "+faststart", // Optimize for web streaming
+            "+faststart",
             "-f",
             "mp4",
-            output_path.to_str().unwrap(),
         ])
+        .arg(output_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // Hide console window on Windows to prevent CMD popup during recording
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        command.creation_flags(0x08000000);
     }
-
-    debug!("FFmpeg command: {:?}", command);
-
-    #[allow(clippy::zombie_processes)]
-    let mut ffmpeg = command.spawn().expect("Failed to spawn FFmpeg process");
-    debug!("FFmpeg process spawned");
-    let mut stdin = ffmpeg.stdin.take().expect("Failed to open stdin");
-
-    stdin.write_all(data)?;
-
-    debug!("Dropping stdin");
-    drop(stdin);
-    debug!("Waiting for FFmpeg process to exit");
-    let output = ffmpeg.wait_with_output().unwrap();
-    let status = output.status;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    debug!("FFmpeg process exited with status: {}", status);
-    debug!("FFmpeg stdout: {}", stdout);
-    debug!("FFmpeg stderr: {}", stderr);
-
-    if !status.success() {
-        error!("FFmpeg process failed with status: {}", status);
-        error!("FFmpeg stderr: {}", stderr);
-        return Err(anyhow::anyhow!(
-            "FFmpeg process failed with status: {}",
-            status
-        ));
-    }
-
-    Ok(())
+    let mut child = command
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("Could not start audio encoder"))?;
+    let Some(mut input) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(anyhow::anyhow!("Audio encoder input unavailable"));
+    };
+    // Feed stdin independently so a hung encoder cannot block the deadline.
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || input.write_all(data));
+        let result = wait_for_encoder(&mut child);
+        let written = writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("Audio encoder input task failed"))?;
+        result?;
+        written.map_err(|_| anyhow::anyhow!("Could not deliver audio to encoder"))
+    })
 }

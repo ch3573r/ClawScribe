@@ -90,6 +90,17 @@ impl TranscriptsRepository {
         transcripts: &[TranscriptSegment],
         folder_path: Option<String>,
     ) -> Result<String, SqlxError> {
+        Self::save_transcript_with_outcome(pool, meeting_title, transcripts, folder_path, None)
+            .await
+    }
+
+    pub async fn save_transcript_with_outcome(
+        pool: &SqlitePool,
+        meeting_title: &str,
+        transcripts: &[TranscriptSegment],
+        folder_path: Option<String>,
+        outcome: Option<&crate::audio::outcome::RecordingOutcome>,
+    ) -> Result<String, SqlxError> {
         let meeting_id = format!("meeting-{}", Uuid::new_v4());
 
         let mut conn = pool.acquire().await?;
@@ -110,7 +121,7 @@ impl TranscriptsRepository {
         .await;
 
         if let Err(e) = result {
-            error!("Failed to create meeting '{}': {}", meeting_title, e);
+            error!("Failed to create meeting");
             transaction.rollback().await?;
             return Err(e);
         }
@@ -143,10 +154,7 @@ impl TranscriptsRepository {
             .await;
 
             if let Err(e) = result {
-                error!(
-                    "Failed to save transcript segment for meeting {}: {}",
-                    meeting_id, e
-                );
+                error!("Failed to save transcript segment");
                 transaction.rollback().await?;
                 return Err(e);
             }
@@ -158,7 +166,12 @@ impl TranscriptsRepository {
             meeting_id
         );
 
-        // Commit the transaction
+        if let Some(outcome) = outcome {
+            sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES (?, ?, ?)")
+                .bind(&meeting_id).bind(outcome.audio_save_failed).bind(outcome.transcription_incomplete)
+                .execute(&mut *transaction).await?;
+        }
+        // Commit the meeting, transcript and recovery status together.
         transaction.commit().await?;
 
         Ok(meeting_id)

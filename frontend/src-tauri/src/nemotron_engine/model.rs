@@ -792,6 +792,19 @@ impl NemotronModel {
         samples: Vec<f32>,
         lang_slot: i64,
     ) -> Result<String, NemotronError> {
+        self.transcribe_samples_cancellable(
+            samples,
+            lang_slot,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    pub fn transcribe_samples_cancellable(
+        &mut self,
+        samples: Vec<f32>,
+        lang_slot: i64,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<String, NemotronError> {
         if samples.len() < HOP {
             return Ok(String::new());
         }
@@ -834,6 +847,12 @@ impl NemotronModel {
         let mut stats = SegmentStats::default();
         let mut text = String::new();
         for k in 0..total_windows {
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(NemotronError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Transcription cancelled",
+                )));
+            }
             text.push_str(&self.run_window(
                 &mel,
                 k * CHUNK_MEL_FRAMES,

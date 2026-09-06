@@ -172,7 +172,7 @@ pub async fn generate_summary(
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             (
-                format!("{}/v1/chat/completions", host),
+                format!("{}/api/chat", host.trim_end_matches('/')),
                 header::HeaderMap::new(),
             )
         }
@@ -248,7 +248,23 @@ pub async fn generate_summary(
     );
 
     // Build request body based on provider
-    let request_body = if provider != &LLMProvider::Claude {
+    let output_tokens = max_tokens.unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32);
+    let request_body = if provider == &LLMProvider::Ollama {
+        let context = super::context_budget::ollama_context(model_name, ollama_endpoint).await;
+        let budget = super::context_budget::input_budget(
+            context,
+            output_tokens as usize,
+            system_prompt.len(),
+        )?;
+        if user_prompt.len() > budget {
+            return Err(
+                "Meeting request exceeds the configured Ollama context. Shorten the prompt.".into(),
+            );
+        }
+        serde_json::json!({"model": model_name, "stream": false,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            "options": {"num_ctx": context, "num_predict": output_tokens}})
+    } else if provider != &LLMProvider::Claude {
         // For operator-managed OpenAI-compatible endpoints, apply optional parameters if provided.
         let (max_tokens_val, temperature_val, top_p_val) = if matches!(
             provider,
@@ -271,7 +287,7 @@ pub async fn generate_summary(
                     content: user_prompt.to_string(),
                 }
             ],
-            max_tokens: max_tokens_val,
+            max_tokens: Some(max_tokens_val.unwrap_or(output_tokens)),
             temperature: temperature_val,
             top_p: top_p_val,
         })
@@ -328,11 +344,22 @@ pub async fn generate_summary(
     };
 
     if !response.status().is_success() {
-        let error_body = response
-            .text()
+        return Err(format!(
+            "LLM API request failed with HTTP {}. Check provider settings and retry.",
+            response.status().as_u16()
+        ));
+    }
+    if provider == &LLMProvider::Ollama {
+        let response: serde_json::Value = response
+            .json()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("LLM API request failed: {}", error_body));
+            .map_err(|_| "Invalid Ollama response".to_string())?;
+        return response
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "No content in Ollama response".into());
     }
 
     // Parse response based on provider

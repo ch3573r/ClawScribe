@@ -30,9 +30,12 @@ export function ProgressIndicator({ current, total, onStepClick }: ProgressIndic
             <React.Fragment key={step}>
               {/* Step Circle */}
               <button
+                type="button"
+                aria-label={`Step ${step} of ${total}: ${['Welcome', 'Setup overview', 'Downloads', 'Permissions'][step - 1] ?? 'Setup'}`}
+                aria-current={isActive ? 'step' : undefined}
                 onClick={() => isClickable && onStepClick(step)}
                 disabled={!isClickable}
-                className={`relative flex items-center justify-center transition-all duration-300 ${
+                className={`relative flex items-center justify-center transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
                   isCompleted
                     ? 'w-7 h-7 bg-green-600 rounded-full'
                     : isActive

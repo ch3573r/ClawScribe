@@ -100,12 +100,6 @@ pub async fn nemotron_validate_model_ready_with_config<R: Runtime>(
 ) -> Result<String, String> {
     let engine = engine().ok_or_else(|| "Nemotron engine not initialized".to_string())?;
 
-    if engine.is_model_loaded().await {
-        if let Some(current) = engine.get_current_model().await {
-            return Ok(current);
-        }
-    }
-
     // Resolve the configured model name (single v1 model otherwise).
     let configured =
         match crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await {

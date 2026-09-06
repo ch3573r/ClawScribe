@@ -177,10 +177,7 @@ impl ParakeetEngine {
             }
         };
 
-        log::info!(
-            "ParakeetEngine using models directory: {}",
-            models_dir.display()
-        );
+        log::info!("Parakeet model storage initialized");
 
         // Create directory if it doesn't exist
         if !models_dir.exists() {
@@ -274,7 +271,7 @@ impl ParakeetEngine {
                     match self.validate_model_directory(&model_path).await {
                         Ok(_) => ModelStatus::Available,
                         Err(_) => {
-                            log::warn!("Model directory {} appears corrupted", name);
+                            log::warn!("Model directory appears corrupted");
                             // Calculate total size of existing files
                             let mut total_size = 0u64;
                             for file in required_files {
@@ -417,11 +414,8 @@ impl ParakeetEngine {
                 log::info!("Model directory is valid, no cleanup needed");
                 return Ok(());
             }
-            Err(validation_error) => {
-                log::warn!(
-                    "Model directory exists but is invalid: {}. Cleaning up...",
-                    validation_error
-                );
+            Err(_validation_error) => {
+                log::warn!("Removing invalid model directory");
 
                 // List and remove all files in the directory
                 let mut entries = fs::read_dir(model_dir)
@@ -441,8 +435,8 @@ impl ParakeetEngine {
                                 log::info!("Removed incomplete file: {:?}", path.file_name());
                                 removed_count += 1;
                             }
-                            Err(e) => {
-                                log::warn!("Failed to remove file {:?}: {}", path, e);
+                            Err(_e) => {
+                                log::warn!("Failed to remove file");
                             }
                         }
                     }
@@ -555,41 +549,43 @@ impl ParakeetEngine {
         &self,
         audio_data: Vec<f32>,
     ) -> Result<TimestampedResult> {
-        let mut model_guard = self.current_model.write().await;
-        let model = model_guard
-            .as_mut()
-            .ok_or_else(|| anyhow!("No Parakeet model loaded. Please load a model first."))?;
+        let mut model_guard = self.current_model.clone().write_owned().await;
+        crate::audio::inference::run(move |_cancelled| {
+            let model = model_guard
+                .as_mut()
+                .ok_or_else(|| anyhow!("No Parakeet model loaded. Please load a model first."))?;
 
-        let duration_seconds = audio_data.len() as f64 / 16000.0; // Assuming 16kHz
-        log::debug!(
-            "Parakeet transcribing {} samples ({:.1}s duration)",
-            audio_data.len(),
-            duration_seconds
-        );
+            let duration_seconds = audio_data.len() as f64 / 16000.0; // Assuming 16kHz
+            log::debug!(
+                "Parakeet transcribing {} samples ({:.1}s duration)",
+                audio_data.len(),
+                duration_seconds
+            );
 
-        // Transcribe using Parakeet model
-        let start = Instant::now();
-        let result = model
-            .transcribe_samples(audio_data)
-            .map_err(|e| anyhow!("Parakeet transcription failed: {}", e))?;
-        let elapsed = start.elapsed();
-        let elapsed_seconds = elapsed.as_secs_f64();
-        let speed = if elapsed_seconds > 0.0 {
-            duration_seconds / elapsed_seconds
-        } else {
-            0.0
-        };
+            // Transcribe using Parakeet model
+            let start = Instant::now();
+            let result = model
+                .transcribe_samples(audio_data)
+                .map_err(|e| anyhow!("Parakeet transcription failed: {}", e))?;
+            let elapsed = start.elapsed();
+            let elapsed_seconds = elapsed.as_secs_f64();
+            let speed = if elapsed_seconds > 0.0 {
+                duration_seconds / elapsed_seconds
+            } else {
+                0.0
+            };
 
-        log::info!(
-            "Parakeet segment: audio={:.1}s elapsed={:.0}ms speed={:.2}x text_len={}",
-            duration_seconds,
-            elapsed.as_secs_f64() * 1000.0,
-            speed,
-            result.text.chars().count()
-        );
-        log::debug!("Parakeet transcription result: '{}'", result.text);
+            log::info!(
+                "Parakeet segment: audio={:.2}s elapsed={}ms speed={:.2}x chars={}",
+                duration_seconds,
+                elapsed.as_millis(),
+                speed,
+                result.text.chars().count()
+            );
 
-        Ok(result)
+            Ok(result)
+        })
+        .await
     }
 
     /// Get the models directory path
@@ -623,9 +619,9 @@ impl ParakeetEngine {
                 if model_info.path.exists() {
                     fs::remove_dir_all(&model_info.path).await
                         .map_err(|e| anyhow!("Failed to delete directory '{}': {}", model_info.path.display(), e))?;
-                    log::info!("Successfully deleted Parakeet model directory: {}", model_info.path.display());
+                    log::info!("Successfully deleted Parakeet model directory");
                 } else {
-                    log::warn!("Directory '{}' does not exist, nothing to delete", model_info.path.display());
+                    log::warn!("Model directory already absent");
                 }
 
                 // Update model status to Missing
@@ -676,10 +672,7 @@ impl ParakeetEngine {
         {
             let active = self.active_downloads.read().await;
             if active.contains(model_name) {
-                log::warn!(
-                    "Download already in progress for Parakeet model: {}",
-                    model_name
-                );
+                log::warn!("Download already in progress for Parakeet model");
                 return Err(anyhow!(
                     "Download already in progress for model: {}",
                     model_name
@@ -768,8 +761,8 @@ impl ParakeetEngine {
 
         // Clean up incomplete downloads before starting
         log::info!("Checking for incomplete model files to clean up...");
-        if let Err(e) = self.clean_incomplete_model_directory(model_dir).await {
-            log::warn!("Failed to clean incomplete model directory: {}", e);
+        if let Err(_e) = self.clean_incomplete_model_directory(model_dir).await {
+            log::warn!("Failed to clean incomplete model directory");
             // Continue anyway - we'll handle errors during download
         }
 
@@ -937,15 +930,12 @@ impl ParakeetEngine {
                 } else if response.status().is_success() {
                     // Fresh download or server doesn't support resume
                     if existing_size > 0 {
-                        log::warn!(
-                            "Server doesn't support resume for {}, starting fresh download",
-                            filename
-                        );
+                        log::warn!("Server does not support resume; restarting model download");
                     }
                     (response.content_length().unwrap_or(0), false)
                 } else if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
                     // 416: Range not satisfiable - file complete or invalid range
-                    log::warn!("Server returned 416 Range Not Satisfiable for {}", filename);
+                    log::warn!("Model download server rejected resume range");
 
                     let size_tolerance = (expected_size as f64 * 0.99) as u64;
                     if existing_size >= size_tolerance && expected_size > 0 {
@@ -958,12 +948,7 @@ impl ParakeetEngine {
                         continue;
                     } else {
                         // File incomplete but server won't accept range - delete and retry
-                        log::warn!(
-                            "File {} incomplete ({}/{} bytes). Deleting and retrying.",
-                            filename,
-                            existing_size,
-                            expected_size
-                        );
+                        log::warn!("Model download incomplete; removing partial file and retrying");
 
                         if let Err(e) = fs::remove_file(&file_path).await {
                             let mut active = self.active_downloads.write().await;
@@ -1049,10 +1034,7 @@ impl ParakeetEngine {
                 let chunk = match next_result {
                     // Timeout - no data received for 30 seconds
                     Err(_) => {
-                        log::warn!(
-                            "Download timeout for {}: no data received for 30 seconds",
-                            model_name
-                        );
+                        log::warn!("Model download timed out after 30 seconds without data");
                         let _ = writer.flush().await;
 
                         // Remove from active downloads
@@ -1081,7 +1063,7 @@ impl ParakeetEngine {
                             Ok(c) => c,
                             // Detect error type for better user feedback
                             Err(e) => {
-                                log::error!("Download error for {}: {:?}", model_name, e);
+                                log::error!("Model download failed");
                                 let _ = writer.flush().await;
 
                                 // Remove from active downloads
@@ -1289,13 +1271,10 @@ impl ParakeetEngine {
 
         let model_path = self.models_dir.join(model_name);
         if model_path.exists() {
-            if let Err(e) = fs::remove_dir_all(&model_path).await {
-                log::warn!("Failed to clean up cancelled download directory: {}", e);
+            if let Err(_e) = fs::remove_dir_all(&model_path).await {
+                log::warn!("Failed to clean up cancelled download directory");
             } else {
-                log::info!(
-                    "Cleaned up cancelled download directory: {}",
-                    model_path.display()
-                );
+                log::info!("Cleaned up cancelled download directory");
             }
         }
 

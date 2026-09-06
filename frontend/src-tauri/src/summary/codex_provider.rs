@@ -949,6 +949,20 @@ impl CodexAppServerProvider {
         &self,
         request: CodexMeetingProcessRequest,
     ) -> Result<CodexProcessingResult, String> {
+        let overhead = build_meeting_prompt().len()
+            + output_schema_json().len()
+            + request.custom_prompt.as_ref().map_or(0, String::len)
+            + 1024;
+        let budget = super::context_budget::input_budget(32_768, 4096, overhead)?;
+        let (bounded_transcript, _) =
+            super::context_budget::reduce(&request.transcript, budget, |chunk| async move {
+                self.run_text_prompt(&format!(
+                    "{}\n\n<excerpt>{chunk}</excerpt>",
+                    super::context_budget::EXTRACT_FACTS
+                ))
+                .await
+            })
+            .await?;
         let scratch_dir = request
             .scratch_root
             .unwrap_or_else(default_codex_runs_root)
@@ -989,7 +1003,7 @@ impl CodexAppServerProvider {
         let raw_output = match session
             .process_turn(
                 &self.config.model,
-                &request.transcript,
+                &bounded_transcript,
                 request.custom_prompt.as_deref(),
                 serde_json::json!({
                     "meeting_id": request.meeting_id,

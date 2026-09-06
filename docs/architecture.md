@@ -74,6 +74,27 @@ recordings and migration paths continue to work.
 - OpenClaw handoff is optional and sends completed recording artifacts only to
   the configured operator endpoint.
 
+## Recording And Inference Lifetimes
+
+`audio/inference.rs` serializes recording, batch, diarization and model-changing jobs and holds a
+separate native-call permit inside the blocking task. Cancelling the async caller
+cannot free a model that native code still uses. `audio/batch_audio.rs` normalizes
+imports/retranscription to temporary PCM on disk, uses one continuous VAD state,
+and reads one bounded speech segment for inference. Preparation needs temporary
+disk capacity; it does not retain a full decoded meeting in RAM.
+
+`audio/transcription/queue.rs` serves both live recognition and the retained
+recording spool. `audio/audio_spool.rs` recovers mixed float PCM into a playable
+WAV. `audio/outcome.rs` persists recording failures before the completion event;
+meeting/transcript/outcome database writes share a transaction. New schema is
+added through a migration; shipped migrations remain unchanged.
+
+`credentials.rs` supplies protected, provider-scoped references for legacy
+settings columns. Optional providers can fail independently without preventing
+local recording. `summary/context_budget.rs` bounds hierarchical reduction, and
+`summary/chat_context.rs` selects question-relevant evidence from across the
+meeting instead of silently discarding its middle.
+
 ## Compatibility Boundaries
 
 Some internal names, folders, and environment variables still use Meetily names.

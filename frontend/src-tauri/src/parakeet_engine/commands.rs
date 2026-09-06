@@ -75,6 +75,7 @@ pub async fn parakeet_load_model<R: Runtime>(
     app_handle: AppHandle<R>,
     model_name: String,
 ) -> Result<(), String> {
+    let _job = crate::audio::inference::claim_job()?;
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -242,14 +243,6 @@ pub async fn parakeet_validate_model_ready_with_config<R: tauri::Runtime>(
     };
 
     if let Some(engine) = engine {
-        // Check if a model is currently loaded
-        if engine.is_model_loaded().await {
-            if let Some(current_model) = engine.get_current_model().await {
-                log::info!("Parakeet model already loaded: {}", current_model);
-                return Ok(current_model);
-            }
-        }
-
         // No model loaded - try to load user's configured model from transcript config
         let model_to_load = match crate::api::api::api_get_transcript_config(
             app.clone(),
@@ -559,6 +552,7 @@ pub async fn parakeet_retry_download<R: Runtime>(
 
 #[command]
 pub async fn parakeet_delete_corrupted_model(model_name: String) -> Result<String, String> {
+    let _job = crate::audio::inference::claim_job()?;
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -622,6 +616,7 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
 /// next load. No effect unless the build includes the `directml` feature.
 #[command]
 pub async fn set_parakeet_use_directml(enabled: bool) -> Result<(), String> {
+    let _job = crate::audio::inference::claim_job()?;
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 

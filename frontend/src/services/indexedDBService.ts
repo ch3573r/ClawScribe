@@ -20,7 +20,7 @@ export interface StoredTranscript {
   meetingId: string;          // Foreign key to meetings store
   text: string;               // Transcript text
   timestamp: string;          // ISO 8601 timestamp
-  confidence: number;         // Whisper confidence score
+  confidence: number | null; // Null when the engine does not provide a score
   sequenceId: number;         // Sequence number for ordering
   storedAt: number;           // Unix timestamp when saved
   audio_start_time?: number;  // Recording-relative start time in seconds

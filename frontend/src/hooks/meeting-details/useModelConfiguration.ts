@@ -57,6 +57,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
                 data.customOpenAIModel = customConfig.model || null;
                 data.customOpenAIApiKey = customConfig.apiKey || null;
                 data.maxTokens = customConfig.maxTokens || null;
+              data.contextWindow = customConfig.contextWindow || null;
                 data.temperature = customConfig.temperature || null;
                 data.topP = customConfig.topP || null;
                 // For custom-openai, model field should match customOpenAIModel

@@ -1988,6 +1988,8 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     num_speakers: Option<i32>,
     preserve_existing_labels: Option<bool>,
 ) -> std::result::Result<SpeakerDiarizationComplete, String> {
+    let _job = super::inference::claim_job()?;
+    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let guard = DiarizationRunGuard::acquire()?;
     let meeting_id_for_task = meeting_id.clone();
 
@@ -3603,7 +3605,7 @@ async fn run_sherpa_diarization(
     config: SherpaDiarizationConfig,
     samples: Arc<Vec<f32>>,
 ) -> Result<Vec<DiarizationTurn>> {
-    tokio::task::spawn_blocking(move || {
+    super::inference::run(move |_cancelled| {
         let diarizer = SherpaOfflineDiarizer::new(config)?;
         let sample_rate = diarizer.sample_rate();
         if sample_rate != DIARIZATION_SAMPLE_RATE {
@@ -3616,7 +3618,6 @@ async fn run_sherpa_diarization(
         diarizer.diarize(samples.as_ref().as_slice())
     })
     .await
-    .map_err(|e| anyhow!("Speaker diarization task failed: {}", e))?
 }
 
 async fn run_sherpa_diarization_with_fallback<R: Runtime>(

@@ -184,6 +184,7 @@ pub async fn whisper_load_model(
     app_handle: tauri::AppHandle,
     model_name: String,
 ) -> Result<(), String> {
+    let _job = crate::audio::inference::claim_job()?;
     let engine = {
         let guard = WHISPER_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -342,14 +343,6 @@ pub async fn whisper_validate_model_ready_with_config<R: tauri::Runtime>(
     };
 
     if let Some(engine) = engine {
-        // Check if a model is currently loaded
-        if engine.is_model_loaded().await {
-            if let Some(current_model) = engine.get_current_model().await {
-                log::info!("Model already loaded: {}", current_model);
-                return Ok(current_model);
-            }
-        }
-
         // No model loaded - try to load user's configured model from transcript config
         let model_to_load = match crate::api::api::api_get_transcript_config(
             app.clone(),
@@ -559,6 +552,7 @@ pub async fn whisper_cancel_download(model_name: String) -> Result<(), String> {
 
 #[command]
 pub async fn whisper_delete_corrupted_model(model_name: String) -> Result<String, String> {
+    let _job = crate::audio::inference::claim_job()?;
     let engine = {
         let guard = WHISPER_ENGINE.lock().unwrap();
         guard.as_ref().cloned()

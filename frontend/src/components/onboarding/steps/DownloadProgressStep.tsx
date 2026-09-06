@@ -426,7 +426,7 @@ export function DownloadProgressStep() {
       {/* Progress Bar */}
       {(state.status === 'downloading' || state.status === 'completed') && (
         <div className="space-y-2">
-          <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+          <div role="progressbar" aria-label={`${title} download`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.progress)} className="w-full h-2 bg-muted rounded-full overflow-hidden">
             <div
               className="h-full bg-primary rounded-full transition-all duration-300"
               style={{ width: `${state.progress}%` }}
@@ -524,11 +524,12 @@ export function DownloadProgressStep() {
         <div className="w-full max-w-xs">
           <Button
             onClick={handleContinue}
+            aria-label={isCompleting ? 'Completing setup' : !parakeetDownloaded ? 'Waiting for transcription model' : 'Continue'}
             disabled={!parakeetDownloaded || isCompleting}
             className="w-full h-11 bg-accent-gradient hover:brightness-110 text-primary-foreground disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {(isCompleting || !parakeetDownloaded) ? (
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              <><Loader2 aria-hidden="true" className="w-4 h-4 mr-2 animate-spin" />{isCompleting ? 'Completing setup…' : 'Downloading model…'}</>
             ) : (
               'Continue'
             )}

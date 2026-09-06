@@ -52,40 +52,46 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
 /// Skips unloading if a live recording is currently in progress, since recording
 /// uses the same global engine instances.
 pub(crate) async fn unload_engine_after_batch_for(use_parakeet: bool, use_nemotron: bool) {
-    let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
 
-    if crate::audio::recording_commands::is_recording().await {
-        log::info!("Skipping model unload after batch: recording in progress");
-        return;
-    }
+        if crate::audio::recording_commands::is_recording().await {
+            log::info!("Skipping model unload after batch: recording in progress");
+            return;
+        }
 
-    if use_nemotron {
-        use crate::nemotron_engine::commands::NEMOTRON_ENGINE;
-        let engine = {
-            let guard = NEMOTRON_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
+        if use_nemotron {
+            use crate::nemotron_engine::commands::NEMOTRON_ENGINE;
+            let engine = {
+                let guard = NEMOTRON_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
+        } else if use_parakeet {
+            use crate::parakeet_engine::commands::PARAKEET_ENGINE;
+            let engine = {
+                let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
+        } else {
+            use crate::whisper_engine::commands::WHISPER_ENGINE;
+            let engine = {
+                let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
         }
-    } else if use_parakeet {
-        use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-        let engine = {
-            let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
-        }
-    } else {
-        use crate::whisper_engine::commands::WHISPER_ENGINE;
-        let engine = {
-            let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
-        }
+    })
+    .await;
+    if result.is_err() {
+        log::warn!("Native engine still busy; model retained until the call finishes");
     }
 }
 
@@ -278,6 +284,7 @@ fn choose_timing_grid_word_boundary(
     best.map(|(candidate, _)| candidate).unwrap_or(target)
 }
 
+#[cfg(test)]
 pub(crate) fn speech_segments_to_timing_grid(
     speech_segments: &[crate::audio::vad::SpeechSegment],
     max_segment_samples: usize,

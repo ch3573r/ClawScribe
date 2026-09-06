@@ -1,7 +1,7 @@
 'use client';
 
 interface ConfidenceIndicatorProps {
-  confidence: number;
+  confidence?: number | null;
   showIndicator?: boolean;
 }
 
@@ -12,6 +12,9 @@ export const ConfidenceIndicator: React.FC<ConfidenceIndicatorProps> = ({
   // Don't render if preference is disabled
   if (!showIndicator) {
     return null;
+  }
+  if (confidence == null || !Number.isFinite(confidence)) {
+    return <span className="text-xs text-muted-foreground">Confidence unavailable</span>;
   }
 
   // Get color class based on confidence threshold

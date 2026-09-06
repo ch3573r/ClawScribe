@@ -29,6 +29,9 @@ pub struct CustomOpenAIConfig {
     /// Maximum tokens for completion (optional)
     #[serde(rename = "maxTokens")]
     pub max_tokens: Option<i32>,
+    /// Actual context limit advertised by the configured model.
+    #[serde(rename = "contextWindow")]
+    pub context_window: Option<usize>,
     /// Temperature parameter (0.0-2.0, optional)
     pub temperature: Option<f32>,
     /// Top-P sampling parameter (0.0-1.0, optional)
@@ -36,8 +39,8 @@ pub struct CustomOpenAIConfig {
     pub top_p: Option<f32>,
 }
 
-mod chunking;
 pub mod chat_commands;
+mod chunking;
 pub mod codex_provider;
 pub mod commands;
 pub(crate) mod language_detection;
@@ -101,3 +104,7 @@ pub use processor::{
     generate_meeting_summary, rough_token_count,
 };
 pub use service::SummaryService;
+
+pub(crate) mod context_budget;
+
+mod chat_context;

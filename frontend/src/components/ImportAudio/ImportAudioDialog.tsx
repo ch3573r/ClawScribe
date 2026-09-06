@@ -347,7 +347,7 @@ export function ImportAudioDialog({
                       <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
                         <span className="flex items-center gap-1">
                           <Clock className="h-3.5 w-3.5" />
-                          {formatDuration(fileInfo.duration_seconds)}
+                          {fileInfo.duration_seconds > 0 ? formatDuration(fileInfo.duration_seconds) : "Measured during import"}
                         </span>
                         <span className="flex items-center gap-1">
                           <HardDrive className="h-3.5 w-3.5" />

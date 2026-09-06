@@ -136,6 +136,7 @@ pub async fn generate_with_builtin(
     user_prompt: &str,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<String> {
+    let _job = crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?;
     // Check cancellation at start
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -181,7 +182,7 @@ pub async fn generate_with_builtin(
     let request = Request::Generate {
         prompt: formatted_prompt,
         max_tokens: Some(models::DEFAULT_MAX_TOKENS),
-        context_size: Some(model_def.context_size),
+        context_size: Some(model_def.context_size.min(8192)),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(sampling.temperature),
         top_k: Some(sampling.top_k),

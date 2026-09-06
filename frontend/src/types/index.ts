@@ -12,7 +12,7 @@ export interface Transcript {
   sequence_id?: number;
   chunk_start_time?: number; // Legacy field
   is_partial?: boolean;
-  confidence?: number;
+  confidence?: number | null;
   // NEW: Recording-relative timestamps for playback sync
   audio_start_time?: number; // Seconds from recording start (e.g., 125.3)
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
@@ -27,7 +27,7 @@ export interface TranscriptUpdate {
   sequence_id: number;
   chunk_start_time: number; // Legacy field
   is_partial: boolean;
-  confidence: number;
+  confidence: number | null;
   // NEW: Recording-relative timestamps for playback sync
   audio_start_time: number; // Seconds from recording start
   audio_end_time: number;   // Seconds from recording start
@@ -39,7 +39,7 @@ export interface TranscriptWord {
   text: string;
   start: number;
   end: number;
-  confidence?: number;
+  confidence?: number | null;
   speaker?: string;
 }
 
@@ -117,7 +117,7 @@ export interface TranscriptSegmentData {
   timestamp: number; // audio_start_time in seconds
   endTime?: number; // audio_end_time in seconds
   text: string;
-  confidence?: number;
+  confidence?: number | null;
   speaker?: string; // "Me" (microphone) or "Participants" (system audio)
   word_timestamps?: TranscriptWord[];
 }

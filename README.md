@@ -95,6 +95,29 @@ prove attendance.
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
+## Reliability In The Current Source
+
+The current source keeps captured audio in a recovery spool while encoding,
+limits in-memory capture and inference work, and preserves incomplete-recording
+status across restarts. A failed live transcript does not stop the UI from
+showing that recording is still active. After stopping, recovery notices explain
+when to inspect audio and retranscribe before generating notes.
+
+Imports and retranscription prepare audio on disk and load bounded speech
+segments. Empty retranscription cannot erase an existing transcript. Local
+recording, batch transcription, and built-in summary inference cannot compete
+for the same model resources. Provider credentials migrate to the OS credential
+store, with an encrypted Windows fallback.
+
+Summary routes reduce long transcripts through bounded context windows; custom
+compatible providers expose a context-window setting. Meeting chat searches
+across the meeting and labels selected excerpts. Confidence is shown only when
+available, and the desktop window supports smaller notebook layouts.
+
+These source changes are not a new installer release. Real-device capture and
+sustained notebook performance still require the acceptance checks in the
+[meeting-quality guide](docs/meeting-quality.md).
+
 ## What Changed In 0.5.36
 
 This version fixes skipped source text at shared-summary chunk boundaries,

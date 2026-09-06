@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 // Global cache for model metadata (5 minute TTL)
-static METADATA_CACHE: Lazy<ModelMetadataCache> =
+pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> =
     Lazy::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
 
 // Global registry for cancellation tokens (thread-safe)
@@ -446,27 +446,7 @@ impl SummaryService {
 
         // Dynamically fetch context size based on provider and model
         let token_threshold = if provider == LLMProvider::Ollama {
-            match METADATA_CACHE
-                .get_or_fetch(&model_name, ollama_endpoint.as_deref())
-                .await
-            {
-                Ok(metadata) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = metadata.context_size.saturating_sub(300);
-                    info!(
-                        "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
-                        model_name, metadata.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch context for {}: {}. Using default 4000",
-                        model_name, e
-                    );
-                    4000 // Fallback to safe default
-                }
-            }
+            super::context_budget::ollama_context(&model_name, ollama_endpoint.as_deref()).await
         } else if provider == LLMProvider::BuiltInAI {
             // Get model's context size from registry
             use crate::summary::summary_engine::models;
@@ -476,7 +456,7 @@ impl SummaryService {
             match model {
                 Ok(model_def) => {
                     // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.saturating_sub(300) as usize;
+                    let optimal = model_def.context_size.min(8192) as usize;
                     info!(
                         "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
                         model_def.context_size, optimal
@@ -489,8 +469,8 @@ impl SummaryService {
                 }
             }
         } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000 // Effectively unlimited for single-pass processing
+            // Unknown cloud endpoints also have finite context limits.
+            super::context_budget::DEFAULT_CONTEXT_TOKENS
         };
 
         // Get app data directory for BuiltInAI provider
@@ -597,6 +577,7 @@ impl SummaryService {
                     organization: None,
                     project: None,
                     max_tokens: None,
+                    context_window: None,
                     temperature: None,
                     top_p: None,
                 }),

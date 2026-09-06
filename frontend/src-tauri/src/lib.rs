@@ -44,6 +44,7 @@ pub mod api;
 pub mod audio;
 pub mod config;
 pub mod console_utils;
+pub(crate) mod credentials;
 pub mod database;
 pub mod diagnostics;
 pub mod exports;
@@ -710,6 +711,7 @@ pub fn run() {
             is_recording,
             set_native_theme,
             get_transcription_status,
+            audio::outcome::get_recording_outcome,
             read_audio_file,
             resolve_meeting_audio_file,
             save_transcript,

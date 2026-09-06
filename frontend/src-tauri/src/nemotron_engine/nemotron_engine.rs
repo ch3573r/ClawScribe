@@ -149,10 +149,7 @@ impl NemotronEngine {
             }
         };
 
-        log::info!(
-            "NemotronEngine using models directory: {}",
-            models_dir.display()
-        );
+        log::info!("Nemotron model storage initialized");
         if !models_dir.exists() {
             std::fs::create_dir_all(&models_dir)?;
         }
@@ -269,24 +266,27 @@ impl NemotronEngine {
         samples: Vec<f32>,
         language: Option<String>,
     ) -> Result<String> {
-        let mut guard = self.current_model.write().await;
-        let model = guard
-            .as_mut()
-            .ok_or_else(|| anyhow!("No Nemotron model loaded"))?;
-        let requested_language = language
-            .as_deref()
-            .ok_or_else(|| anyhow!("Nemotron requires an explicit transcription language"))?;
-        let slot = model
-            .resolve_lang_slot(Some(requested_language))
-            .ok_or_else(|| {
-                anyhow!(
-                    "Nemotron does not have a prompt slot for language '{}'",
-                    requested_language
-                )
-            })?;
-        model
-            .transcribe_samples(samples, slot)
-            .map_err(|e| anyhow!("Nemotron transcription failed: {}", e))
+        let mut guard = self.current_model.clone().write_owned().await;
+        crate::audio::inference::run(move |cancelled| {
+            let model = guard
+                .as_mut()
+                .ok_or_else(|| anyhow!("No Nemotron model loaded"))?;
+            let requested_language = language
+                .as_deref()
+                .ok_or_else(|| anyhow!("Nemotron requires an explicit transcription language"))?;
+            let slot = model
+                .resolve_lang_slot(Some(requested_language))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Nemotron does not have a prompt slot for language '{}'",
+                        requested_language
+                    )
+                })?;
+            model
+                .transcribe_samples_cancellable(samples, slot, &cancelled)
+                .map_err(|e| anyhow!("Nemotron transcription failed: {}", e))
+        })
+        .await
     }
 
     pub async fn cancel_download(&self, model_name: &str) {

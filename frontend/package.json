@@ -33,7 +33,7 @@
         "verify:public-repo": "node ../scripts/verify-public-repo-safety.mjs",
         "verify:icons": "powershell -ExecutionPolicy Bypass -File scripts/verify-brand-icons.ps1",
         "lint": "next lint",
-        "test": "node --test tests/lib/audio-device-preferences.test.mjs tests/lib/blocknote-markdown.test.mjs tests/lib/cloud-transcription.test.mjs tests/lib/onboarding-summary-model.test.mjs tests/lib/summary-language-preferences.test.mjs tests/lib/auto-scroll.test.mjs tests/lib/transcript-display.test.mjs tests/lib/transcript-interaction.test.mjs",
+        "test": "node --test tests/lib/audio-device-preferences.test.mjs tests/lib/blocknote-markdown.test.mjs tests/lib/cloud-transcription.test.mjs tests/lib/onboarding-summary-model.test.mjs tests/lib/summary-language-preferences.test.mjs tests/lib/auto-scroll.test.mjs tests/lib/transcript-display.test.mjs tests/lib/transcript-interaction.test.mjs tests/lib/recording-outcome.test.mjs",
         "test:cloud-live": "cargo test --manifest-path src-tauri/Cargo.toml --lib audio::transcription::cloud::live_smoke::hosted_api_transcription_live_smoke -- --ignored --nocapture --test-threads=1",
         "typecheck": "tsc --noEmit"
     },

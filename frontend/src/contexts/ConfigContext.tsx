@@ -254,6 +254,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
                   customOpenAIModel: customConfig.model,
                   customOpenAIApiKey: customConfig.apiKey,
                   maxTokens: customConfig.maxTokens,
+                  contextWindow: customConfig.contextWindow,
                   temperature: customConfig.temperature,
                   topP: customConfig.topP,
                 }));

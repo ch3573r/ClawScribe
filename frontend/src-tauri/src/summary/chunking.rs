@@ -1,5 +1,6 @@
 //! Dependency-free transcript chunking; also tested directly with rustc in CI.
 
+#[cfg(test)]
 pub(crate) fn summary_chunk_budget(token_threshold: usize) -> Result<usize, String> {
     token_threshold
         .checked_sub(300)
@@ -25,8 +26,7 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
     }
 
     let chunk_size_chars = ((chunk_size_tokens as f64 / 0.35).floor() as usize).max(1);
-    let overlap_chars = ((overlap_tokens as f64 / 0.35).floor() as usize)
-        .min(chunk_size_chars / 2);
+    let overlap_chars = ((overlap_tokens as f64 / 0.35).floor() as usize).min(chunk_size_chars / 2);
     let mut chunks = Vec::new();
     let mut start_byte = 0;
 
@@ -46,9 +46,10 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
                 .map(|offset| offset + 2)
                 .filter(|end| *end >= minimum_end);
             let word_end = || {
-                window.rfind(char::is_whitespace).map(|offset| {
-                    offset + window[offset..].chars().next().unwrap().len_utf8()
-                }).filter(|end| *end >= minimum_end)
+                window
+                    .rfind(char::is_whitespace)
+                    .map(|offset| offset + window[offset..].chars().next().unwrap().len_utf8())
+                    .filter(|end| *end >= minimum_end)
             };
             if let Some(boundary) = sentence_end.or_else(word_end) {
                 end_offset = boundary;
@@ -66,11 +67,18 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         let next_offset = if overlap_chars == 0 {
             end_offset
         } else {
-            chunk.char_indices().rev().nth(overlap_chars - 1)
+            chunk
+                .char_indices()
+                .rev()
+                .nth(overlap_chars - 1)
                 .map_or(end_offset, |(offset, _)| offset)
         };
         // Unusual short/Unicode windows must still make forward progress.
-        start_byte += if next_offset > 0 { next_offset } else { end_offset };
+        start_byte += if next_offset > 0 {
+            next_offset
+        } else {
+            end_offset
+        };
     }
 
     chunks
@@ -82,29 +90,43 @@ mod tests {
 
     #[test]
     fn chunking_does_not_skip_text_after_sentence_boundaries() {
-        let text = format!("Opening. {}", (0..80).map(|i| format!("word{i:03} ")).collect::<String>());
+        let text = format!(
+            "Opening. {}",
+            (0..80).map(|i| format!("word{i:03} ")).collect::<String>()
+        );
         assert_eq!(chunk_text(&text, 20, 0).concat(), text);
     }
 
     #[test]
     fn chunking_preserves_unicode_and_whitespace_without_overlap() {
-        for text in ["Grüße. 日本語の会議 😀\n", "e\u{301}\tNein. Да! ", "長い単語に空白はありません", "\r\n \t"] {
+        for text in [
+            "Grüße. 日本語の会議 😀\n",
+            "e\u{301}\tNein. Да! ",
+            "長い単語に空白はありません",
+            "\r\n \t",
+        ] {
             let text = text.repeat(30);
             for budget in [1, 2, 5, 20, 100] {
                 let chunks = chunk_text(&text, budget, 0);
                 assert_eq!(chunks.concat(), text);
                 assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
-                assert!(chunks.iter().all(|chunk| rough_token_count(chunk) <= budget));
+                assert!(chunks
+                    .iter()
+                    .all(|chunk| rough_token_count(chunk) <= budget));
             }
         }
     }
 
     #[test]
     fn overlapping_chunks_retain_every_numbered_fact() {
-        let text = (0..200).map(|i| format!("Decision{i:03}. ")).collect::<String>();
+        let text = (0..200)
+            .map(|i| format!("Decision{i:03}. "))
+            .collect::<String>();
         let chunks = chunk_text(&text, 30, 5);
         for i in 0..200 {
-            assert!(chunks.iter().any(|chunk| chunk.contains(&format!("Decision{i:03}."))));
+            assert!(chunks
+                .iter()
+                .any(|chunk| chunk.contains(&format!("Decision{i:03}."))));
         }
     }
 
@@ -127,5 +149,4 @@ mod tests {
         assert_eq!(summary_chunk_budget(301).unwrap(), 1);
         assert_eq!(summary_chunk_budget(4000).unwrap(), 3700);
     }
-
 }

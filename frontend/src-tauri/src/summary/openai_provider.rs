@@ -31,6 +31,8 @@ pub struct OpenAICompatibleProviderConfig {
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub organization: Option<String>,
@@ -47,6 +49,7 @@ impl Default for OpenAICompatibleProviderConfig {
             model: default_openai_model(),
             timeout_seconds: DEFAULT_OPENAI_TIMEOUT_SECONDS,
             max_tokens: None,
+            context_window: default_context_window(),
             temperature: Some(0.2),
             top_p: None,
             organization: None,
@@ -66,6 +69,7 @@ impl From<CustomOpenAIConfig> for OpenAICompatibleProviderConfig {
                 .timeout_seconds
                 .filter(|seconds| *seconds > 0)
                 .unwrap_or(DEFAULT_OPENAI_TIMEOUT_SECONDS),
+            context_window: config.context_window.unwrap_or_else(default_context_window),
             max_tokens: config
                 .max_tokens
                 .and_then(|tokens| u32::try_from(tokens).ok()),
@@ -203,6 +207,34 @@ impl OpenAICompatibleProcessingProvider {
         let started_at = Instant::now();
         let transcript = normalize_transcript_markdown(&request.transcript);
         let system_prompt = build_system_prompt();
+        let overhead = system_prompt.len()
+            + json_schema_response_format().to_string().len()
+            + build_user_prompt(
+                &request.meeting_id,
+                &request.meeting_title,
+                "",
+                request.custom_prompt.as_deref(),
+            )
+            .len();
+        let budget = super::context_budget::input_budget(
+            self.config.context_window,
+            self.config
+                .max_tokens
+                .unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32)
+                as usize,
+            overhead,
+        )?;
+        let (transcript, _) =
+            super::context_budget::reduce(&transcript, budget, |chunk| async move {
+                self.send_chat(
+                    super::context_budget::EXTRACT_FACTS,
+                    &chunk,
+                    None,
+                    cancellation_token,
+                )
+                .await
+            })
+            .await?;
         let user_prompt = build_user_prompt(
             &request.meeting_id,
             &request.meeting_title,
@@ -307,8 +339,7 @@ impl OpenAICompatibleProcessingProvider {
             build_system_prompt()
         );
         let user_prompt = format!(
-            "The previous response failed validation with this error:\n{parse_error}\n\n<schema>\n{}\n</schema>\n\n<invalid_output>\n{}\n</invalid_output>",
-            output_schema_json(),
+            "The previous response failed validation with this error:\n{parse_error}\n\n<invalid_output>\n{}\n</invalid_output>",
             raw_json
         );
         self.send_chat(&system_prompt, &user_prompt, None, cancellation_token)
@@ -328,6 +359,21 @@ impl OpenAICompatibleProcessingProvider {
             }
         }
 
+        let overhead = system_prompt.len()
+            + response_format
+                .as_ref()
+                .map_or(0, |format| format.to_string().len());
+        let budget = super::context_budget::input_budget(
+            self.config.context_window,
+            self.config
+                .max_tokens
+                .unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32)
+                as usize,
+            overhead,
+        )?;
+        if user_prompt.len() > budget {
+            return Err("The request exceeds this provider's configured context. Increase Context window to the model's supported limit or shorten the notes prompt.".into());
+        }
         let body = ChatCompletionRequest {
             model: self.config.model.clone(),
             messages: vec![
@@ -340,7 +386,11 @@ impl OpenAICompatibleProcessingProvider {
                     content: user_prompt.to_string(),
                 },
             ],
-            max_tokens: self.config.max_tokens,
+            max_tokens: Some(
+                self.config
+                    .max_tokens
+                    .unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32),
+            ),
             temperature: self.config.temperature,
             top_p: self.config.top_p,
             response_format,
@@ -363,9 +413,8 @@ impl OpenAICompatibleProcessingProvider {
         let response_text = response.text().await.unwrap_or_default();
         if !status.is_success() {
             return Err(format!(
-                "OpenAI-compatible API request failed with HTTP {}: {}",
-                status.as_u16(),
-                truncate_for_log(&response_text)
+                "OpenAI-compatible API request failed with HTTP {}",
+                status.as_u16()
             ));
         }
 
@@ -532,7 +581,7 @@ Extraction rules:
 {}
 </schema>"#,
         build_meeting_prompt(),
-        output_schema_json()
+        compact_schema_json()
     )
 }
 
@@ -878,4 +927,13 @@ mod tests {
 
         assert!(status.success);
     }
+}
+
+fn default_context_window() -> usize {
+    super::context_budget::DEFAULT_CONTEXT_TOKENS
+}
+fn compact_schema_json() -> String {
+    serde_json::from_str::<Value>(&output_schema_json())
+        .expect("built-in schema is valid JSON")
+        .to_string()
 }

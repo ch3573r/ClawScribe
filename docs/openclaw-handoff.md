@@ -15,7 +15,7 @@ the Settings page to see the exact resolved config path on the recorder.
   "enabled": true,
   "endpoint": "http://openclaw.local:8765/meetings/completed",
   "model_endpoint": "http://openclaw.local:8765/v1/chat/completions",
-  "bearer_token": "replace-me",
+  "bearer_token": "",
   "source": "ClawScribe",
   "include_audio_path": false
 }
@@ -27,8 +27,8 @@ service runs on the same Windows machine.
 
 When the summarization provider is set to `OpenClaw managed auth`, ClawScribe
 uses `model_endpoint` as an OpenAI-compatible chat-completions bridge. The
-default is `http://openclaw.local:8765/v1/chat/completions`; that endpoint is
-implemented by the OpenClaw ingest service and routes through the host's
+example is `http://openclaw.local:8765/v1/chat/completions`; configure your own
+endpoint (none is prefilled). The endpoint is implemented by the OpenClaw ingest service and routes through the host's
 existing OpenClaw gateway/Codex auth. ClawScribe sends only the configured
 handoff bearer token and does not store ChatGPT/Codex tokens.
 
@@ -46,9 +46,13 @@ keys for reset-safe compatibility with existing recorder deployments. The
 Windows package identity is now ClawScribe, but the environment variable names
 remain unchanged.
 
-Keep the bearer token out of committed files. On Windows, prefer setting
-`MEETILY_OPENCLAW_BEARER_TOKEN` as a user environment variable and leaving the
-JSON `bearer_token` blank or placeholder-only in any copied example.
+Enter the bearer token in Settings. ClawScribe stores a provider-scoped OS
+credential reference in `bearer_token`; a Windows fallback uses current-user
+DPAPI encryption. Existing plaintext configuration is migrated before use, even
+when an environment override is present. Failed or corrupt protected storage
+requires reconnecting the provider; it does not silently discard the settings.
+Environment overrides remain available for operator-managed launches. Keep
+secrets out of copied examples and committed files.
 
 ## OpenClaw Ingestion Point Setup
 

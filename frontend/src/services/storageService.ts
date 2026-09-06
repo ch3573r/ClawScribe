@@ -7,6 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { Transcript } from '@/types';
+import type { RecordingOutcome } from '@/lib/recording-outcome';
 
 export interface SaveMeetingRequest {
   meetingTitle: string;
@@ -39,12 +40,14 @@ export class StorageService {
   async saveMeeting(
     meetingTitle: string,
     transcripts: Transcript[],
-    folderPath: string | null
+    folderPath: string | null,
+    recordingOutcome?: RecordingOutcome,
   ): Promise<SaveMeetingResponse> {
     return invoke<SaveMeetingResponse>('api_save_transcript', {
       meetingTitle,
       transcripts,
       folderPath,
+      recordingOutcome,
     });
   }
 

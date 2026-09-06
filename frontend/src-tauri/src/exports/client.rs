@@ -39,7 +39,8 @@ pub fn backoff_delay(
     policy: &RetryPolicy,
 ) -> Duration {
     if let Some(secs) = retry_after_secs {
-        return Duration::from_millis((secs * 1000).min(policy.max_delay_ms));
+        // Retry-After is a server minimum, not our locally generated backoff.
+        return Duration::from_secs(secs);
     }
     let shift = attempt.saturating_sub(1).min(20);
     let scaled = policy.base_delay_ms.saturating_mul(1u64 << shift);
@@ -126,7 +127,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn honors_retry_after_capped() {
+    fn honors_retry_after_above_local_backoff_cap() {
         let policy = RetryPolicy {
             max_attempts: 5,
             base_delay_ms: 500,
@@ -136,10 +137,10 @@ mod tests {
             backoff_delay(1, Some(2), &policy),
             Duration::from_millis(2000)
         );
-        // Retry-After above the cap is clamped.
+        // Never exhaust retries before the server's throttle interval expires.
         assert_eq!(
             backoff_delay(1, Some(120), &policy),
-            Duration::from_millis(30_000)
+            Duration::from_secs(120)
         );
     }
 

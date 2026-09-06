@@ -9,6 +9,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
+import { listen } from '@tauri-apps/api/event';
+import { RecordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
 interface MeetingDetailsResponse {
   id: string;
@@ -31,6 +33,23 @@ function MeetingDetailsContent() {
   const [error, setError] = useState<string | null>(null);
   const [shouldAutoGenerate, setShouldAutoGenerate] = useState<boolean>(false);
   const [hasCheckedAutoGen, setHasCheckedAutoGen] = useState<boolean>(false);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      if (!meetingId) return;
+      try {
+        const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
+        if (active) setRecoveryMessage(outcome ? recordingRecoveryMessage(outcome) : null);
+      } catch {
+        if (active) setRecoveryMessage('Recording status could not be checked. Check the transcript before generating notes.');
+      }
+    };
+    void refresh();
+    const subscription = listen('retranscription-complete', () => { void refresh(); });
+    return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+  }, [meetingId]);
 
   // Use pagination hook for efficient transcript loading
   const {
@@ -54,31 +73,33 @@ function MeetingDetailsContent() {
 
     // Only auto-generate if navigated from recording
     if (source !== 'recording') {
-      console.log('Not from recording navigation, skipping auto-generation');
       setHasCheckedAutoGen(true);
       return;
     }
 
     // Respect user's auto-summary toggle preference
     if (!isAutoSummary) {
-      console.log('Auto-summary is disabled in settings');
       setHasCheckedAutoGen(true);
       return;
     }
 
     try {
+      const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
+      if (outcome && recordingRecoveryMessage(outcome)) {
+        setShouldAutoGenerate(false);
+        setHasCheckedAutoGen(true);
+        return;
+      }
       // Check what's currently in database
       const currentConfig = await invoke('api_get_model_config') as any;
 
       // If DB already has a model, use it (never override!)
       if (currentConfig && currentConfig.model) {
-        console.log('Using existing model from DB:', currentConfig.model);
         setShouldAutoGenerate(true);
         setHasCheckedAutoGen(true);
         return;
       }
 
-      console.log('💾 DB empty, seeding standalone OpenAI-compatible summary defaults');
 
       await invoke('api_save_custom_openai_config', {
         endpoint: 'https://api.openai.com/v1',
@@ -100,13 +121,12 @@ function MeetingDetailsContent() {
         ollamaEndpoint: null,
       });
 
-      console.log('⚠️ Auto-summary needs an OpenAI API key or OpenAI-compatible endpoint before it can run');
     } catch (error) {
-      console.error('❌ Failed to setup auto-generation:', error);
+      console.error("❌ Failed to setup auto-generation:");
     }
 
     setHasCheckedAutoGen(true);
-  }, [hasCheckedAutoGen, source, isAutoSummary]);
+  }, [hasCheckedAutoGen, source, isAutoSummary, meetingId]);
 
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {
@@ -116,7 +136,6 @@ function MeetingDetailsContent() {
     }
 
     if (metadata) {
-      console.log('Meeting metadata loaded:', metadata);
 
       // Build meeting details from metadata and paginated transcripts
       setMeetingDetails({
@@ -136,7 +155,7 @@ function MeetingDetailsContent() {
   // Handle transcript loading errors
   useEffect(() => {
     if (transcriptError) {
-      console.error('Error loading transcripts:', transcriptError);
+      console.error("Error loading transcripts:");
       setError(transcriptError);
     }
   }, [transcriptError]);
@@ -149,7 +168,6 @@ function MeetingDetailsContent() {
 
     // The usePaginatedTranscripts hook automatically refetches when meetingId changes
     // This function is kept for compatibility with onMeetingUpdated callback
-    console.log('fetchMeetingDetails called - pagination hook will handle refetch');
   }, [meetingId]);
 
   // Reset states when meetingId changes (prevent race conditions)
@@ -166,23 +184,20 @@ function MeetingDetailsContent() {
   useEffect(() => {
     return () => {
       if (meetingId) {
-        console.log('Cleaning up: Stopping summary polling for meeting:', meetingId);
         stopSummaryPolling(meetingId);
       }
     };
   }, [meetingId, stopSummaryPolling]);
 
   useEffect(() => {
-    console.log('MeetingDetails useEffect triggered - meetingId:', meetingId);
 
     if (!meetingId || meetingId === 'intro-call') {
-      console.warn('No valid meeting ID in URL - meetingId:', meetingId);
+      console.warn("No valid meeting ID in URL - meetingId:");
       setError("No meeting selected");
       Analytics.trackPageView('meeting_details');
       return;
     }
 
-    console.log('Valid meeting ID found, fetching details for:', meetingId);
 
     setMeetingDetails(null);
     setMeetingSummary(null);
@@ -194,12 +209,11 @@ function MeetingDetailsContent() {
           meetingId: meetingId,
         }) as any;
 
-        console.log('FETCH SUMMARY: Raw response:', summary);
 
         // Check if the summary request failed with 404 or error status, or if no summary exists yet (idle)
         // Note: 'cancelled' and 'failed' statuses can still have data if backup was restored
         if (summary.status === 'idle' || (!summary.data && summary.status === 'error')) {
-          console.warn('Meeting summary not found or no summary generated yet:', summary.error || 'idle');
+          console.warn("Meeting summary not found or no summary generated yet:");
           setMeetingSummary(null);
           return;
         }
@@ -216,7 +230,6 @@ function MeetingDetailsContent() {
           }
         }
 
-        console.log('🔍 FETCH SUMMARY: Parsed data:', parsedData);
 
         // Priority 1: BlockNote JSON format
         if (parsedData.summary_json) {
@@ -231,7 +244,6 @@ function MeetingDetailsContent() {
         }
 
         // Legacy format - apply formatting
-        console.log('LEGACY FORMAT: Detected legacy format, applying section formatting');
 
         const { MeetingName, _section_order, ...restSummaryData } = parsedData;
 
@@ -241,7 +253,6 @@ function MeetingDetailsContent() {
         // Use section order if available to maintain exact order and handle duplicates
         const sectionKeys = _section_order || Object.keys(restSummaryData);
 
-        console.log('LEGACY FORMAT: Processing sections:', sectionKeys);
 
         for (const key of sectionKeys) {
           try {
@@ -266,25 +277,24 @@ function MeetingDetailsContent() {
                 };
               } else {
                 // Handle case where blocks is not an array
-                console.warn(`LEGACY FORMAT: Section ${key} has invalid blocks:`, typedSection.blocks);
+                console.warn("Operation failed; see the application error message.");
                 formattedSummary[key] = {
                   title: typedSection.title || key,
                   blocks: []
                 };
               }
             } else {
-              console.warn(`LEGACY FORMAT: Skipping invalid section ${key}:`, section);
+              console.warn("Operation failed; see the application error message.");
             }
           } catch (error) {
-            console.warn(`LEGACY FORMAT: Error processing section ${key}:`, error);
+            console.warn("Operation failed; see the application error message.");
             // Continue processing other sections
           }
         }
 
-        console.log('LEGACY FORMAT: Formatted summary:', formattedSummary);
         setMeetingSummary(formattedSummary);
       } catch (error) {
-        console.error('FETCH SUMMARY: Error fetching meeting summary:', error);
+        console.error("FETCH SUMMARY: Error fetching meeting summary:");
         // Don't set error state for summary fetch failure, set to null to show generate button
         setMeetingSummary(null);
       }
@@ -308,7 +318,6 @@ function MeetingDetailsContent() {
         meetingDetails.transcripts.length > 0 &&
         !hasCheckedAutoGen
       ) {
-        console.log('No summary found, checking for auto-generation...');
         await setupAutoGeneration();
       }
     };
@@ -341,7 +350,11 @@ function MeetingDetailsContent() {
     </div>;
   }
 
-  return <PageContent
+  return <div className="flex h-full min-h-0 flex-col">
+    {recoveryMessage && <div role="alert" className="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
+      <strong>Meeting needs review. </strong>{recoveryMessage} Automatic notes are paused.
+    </div>}
+    <div className="min-h-0 flex-1"><PageContent
     meeting={meetingDetails}
     summaryData={meetingSummary}
     shouldAutoGenerate={shouldAutoGenerate}
@@ -362,7 +375,7 @@ function MeetingDetailsContent() {
     totalCount={totalCount}
     loadedCount={loadedCount}
     onLoadMore={loadMore}
-  />;
+  /></div></div>;
 }
 
 export default function MeetingDetails() {

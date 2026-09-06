@@ -69,6 +69,13 @@ export const useSidebar = () => {
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
   const [isCollapsed, setIsCollapsed] = useState(false);
+  useEffect(() => {
+    const compact = window.matchMedia('(max-width: 899px)');
+    const update = () => setIsCollapsed(compact.matches);
+    update();
+    compact.addEventListener('change', update);
+    return () => compact.removeEventListener('change', update);
+  }, []);
   const [meetings, setMeetings] = useState<CurrentMeeting[]>([]);
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
   const [isMeetingActive, setIsMeetingActive] = useState(false);

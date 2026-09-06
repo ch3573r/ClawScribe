@@ -43,6 +43,7 @@ export interface ModelConfig {
   customOpenAIModel?: string | null;
   customOpenAIApiKey?: string | null;
   maxTokens?: number | null;
+  contextWindow?: number | null;
   temperature?: number | null;
   topP?: number | null;
   timeoutSeconds?: number | null;
@@ -292,6 +293,7 @@ export function ModelSettingsModal({
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
   const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
+  const [customContextWindow, setCustomContextWindow] = useState<string>(modelConfig.contextWindow?.toString() || '8192');
   const [customMaxTokens, setCustomMaxTokens] = useState<string>(modelConfig.maxTokens?.toString() || '');
   const [customTemperature, setCustomTemperature] = useState<string>(modelConfig.temperature?.toString() || '');
   const [customTopP, setCustomTopP] = useState<string>(modelConfig.topP?.toString() || '');
@@ -494,6 +496,7 @@ export function ModelSettingsModal({
                 setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                 setCustomOpenAIApiKey(customConfig.apiKey || '');
                 setCustomMaxTokens(customConfig.maxTokens?.toString() || '');
+                setCustomContextWindow(customConfig.contextWindow?.toString() || '8192');
                 setCustomTemperature(customConfig.temperature?.toString() || '');
                 setCustomTopP(customConfig.topP?.toString() || '');
                 setCustomTimeoutSeconds(customConfig.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
@@ -557,6 +560,7 @@ export function ModelSettingsModal({
       setCustomOpenAIModel(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
       setCustomOpenAIApiKey(modelConfig.customOpenAIApiKey || '');
       setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
+      setCustomContextWindow(modelConfig.contextWindow?.toString() || '8192');
       setCustomTemperature(modelConfig.temperature?.toString() || '');
       setCustomTopP(modelConfig.topP?.toString() || '');
       setCustomTimeoutSeconds(modelConfig.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
@@ -569,6 +573,7 @@ export function ModelSettingsModal({
     modelConfig.customOpenAIModel,
     modelConfig.customOpenAIApiKey,
     modelConfig.maxTokens,
+    modelConfig.contextWindow,
     modelConfig.temperature,
     modelConfig.topP,
     modelConfig.timeoutSeconds,
@@ -1027,6 +1032,7 @@ export function ModelSettingsModal({
           apiKey: customOpenAIApiKey.trim() || null,
           model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
           maxTokens: customMaxTokens ? parseInt(customMaxTokens, 10) : null,
+          contextWindow: Number(customContextWindow) || 8192,
           temperature: customTemperature ? parseFloat(customTemperature) : null,
           topP: customTopP ? parseFloat(customTopP) : null,
           timeoutSeconds: customTimeoutSeconds ? parseInt(customTimeoutSeconds, 10) : null,
@@ -1051,6 +1057,7 @@ export function ModelSettingsModal({
       customOpenAIEndpoint: modelConfig.provider === 'custom-openai' ? (customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT) : null,
       customOpenAIModel: modelConfig.provider === 'custom-openai' ? (customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL) : null,
       customOpenAIApiKey: modelConfig.provider === 'custom-openai' && customOpenAIApiKey.trim() ? customOpenAIApiKey.trim() : null,
+      contextWindow: modelConfig.provider === 'custom-openai' ? Number(customContextWindow) || 8192 : null,
       maxTokens: modelConfig.provider === 'custom-openai' && customMaxTokens ? parseInt(customMaxTokens, 10) : null,
       temperature: modelConfig.provider === 'custom-openai' && customTemperature ? parseFloat(customTemperature) : null,
       topP: modelConfig.provider === 'custom-openai' && customTopP ? parseFloat(customTopP) : null,
@@ -1138,6 +1145,7 @@ export function ModelSettingsModal({
     apiKey: customOpenAIApiKey.trim() || null,
     model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
     maxTokens: customMaxTokens ? parseInt(customMaxTokens, 10) : null,
+          contextWindow: Number(customContextWindow) || 8192,
     temperature: customTemperature ? parseFloat(customTemperature) : null,
     topP: customTopP ? parseFloat(customTopP) : null,
     timeoutSeconds: customTimeoutSeconds ? parseInt(customTimeoutSeconds, 10) : null,
@@ -1363,6 +1371,7 @@ export function ModelSettingsModal({
                       setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                       setCustomOpenAIApiKey(config.apiKey || '');
                       setCustomMaxTokens(config.maxTokens?.toString() || '');
+      setCustomContextWindow(config.contextWindow?.toString() || '8192');
                       setCustomTemperature(config.temperature?.toString() || '');
                       setCustomTopP(config.topP?.toString() || '');
                       setCustomTimeoutSeconds(config.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
@@ -1509,7 +1518,7 @@ export function ModelSettingsModal({
                 className="mt-1"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Stored in app settings and redacted from logs. Leave empty only for gateways that do not require a token.
+                Protected by your operating system. Leave empty only for gateways that do not require a token.
               </p>
             </div>
 
@@ -1562,7 +1571,13 @@ export function ModelSettingsModal({
                     />
                   </div>
                   <div>
-                    <Label htmlFor="custom-max-tokens">Max Tokens</Label>
+                    <Label htmlFor="custom-context-window">Context window (tokens)</Label>
+                    <Input id="custom-context-window" type="number" min="4096" max="2000000"
+                      value={customContextWindow} onChange={(event) => setCustomContextWindow(event.target.value)} className="mt-1" />
+                    <p className="mt-1 text-xs text-muted-foreground">Use the context limit supported by your model. Longer meetings are summarized in sections to fit.</p>
+                  </div>
+                  <div>
+                    <Label htmlFor="custom-max-tokens">Maximum output tokens</Label>
                     <Input
                       id="custom-max-tokens"
                       type="number"

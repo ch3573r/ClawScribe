@@ -23,6 +23,7 @@ export interface ModelConfig {
   customOpenAIModel?: string | null;
   customOpenAIApiKey?: string | null;
   maxTokens?: number | null;
+  contextWindow?: number | null;
   temperature?: number | null;
   topP?: number | null;
   timeoutSeconds?: number | null;
@@ -35,6 +36,7 @@ export interface CustomOpenAIConfig {
   apiKey: string | null;
   model: string;
   maxTokens: number | null;
+  contextWindow?: number | null;
   temperature: number | null;
   topP: number | null;
   timeoutSeconds?: number | null;

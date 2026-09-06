@@ -759,7 +759,7 @@ impl AudioCapture {
 /// VAD-driven audio processing pipeline
 /// Uses Voice Activity Detection to segment speech in real-time and send only speech to Whisper
 pub struct AudioPipeline {
-    receiver: mpsc::UnboundedReceiver<AudioChunk>,
+    receiver: mpsc::Receiver<AudioChunk>,
     transcription_sender: TranscriptionQueueSender,
     state: Arc<RecordingState>,
     vad_processor: ContinuousVadProcessor,
@@ -773,13 +773,15 @@ pub struct AudioPipeline {
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
-    recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    recording_sender_for_mixed: Option<super::transcription::queue::TranscriptionQueueSender>,
+    recording_buffer: Vec<f32>,
+    recording_buffer_timestamp: f64,
     queue_write_failures: QueueWriteFailureTracker,
 }
 
 impl AudioPipeline {
     pub fn new(
-        receiver: mpsc::UnboundedReceiver<AudioChunk>,
+        receiver: mpsc::Receiver<AudioChunk>,
         transcription_sender: TranscriptionQueueSender,
         state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
@@ -860,6 +862,8 @@ impl AudioPipeline {
             // Initialize professional audio mixing
             ring_buffer,
             mixer,
+            recording_buffer: Vec::new(),
+            recording_buffer_timestamp: 0.0,
             recording_sender_for_mixed: None, // Will be set by manager
             queue_write_failures: QueueWriteFailureTracker::default(),
         }
@@ -1011,6 +1015,9 @@ impl AudioPipeline {
                             // Previous 2x gain was causing excessive limiting/distortion
                             let mixed_with_gain = mixed_clean;
 
+                            self.preserve_mixed_audio(&mixed_with_gain, chunk.timestamp)
+                                .await?;
+
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
                             match self.vad_processor.process_audio(&mixed_with_gain) {
                                 Ok(speech_segments) => {
@@ -1072,21 +1079,10 @@ impl AudioPipeline {
                                         sys_snr_acc = 0.0;
                                     }
                                 }
-                                Err(e) => {
-                                    warn!("⚠️ VAD error: {}", e);
+                                Err(_) => {
+                                    self.transcription_sender.mark_failed();
+                                    self.state.report_warning("Speech detection failed. Recorded audio is retained; use Retranscribe after stopping.");
                                 }
-                            }
-
-                            // STEP 4: Send mixed audio for recording (WAV file)
-                            if let Some(ref sender) = self.recording_sender_for_mixed {
-                                let recording_chunk = AudioChunk {
-                                    data: mixed_with_gain.clone(),
-                                    sample_rate: self.sample_rate,
-                                    timestamp: chunk.timestamp,
-                                    chunk_id: self.chunk_id_counter,
-                                    device_type: DeviceType::Microphone, // Mixed audio
-                                };
-                                let _ = sender.send(recording_chunk);
                             }
                         }
                     }
@@ -1128,11 +1124,75 @@ impl AudioPipeline {
         Ok(())
     }
 
+    async fn preserve_mixed_audio(&mut self, samples: &[f32], timestamp: f64) -> Result<()> {
+        if self.recording_sender_for_mixed.is_none() {
+            return Ok(());
+        }
+        if self.recording_buffer.is_empty() {
+            self.recording_buffer_timestamp = timestamp;
+        }
+        self.recording_buffer.extend_from_slice(samples);
+        // Batch one second per durable write; syncing every mixer frame is too expensive.
+        if self.recording_buffer.len() >= self.sample_rate as usize {
+            self.flush_recording_buffer().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_recording_buffer(&mut self) -> Result<()> {
+        if self.recording_buffer.is_empty() {
+            return Ok(());
+        }
+        if let Some(sender) = &self.recording_sender_for_mixed {
+            let chunk = AudioChunk {
+                data: std::mem::take(&mut self.recording_buffer),
+                sample_rate: self.sample_rate,
+                timestamp: self.recording_buffer_timestamp,
+                chunk_id: self.chunk_id_counter,
+                device_type: DeviceType::Microphone,
+            };
+            if sender.send(chunk).await.is_err() {
+                self.state.mark_capture_incomplete();
+                self.state.stop_recording();
+                self.state.report_warning("Audio capture stopped because recorded audio could not be written. Press Stop to save the available audio, then free disk space.");
+                return Err(anyhow::anyhow!("Captured audio could not be saved"));
+            }
+        }
+        Ok(())
+    }
+
     async fn flush_remaining_audio(&mut self) -> Result<()> {
         info!(
             "Flushing remaining audio from pipeline (processed {} chunks)",
             self.processed_chunks
         );
+
+        let mic: Vec<f32> = self.ring_buffer.mic_buffer.drain(..).collect();
+        let system: Vec<f32> = self.ring_buffer.system_buffer.drain(..).collect();
+        if !mic.is_empty() || !system.is_empty() {
+            let mixed = self.mixer.mix_window(&mic, &system);
+            self.preserve_mixed_audio(&mixed, self.recording_buffer_timestamp)
+                .await?;
+            self.flush_recording_buffer().await?;
+            let segments = self.vad_processor.process_audio(&mixed).unwrap_or_else(|_| {
+                self.transcription_sender.mark_failed();
+                self.state.report_warning("Final speech detection failed; use Retranscribe to recover speech from the saved audio.");
+                Vec::new()
+            });
+            for segment in segments {
+                let chunk = AudioChunk {
+                    data: segment.samples,
+                    sample_rate: 16000,
+                    timestamp: segment.start_timestamp_ms / 1000.0,
+                    chunk_id: self.chunk_id_counter,
+                    device_type: DeviceType::Microphone,
+                };
+                if self.enqueue_transcription_chunk(chunk).await {
+                    self.chunk_id_counter += 1;
+                }
+            }
+        }
+        self.flush_recording_buffer().await?;
 
         // Flush any remaining audio from VAD processor and send segments to transcription
         match self.vad_processor.flush() {
@@ -1168,8 +1228,9 @@ impl AudioPipeline {
                     }
                 }
             }
-            Err(e) => {
-                warn!("Failed to flush VAD processor: {}", e);
+            Err(_) => {
+                self.transcription_sender.mark_failed();
+                self.state.report_warning("Final speech detection failed; use Retranscribe to recover speech from the saved audio.");
             }
         }
 
@@ -1180,7 +1241,7 @@ impl AudioPipeline {
 /// Simple audio pipeline manager
 pub struct AudioPipelineManager {
     pipeline_handle: Option<JoinHandle<Result<()>>>,
-    audio_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+    audio_sender: Option<mpsc::Sender<AudioChunk>>,
 }
 
 impl AudioPipelineManager {
@@ -1198,7 +1259,7 @@ impl AudioPipelineManager {
         transcription_sender: TranscriptionQueueSender,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
-        recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        recording_sender: Option<super::transcription::queue::TranscriptionQueueSender>,
         mic_device_name: String,
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
@@ -1216,7 +1277,7 @@ impl AudioPipelineManager {
         );
 
         // Create audio processing channel
-        let (audio_sender, audio_receiver) = mpsc::unbounded_channel::<AudioChunk>();
+        let (audio_sender, audio_receiver) = mpsc::channel::<AudioChunk>(512);
 
         // Set sender in state for audio captures to use
         state.set_audio_sender(audio_sender.clone());
@@ -1258,7 +1319,7 @@ impl AudioPipelineManager {
                 Ok(result) => result,
                 Err(e) => {
                     error!("Pipeline task failed: {}", e);
-                    Ok(())
+                    Err(anyhow::anyhow!("Audio pipeline task failed"))
                 }
             }
         } else {
@@ -1269,47 +1330,6 @@ impl AudioPipelineManager {
     /// Force immediate flush of accumulated audio and stop pipeline
     /// PERFORMANCE CRITICAL: Eliminates 30+ second shutdown delays
     pub async fn force_flush_and_stop(&mut self) -> Result<()> {
-        info!("🚀 Force flushing pipeline - processing ALL accumulated audio immediately");
-
-        // If we have a sender, send a special flush signal first
-        if let Some(sender) = &self.audio_sender {
-            // Create a special flush chunk to trigger immediate processing
-            let flush_chunk = AudioChunk {
-                data: vec![], // Empty data signals flush
-                sample_rate: 16000,
-                timestamp: 0.0,
-                chunk_id: u64::MAX, // Special ID to indicate flush
-                device_type: super::recording_state::DeviceType::Microphone,
-            };
-
-            if let Err(e) = sender.send(flush_chunk) {
-                warn!("Failed to send flush signal: {}", e);
-            } else {
-                info!("📤 Sent flush signal to pipeline");
-
-                // PERFORMANCE OPTIMIZATION: Reduced wait time from 50ms to 20ms
-                // Pipeline should process flush signal very quickly
-                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-                // Send multiple flush signals to ensure the pipeline catches it
-                // This aggressive approach eliminates shutdown delay issues
-                for i in 0..3 {
-                    let additional_flush = AudioChunk {
-                        data: vec![],
-                        sample_rate: 16000,
-                        timestamp: 0.0,
-                        chunk_id: u64::MAX - (i as u64),
-                        device_type: super::recording_state::DeviceType::Microphone,
-                    };
-                    let _ = sender.send(additional_flush);
-                }
-
-                info!("📤 Sent additional flush signals for reliability");
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            }
-        }
-
-        // Now stop normally
         self.stop().await
     }
 }

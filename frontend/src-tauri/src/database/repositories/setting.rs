@@ -106,7 +106,12 @@ impl SettingsRepository {
             "#,
             api_key_column, api_key_column
         );
-        sqlx::query(&query).bind(api_key).execute(pool).await?;
+        let protected = crate::credentials::seal_async(
+            format!("settings/{api_key_column}"),
+            api_key.to_string(),
+        )
+        .await?;
+        sqlx::query(&query).bind(protected).execute(pool).await?;
 
         Ok(())
     }
@@ -138,12 +143,7 @@ impl SettingsRepository {
             }
         };
 
-        let query = format!(
-            "SELECT {} FROM settings WHERE id = '1' LIMIT 1",
-            api_key_column
-        );
-        let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
-        Ok(api_key)
+        read_protected_setting(pool, "settings", api_key_column).await
     }
 
     pub async fn get_transcript_config(
@@ -252,7 +252,12 @@ impl SettingsRepository {
             crate::config::DEFAULT_PARAKEET_MODEL,
             api_key_column
         );
-        sqlx::query(&query).bind(api_key).execute(pool).await?;
+        let protected = crate::credentials::seal_async(
+            format!("transcript_settings/{api_key_column}"),
+            api_key.to_string(),
+        )
+        .await?;
+        sqlx::query(&query).bind(protected).execute(pool).await?;
 
         Ok(())
     }
@@ -277,12 +282,7 @@ impl SettingsRepository {
             }
         };
 
-        let query = format!(
-            "SELECT {} FROM transcript_settings WHERE id = '1' LIMIT 1",
-            api_key_column
-        );
-        let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
-        Ok(api_key)
+        read_protected_setting(pool, "transcript_settings", api_key_column).await
     }
 
     pub async fn delete_api_key(
@@ -351,12 +351,44 @@ impl SettingsRepository {
 
                 if let Some(json) = config_json {
                     // Parse JSON into CustomOpenAIConfig
-                    let config: CustomOpenAIConfig = serde_json::from_str(&json).map_err(|e| {
-                        sqlx::Error::Protocol(
-                            format!("Invalid JSON in customOpenAIConfig: {}", e).into(),
-                        )
-                    })?;
+                    let mut config: CustomOpenAIConfig =
+                        serde_json::from_str(&json).map_err(|e| {
+                            sqlx::Error::Protocol(
+                                format!("Invalid JSON in customOpenAIConfig: {}", e).into(),
+                            )
+                        })?;
 
+                    if let Some(stored) = config.api_key.as_ref().filter(|key| !key.is_empty()) {
+                        let protected = if crate::credentials::is_protected(stored) {
+                            stored.clone()
+                        } else {
+                            let protected = crate::credentials::seal_async(
+                                "summary/custom-openai".into(),
+                                stored.clone(),
+                            )
+                            .await?;
+                            let mut persisted = config.clone();
+                            persisted.api_key = Some(protected.clone());
+                            let serialized = serde_json::to_string(&persisted).map_err(|_| {
+                                sqlx::Error::Protocol("Invalid provider configuration".into())
+                            })?;
+                            let changed = sqlx::query("UPDATE settings SET customOpenAIConfig = ? WHERE id = '1' AND customOpenAIConfig = ?")
+                                .bind(serialized).bind(&json).execute(pool).await?;
+                            if changed.rows_affected() != 1 {
+                                return Err(sqlx::Error::Protocol(
+                                    "Provider settings changed; retry the operation".into(),
+                                ));
+                            }
+                            protected
+                        };
+                        config.api_key = Some(
+                            crate::credentials::open_async(
+                                "summary/custom-openai".into(),
+                                protected,
+                            )
+                            .await?,
+                        );
+                    }
                     Ok(Some(config))
                 } else {
                     Ok(None)
@@ -379,8 +411,14 @@ impl SettingsRepository {
         pool: &SqlitePool,
         config: &CustomOpenAIConfig,
     ) -> std::result::Result<(), sqlx::Error> {
-        // Serialize config to JSON
-        let config_json = serde_json::to_string(config).map_err(|e| {
+        let mut persisted = config.clone();
+        if let Some(value) = &config.api_key {
+            persisted.api_key = Some(
+                crate::credentials::seal_async("summary/custom-openai".into(), value.clone())
+                    .await?,
+            );
+        }
+        let config_json = serde_json::to_string(&persisted).map_err(|e| {
             sqlx::Error::Protocol(format!("Failed to serialize config to JSON: {}", e).into())
         })?;
 
@@ -421,7 +459,7 @@ impl SettingsRepository {
         Ok(config_json)
     }
 
-    /// Saves OpenAI auth-mode metadata JSON. API keys remain in the legacy key column.
+    /// Saves OpenAI auth-mode metadata JSON. Keys use protected references in compatibility columns.
     pub async fn save_openai_auth_config(
         pool: &SqlitePool,
         config_json: &str,
@@ -450,5 +488,90 @@ impl SettingsRepository {
             .await?;
 
         Ok(())
+    }
+}
+
+// Table and column identifiers are supplied only by the closed provider maps above.
+async fn read_protected_setting(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let scope = format!("{table}/{column}");
+    for _ in 0..3 {
+        let stored = sqlx::query_scalar::<_, Option<String>>(&format!(
+            "SELECT {column} FROM {table} WHERE id = '1'"
+        ))
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        let Some(stored) = stored.filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        if crate::credentials::is_protected(&stored) {
+            return crate::credentials::open_async(scope, stored)
+                .await
+                .map(Some);
+        }
+        let protected = crate::credentials::seal_async(scope.clone(), stored.clone()).await?;
+        let updated = sqlx::query(&format!(
+            "UPDATE {table} SET {column} = ? WHERE id = '1' AND {column} = ?"
+        ))
+        .bind(&protected)
+        .bind(&stored)
+        .execute(pool)
+        .await?;
+        if updated.rows_affected() == 1 {
+            return crate::credentials::open_async(scope, protected)
+                .await
+                .map(Some);
+        }
+    }
+    Err(sqlx::Error::Protocol(
+        "Provider settings changed; retry the operation".into(),
+    ))
+}
+
+/// Migrate independent providers without making local recording depend on any
+/// credential service. A provider whose migration fails stays unusable until
+/// its protected store is available; plaintext is never used as a fallback.
+pub(crate) async fn migrate_provider_credentials(pool: &SqlitePool) {
+    for (table, columns) in [
+        (
+            "settings",
+            &[
+                "openaiApiKey",
+                "anthropicApiKey",
+                "ollamaApiKey",
+                "groqApiKey",
+                "openRouterApiKey",
+            ][..],
+        ),
+        (
+            "transcript_settings",
+            &[
+                "whisperApiKey",
+                "deepgramApiKey",
+                "elevenLabsApiKey",
+                "groqApiKey",
+                "openaiApiKey",
+                "cloudWhisperApiKey",
+                "maiTranscribeApiKey",
+            ][..],
+        ),
+    ] {
+        for column in columns {
+            if read_protected_setting(pool, table, column).await.is_err() {
+                log::warn!(
+                    "A provider credential needs protected-store access before it can be used"
+                );
+            }
+        }
+    }
+    if SettingsRepository::get_custom_openai_config(pool)
+        .await
+        .is_err()
+    {
+        log::warn!("Custom provider credentials need protected-store access before use");
     }
 }

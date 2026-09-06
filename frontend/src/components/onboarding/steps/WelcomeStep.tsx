@@ -10,7 +10,7 @@ export function WelcomeStep() {
   const features = [
     {
       icon: Lock,
-      title: 'Your data never leaves your device',
+      title: 'Local by default; cloud features are your choice',
     },
     {
       icon: Sparkles,
@@ -58,7 +58,7 @@ export function WelcomeStep() {
           >
             Get Started
           </Button>
-          <p className="text-xs text-center text-muted-foreground">Takes less than 3 minutes</p>
+          <p className="text-xs text-center text-muted-foreground">Setup time depends on model downloads and your connection.</p>
         </div>
       </div>
     </OnboardingContainer>

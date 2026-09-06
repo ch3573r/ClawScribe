@@ -46,7 +46,7 @@ export function SetupOverviewStep() {
   return (
     <OnboardingContainer
       title="Setup Overview"
-      description="ClawScribe requires that you download the Transcription & Summarization AI models for the software to work."
+      description="Download a transcription model to record locally. For meeting notes, use a local summary model or choose an external provider in Settings."
       step={2}
       totalSteps={isMac ? 4 : 3}
     >
@@ -68,7 +68,7 @@ export function SetupOverviewStep() {
                             <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                <button className="text-muted-foreground hover:text-muted-foreground">
+                                <button type="button" aria-label="About summary provider choices" className="text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                                     <Info className="w-4 h-4" />
                                 </button>
                                 </TooltipTrigger>

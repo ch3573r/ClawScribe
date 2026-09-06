@@ -77,7 +77,9 @@ impl RecordingManager {
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
         // Pass auto_save to control whether audio checkpoints are created
-        let recording_sender = self.recording_saver.start_accumulation(auto_save);
+        let recording_sender = self
+            .recording_saver
+            .start_accumulation(auto_save, self.state.clone())?;
 
         // Start recording state first
         self.state.start_recording()?;
@@ -120,9 +122,9 @@ impl RecordingManager {
         self.pipeline_manager.start(
             self.state.clone(),
             transcription_sender,
-            0,                      // Ignored - using dynamic sizing internally
-            48000,                  // 48kHz sample rate
-            Some(recording_sender), // CRITICAL: Pass recording sender to receive pre-mixed audio
+            0,     // Ignored - using dynamic sizing internally
+            48000, // 48kHz sample rate
+            recording_sender,
             mic_name,
             mic_kind,
             sys_name,
@@ -140,8 +142,8 @@ impl RecordingManager {
 
         // Start device monitoring to detect disconnects
         if let Some(ref mut monitor) = self.device_monitor {
-            if let Err(e) = monitor.start_monitoring(microphone_device, system_device) {
-                warn!("Failed to start device monitoring: {}", e);
+            if let Err(_e) = monitor.start_monitoring(microphone_device, system_device) {
+                warn!("Failed to start device monitoring");
                 // Non-fatal - continue without monitoring
             } else {
                 info!("✅ Device monitoring started");
@@ -220,8 +222,8 @@ impl RecordingManager {
                     info!("Using default microphone: {}", device.name);
                     Some(Arc::new(device))
                 }
-                Err(e) => {
-                    warn!("No default microphone available: {}", e);
+                Err(_e) => {
+                    warn!("No default microphone available");
                     None
                 }
             };
@@ -231,8 +233,8 @@ impl RecordingManager {
                     info!("Using default system audio: {}", device.name);
                     Some(Arc::new(device))
                 }
-                Err(e) => {
-                    warn!("No default system audio available: {}", e);
+                Err(_e) => {
+                    warn!("No default system audio available");
                     None
                 }
             };
@@ -260,13 +262,13 @@ impl RecordingManager {
         self.state.stop_recording();
 
         // Stop audio streams
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
+        if let Err(_e) = self.stream_manager.stop_streams() {
+            error!("Error stopping audio streams");
         }
 
         // Stop audio pipeline
-        if let Err(e) = self.pipeline_manager.stop().await {
-            error!("Error stopping audio pipeline: {}", e);
+        if let Err(_e) = self.pipeline_manager.stop().await {
+            error!("Error stopping audio pipeline");
         }
 
         debug!("Recording streams stopped successfully");
@@ -277,33 +279,33 @@ impl RecordingManager {
     pub async fn stop_streams_and_force_flush(&mut self) -> Result<()> {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
-        // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
-        // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
-        if let Some(ref mut monitor) = self.device_monitor {
-            info!("Stopping device monitor first...");
-            monitor.stop_monitoring().await;
-        }
-
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
         // Stop audio streams immediately
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
+        if let Err(_e) = self.stream_manager.stop_streams() {
+            error!("Error stopping audio streams");
+        }
+
+        if let Some(ref mut monitor) = self.device_monitor {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(3), monitor.stop_monitoring())
+                    .await;
         }
 
         // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
-            error!("Error during force flush: {}", e);
+        let flush_result = self.pipeline_manager.force_flush_and_stop().await;
+        if flush_result.is_err() {
+            self.state.mark_capture_incomplete();
         }
 
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        info!("✅ Recording streams stopped with immediate flush completed");
-        Ok(())
+        info!("Recording streams stopped");
+        flush_result
     }
 
     /// Save recording after transcription is complete
@@ -320,18 +322,18 @@ impl RecordingManager {
         // Save the recording with actual duration
         match self
             .recording_saver
-            .stop_and_save(app, recording_duration)
+            .stop_and_save(app, recording_duration, self.state.capture_incomplete())
             .await
         {
-            Ok(Some(file_path)) => {
-                info!("Recording saved successfully to: {}", file_path);
+            Ok(Some(_)) => {
+                info!("Recording audio saved successfully");
             }
             Ok(None) => {
                 debug!("Recording not saved (auto-save disabled or no audio data)");
             }
             Err(e) => {
-                error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                error!("Failed to save recording");
+                return Err(anyhow::anyhow!(e));
             }
         }
 
@@ -354,29 +356,29 @@ impl RecordingManager {
         self.state.stop_recording();
 
         // Stop audio streams
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
+        if let Err(_e) = self.stream_manager.stop_streams() {
+            error!("Error stopping audio streams");
         }
 
         // Stop audio pipeline
-        if let Err(e) = self.pipeline_manager.stop().await {
-            error!("Error stopping audio pipeline: {}", e);
+        if let Err(_e) = self.pipeline_manager.stop().await {
+            error!("Error stopping audio pipeline");
         }
 
         // Save the recording with actual duration
         match self
             .recording_saver
-            .stop_and_save(app, recording_duration)
+            .stop_and_save(app, recording_duration, self.state.capture_incomplete())
             .await
         {
-            Ok(Some(file_path)) => {
-                info!("Recording saved successfully to: {}", file_path);
+            Ok(Some(_)) => {
+                info!("Recording audio saved successfully");
             }
             Ok(None) => {
                 info!("Recording not saved (auto-save disabled or no audio data)");
             }
-            Err(e) => {
-                error!("Failed to save recording: {}", e);
+            Err(_e) => {
+                error!("Failed to save recording");
                 // Don't fail the stop operation if saving fails
             }
         }
@@ -525,13 +527,13 @@ impl RecordingManager {
             self.state.stop_recording();
 
             // Stop audio streams
-            if let Err(e) = self.stream_manager.stop_streams() {
-                error!("Error stopping audio streams during cleanup: {}", e);
+            if let Err(_e) = self.stream_manager.stop_streams() {
+                error!("Error stopping audio streams during cleanup");
             }
 
             // Stop audio pipeline
-            if let Err(e) = self.pipeline_manager.stop().await {
-                error!("Error stopping audio pipeline during cleanup: {}", e);
+            if let Err(_e) = self.pipeline_manager.stop().await {
+                error!("Error stopping audio pipeline during cleanup");
             }
         }
         self.state.cleanup();
@@ -555,13 +557,10 @@ impl RecordingManager {
 
     pub fn handle_device_disconnect_event(
         &mut self,
-        device_name: String,
+        _device_name: String,
         device_type: DeviceMonitorType,
     ) {
-        warn!(
-            "📱 Device disconnected: {} ({:?})",
-            device_name, device_type
-        );
+        warn!("Audio device disconnected");
 
         let device = match device_type {
             DeviceMonitorType::Microphone => self.state.get_microphone_device(),
@@ -641,7 +640,7 @@ impl RecordingManager {
                 }
             }
         } else {
-            warn!("❌ Device '{}' not yet available", device_name);
+            warn!("Audio device still unavailable");
             Ok(false)
         }
     }
@@ -679,7 +678,7 @@ impl RecordingManager {
                 Err(anyhow::anyhow!("Device not available"))
             }
             Err(e) => {
-                error!("Device reconnect failed: {}", e);
+                error!("Device reconnect failed");
                 Err(e)
             }
         }

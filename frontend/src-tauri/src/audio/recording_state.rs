@@ -95,6 +95,7 @@ pub struct RecordingStats {
 pub struct RecordingState {
     // Core recording state
     is_recording: AtomicBool,
+    capture_incomplete: AtomicBool,
     is_paused: AtomicBool,
     is_reconnecting: AtomicBool, // NEW: Attempting to reconnect to device
 
@@ -105,7 +106,7 @@ pub struct RecordingState {
     disconnected_device: Mutex<Option<(Arc<AudioDevice>, DeviceType)>>,
 
     // Audio pipeline
-    audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
+    audio_sender: Mutex<Option<mpsc::Sender<AudioChunk>>>,
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -131,6 +132,7 @@ pub struct RecordingState {
 impl RecordingState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            capture_incomplete: AtomicBool::new(false),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             is_reconnecting: AtomicBool::new(false),
@@ -153,6 +155,7 @@ impl RecordingState {
 
     // Recording control
     pub fn start_recording(&self) -> Result<()> {
+        self.capture_incomplete.store(false, Ordering::Release);
         self.is_recording.store(true, Ordering::SeqCst);
         *self.recording_start.lock().unwrap() = Some(Instant::now());
         self.error_count.store(0, Ordering::SeqCst);
@@ -264,31 +267,36 @@ impl RecordingState {
     }
 
     // Audio pipeline management
-    pub fn set_audio_sender(&self, sender: mpsc::UnboundedSender<AudioChunk>) {
+    pub fn set_audio_sender(&self, sender: mpsc::Sender<AudioChunk>) {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
+    pub fn capture_incomplete(&self) -> bool {
+        self.capture_incomplete.load(Ordering::Acquire)
+    }
+
+    pub fn mark_capture_incomplete(&self) {
+        self.capture_incomplete.store(true, Ordering::Release);
+    }
+
     pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
-        // Don't send audio chunks when paused
-        if self.is_paused() {
-            return Ok(()); // Silently discard chunks while paused
+        if self.is_paused() || !self.is_recording() {
+            return Ok(());
         }
-
-        if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            sender
-                .send(chunk)
-                .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
-
-            // Update statistics
+        let sender = self.audio_sender.lock().unwrap().clone();
+        if let Some(sender) = sender {
+            if sender.try_send(chunk).is_err() {
+                self.mark_capture_incomplete();
+                self.stop_recording();
+                self.report_warning("Audio capture stopped because processing could not keep up. Press Stop to save the available audio; check disk space before recording again.");
+                return Err(anyhow::anyhow!("Audio capture queue unavailable"));
+            }
             let mut stats = self.stats.lock().unwrap();
             stats.chunks_processed += 1;
             stats.last_activity = Some(Instant::now());
             Ok(())
         } else {
-            // Return an error when no sender is available (pipeline not ready)
-            Err(anyhow::anyhow!(
-                "Audio pipeline not ready - no sender available"
-            ))
+            Err(anyhow::anyhow!("Audio pipeline not ready"))
         }
     }
 
@@ -452,6 +460,7 @@ impl RecordingState {
 impl Default for RecordingState {
     fn default() -> Self {
         Self {
+            capture_incomplete: AtomicBool::new(false),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             is_reconnecting: AtomicBool::new(false),
@@ -481,5 +490,40 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capture_overrun_preserves_accepted_audio_and_allows_a_new_session() {
+        let state = RecordingState::new();
+        let (sender, mut receiver) = mpsc::channel(1);
+        state.set_audio_sender(sender);
+        state.start_recording().unwrap();
+        let chunk = AudioChunk {
+            data: vec![0.25; 480],
+            sample_rate: 48000,
+            timestamp: 0.0,
+            chunk_id: 0,
+            device_type: DeviceType::System,
+        };
+        state.send_audio_chunk(chunk.clone()).unwrap();
+        assert!(state.send_audio_chunk(chunk.clone()).is_err());
+        assert!(!state.is_recording());
+        assert!(state.capture_incomplete());
+        assert_eq!(receiver.recv().await.unwrap().data, chunk.data);
+        assert!(receiver.recv().await.is_none());
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        state.set_audio_sender(sender);
+        state.start_recording().unwrap();
+        assert!(!state.capture_incomplete());
+        state.send_audio_chunk(chunk).unwrap();
+        state.stop_recording();
+        assert!(receiver.recv().await.is_some());
+        assert!(receiver.recv().await.is_none());
     }
 }

@@ -17,6 +17,8 @@ export interface RecordingState {
 }
 
 export interface RecordingStoppedPayload {
+  audio_save_failed?: boolean;
+  transcription_incomplete?: boolean;
   message: string;
   folder_path?: string;
   meeting_name?: string;

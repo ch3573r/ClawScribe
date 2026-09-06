@@ -1,8 +1,6 @@
 // Audio file import module - allows importing external audio files as new meetings
 
 use crate::api::TranscriptSegment;
-use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
-use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
@@ -19,8 +17,7 @@ use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
 use super::common::{
-    create_readable_transcript_segments_with_words, speech_segments_to_timing_grid,
-    split_segment_at_silence, split_transcripts_to_timing_grid,
+    create_readable_transcript_segments_with_words, split_transcripts_to_timing_grid,
     transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
 };
 use super::constants::AUDIO_EXTENSIONS;
@@ -121,7 +118,7 @@ pub fn cancel_import() {
 }
 
 /// Validate an audio file and return its info using metadata-only approach
-/// Falls back to full decode if metadata is unavailable
+/// Missing duration is shown as unknown and measured during bounded batch preparation.
 pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
     // Check file exists
     if !path.exists() {
@@ -169,14 +166,9 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
             debug!("Got duration from metadata: {:.2}s (fast path)", duration);
             duration
         }
-        Err(e) => {
-            // Fallback to full decode if metadata unavailable
-            warn!(
-                "Metadata extraction failed: {}, falling back to full decode",
-                e
-            );
-            let decoded = decode_audio_file(path)?;
-            decoded.duration_seconds
+        Err(_) => {
+            debug!("Duration unavailable in file metadata; it will be measured during import");
+            0.0
         }
     };
 
@@ -190,7 +182,7 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
 }
 
 /// Extract duration from audio file metadata without full decode
-/// Returns error if metadata is unavailable, triggering fallback to full decode
+/// Returns an error when the container does not expose duration metadata.
 fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
@@ -259,6 +251,8 @@ pub async fn start_import<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<ImportResult> {
+    let _job = super::inference::claim_job().map_err(anyhow::Error::msg)?;
+    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
 
@@ -318,8 +312,8 @@ async fn run_import<R: Runtime>(
     }
 
     info!(
-        "Starting import for '{}' from {} with language {:?}, model {:?}, provider {:?}",
-        title, source_path, language, model, provider
+        "Starting audio import (language={:?}, model={:?}, provider={:?})",
+        language, model, provider
     );
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
@@ -332,11 +326,8 @@ async fn run_import<R: Runtime>(
     // Create meeting folder in the configured recording location.
     let base_folder = match load_recording_preferences(&app).await {
         Ok(prefs) => prefs.save_folder,
-        Err(e) => {
-            warn!(
-                "Failed to load recording preferences for import destination, using default: {}",
-                e
-            );
+        Err(_e) => {
+            warn!("Failed to load recording preferences for import destination, using default");
             get_default_recordings_folder()
         }
     };
@@ -358,7 +349,7 @@ async fn run_import<R: Runtime>(
         .map_err(|e| anyhow!("Copy task join error: {}", e))?
         .map_err(|e| anyhow!("Failed to copy audio file: {}", e))?;
 
-    info!("Copied audio to: {}", dest_path.display());
+    info!("Imported audio copy saved");
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
@@ -423,12 +414,7 @@ async fn run_import<R: Runtime>(
                     .await;
                 }
                 Err(error) => {
-                    warn!(
-                        "Cloud transcription failed for provider '{}' (category={}): {}; falling back to local",
-                        provider_id,
-                        error.category().as_str(),
-                        error
-                    );
+                    warn!("Cloud transcription failed; using the configured local fallback");
                     super::transcription::cloud::emit_fallback_event(
                         &app,
                         None,
@@ -452,86 +438,15 @@ async fn run_import<R: Runtime>(
 
     emit_progress(&app, "decoding", 15, "Decoding audio file...");
 
-    // Decode the audio file with progress updates
-    let app_for_decode = app.clone();
-    let decode_progress = Box::new(move |progress: u32, msg: &str| {
-        // Map decode progress: 15% + (progress * 0.05) to go from 15% to 20%
-        let overall_progress = 15 + ((progress as f32 * 0.05) as u32);
-        emit_progress(&app_for_decode, "decoding", overall_progress, msg);
-    });
-
-    let path_for_decode = dest_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || {
-        decode_audio_file_with_progress(&path_for_decode, Some(decode_progress))
-    })
-    .await
-    .map_err(|e| anyhow!("Decode task join error: {}", e))??;
-    let duration_seconds = decoded.duration_seconds;
-
-    info!(
-        "Decoded audio: {:.2}s, {}Hz, {} channels",
-        duration_seconds, decoded.sample_rate, decoded.channels
-    );
-
-    emit_progress(&app, "resampling", 20, "Converting audio format...");
-
-    // Check for cancellation
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
-        return Err(anyhow!("Import cancelled"));
-    }
-
-    // Convert to 16kHz mono format with progress updates
-    let app_for_resample = app.clone();
-    let resample_progress = Box::new(move |progress: u32, msg: &str| {
-        // Map resample progress: 20% + (progress * 0.05) to go from 20% to 25%
-        let overall_progress = 20 + ((progress as f32 * 0.05) as u32);
-        emit_progress(&app_for_resample, "resampling", overall_progress, msg);
-    });
-
-    let audio_samples = tokio::task::spawn_blocking(move || {
-        decoded.to_whisper_format_with_progress(Some(resample_progress))
-    })
-    .await
-    .map_err(|e| anyhow!("Resample task join error: {}", e))?;
-    info!(
-        "Converted to 16kHz mono format: {} samples",
-        audio_samples.len()
-    );
-
-    emit_progress(&app, "vad", 25, "Detecting speech segments...");
-
-    // Check for cancellation
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
-        return Err(anyhow!("Import cancelled"));
-    }
-
-    // Use VAD to find speech segments
-    let app_for_vad = app.clone();
-
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
-            |vad_progress, segments_found| {
-                let overall_progress = 25 + (vad_progress as f32 * 0.05) as u32;
-                emit_progress(
-                    &app_for_vad,
-                    "vad",
-                    overall_progress,
-                    &format!(
-                        "Detecting speech segments... {}% ({} found)",
-                        vad_progress, segments_found
-                    ),
-                );
-                !IMPORT_CANCELLED.load(Ordering::SeqCst)
-            },
-        )
-    })
-    .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
-    .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+    let prepared_audio = super::batch_audio::prepare(
+        &dest_path,
+        VAD_REDEMPTION_TIME_MS,
+        MAX_TRANSCRIPTION_SEGMENT_SAMPLES,
+        &IMPORT_CANCELLED,
+    )
+    .await?;
+    let duration_seconds = prepared_audio.duration_seconds;
+    let speech_segments = &prepared_audio.segments;
 
     let total_segments = speech_segments.len();
     info!(
@@ -563,11 +478,7 @@ async fn run_import<R: Runtime>(
             let dur = seg.end_timestamp_ms - seg.start_timestamp_ms;
             debug!(
                 "  Segment {}: {:.0}ms-{:.0}ms ({:.0}ms, {} samples)",
-                i,
-                seg.start_timestamp_ms,
-                seg.end_timestamp_ms,
-                dur,
-                seg.samples.len()
+                i, seg.start_timestamp_ms, seg.end_timestamp_ms, dur, seg.sample_count
             );
         }
         if total_segments > 10 {
@@ -656,23 +567,7 @@ async fn run_import<R: Runtime>(
     // for the lowest-energy window near the target split point and cut there.
     // Consume the VAD segments by value: cloning them would double the resident
     // memory of the meeting's entire speech audio.
-    let mut processable_segments: Vec<crate::audio::vad::SpeechSegment> = Vec::new();
-    for segment in speech_segments {
-        if segment.samples.len() > MAX_TRANSCRIPTION_SEGMENT_SAMPLES {
-            debug!(
-                "Splitting large segment ({:.0}ms, {} samples) at silence boundaries",
-                segment.end_timestamp_ms - segment.start_timestamp_ms,
-                segment.samples.len()
-            );
-
-            let sub_segments =
-                split_segment_at_silence(&segment, MAX_TRANSCRIPTION_SEGMENT_SAMPLES);
-            debug!("Split into {} sub-segments", sub_segments.len());
-            processable_segments.extend(sub_segments);
-        } else {
-            processable_segments.push(segment);
-        }
-    }
+    let processable_segments = &prepared_audio.segments;
 
     let processable_count = processable_segments.len();
     info!(
@@ -683,8 +578,10 @@ async fn run_import<R: Runtime>(
     // Process each speech segment
     let mut all_transcripts: Vec<TranscribedSegment> = Vec::new();
     let mut total_confidence = 0.0f32;
+    let mut confidence_count = 0usize;
 
     for (i, segment) in processable_segments.iter().enumerate() {
+        let segment = segment.load().await?;
         if IMPORT_CANCELLED.load(Ordering::SeqCst) {
             let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(anyhow!("Import cancelled"));
@@ -717,17 +614,21 @@ async fn run_import<R: Runtime>(
         // Transcribe
         let (text, conf, word_timestamps) = if use_nemotron {
             let engine = nemotron_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Nemotron transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32, None)
+            let text = super::batch_audio::cancel_aware(
+                engine.transcribe_audio(segment.samples.clone(), language.clone()),
+                &IMPORT_CANCELLED,
+            )
+            .await
+            .map_err(|e| anyhow!("Nemotron transcription failed on segment {}: {}", i, e))?;
+            (text, None, None)
         } else if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
-            let result = engine
-                .transcribe_audio_timestamped(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
+            let result = super::batch_audio::cancel_aware(
+                engine.transcribe_audio_timestamped(segment.samples.clone()),
+                &IMPORT_CANCELLED,
+            )
+            .await
+            .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             let text = result.text;
             let word_timestamps = transcript_words_from_token_timestamps(
                 &text,
@@ -738,33 +639,30 @@ async fn run_import<R: Runtime>(
                 None,
                 None,
             );
-            (text, 0.9f32, word_timestamps)
+            (text, None, word_timestamps)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+            let (text, conf, partial) = super::batch_audio::cancel_aware(
+                engine.transcribe_audio_with_confidence(segment.samples.clone(), language.clone()),
+                &IMPORT_CANCELLED,
+            )
+            .await
+            .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+            if partial {
+                return Err(anyhow!("The speech engine returned incomplete text. Existing audio and transcripts were preserved; retry transcription."));
+            }
             (text, conf, None)
         };
 
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
+                "Segment {}/{}: audio={:.1}s, confidence={:?}, chars={}",
                 i + 1,
                 processable_count,
                 segment_duration_sec,
                 conf,
-                if trimmed.len() > 80 {
-                    let mut end = 80;
-                    while !trimmed.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    &trimmed[..end]
-                } else {
-                    trimmed
-                }
+                trimmed.chars().count()
             );
             all_transcripts.push(TranscribedSegment {
                 text,
@@ -772,7 +670,10 @@ async fn run_import<R: Runtime>(
                 end_ms: segment.end_timestamp_ms,
                 word_timestamps,
             });
-            total_confidence += conf;
+            if let Some(confidence) = conf {
+                total_confidence += confidence;
+                confidence_count += 1;
+            }
         } else {
             debug!(
                 "Segment {}/{}: {:.1}s — empty transcription",
@@ -784,14 +685,10 @@ async fn run_import<R: Runtime>(
     }
 
     let transcribed_count = all_transcripts.len();
-    let avg_confidence = if transcribed_count > 0 {
-        total_confidence / transcribed_count as f32
-    } else {
-        0.0
-    };
+    let avg_confidence = (confidence_count > 0).then(|| total_confidence / confidence_count as f32);
 
     info!(
-        "Transcription complete: {} segments transcribed out of {}, avg confidence: {:.2}",
+        "Transcription complete: {} segments transcribed out of {}, avg reported confidence: {:?}",
         transcribed_count, processable_count, avg_confidence
     );
 
@@ -849,74 +746,27 @@ async fn prepare_cloud_import_timing_grid<R: Runtime>(
         return Err(anyhow!("Import cancelled"));
     }
 
-    let path_for_decode = audio_path.to_path_buf();
-    let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&path_for_decode))
-        .await
-        .map_err(|e| anyhow!("Decode task join error: {}", e))??;
-    let duration_seconds = decoded.duration_seconds;
-
-    emit_progress(app, "resampling", 23, "Preparing speech timing...");
-
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        return Err(anyhow!("Import cancelled"));
-    }
-
-    let audio_samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
-        .await
-        .map_err(|e| anyhow!("Resample task join error: {}", e))?;
-
-    emit_progress(app, "vad", 25, "Detecting speech timing...");
-
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        return Err(anyhow!("Import cancelled"));
-    }
-
-    let app_for_vad = app.clone();
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
-            |vad_progress, segments_found| {
-                let overall_progress = 25 + (vad_progress as f32 * 0.05) as u32;
-                emit_progress(
-                    &app_for_vad,
-                    "vad",
-                    overall_progress,
-                    &format!(
-                        "Detecting speech timing... {}% ({} found)",
-                        vad_progress, segments_found
-                    ),
-                );
-                !IMPORT_CANCELLED.load(Ordering::SeqCst)
-            },
-        )
-    })
-    .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
-    .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
-
-    let timing_grid =
-        speech_segments_to_timing_grid(&speech_segments, MAX_TRANSCRIPTION_SEGMENT_SAMPLES);
+    let prepared_audio = super::batch_audio::prepare(
+        audio_path,
+        VAD_REDEMPTION_TIME_MS,
+        MAX_TRANSCRIPTION_SEGMENT_SAMPLES,
+        &IMPORT_CANCELLED,
+    )
+    .await?;
+    let duration_seconds = prepared_audio.duration_seconds;
+    let timing_grid = prepared_audio.timing_grid();
     if timing_grid.is_empty() {
-        warn!(
-            "Cloud provider returned collapsed transcript output, but local VAD found no timing grid; preserving cloud transcript as returned"
-        );
+        warn!("Cloud provider returned collapsed transcript output, but local VAD found no timing grid; preserving cloud transcript as returned");
         return Ok((duration_seconds, cloud_segments.to_vec()));
     }
 
     let timed_segments = split_transcripts_to_timing_grid(cloud_segments, &timing_grid);
     if timed_segments.is_empty() {
-        warn!(
-            "Cloud provider returned collapsed transcript output, but text could not be split onto local timing grid; preserving cloud transcript as returned"
-        );
+        warn!("Cloud provider returned collapsed transcript output, but text could not be split onto local timing grid; preserving cloud transcript as returned");
         return Ok((duration_seconds, cloud_segments.to_vec()));
     }
 
-    info!(
-        "Applied local VAD timing grid to cloud transcript during import: {} cloud segment(s) -> {} timed row(s)",
-        cloud_segments.len(),
-        timed_segments.len()
-    );
+    info!("Applied local VAD timing to imported cloud transcript");
 
     Ok((duration_seconds, timed_segments))
 }
@@ -954,11 +804,11 @@ async fn save_import_transcripts<R: Runtime>(
     // Write transcripts.json and metadata.json to the meeting folder
     emit_progress(app, "saving", 90, "Writing transcript files...");
 
-    if let Err(e) = write_transcripts_json(meeting_folder, &segments) {
-        warn!("Failed to write transcripts.json: {}", e);
+    if let Err(_e) = write_transcripts_json(meeting_folder, &segments) {
+        warn!("Failed to write transcripts.json");
     }
 
-    if let Err(e) = write_import_metadata(
+    if let Err(_e) = write_import_metadata(
         meeting_folder,
         &meeting_id,
         title,
@@ -969,7 +819,7 @@ async fn save_import_transcripts<R: Runtime>(
         used_model,
         transcription_source_language,
     ) {
-        warn!("Failed to write metadata.json: {}", e);
+        warn!("Failed to write metadata.json");
     }
 
     emit_progress(app, "complete", 100, "Import complete");
@@ -1097,8 +947,8 @@ async fn get_or_init_whisper<R: Runtime>(
                     target_model, current_model
                 );
 
-                if let Err(e) = e.discover_models().await {
-                    warn!("Model discovery error (continuing): {}", e);
+                if let Err(_e) = e.discover_models().await {
+                    warn!("Model discovery error (continuing)");
                 }
 
                 e.load_model(&target_model)
@@ -1143,8 +993,8 @@ async fn get_or_init_parakeet<R: Runtime>(
                     target_model, current_model
                 );
 
-                if let Err(e) = e.discover_models().await {
-                    warn!("Model discovery error (continuing): {}", e);
+                if let Err(_e) = e.discover_models().await {
+                    warn!("Model discovery error (continuing)");
                 }
 
                 e.load_model(&target_model)
@@ -1181,8 +1031,8 @@ async fn get_or_init_nemotron<R: Runtime>(
             let current_model = e.get_current_model().await;
             let needs_load = current_model.as_deref() != Some(target_model.as_str());
             if needs_load {
-                if let Err(err) = e.discover_models().await {
-                    warn!("Nemotron model discovery error (continuing): {}", err);
+                if let Err(_err) = e.discover_models().await {
+                    warn!("Nemotron model discovery error (continuing)");
                 }
                 e.load_model(&target_model).await.map_err(|err| {
                     anyhow!("Failed to load Nemotron model '{}': {}", target_model, err)
@@ -1271,7 +1121,7 @@ fn write_import_metadata(
     std::fs::write(&temp_path, &json_string)?;
     std::fs::rename(&temp_path, &metadata_path)?;
 
-    info!("Wrote metadata.json to {}", metadata_path.display());
+    info!("Meeting metadata saved");
     Ok(())
 }
 
@@ -1304,12 +1154,12 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
     match file_path {
         Some(path) => {
             let path_str = path.to_string();
-            info!("User selected: {}", path_str);
+            info!("Audio file selected");
 
             match validate_audio_file(Path::new(&path_str)) {
                 Ok(info) => Ok(Some(info)),
                 Err(e) => {
-                    error!("Validation failed: {}", e);
+                    error!("Validation failed");
                     Err(e.to_string())
                 }
             }
@@ -1324,7 +1174,7 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
 /// Validate an audio file from a given path (for drag-drop)
 #[tauri::command]
 pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
-    info!("Validating audio file: {}", path);
+    info!("Validating selected audio file");
     validate_audio_file(Path::new(&path)).map_err(|e| e.to_string())
 }
 
@@ -1347,8 +1197,8 @@ pub async fn start_import_audio_command<R: Runtime>(
     tauri::async_runtime::spawn(async move {
         let result = start_import(app, source_path, title, language, model, provider).await;
 
-        if let Err(e) = result {
-            error!("Import failed: {}", e);
+        if let Err(_e) = result {
+            error!("Import failed");
         }
     });
 
@@ -1377,6 +1227,7 @@ pub async fn is_import_in_progress_command() -> bool {
 mod tests {
     use super::super::common::create_transcript_segments;
     use super::*;
+    use crate::audio::common::split_segment_at_silence;
 
     fn write_test_wav(path: &Path) {
         let sample_rate = 16_000u32;
