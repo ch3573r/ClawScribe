@@ -1,21 +1,23 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
+import { useAppTheme } from '@/hooks/useAppTheme';
 import dynamic from 'next/dynamic';
 import { Summary, SummaryDataResponse, SummaryFormat, BlockNoteBlock } from '@/types';
 import { AISummary } from './index';
-import { Block } from '@blocknote/core';
+import { Block, BlockNoteEditor } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import "@blocknote/shadcn/style.css";
+import { planSummaryReplacement, ReplaceOptions, ReplacePreview } from "@/lib/summary-text-replace";
 
 // Dynamically import BlockNote Editor to avoid SSR issues
 const Editor = dynamic(() => import('../BlockNoteEditor/Editor'), { ssr: false });
 
 interface BlockNoteSummaryViewProps {
   summaryData: SummaryDataResponse | Summary | null;
-  onSave?: (data: { markdown?: string; summary_json?: BlockNoteBlock[] }) => void;
+  onSave?: (data: { markdown?: string; summary_json?: BlockNoteBlock[] }) => void | Promise<void>;
   onSummaryChange?: (summary: Summary) => void;
   status?: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   error?: string | null;
@@ -31,6 +33,8 @@ interface BlockNoteSummaryViewProps {
 export interface BlockNoteSummaryViewRef {
   saveSummary: () => Promise<void>;
   getMarkdown: () => Promise<string>;
+  previewReplacement: (options: ReplaceOptions) => ReplacePreview;
+  replaceText: (options: ReplaceOptions, token: string) => void;
   isDirty: boolean;
 }
 
@@ -75,48 +79,43 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   meeting,
   onDirtyChange
 }, ref) => {
+  const theme = useAppTheme();
+  const saveInFlight = useRef(false);
   const { format, data } = detectSummaryFormat(summaryData);
   const [isDirty, setIsDirty] = useState(false);
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
+  const [loadError, setLoadError] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const isContentLoaded = useRef(false);
+  const directEditor = useRef<BlockNoteEditor | null>(null);
+  const onEditorReady = useCallback((value: BlockNoteEditor) => { directEditor.current = value; }, []);
 
   // Create BlockNote editor for markdown parsing
   const editor = useCreateBlockNote({
     initialContent: undefined
   });
 
-  // Parse markdown to blocks when format is markdown
+  // Ignore late parses and reset dirty state only when a new saved summary loads.
   useEffect(() => {
-    if (format === 'markdown' && data?.markdown && editor) {
-      const loadMarkdown = async () => {
-        try {
-          console.log('📝 Parsing markdown to BlockNote blocks...');
-          const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
-          editor.replaceBlocks(editor.document, blocks);
-          console.log('✅ Markdown parsed successfully');
-
-          // Delay to ensure editor has finished rendering before allowing onChange
-          setTimeout(() => {
-            isContentLoaded.current = true;
-          }, 100);
-        } catch (err) {
-          console.error('❌ Failed to parse markdown:', err);
-        }
-      };
-      loadMarkdown();
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    isContentLoaded.current = false;
+    setLoadError(false);
+    setIsDirty(false);
+    const ready = () => { timer = setTimeout(() => { if (active) isContentLoaded.current = true; }, 100); };
+    if (format === 'markdown' && data?.markdown) {
+      void editor.tryParseMarkdownToBlocks(data.markdown).then(blocks => {
+        if (!active) return;
+        editor.replaceBlocks(editor.document, blocks);
+        setCurrentBlocks(blocks);
+        ready();
+      }).catch(() => { if (active) setLoadError(true); });
+    } else if (format === 'blocknote' && data?.summary_json) {
+      setCurrentBlocks(data.summary_json);
+      ready();
     }
-  }, [format, data?.markdown, editor]);
-
-  // Set content loaded flag for blocknote format
-  useEffect(() => {
-    if (format === 'blocknote' && data?.summary_json) {
-      // Delay to ensure editor has finished rendering
-      setTimeout(() => {
-        isContentLoaded.current = true;
-      }, 100);
-    }
-  }, [format, data?.summary_json]);
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [format, data?.markdown, data?.summary_json, editor]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
@@ -134,7 +133,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   }, [isDirty, onDirtyChange]);
 
   const handleSave = useCallback(async () => {
-    if (!onSave || !isDirty) return;
+    if (!onSave || !isDirty || saveInFlight.current) return;
+    saveInFlight.current = true;
 
     setIsSaving(true);
     try {
@@ -153,14 +153,15 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         saveData.markdown = markdownResult.markdown;
       }
 
-      onSave(saveData);
+      await onSave(saveData);
 
       setIsDirty(false);
       console.log('✅ Save successful');
     } catch (err) {
       console.error('❌ Save failed:', err);
-      alert('Failed to save changes. Please try again.');
+      throw new Error("Could not save the summary. Your edits are still in the editor.");
     } finally {
+      saveInFlight.current = false;
       setIsSaving(false);
     }
   }, [onSave, isDirty, currentBlocks, editor]);
@@ -168,11 +169,26 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   // Expose methods to parent via ref
   useImperativeHandle(ref, () => ({
     saveSummary: handleSave,
+    previewReplacement: (options) => {
+      const active = format === 'markdown' ? editor : format === 'blocknote' ? directEditor.current : null;
+      if (!active || !isContentLoaded.current) throw new Error('This summary is not ready for replacement.');
+      return planSummaryReplacement(active.document, options);
+    },
+    replaceText: (options, token) => {
+      const active = format === 'markdown' ? editor : format === 'blocknote' ? directEditor.current : null;
+      if (!active || !isContentLoaded.current || isSaving) throw new Error('Wait for the summary to finish loading or saving.');
+      const plan = planSummaryReplacement(active.document, options);
+      if (plan.token !== token) throw new Error('The summary changed. Preview the replacements again.');
+      if (plan.matches) {
+        active.replaceBlocks(active.document, plan.blocks);
+        setCurrentBlocks(active.document);
+        setIsDirty(true);
+      }
+    },
     getMarkdown: async () => {
       try {
         console.log('🔍 getMarkdown called, format:', format);
         console.log('🔍 currentBlocks length:', currentBlocks.length);
-        console.log('🔍 data:', data);
 
         // For markdown format - use the main editor
         if (format === 'markdown' && editor) {
@@ -216,7 +232,9 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       }
     },
     isDirty
-  }), [handleSave, isDirty, editor, format, currentBlocks, data]);
+  }), [handleSave, isDirty, isSaving, editor, format, currentBlocks, data]);
+
+  if (loadError) return <p role="alert" className="text-sm text-destructive">Could not open the summary editor. Reopen this meeting to retry; the saved notes are retained.</p>;
 
   // Render legacy format
   if (format === 'legacy') {
@@ -240,12 +258,14 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       <div className="flex flex-col w-full">
         <div className="w-full">
           <Editor
+            key={meeting?.id}
             initialContent={data.summary_json}
+            onEditorReady={onEditorReady}
             onChange={(blocks) => {
               console.log('📝 Editor blocks changed:', blocks.length);
               handleEditorChange(blocks);
             }}
-            editable={true}
+            editable={!isSaving}
           />
         </div>
       </div>
@@ -260,13 +280,13 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         <div className="w-full">
           <BlockNoteView
             editor={editor}
-            editable={true}
+            editable={!isSaving}
             onChange={() => {
               if (isContentLoaded.current) {
                 handleEditorChange(editor.document);
               }
             }}
-            theme="light"
+            theme={theme}
           />
         </div>
       </div>

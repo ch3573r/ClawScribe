@@ -21,6 +21,7 @@ import { TranscriptSettings } from "@/components/TranscriptSettings";
 import { RecordingSettings } from "@/components/RecordingSettings";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { SummaryModelSettings } from "@/components/SummaryModelSettings";
+import { SummaryTemplateSettings } from "@/components/SummaryTemplateSettings";
 import { BetaSettings } from "@/components/BetaSettings";
 import { IntegrationsSettings, DiagnosticsSettings } from "@/components/IntegrationsSettings";
 import { ThemeSettings } from "@/components/ThemeSettings";
@@ -132,7 +133,7 @@ export default function SettingsPage() {
           />
         );
       case "summary":
-        return <SummaryModelSettings />;
+        return <div className="space-y-6"><SummaryModelSettings /><SummaryTemplateSettings /></div>;
       case "integrations":
         return <IntegrationsSettings />;
       case "diagnostics":

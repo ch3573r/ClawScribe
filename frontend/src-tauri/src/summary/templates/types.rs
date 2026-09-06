@@ -37,25 +37,28 @@ pub struct Template {
 impl Template {
     /// Validates the template structure
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.is_empty() {
-            return Err("Template name cannot be empty".to_string());
+        if self.name.trim().is_empty() || self.name.len() > 200 {
+            return Err("Template name must contain 1 to 200 bytes".to_string());
         }
 
-        if self.description.is_empty() {
-            return Err("Template description cannot be empty".to_string());
+        if self.description.trim().is_empty() || self.description.len() > 4000 {
+            return Err("Template description must contain 1 to 4,000 bytes".to_string());
         }
 
-        if self.sections.is_empty() {
-            return Err("Template must have at least one section".to_string());
+        if self.sections.is_empty() || self.sections.len() > 30 {
+            return Err("Template must have 1 to 30 sections".to_string());
         }
 
         for (i, section) in self.sections.iter().enumerate() {
-            if section.title.is_empty() {
-                return Err(format!("Section {} has empty title", i));
+            if section.title.trim().is_empty() || section.title.len() > 200 {
+                return Err(format!("Section {} needs a title of 1 to 200 bytes", i));
             }
 
-            if section.instruction.is_empty() {
-                return Err(format!("Section '{}' has empty instruction", section.title));
+            if section.instruction.trim().is_empty() || section.instruction.len() > 16000 {
+                return Err(format!(
+                    "Section '{}' needs instructions of 1 to 16,000 bytes",
+                    section.title
+                ));
             }
 
             match section.format.as_str() {

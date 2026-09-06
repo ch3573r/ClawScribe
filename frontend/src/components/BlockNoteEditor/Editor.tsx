@@ -1,7 +1,8 @@
 "use client";
 
+import { useAppTheme } from '@/hooks/useAppTheme';
 import { useEffect } from "react";
-import type { PartialBlock, Block } from "@blocknote/core";
+import type { PartialBlock, Block, BlockNoteEditor } from "@blocknote/core";
 import { useCreateBlockNote } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/shadcn/style.css";
@@ -11,9 +12,11 @@ interface EditorProps {
   initialContent?: Block[];
   onChange?: (blocks: Block[]) => void;
   editable?: boolean;
+  onEditorReady?: (editor: BlockNoteEditor) => void;
 }
 
-export default function Editor({ initialContent, onChange, editable = true }: EditorProps) {
+export default function Editor({ initialContent, onChange, editable = true, onEditorReady }: EditorProps) {
+  const theme = useAppTheme();
   console.log('📝 EDITOR: Initializing BlockNote editor with blocks:', {
     hasContent: !!initialContent,
     blocksCount: initialContent?.length || 0,
@@ -25,6 +28,8 @@ export default function Editor({ initialContent, onChange, editable = true }: Ed
   });
 
   console.log('📝 EDITOR: BlockNote editor created successfully');
+
+  useEffect(() => { onEditorReady?.(editor); }, [editor, onEditorReady]);
 
   // Handle content changes
   useEffect(() => {
@@ -47,5 +52,5 @@ export default function Editor({ initialContent, onChange, editable = true }: Ed
     };
   }, [editor, onChange]);
 
-  return <BlockNoteView editor={editor} editable={editable} theme="light" />;
+  return <BlockNoteView editor={editor} editable={editable} theme={theme} />;
 }

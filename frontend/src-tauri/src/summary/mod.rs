@@ -49,6 +49,7 @@ pub(crate) mod metadata;
 pub mod openai_provider;
 pub mod processor;
 pub mod service;
+pub mod sources;
 pub mod summary_engine;
 pub mod template_commands;
 pub mod templates;

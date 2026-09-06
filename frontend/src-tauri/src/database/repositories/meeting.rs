@@ -87,6 +87,7 @@ impl MeetingsRepository {
             let meeting_transcripts = transcripts
                 .into_iter()
                 .map(|t| MeetingTranscript {
+                    original_text: t.original_transcript,
                     id: t.id,
                     text: t.transcript,
                     timestamp: t.timestamp,
@@ -155,7 +156,7 @@ impl MeetingsRepository {
         let transcripts = sqlx::query_as::<_, Transcript>(
             "SELECT * FROM transcripts
              WHERE meeting_id = ?
-             ORDER BY audio_start_time ASC
+             ORDER BY audio_start_time ASC, id ASC
              LIMIT ? OFFSET ?",
         )
         .bind(meeting_id)

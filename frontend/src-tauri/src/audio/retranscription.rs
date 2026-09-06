@@ -639,6 +639,13 @@ async fn save_retranscription_transcripts<R: Runtime>(
         .await
         .map_err(|e| anyhow!("Failed to delete existing transcripts: {}", e))?;
 
+    // Previous corrections remain in the archived transcript revision. They
+    // cannot be applied to the new recognition result by the correction undo UI.
+    sqlx::query("UPDATE transcript_edit_batches SET undone = 1 WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *tx)
+        .await?;
+
     for segment in &segments {
         let word_timestamps_json = segment
             .word_timestamps

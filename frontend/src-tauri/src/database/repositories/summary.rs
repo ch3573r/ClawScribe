@@ -40,7 +40,21 @@ impl SummaryProcessesRepository {
             return Ok(false);
         }
 
-        let result_json = serde_json::to_string(summary);
+        // User edits invalidate the English generation cache but retain source identities.
+        let previous: Option<String> =
+            sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
+                .bind(meeting_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .flatten();
+        let mut saved = summary.clone();
+        if let Some(sources) = previous
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|value| value.get("summary_sources").cloned())
+        {
+            saved["summary_sources"] = sources;
+        }
+        let result_json = serde_json::to_string(&saved);
         if result_json.is_err() {
             error!("Can't convert the json to string for saving to Database");
             transaction.rollback().await?;

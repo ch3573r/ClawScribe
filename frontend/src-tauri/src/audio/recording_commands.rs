@@ -34,6 +34,7 @@ pub use super::transcription::TranscriptUpdate;
 
 // Simple recording state tracking
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
+static LIVE_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static RECORDING_JOB: Mutex<Option<tokio::sync::OwnedSemaphorePermit>> = Mutex::new(None);
 
 // Global recording manager and transcription task to keep them alive during recording
@@ -130,6 +131,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     let start_timer = Instant::now();
     info!("Starting recording with default devices");
 
+    let mode = super::recording_mode::load(&app)?;
     let job = super::inference::claim_job()?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
@@ -144,7 +146,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Validate that transcription models are available before starting recording
     info!("🔍 Validating transcription model availability before starting recording...");
     let validation_timer = Instant::now();
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
+    if let Err(validation_error) = if mode.transcribes() {
+        transcription::validate_transcription_model_ready(&app).await
+    } else {
+        Ok(())
+    } {
         error!("Model validation failed");
 
         // Emit error event for frontend - actionable: false to show toast instead of modal
@@ -167,6 +173,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Create new recording manager
     let mut manager = RecordingManager::new();
+    manager.set_mode(mode);
 
     // Load recording preferences to get save path, auto_save, and device preferences.
     let (auto_save, preferred_mic_name, preferred_system_name, save_folder) =
@@ -298,7 +305,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     manager.set_recordings_folder(save_folder);
 
     // Record which transcription engine + model this session uses.
-    let (tp, tm, source_language) = resolve_transcription_info(&app).await;
+    let (tp, tm, source_language) = if mode.transcribes() {
+        resolve_transcription_info(&app).await
+    } else {
+        (None, None, None)
+    };
     // Provider-specific live VAD cap: Nemotron is slower per segment, so cap its
     // live segments shorter to reduce perceived latency; others keep the default.
     crate::audio::pipeline::set_live_max_segment_ms_for_provider(tp.as_deref().unwrap_or(""));
@@ -320,7 +331,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let manager_timer = Instant::now();
     let transcription_receiver = manager
-        .start_recording(microphone_device, system_device, auto_save)
+        .start_recording(
+            microphone_device,
+            system_device,
+            mode.saves_audio(auto_save),
+        )
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
     info!(
@@ -336,40 +351,45 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Set recording flag and reset speech detection flag
     info!("🔍 Setting IS_RECORDING to true and resetting SPEECH_DETECTED_EMITTED");
+    LIVE_TRANSCRIPTION.store(mode.transcribes(), Ordering::SeqCst);
     IS_RECORDING.store(true, Ordering::SeqCst);
     *RECORDING_JOB.lock().unwrap() = Some(job);
     drop(engine_lifecycle_guard);
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
+    if mode.transcribes() {
+        let task_handle =
+            transcription::start_transcription_task(app.clone(), transcription_receiver);
+        {
+            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
+            *global_task = Some(task_handle);
+        }
 
-    // CRITICAL: Listen for transcript-update events and save to recording manager
-    // This enables transcript history persistence for page reload sync
-    // Store listener ID for cleanup during stop_recording to ensure microphone is released
-    {
-        use tauri::Listener;
-        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                persist_transcript_update(update);
-            }
-        });
-        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-        *global_listener = Some(listener_id);
-        info!("✅ Transcript-update event listener registered for history persistence");
-    }
+        // CRITICAL: Listen for transcript-update events and save to recording manager
+        // This enables transcript history persistence for page reload sync
+        // Store listener ID for cleanup during stop_recording to ensure microphone is released
+        {
+            use tauri::Listener;
+            let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
+                if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
+                    persist_transcript_update(update);
+                }
+            });
+            let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
+            *global_listener = Some(listener_id);
+            info!("✅ Transcript-update event listener registered for history persistence");
+        }
+    } // Audio-only sessions have no worker or transcript listener.
 
     // Emit success event
     app.emit(
         "recording-started",
         serde_json::json!({
-            "message": "Recording started successfully with bounded transcription",
+            "message": "Recording started",
+            "recording_mode": mode,
             "devices": ["Default Microphone", "Default System Audio"],
-            "workers": 1
+            "workers": if mode.transcribes() { 1 } else { 0 }
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -404,6 +424,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let start_timer = Instant::now();
     info!("Starting recording with selected devices");
 
+    let mode = super::recording_mode::load(&app)?;
     let job = super::inference::claim_job()?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
@@ -418,7 +439,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Validate that transcription models are available before starting recording
     info!("🔍 Validating transcription model availability before starting recording...");
     let validation_timer = Instant::now();
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
+    if let Err(validation_error) = if mode.transcribes() {
+        transcription::validate_transcription_model_ready(&app).await
+    } else {
+        Ok(())
+    } {
         error!("Model validation failed");
 
         // Emit error event for frontend - actionable: false to show toast instead of modal
@@ -458,6 +483,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Create new recording manager
     let mut manager = RecordingManager::new();
+    manager.set_mode(mode);
 
     // Load recording preferences to check save path and auto_save setting.
     let (auto_save, save_folder) =
@@ -487,7 +513,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     manager.set_recordings_folder(save_folder);
 
     // Record which transcription engine + model this session uses.
-    let (tp, tm, source_language) = resolve_transcription_info(&app).await;
+    let (tp, tm, source_language) = if mode.transcribes() {
+        resolve_transcription_info(&app).await
+    } else {
+        (None, None, None)
+    };
     // Provider-specific live VAD cap: Nemotron is slower per segment, so cap its
     // live segments shorter to reduce perceived latency; others keep the default.
     crate::audio::pipeline::set_live_max_segment_ms_for_provider(tp.as_deref().unwrap_or(""));
@@ -509,7 +539,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Start recording with specified devices and auto_save setting
     let manager_timer = Instant::now();
     let transcription_receiver = manager
-        .start_recording(mic_device, system_device, auto_save)
+        .start_recording(mic_device, system_device, mode.saves_audio(auto_save))
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
     info!(
@@ -525,43 +555,48 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Set recording flag and reset speech detection flag
     info!("🔍 Setting IS_RECORDING to true and resetting SPEECH_DETECTED_EMITTED");
+    LIVE_TRANSCRIPTION.store(mode.transcribes(), Ordering::SeqCst);
     IS_RECORDING.store(true, Ordering::SeqCst);
     *RECORDING_JOB.lock().unwrap() = Some(job);
     drop(engine_lifecycle_guard);
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
+    if mode.transcribes() {
+        let task_handle =
+            transcription::start_transcription_task(app.clone(), transcription_receiver);
+        {
+            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
+            *global_task = Some(task_handle);
+        }
 
-    // CRITICAL: Listen for transcript-update events and save to recording manager
-    // This enables transcript history persistence for page reload sync
-    // Store listener ID for cleanup during stop_recording to ensure microphone is released
-    {
-        use tauri::Listener;
-        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                persist_transcript_update(update);
-            }
-        });
-        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-        *global_listener = Some(listener_id);
-        info!("✅ Transcript-update event listener registered for history persistence");
-    }
+        // CRITICAL: Listen for transcript-update events and save to recording manager
+        // This enables transcript history persistence for page reload sync
+        // Store listener ID for cleanup during stop_recording to ensure microphone is released
+        {
+            use tauri::Listener;
+            let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
+                if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
+                    persist_transcript_update(update);
+                }
+            });
+            let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
+            *global_listener = Some(listener_id);
+            info!("✅ Transcript-update event listener registered for history persistence");
+        }
+    } // Audio-only sessions have no worker or transcript listener.
 
     // Emit success event
     app.emit(
         "recording-started",
         serde_json::json!({
-            "message": "Recording started with custom devices and bounded transcription",
+            "message": "Recording started",
+            "recording_mode": mode,
             "devices": [
                 mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
                 system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
             ],
-            "workers": 1
+            "workers": if mode.transcribes() { 1 } else { 0 }
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -641,15 +676,18 @@ pub async fn stop_recording<R: Runtime>(
         store_recording_manager(manager);
     }
 
-    // Step 2: Signal transcription workers to finish processing ALL queued chunks
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({
-            "stage": "processing_transcripts",
-            "message": "Processing remaining transcript chunks...",
-            "progress": 40
-        }),
-    );
+    let transcribes = LIVE_TRANSCRIPTION.load(Ordering::SeqCst);
+    if transcribes {
+        // Step 2: Signal transcription workers to finish processing ALL queued chunks
+        let _ = app.emit(
+            "recording-shutdown-progress",
+            serde_json::json!({
+                "stage": "processing_transcripts",
+                "message": "Processing remaining transcript chunks...",
+                "progress": 40
+            }),
+        );
+    }
 
     // Drain a bounded amount of recognition work; retained audio supports recovery.
     let transcription_task = {
@@ -742,7 +780,7 @@ pub async fn stop_recording<R: Runtime>(
 
         // Stop progress monitoring
         progress_task.abort();
-    } else {
+    } else if transcribes {
         info!("ℹ️ No transcription task found to wait for");
         if transcription::current_transcription_metrics()
             .is_some_and(|status| status.chunks_in_queue > 0)
@@ -763,132 +801,135 @@ pub async fn stop_recording<R: Runtime>(
 
     let manager_for_cleanup = RECORDING_MANAGER.lock().unwrap().take();
 
-    // Step 3: Now safely unload Whisper model after ALL chunks are processed
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({
-            "stage": "unloading_model",
-            "message": "Unloading speech recognition model...",
-            "progress": 70
-        }),
-    );
+    if transcribes {
+        // Step 3: Now safely unload Whisper model after ALL chunks are processed
+        let _ = app.emit(
+            "recording-shutdown-progress",
+            serde_json::json!({
+                "stage": "unloading_model",
+                "message": "Unloading speech recognition model...",
+                "progress": 70
+            }),
+        );
 
-    info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
+        info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
 
-    // Determine which provider was used and unload the appropriate model (with timeout)
-    let config = match tokio::time::timeout(
-        tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
-        crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
-    )
-    .await
-    {
-        Ok(Ok(Some(config))) => {
-            if crate::audio::transcription::cloud::is_cloud_provider(Some(config.provider.as_str()))
-            {
-                Some("parakeet".to_string())
-            } else {
-                Some(config.provider)
-            }
-        }
-        Ok(Ok(None)) => None,
-        Ok(Err(_e)) => {
-            warn!("⚠️ Failed to get transcript config");
-            None
-        }
-        Err(_) => {
-            warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
-            None
-        }
-    };
-
-    if tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        match config.as_deref() {
-            Some("parakeet") => {
-                info!("🦜 Unloading Parakeet model...");
-                let engine_clone = {
-                    let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
-                        .lock()
-                        .unwrap();
-                    engine_guard.as_ref().cloned()
-                };
-
-                if let Some(engine) = engine_clone {
-                    let current_model = engine
-                        .get_current_model()
-                        .await
-                        .unwrap_or_else(|| "unknown".to_string());
-                    info!("Current Parakeet model before unload: '{}'", current_model);
-
-                    if engine.unload_model().await {
-                        info!(
-                            "✅ Parakeet model '{}' unloaded successfully",
-                            current_model
-                        );
-                    } else {
-                        warn!("Failed to unload Parakeet model");
-                    }
+        // Determine which provider was used and unload the appropriate model (with timeout)
+        let config = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
+            crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
+        )
+        .await
+        {
+            Ok(Ok(Some(config))) => {
+                if crate::audio::transcription::cloud::is_cloud_provider(Some(
+                    config.provider.as_str(),
+                )) {
+                    Some("parakeet".to_string())
                 } else {
-                    warn!("⚠️ No Parakeet engine found to unload model");
+                    Some(config.provider)
                 }
             }
-            Some("nemotron") => {
-                info!("🌊 Unloading Nemotron model...");
-                let engine_clone = {
-                    let engine_guard = crate::nemotron_engine::commands::NEMOTRON_ENGINE
-                        .lock()
-                        .unwrap();
-                    engine_guard.as_ref().cloned()
-                };
+            Ok(Ok(None)) => None,
+            Ok(Err(_e)) => {
+                warn!("⚠️ Failed to get transcript config");
+                None
+            }
+            Err(_) => {
+                warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
+                None
+            }
+        };
 
-                if let Some(engine) = engine_clone {
-                    let current_model = engine
-                        .get_current_model()
-                        .await
-                        .unwrap_or_else(|| "unknown".to_string());
-                    if engine.unload_model().await {
-                        info!(
-                            "✅ Nemotron model '{}' unloaded successfully",
-                            current_model
-                        );
+        if tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            match config.as_deref() {
+                Some("parakeet") => {
+                    info!("🦜 Unloading Parakeet model...");
+                    let engine_clone = {
+                        let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
+                            .lock()
+                            .unwrap();
+                        engine_guard.as_ref().cloned()
+                    };
+
+                    if let Some(engine) = engine_clone {
+                        let current_model = engine
+                            .get_current_model()
+                            .await
+                            .unwrap_or_else(|| "unknown".to_string());
+                        info!("Current Parakeet model before unload: '{}'", current_model);
+
+                        if engine.unload_model().await {
+                            info!(
+                                "✅ Parakeet model '{}' unloaded successfully",
+                                current_model
+                            );
+                        } else {
+                            warn!("Failed to unload Parakeet model");
+                        }
                     } else {
-                        warn!("Failed to unload Nemotron model");
+                        warn!("⚠️ No Parakeet engine found to unload model");
                     }
-                } else {
-                    warn!("⚠️ No Nemotron engine found to unload model");
+                }
+                Some("nemotron") => {
+                    info!("🌊 Unloading Nemotron model...");
+                    let engine_clone = {
+                        let engine_guard = crate::nemotron_engine::commands::NEMOTRON_ENGINE
+                            .lock()
+                            .unwrap();
+                        engine_guard.as_ref().cloned()
+                    };
+
+                    if let Some(engine) = engine_clone {
+                        let current_model = engine
+                            .get_current_model()
+                            .await
+                            .unwrap_or_else(|| "unknown".to_string());
+                        if engine.unload_model().await {
+                            info!(
+                                "✅ Nemotron model '{}' unloaded successfully",
+                                current_model
+                            );
+                        } else {
+                            warn!("Failed to unload Nemotron model");
+                        }
+                    } else {
+                        warn!("⚠️ No Nemotron engine found to unload model");
+                    }
+                }
+                _ => {
+                    // Default to Whisper
+                    info!("🎤 Unloading Whisper model...");
+                    let engine_clone = {
+                        let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
+                            .lock()
+                            .unwrap();
+                        engine_guard.as_ref().cloned()
+                    };
+
+                    if let Some(engine) = engine_clone {
+                        let current_model = engine
+                            .get_current_model()
+                            .await
+                            .unwrap_or_else(|| "unknown".to_string());
+                        info!("Current Whisper model before unload: '{}'", current_model);
+
+                        if engine.unload_model().await {
+                            info!("✅ Whisper model '{}' unloaded successfully", current_model);
+                        } else {
+                            warn!("Failed to unload Whisper model");
+                        }
+                    } else {
+                        warn!("⚠️ No Whisper engine found to unload model");
+                    }
                 }
             }
-            _ => {
-                // Default to Whisper
-                info!("🎤 Unloading Whisper model...");
-                let engine_clone = {
-                    let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
-                        .lock()
-                        .unwrap();
-                    engine_guard.as_ref().cloned()
-                };
-
-                if let Some(engine) = engine_clone {
-                    let current_model = engine
-                        .get_current_model()
-                        .await
-                        .unwrap_or_else(|| "unknown".to_string());
-                    info!("Current Whisper model before unload: '{}'", current_model);
-
-                    if engine.unload_model().await {
-                        info!("✅ Whisper model '{}' unloaded successfully", current_model);
-                    } else {
-                        warn!("Failed to unload Whisper model");
-                    }
-                } else {
-                    warn!("⚠️ No Whisper engine found to unload model");
-                }
-            }
+        })
+        .await
+        .is_err()
+        {
+            warn!("Speech engine still finishing a native call; model retained until it returns");
         }
-    })
-    .await
-    .is_err()
-    {
-        warn!("Speech engine still finishing a native call; model retained until it returns");
     }
 
     // Step 3.5: Track meeting ended analytics with privacy-safe metadata
@@ -943,26 +984,26 @@ pub async fn stop_recording<R: Runtime>(
         }
 
         // Get transcription model info (already loaded above for model unload)
-        let transcription_config = match crate::api::api::api_get_transcript_config(
-            app.clone(),
-            app.clone().state(),
-            None,
-        )
-        .await
-        {
-            Ok(Some(config)) => {
-                if crate::audio::transcription::cloud::is_cloud_provider(Some(
-                    config.provider.as_str(),
-                )) {
-                    Some((
-                        "parakeet".to_string(),
-                        crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                    ))
-                } else {
-                    Some((config.provider, config.model))
+        let transcription_config = if !transcribes {
+            Some(("audio_only".to_string(), "none".to_string()))
+        } else {
+            match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
+                .await
+            {
+                Ok(Some(config)) => {
+                    if crate::audio::transcription::cloud::is_cloud_provider(Some(
+                        config.provider.as_str(),
+                    )) {
+                        Some((
+                            "parakeet".to_string(),
+                            crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                        ))
+                    } else {
+                        Some((config.provider, config.model))
+                    }
                 }
+                _ => None,
             }
-            _ => None,
         };
 
         let (transcription_provider, transcription_model) =
@@ -1112,13 +1153,14 @@ pub async fn stop_recording<R: Runtime>(
             },
             "folder_path": folder_path_str,
             "meeting_name": meeting_name_str,
+            "recording_mode": if transcribes { "live" } else { "audio_only" },
             "transcription_incomplete": transcription_incomplete,
             "audio_save_failed": audio_save_failed
         }),
     )
     .map_err(|e| e.to_string())?;
 
-    if !transcription_incomplete && !audio_save_failed {
+    if transcribes && !transcription_incomplete && !audio_save_failed {
         crate::openclaw::submit_completed_recording(
             app.clone(),
             folder_path_str.clone(),
@@ -1144,6 +1186,16 @@ pub async fn is_recording() -> bool {
 
 /// Get recording statistics
 pub async fn get_transcription_status() -> TranscriptionStatus {
+    if !LIVE_TRANSCRIPTION.load(Ordering::SeqCst) {
+        return TranscriptionStatus {
+            chunks_in_queue: 0,
+            is_processing: false,
+            last_activity_ms: 0,
+            queued_audio_seconds: 0.0,
+            processing_realtime_factor: None,
+            estimated_seconds_remaining: None,
+        };
+    }
     match transcription::current_transcription_metrics() {
         Some(status) => TranscriptionStatus {
             chunks_in_queue: status.chunks_in_queue,
@@ -1258,6 +1310,7 @@ pub async fn get_recording_state() -> serde_json::Value {
     if let Some(manager) = manager_guard.as_ref() {
         serde_json::json!({
             "is_recording": is_recording,
+            "recording_mode": if LIVE_TRANSCRIPTION.load(Ordering::SeqCst) { "live" } else { "audio_only" },
             "is_paused": manager.is_paused(),
             "is_active": manager.is_active(),
             "recording_duration": manager.get_recording_duration(),
@@ -1268,6 +1321,7 @@ pub async fn get_recording_state() -> serde_json::Value {
     } else {
         serde_json::json!({
             "is_recording": is_recording,
+            "recording_mode": if LIVE_TRANSCRIPTION.load(Ordering::SeqCst) { "live" } else { "audio_only" },
             "is_paused": false,
             "is_active": false,
             "recording_duration": null,

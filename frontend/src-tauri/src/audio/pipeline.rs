@@ -762,7 +762,7 @@ pub struct AudioPipeline {
     receiver: mpsc::Receiver<AudioChunk>,
     transcription_sender: TranscriptionQueueSender,
     state: Arc<RecordingState>,
-    vad_processor: ContinuousVadProcessor,
+    vad_processor: Option<ContinuousVadProcessor>,
     sample_rate: u32,
     chunk_id_counter: u64,
     // Performance optimization: reduce logging frequency
@@ -790,6 +790,7 @@ impl AudioPipeline {
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
         system_device_kind: super::device_detection::InputDeviceKind,
+        transcribe: bool,
     ) -> Self {
         // Log device characteristics for adaptive buffering
         info!("🎛️ AudioPipeline initializing with device characteristics:");
@@ -824,22 +825,28 @@ impl AudioPipeline {
         // Per-provider live cap, set at recording start (shorter for Nemotron).
         let live_max_segment_ms = LIVE_MAX_SEGMENT_MS.load(std::sync::atomic::Ordering::Relaxed);
 
-        let vad_processor = match ContinuousVadProcessor::new_with_max_segment_duration(
-            sample_rate,
-            redemption_time,
-            Some(live_max_segment_ms),
-        ) {
-            Ok(processor) => {
-                info!(
+        let vad_processor = if transcribe {
+            Some(
+                match ContinuousVadProcessor::new_with_max_segment_duration(
+                    sample_rate,
+                    redemption_time,
+                    Some(live_max_segment_ms),
+                ) {
+                    Ok(processor) => {
+                        info!(
                     "VAD-driven pipeline: live speech segments capped at {}ms for lower latency",
                     live_max_segment_ms
                 );
-                processor
-            }
-            Err(e) => {
-                error!("Failed to create VAD processor: {}", e);
-                panic!("VAD processor creation failed: {}", e);
-            }
+                        processor
+                    }
+                    Err(e) => {
+                        error!("Failed to create VAD processor: {}", e);
+                        panic!("VAD processor creation failed: {}", e);
+                    }
+                },
+            )
+        } else {
+            None
         };
 
         // Initialize professional audio mixing components
@@ -1019,8 +1026,13 @@ impl AudioPipeline {
                                 .await?;
 
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
-                            match self.vad_processor.process_audio(&mixed_with_gain) {
-                                Ok(speech_segments) => {
+                            match self
+                                .vad_processor
+                                .as_mut()
+                                .map(|vad| vad.process_audio(&mixed_with_gain))
+                                .transpose()
+                            {
+                                Ok(Some(speech_segments)) => {
                                     let had_segments = !speech_segments.is_empty();
                                     // Attribute the segment to the dominant source by SNR
                                     // accumulated over the windows feeding it. "Me" only when
@@ -1078,6 +1090,10 @@ impl AudioPipeline {
                                         mic_snr_acc = 0.0;
                                         sys_snr_acc = 0.0;
                                     }
+                                }
+                                Ok(None) => {
+                                    mic_snr_acc = 0.0;
+                                    sys_snr_acc = 0.0;
                                 }
                                 Err(_) => {
                                     self.transcription_sender.mark_failed();
@@ -1174,7 +1190,7 @@ impl AudioPipeline {
             self.preserve_mixed_audio(&mixed, self.recording_buffer_timestamp)
                 .await?;
             self.flush_recording_buffer().await?;
-            let segments = self.vad_processor.process_audio(&mixed).unwrap_or_else(|_| {
+            let segments = self.vad_processor.as_mut().map(|vad| vad.process_audio(&mixed)).transpose().map(|segments| segments.unwrap_or_default()).unwrap_or_else(|_| {
                 self.transcription_sender.mark_failed();
                 self.state.report_warning("Final speech detection failed; use Retranscribe to recover speech from the saved audio.");
                 Vec::new()
@@ -1195,7 +1211,10 @@ impl AudioPipeline {
         self.flush_recording_buffer().await?;
 
         // Flush any remaining audio from VAD processor and send segments to transcription
-        match self.vad_processor.flush() {
+        let Some(vad) = self.vad_processor.as_mut() else {
+            return Ok(());
+        };
+        match vad.flush() {
             Ok(final_segments) => {
                 for segment in final_segments {
                     let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
@@ -1264,6 +1283,7 @@ impl AudioPipelineManager {
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
         system_device_kind: super::device_detection::InputDeviceKind,
+        transcribe: bool,
     ) -> Result<()> {
         // Log device information for adaptive buffering
         info!("🎙️ Starting pipeline with device info:");
@@ -1293,6 +1313,7 @@ impl AudioPipelineManager {
             mic_device_kind,
             system_device_name,
             system_device_kind,
+            transcribe,
         );
 
         // CRITICAL FIX: Connect recording sender to receive pre-mixed audio
@@ -1343,6 +1364,39 @@ impl Default for AudioPipelineManager {
 #[cfg(test)]
 mod queue_failure_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn audio_only_flush_preserves_audio_without_vad_or_transcription() {
+        let (_capture, receiver) = mpsc::channel(1);
+        let (sender, _transcripts, metrics) =
+            super::super::transcription::queue::transcription_queue().unwrap();
+        let (recording, mut saved, _) =
+            super::super::transcription::queue::transcription_queue().unwrap();
+        let kind = super::super::device_detection::InputDeviceKind::Unknown;
+        let mut pipeline = AudioPipeline::new(
+            receiver,
+            sender,
+            RecordingState::new(),
+            0,
+            48000,
+            "Microphone".into(),
+            kind,
+            "System audio".into(),
+            kind,
+            false,
+        );
+        assert!(pipeline.vad_processor.is_none());
+        pipeline.recording_sender_for_mixed = Some(recording);
+        pipeline
+            .preserve_mixed_audio(&vec![0.1; 4800], 0.0)
+            .await
+            .unwrap();
+        pipeline.flush_remaining_audio().await.unwrap();
+        let chunk = saved.recv().await.unwrap().unwrap().chunk;
+        assert_eq!(chunk.data.len(), 4800);
+        assert_eq!(chunk.sample_rate, 48000);
+        assert_eq!(metrics.snapshot().chunks_in_queue, 0);
+    }
 
     #[test]
     fn queue_write_warning_is_throttled_and_resets_after_recovery() {

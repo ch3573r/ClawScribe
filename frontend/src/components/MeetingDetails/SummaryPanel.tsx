@@ -8,6 +8,8 @@ import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
 import { MeetingExportButtons } from './MeetingExportButtons';
 import Analytics from '@/lib/analytics';
+import { TextReplaceDialog } from './TextReplaceDialog';
+import { SummarySources, ResolvedSummarySource } from './SummarySources';
 import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
 import { Languages, ChevronDown, ChevronUp, Search, X } from 'lucide-react';
@@ -23,6 +25,8 @@ import {
 } from '@/lib/summary-language-preferences';
 
 interface SummaryPanelProps {
+  onRevealSource?: (source: ResolvedSummarySource) => Promise<void>;
+  onPlaySource?: (seconds: number) => Promise<void>;
   meeting: {
     id: string;
     title: string;
@@ -98,6 +102,8 @@ function transcriptToPlainText(transcripts: Transcript[]): string {
 }
 
 export function SummaryPanel({
+  onRevealSource,
+  onPlaySource,
   meeting,
   meetingTitle,
   onTitleChange,
@@ -135,6 +141,7 @@ export function SummaryPanel({
   const [summaryLang, setSummaryLang] = useState<string | null>(null);
   const [summaryLangStorage, setSummaryLangStorage] = useState<SummaryLanguageStorage>('metadata');
   const [langPickerOpen, setLangPickerOpen] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
   const [isFindOpen, setIsFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findMatchCount, setFindMatchCount] = useState(0);
@@ -392,7 +399,9 @@ export function SummaryPanel({
   );
 
   return (
-    <div className="flex-1 min-w-0 flex flex-col bg-card overflow-hidden">
+    <div tabIndex={0} onKeyDown={event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h' && aiSummary && !isSummaryLoading) { event.preventDefault(); setReplaceOpen(true); }
+    }} className="flex-1 min-h-[24rem] min-w-0 flex flex-col bg-card overflow-hidden">
       {/* Title area */}
       <div className="border-b border-border p-3">
         <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
@@ -455,6 +464,7 @@ export function SummaryPanel({
                 hasSummary={!!aiSummary}
               />
 
+              <Button variant="outline" size="sm" onClick={() => setReplaceOpen(true)}>Replace text</Button>
               <MeetingExportButtons
                 meetingId={meeting.id}
                 meetingTitle={meetingTitle}
@@ -469,6 +479,16 @@ export function SummaryPanel({
         </div>
       </div>
 
+      <TextReplaceDialog open={replaceOpen} onOpenChange={setReplaceOpen} title="summary"
+        preview={async options => {
+          if (!summaryRef.current) throw new Error('The summary is not ready.');
+          return summaryRef.current.previewReplacement(options);
+        }}
+        apply={async (options, token) => {
+          if (!summaryRef.current) throw new Error('The summary is not ready.');
+          summaryRef.current.replaceText(options, token);
+          toast.success('Summary text replaced', { description: 'Review your changes and select Save. Use Ctrl+Z in the editor to undo.' });
+        }} />
       {isFindOpen && aiSummary && !isSummaryLoading && (
         <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
           <Search className="h-4 w-4 text-muted-foreground" />
@@ -629,7 +649,8 @@ export function SummaryPanel({
             </div>
           )}
           <div ref={summarySearchRootRef} className="w-full bg-background/60 p-5">
-            <div className="mx-auto max-w-[72rem] rounded-xl bg-[#fbfbf8] p-8 text-slate-950 shadow-sm ring-1 ring-black/10 dark:ring-white/10">
+            <div className="mx-auto max-w-[72rem] rounded-xl bg-card p-4 text-foreground sm:p-8 shadow-sm ring-1 ring-black/10 dark:ring-white/10">
+              <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
               <BlockNoteSummaryView
                 ref={summaryRef}
                 summaryData={aiSummary}
@@ -648,6 +669,7 @@ export function SummaryPanel({
                   created_at: meeting.created_at
                 }}
               />
+              </SummarySources>
             </div>
           </div>
           {summaryStatus !== 'idle' && (

@@ -22,7 +22,7 @@ pub fn set_bundled_templates_dir(path: PathBuf) {
 /// - macOS: ~/Library/Application Support/ClawScribe/templates/
 /// - Windows: %APPDATA%\ClawScribe\templates\
 /// - Linux: ~/.config/ClawScribe/templates/
-fn get_custom_templates_dir() -> Option<PathBuf> {
+pub(super) fn get_custom_templates_dir() -> Option<PathBuf> {
     data_templates_dir("ClawScribe")
 }
 
@@ -122,6 +122,7 @@ fn load_custom_template(template_id: &str) -> Option<String> {
 /// # Returns
 /// Parsed and validated Template struct
 pub fn get_template(template_id: &str) -> Result<Template, String> {
+    super::storage::validate_id(template_id)?;
     info!("Loading template: {}", template_id);
 
     // Try custom template first, then bundled, then built-in

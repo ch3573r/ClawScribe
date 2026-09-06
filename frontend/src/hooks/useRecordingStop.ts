@@ -90,6 +90,7 @@ export function useRecordingStop(
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
             const { folder_path, meeting_name } = event.payload;
+            sessionStorage.setItem('last_recording_mode', event.payload.recording_mode ?? 'live');
             sessionStorage.setItem('last_recording_outcome', JSON.stringify(recordingOutcome(event.payload)));
 
             // Store folder_path and meeting_name for later use in handleRecordingStop
@@ -142,12 +143,13 @@ export function useRecordingStop(
       // This function only handles post-stop processing (transcription wait, API call, navigation)
 
       // Wait for transcription to complete
-      setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Waiting for transcription...');
+      const audioOnly = sessionStorage.getItem('last_recording_mode') === 'audio_only';
+      if (!audioOnly) setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Waiting for transcription...');
 
       const MAX_WAIT_TIME = 60000; // 60 seconds maximum wait (increased for longer processing)
       const POLL_INTERVAL = 500; // Check every 500ms
       let elapsedTime = 0;
-      let transcriptionComplete = false;
+      let transcriptionComplete = audioOnly;
 
       // Listen for transcription-complete event
       const unlistenComplete = await listen<{failed?: boolean; cancelled?: boolean; chunks_remaining?: number}>('transcription-complete', (event) => {
@@ -222,7 +224,7 @@ export function useRecordingStop(
 
       // Final buffer flush: process ALL remaining transcripts regardless of timing
       const flushStartTime = Date.now();
-      setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Flushing transcript buffer...');
+      if (!audioOnly) setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Flushing transcript buffer...');
       flushBuffer();
       const flushEndTime = Date.now();
 
@@ -329,7 +331,7 @@ export function useRecordingStop(
           // Show success toast with navigation option
           const recoveryMessage = recordingRecoveryMessage(recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')));
           (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with recovery needed' : 'Recording saved successfully!', {
-            description: recoveryMessage || `${freshTranscripts.length} transcript segments saved.`,
+            description: recoveryMessage || (audioOnly ? 'Audio saved. Open the meeting and choose Transcribe when ready.' : `${freshTranscripts.length} transcript segments saved.`),
             action: {
               label: 'View Meeting',
               onClick: () => {

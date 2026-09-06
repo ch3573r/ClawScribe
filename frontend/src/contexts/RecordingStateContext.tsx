@@ -2,6 +2,9 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { recordingService } from '@/services/recordingService';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+export type RecordingMode = 'live' | 'audio_only';
 
 /**
  * Recording state synchronized with backend
@@ -25,6 +28,7 @@ export enum RecordingStatus {
 }
 
 interface RecordingState {
+  sessionMode: RecordingMode;
   isRecording: boolean;           // Is a recording session active
   isPaused: boolean;              // Is the recording paused
   isActive: boolean;              // Is actively recording (recording && !paused)
@@ -37,6 +41,10 @@ interface RecordingState {
 }
 
 interface RecordingStateContextType extends RecordingState {
+  recordingMode: RecordingMode | null;
+  modeError: string | null;
+  isSavingMode: boolean;
+  setRecordingMode: (mode: RecordingMode) => Promise<void>;
   // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
 
@@ -58,7 +66,32 @@ export const useRecordingState = () => {
 };
 
 export function RecordingStateProvider({ children }: { children: React.ReactNode }) {
+  const [recordingMode, updateRecordingMode] = useState<RecordingMode | null>(null);
+  const [modeError, setModeError] = useState<string | null>(null);
+  const [isSavingMode, setIsSavingMode] = useState(false);
+  const modeSave = useRef(false);
+  const modeVersion = useRef(0);
+  useEffect(() => {
+    let active = true;
+    const request = modeVersion.current;
+    const subscription = listen<RecordingMode>('recording-mode-changed', event => {
+      modeVersion.current++;
+      if (active) { updateRecordingMode(event.payload); setModeError(null); }
+    });
+    void invoke<RecordingMode>('get_recording_mode').then(mode => {
+      if (active && request === modeVersion.current) updateRecordingMode(mode);
+    }).catch(() => { if (active) setModeError('Could not load recording mode. Choose a mode to retry.'); });
+    return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+  }, []);
+  const setRecordingMode = useCallback(async (mode: RecordingMode) => {
+    if (modeSave.current) return;
+    modeSave.current = true; setIsSavingMode(true); setModeError(null);
+    try { await invoke('set_recording_mode', { mode }); modeVersion.current++; updateRecordingMode(mode); }
+    catch { setModeError('Could not save recording mode. Please retry.'); }
+    finally { modeSave.current = false; setIsSavingMode(false); }
+  }, []);
   const [state, setState] = useState<RecordingState>({
+    sessionMode: 'live',
     isRecording: false,
     isPaused: false,
     isActive: false,
@@ -94,6 +127,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       // twice a second for the entire meeting.
       setState(prev => {
         if (
+          prev.sessionMode === (backendState.recording_mode ?? 'live') &&
           prev.isRecording === backendState.is_recording &&
           prev.isPaused === backendState.is_paused &&
           prev.isActive === backendState.is_active &&
@@ -104,6 +138,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         }
         return {
           ...prev,
+          sessionMode: backendState.recording_mode ?? 'live',
           isRecording: backendState.is_recording,
           isPaused: backendState.is_paused,
           isActive: backendState.is_active,
@@ -150,11 +185,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     const setupListeners = async () => {
       try {
         // Recording started
-        const unlistenStarted = await recordingService.onRecordingStarted(() => {
+        const unlistenStarted = await recordingService.onRecordingStarted((mode) => {
           console.log('[RecordingStateContext] Recording started event');
           setState(prev => ({
             ...prev,
             isRecording: true,
+            sessionMode: mode,
             isPaused: false,
             isActive: true,
             status: RecordingStatus.RECORDING,  // NEW: Set status to RECORDING
@@ -240,13 +276,14 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
   // NEW: Computed helpers from status
   const contextValue = useMemo(() => ({
+    recordingMode, modeError, isSavingMode, setRecordingMode,
     ...state,
     setStatus,
     isStarting: state.status === RecordingStatus.STARTING,
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
     isSaving: state.status === RecordingStatus.SAVING,
-  }), [state, setStatus]);
+  }), [state, setStatus, recordingMode, modeError, isSavingMode, setRecordingMode]);
 
   return (
     <RecordingStateContext.Provider value={contextValue}>

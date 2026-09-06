@@ -32,6 +32,7 @@ pub mod playback_monitor;
 pub mod post_processor;
 pub mod recording_commands;
 pub mod recording_manager;
+pub mod recording_mode;
 pub mod recording_preferences;
 pub mod recording_saver;
 pub mod recording_state;

@@ -319,6 +319,24 @@ impl SummaryService {
             meeting_id
         );
 
+        let (text, summary_sources) = match super::sources::prepare(&pool, &meeting_id, text).await
+        {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                Self::update_process_failed(&pool, &meeting_id, &message).await;
+                return;
+            }
+        };
+        let custom_prompt = if summary_sources.is_empty() {
+            custom_prompt
+        } else {
+            format!(
+                "{}\n\n{}",
+                custom_prompt,
+                super::sources::SOURCE_INSTRUCTION
+            )
+        };
+
         // Register cancellation token for this meeting
         let cancellation_token = Self::register_cancellation_token(&meeting_id);
 
@@ -327,6 +345,15 @@ impl SummaryService {
             Ok(p) => p,
             Err(e) => {
                 Self::update_process_failed(&pool, &meeting_id, &e).await;
+                return;
+            }
+        };
+
+        let template = match templates::get_template(&template_id) {
+            Ok(template) => template,
+            Err(e) => {
+                let err_msg = format!("Failed to load template '{}': {}", template_id, e);
+                Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
                 return;
             }
         };
@@ -488,6 +515,25 @@ impl SummaryService {
             info!("📝 Detected transcript summary language: {}", code);
         }
 
+        // Structured providers retain task/export fields and return a separate display
+        // report so custom template sections do not discard structured meeting data.
+        let custom_prompt = if matches!(
+            provider,
+            LLMProvider::OpenAI
+                | LLMProvider::OpenAICompatible
+                | LLMProvider::CustomOpenAI
+                | LLMProvider::OpenClaw
+                | LLMProvider::Codex
+        ) {
+            let language = summary_language
+                .as_deref()
+                .or(detected_summary_language.as_deref())
+                .unwrap_or("en");
+            format!("{custom_prompt}\n\nPopulate notes_markdown with the complete meeting report in language {language}, using the exact section layout and instructions below. Include supplied source links with supported claims. Also populate all structured decision, risk, question, action and email fields for exports. Do not omit structured fields just because they are in the report.\n\n{}\n\n{}", template.to_markdown_structure(), template.to_section_instructions())
+        } else {
+            custom_prompt
+        };
+
         if matches!(
             provider,
             LLMProvider::OpenAI
@@ -611,7 +657,7 @@ impl SummaryService {
                         "✓ OpenAI-compatible provider processed meeting_id: {}. Duration: {:.2}s",
                         meeting_id, duration
                     );
-                    let result_json = serde_json::json!({
+                    let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&api_result.markdown),
                         "structured_meeting_output": api_result.structured_output,
                         "openai_compatible": {
@@ -621,6 +667,7 @@ impl SummaryService {
                             "processing_log_path": api_result.processing_log_path,
                         }
                     });
+                    super::sources::attach(&mut result_json, &summary_sources);
                     if let Err(e) = SummaryProcessesRepository::update_process_completed(
                         &pool,
                         &meeting_id,
@@ -705,7 +752,7 @@ impl SummaryService {
                         "✓ Codex processed meeting_id: {}. Duration: {:.2}s",
                         meeting_id, duration
                     );
-                    let result_json = serde_json::json!({
+                    let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&codex_result.markdown),
                         "structured_meeting_output": codex_result.structured_output,
                         "codex": {
@@ -716,6 +763,7 @@ impl SummaryService {
                             "processing_log_path": codex_result.processing_log_path,
                         }
                     });
+                    super::sources::attach(&mut result_json, &summary_sources);
                     if let Err(e) = SummaryProcessesRepository::update_process_completed(
                         &pool,
                         &meeting_id,
@@ -747,14 +795,6 @@ impl SummaryService {
             return;
         }
 
-        let template = match templates::get_template(&template_id) {
-            Ok(template) => template,
-            Err(e) => {
-                let err_msg = format!("Failed to load template '{}': {}", template_id, e);
-                Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
-                return;
-            }
-        };
         let template_fingerprint = template_cache_fingerprint(&template);
 
         let cache_source = build_summary_cache_source(
@@ -849,13 +889,14 @@ impl SummaryService {
                     }
                 }
 
-                let result_json = build_summary_result_json(
+                let mut result_json = build_summary_result_json(
                     &final_markdown,
                     &english_markdown,
                     cache_source,
                     summary_language.as_deref(),
                 );
 
+                super::sources::attach(&mut result_json, &summary_sources);
                 // Update database with completed status
                 if let Err(e) = SummaryProcessesRepository::update_process_completed(
                     &pool,

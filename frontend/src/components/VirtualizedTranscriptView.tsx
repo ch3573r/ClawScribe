@@ -24,6 +24,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 
 export interface VirtualizedTranscriptViewProps {
+    focusedSource?: { id: string; request: number };
+    onEditSegment?: (segment: TranscriptSegmentData) => void;
     /** Transcript segments to display */
     segments: TranscriptSegmentData[];
     /** Whether recording is in progress */
@@ -109,7 +111,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speakerOptions,
     isActive,
     onSeekToTime,
+    onEdit,
+    originalText,
 }: {
+    onEdit?: () => void;
+    originalText?: string | null;
     id: string;
     timestamp: number;
     text: string;
@@ -339,6 +345,10 @@ const TranscriptSegment = memo(function TranscriptSegment({
                             {currentSpeaker}
                         </span>
                     )}
+                    {onEdit && <div className="mb-1 flex items-center gap-2 text-xs">
+                        <button type="button" onClick={onEdit} className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Correct transcript passage">Edit text</button>
+                        {originalText != null && originalText !== text && <span className="text-primary">Edited</span>}
+                    </div>}
                     {isStreaming ? (
                         <div className="bg-muted border border-border rounded-lg px-3 py-2">
                             <p className="text-[15px] leading-7 text-foreground/90">{displayText}</p>
@@ -353,6 +363,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
 });
 
 export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps> = ({
+    onEditSegment,
+    focusedSource,
     segments,
     isRecording = false,
     isPaused = false,
@@ -394,6 +406,17 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     });
 
     // Custom hook for auto-scrolling (supports both virtualized and non-virtualized)
+    useEffect(() => {
+        if (!focusedSource) return;
+        const index = segments.findIndex(segment => segment.id === focusedSource.id);
+        if (index < 0) return;
+        const timer = setTimeout(() => {
+            if (segments.length >= VIRTUALIZATION_THRESHOLD) virtualizer.scrollToIndex(index, { align: 'center' });
+            else scrollRef.current?.querySelectorAll('[data-segment-id]')[index]?.scrollIntoView({ block: 'nearest' });
+        }, 60);
+        return () => clearTimeout(timer);
+    }, [focusedSource, segments, virtualizer]);
+
     const { autoScroll, scrollToBottom } = useAutoScroll({
         scrollRef,
         segments,
@@ -541,6 +564,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                             return (
                                 <div
                                     key={segment.id}
+                                    data-segment-id={segment.id}
                                     data-index={virtualRow.index}
                                     ref={virtualizer.measureElement}
                                     style={{
@@ -555,6 +579,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         id={segment.id}
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
+                                        originalText={segment.original_text}
+                                        onEdit={onEditSegment ? () => onEditSegment(segment) : undefined}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         showSpeakerLabels={showSpeakerLabels}
@@ -563,7 +589,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerOptions={speakerOptions}
-                                        isActive={segment.id === activeSegmentId}
+                                        isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                     />
                                 </div>
@@ -610,6 +636,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                             return (
                                 <motion.div
                                     key={segment.id}
+                                    data-segment-id={segment.id}
                                     initial={{ opacity: 0, y: 5 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     transition={{ duration: 0.15 }}
@@ -618,6 +645,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         id={segment.id}
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
+                                        originalText={segment.original_text}
+                                        onEdit={onEditSegment ? () => onEditSegment(segment) : undefined}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         showSpeakerLabels={showSpeakerLabels}
@@ -626,7 +655,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerOptions={speakerOptions}
-                                        isActive={segment.id === activeSegmentId}
+                                        isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                     />
                                 </motion.div>

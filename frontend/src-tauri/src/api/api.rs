@@ -158,6 +158,8 @@ pub struct MeetingDetails {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MeetingTranscript {
+    #[serde(default)]
+    pub original_text: Option<String>,
     pub id: String,
     pub text: String,
     pub timestamp: String,
@@ -1122,6 +1124,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             let meeting_transcripts = transcripts
                 .into_iter()
                 .map(|t| MeetingTranscript {
+                    original_text: t.original_transcript,
                     id: t.id,
                     text: t.transcript,
                     timestamp: t.timestamp,

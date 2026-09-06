@@ -33,6 +33,8 @@ pub struct TranscriptSegment {
 /// Meeting metadata structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingMetadata {
+    #[serde(default)]
+    pub recording_mode: super::recording_mode::RecordingMode,
     pub version: String,
     pub meeting_id: Option<String>,
     pub meeting_name: Option<String>,
@@ -61,6 +63,7 @@ pub struct DeviceInfo {
 
 /// New recording saver using incremental saving strategy
 pub struct RecordingSaver {
+    mode: super::recording_mode::RecordingMode,
     incremental_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     base_recordings_folder: Option<PathBuf>,
     meeting_folder: Option<PathBuf>,
@@ -79,6 +82,7 @@ pub struct RecordingSaver {
 impl RecordingSaver {
     pub fn new() -> Self {
         Self {
+            mode: super::recording_mode::RecordingMode::Live,
             incremental_saver: None,
             base_recordings_folder: None,
             meeting_folder: None,
@@ -93,6 +97,11 @@ impl RecordingSaver {
             transcription_model: None,
             transcription_source_language: None,
         }
+    }
+
+    /// Snapshot the selected capture mode before initializing meeting metadata.
+    pub fn set_mode(&mut self, mode: super::recording_mode::RecordingMode) {
+        self.mode = mode;
     }
 
     /// Record which transcription engine + model this recording uses. Set before
@@ -294,6 +303,7 @@ impl RecordingSaver {
 
         // Create initial metadata
         let metadata = MeetingMetadata {
+            recording_mode: self.mode,
             version: "1.0".to_string(),
             meeting_id: None, // Will be set by backend
             meeting_name: Some(meeting_name.to_string()),

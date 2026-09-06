@@ -33,7 +33,7 @@ export function TranscriptPanel({
   // Contexts
   const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
   const { transcriptModelConfig } = useConfig();
-  const { isRecording, isPaused, status } = useRecordingState();
+  const { isRecording, isPaused, status, sessionMode } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
   const isLinux = useIsLinux();
   const isStarting = status === RecordingStatus.STARTING;
@@ -107,7 +107,10 @@ export function TranscriptPanel({
       <div className="pb-20">
         <div className="flex justify-center">
           <div className="w-2/3 max-w-[750px]">
-            <VirtualizedTranscriptView
+            {isRecording && sessionMode === 'audio_only' ? <div role="status" className="py-12 text-center">
+              <h2 className="font-semibold">Recording audio</h2>
+              <p className="mt-2 text-sm text-muted-foreground">Live transcription is off. Your audio is being saved; transcribe it from the saved meeting when ready.</p>
+            </div> : <VirtualizedTranscriptView
               segments={segments}
               isRecording={isRecording || isStarting}
               isPaused={isPaused}
@@ -115,7 +118,7 @@ export function TranscriptPanel({
               isStopping={isStopping}
               enableStreaming={isRecording}
               showConfidence={true}
-            />
+            />}
           </div>
         </div>
       </div>

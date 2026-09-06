@@ -17,6 +17,7 @@ import {
   Volume2,
 } from "lucide-react";
 import { RecordingControls } from "@/components/RecordingControls";
+import { RecordingModeSelect } from '@/components/RecordingModeSelect';
 import { UpcomingMeetings } from "@/components/UpcomingMeetings";
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
@@ -145,8 +146,8 @@ export function HomeDashboard({
       number: "03",
       icon: AudioLines,
       label: "Transcription",
-      value: providerLabel,
-      meta: `${languageLabel} · ${isLocalTranscription ? "On-device" : "Hosted"}`,
+      value: recordingState.recordingMode === 'audio_only' ? 'After recording' : providerLabel,
+      meta: recordingState.recordingMode === 'audio_only' ? 'Audio only · no speech model' : `${languageLabel} · ${isLocalTranscription ? "On-device" : "Hosted"}`,
       onClick: () => router.push("/settings?tab=transcription"),
     },
   ];
@@ -210,7 +211,7 @@ export function HomeDashboard({
                 </div>
                 <div className="hidden items-center gap-2 rounded-md border border-border bg-background/75 px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground backdrop-blur-sm sm:flex">
                   <Radio className="h-3.5 w-3.5 text-primary" />
-                  Two-channel capture
+                  Microphone + system audio
                 </div>
               </div>
 
@@ -220,12 +221,14 @@ export function HomeDashboard({
                 </div>
                 <p className="max-w-md text-sm leading-6 text-muted-foreground">
                   {canRecord
-                    ? "Your microphone and meeting audio will be captured on separate channels for a cleaner transcript."
+                    ? "Capture your microphone and meeting audio together. Choose live transcription or save the audio to transcribe later."
                     : "Grant microphone access before starting a capture."}
                 </p>
 
                 <div className="mt-7 rounded-lg border border-border bg-background/85 p-5 shadow-lg backdrop-blur-sm">
                   {canRecord ? (
+                    <div className="space-y-4">
+                    <RecordingModeSelect />
                     <RecordingControls
                       variant="dashboard"
                       isRecording={recordingState.isRecording}
@@ -235,11 +238,12 @@ export function HomeDashboard({
                       onStopInitiated={onStopInitiated}
                       barHeights={barHeights}
                       onTranscriptionError={onTranscriptionError}
-                      isRecordingDisabled={isRecordingDisabled}
+                      isRecordingDisabled={isRecordingDisabled || recordingState.isSavingMode || recordingState.recordingMode === null}
                       isParentProcessing={isProcessingStop}
                       selectedDevices={selectedDevices}
                       meetingName={meetingName}
                     />
+                    </div>
                   ) : (
                     <div className="max-w-sm rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-800 dark:text-amber-100">
                       Microphone access is required before recording.

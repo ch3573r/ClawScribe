@@ -1,6 +1,7 @@
 use crate::summary::templates;
 use serde::{Deserialize, Serialize};
-use tauri::Runtime;
+use tauri::{Emitter, Runtime};
+use tauri_plugin_store::StoreExt;
 use tracing::{info, warn};
 
 /// Template metadata for UI display
@@ -30,6 +31,75 @@ pub struct TemplateDetails {
 
     /// List of section titles in order
     pub sections: Vec<String>,
+}
+
+pub fn default_template<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<String, String> {
+    let store = app
+        .store("summary_preferences.json")
+        .map_err(|_| "Could not load summary preferences")?;
+    let saved = store.get("default_template");
+    Ok(templates::resolve_default(
+        saved.as_ref().and_then(|v| v.as_str()),
+    ))
+}
+
+#[tauri::command]
+pub async fn api_get_default_template<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || default_template(&app))
+        .await
+        .map_err(|_| "Could not load summary preferences")?
+}
+
+#[tauri::command]
+pub async fn api_save_default_template<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<(), String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        templates::get_template(&template_id)?;
+        let store = worker_app
+            .store("summary_preferences.json")
+            .map_err(|_| "Could not load summary preferences")?;
+        let previous = store.get("default_template");
+        store.set("default_template", serde_json::json!(template_id));
+        if store.save().is_err() {
+            match previous {
+                Some(value) => store.set("default_template", value),
+                None => {
+                    store.delete("default_template");
+                }
+            }
+            return Err("Could not save default template".into());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Could not save default template")??;
+    let _ = app.emit("summary-templates-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn api_get_template_editor(template_id: String) -> Result<templates::Template, String> {
+    tauri::async_runtime::spawn_blocking(move || templates::get_template(&template_id))
+        .await
+        .map_err(|_| "Could not load template")?
+}
+
+#[tauri::command]
+pub async fn api_save_template<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    template_id: String,
+    template: templates::Template,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || templates::save_template(&template_id, &template))
+        .await
+        .map_err(|_| "Could not save template")??;
+    let _ = app.emit("summary-templates-changed", ());
+    Ok(())
 }
 
 /// Lists all available templates

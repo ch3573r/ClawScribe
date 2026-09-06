@@ -95,6 +95,47 @@ local recording. `summary/context_budget.rs` bounds hierarchical reduction, and
 `summary/chat_context.rs` selects question-relevant evidence from across the
 meeting instead of silently discarding its middle.
 
+## Recording Modes And Meeting Review
+
+`audio/recording_mode.rs` persists the next-session mode through the Tauri store.
+Recording startup snapshots it into the manager and meeting metadata. Audio-only
+mode always enables the recording saver, omits VAD/model validation and the live
+recognition worker, and skips automatic summary/OpenClaw handoff. Capture and the
+retained audio spool use the existing paths. Later transcription uses the existing
+reviewed retranscription flow and its configured local/cloud preference.
+
+`database/transcript_edits.rs` applies corrections with optimistic text checks in
+one transaction. The first recognized text is retained in `original_transcript`;
+a batch journal supports undo across restarts. Segment timing stays unchanged,
+and edited word alignment is cleared until an undo restores it or transcription
+rebuilds it. Active summary generation and native recording/processing jobs block
+corrections. Retranscription archives old correction batches instead of applying
+undo to replacement segments. SQLite is authoritative. A durable pending marker
+and visible retry preserve corrections if the atomic `transcripts.json` mirror
+cannot be written. Existing migrations are immutable; the correction schema is
+added by a new migration.
+
+`summary/sources.rs` prepares summaries from the complete saved transcript and
+annotates passages with stable content-derived source links. Reduction prompts
+retain links alongside their facts. Completed results store the cited source
+identities and fingerprints. Resolving a link is scoped to the meeting and checks
+the current text, timing and speaker. Stale or missing segments cannot silently
+seek another passage. The UI loads the cited page without skipping sequential
+pagination. Source identity checks establish which passage was cited, not whether
+the passage entails the model's claim. Legacy summaries remain readable without
+references; regeneration requests sources.
+
+User template edits are validated and atomically stored as personal JSON files
+in the existing template directory. Overrides take precedence over bundled
+versions. The default template uses `summary_preferences.json`; a missing saved
+default falls back to `standard_meeting`. Shared template events refresh Settings
+and meeting selectors. Structured providers return a template-shaped
+`notes_markdown` alongside their existing export fields; old stored outputs use
+the standard renderer. Manual summary saves retain source identities and
+invalidate the English generation cache. Summary replacement edits inline text,
+preserves block IDs/formatting/link destinations, checks its preview snapshot,
+and uses the editor's normal undo and save flow.
+
 ## Compatibility Boundaries
 
 Some internal names, folders, and environment variables still use Meetily names.

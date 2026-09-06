@@ -45,6 +45,12 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 - Microphone and system-audio capture from the local Windows session.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.
+- **Record now, transcribe later:** choose audio-only mode on Home or in
+  Recording settings. It always saves audio, skips the speech model and live
+  transcription, and leaves a **Transcribe** action on the saved meeting.
+- Correct transcript passages or preview literal find-and-replace across the
+  entire meeting. Original recognition and segment timing are retained; undo
+  restores previous corrections. Regenerate notes after correcting a transcript.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
 - Disk-backed live recognition queue and interrupted-recording recovery paths.
 - Timestamp playback controls, speaker-label editing, and a **Jump to live
@@ -76,6 +82,16 @@ context, regenerate notes, and chat about the selected meeting. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
 bundled Codex app-server path.
+
+In **Settings → Summary**, create or edit templates and choose a persistent
+default. Each meeting can use a different template when generating notes.
+Summary find-and-replace preserves formatting and source links; review the
+changes, then select Save. Use the editor's undo command to revert changes.
+
+New summaries request links to supporting transcript passages. Open a source
+link to inspect the text, reveal it in the transcript, or play its saved audio.
+Changed or replaced passages are flagged and require regenerated references.
+Citation coverage depends on the model; inspect the passage to check the claim.
 
 Microsoft sign-in supports calendar context and exports. Teams detection can
 prompt or auto-start recording according to your setting. Invited attendees

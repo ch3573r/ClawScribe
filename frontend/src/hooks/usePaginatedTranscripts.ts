@@ -25,6 +25,7 @@ interface UsePaginatedTranscriptsReturn {
     loadMore: () => Promise<void>;
     reset: () => void;
     refetch: () => Promise<void>;
+    revealSource: (id: string, index: number) => Promise<void>;
     updateSpeaker: (transcriptId: string, speaker: string | null) => Promise<void>;
     applySpeakerToMatching: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
 }
@@ -38,6 +39,7 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
         timestamp: t.audio_start_time ?? 0,
         endTime: t.audio_end_time,
         text: t.text,
+        original_text: t.original_text,
         confidence: t.confidence,
         speaker: t.speaker,
         word_timestamps: t.word_timestamps,
@@ -250,6 +252,22 @@ export function usePaginatedTranscripts({
         loadInitial();
     }, [meetingId, reset, loadMetadata, loadTranscriptsAtOffset]);
 
+    // Fetch the cited page without advancing sequential pagination past unloaded pages.
+    const revealSource = useCallback(async (id: string, index: number) => {
+        if (!meetingId || !Number.isInteger(index) || index < 0) throw new Error('Invalid source position.');
+        if (transcripts.some(row => row.id === id)) return;
+        const response = await invoke<PaginatedTranscriptsResponse>('api_get_meeting_transcripts', {
+            meetingId, limit: DEFAULT_PAGE_SIZE, offset: Math.floor(index / DEFAULT_PAGE_SIZE) * DEFAULT_PAGE_SIZE,
+        });
+        if (loadedMeetingIdRef.current !== meetingId) return;
+        if (!response.transcripts.some(row => row.id === id)) throw new Error('The transcript changed. Open the source reference again.');
+        setTranscripts(previous => {
+            const byId = new Map(previous.map(row => [row.id, row]));
+            response.transcripts.forEach(row => byId.set(row.id, row));
+            return [...byId.values()].sort((a, b) => (a.audio_start_time ?? 0) - (b.audio_start_time ?? 0) || a.id.localeCompare(b.id));
+        });
+    }, [meetingId, transcripts]);
+
     // Convert to segments (memoized)
     const segments = useMemo(() =>
         convertTranscriptsToSegments(transcripts),
@@ -269,6 +287,7 @@ export function usePaginatedTranscripts({
         loadMore,
         reset,
         refetch,
+        revealSource,
         updateSpeaker,
         applySpeakerToMatching,
     };

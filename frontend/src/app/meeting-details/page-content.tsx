@@ -30,6 +30,7 @@ export default function PageContent({
   onAutoGenerateComplete,
   onMeetingUpdated,
   onRefetchTranscripts,
+  onRevealTranscript,
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
   // Pagination props for efficient transcript loading
@@ -45,6 +46,7 @@ export default function PageContent({
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
+  onRevealTranscript?: (id: string, index: number) => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
@@ -82,6 +84,7 @@ export default function PageContent({
   );
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
+  const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const audioPlayer = useAudioPlayer(audioPath);
   const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
@@ -271,8 +274,9 @@ export default function PageContent({
           onSeek={isAudioReady ? handleTimelineSeek : undefined}
         />
       )}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          focusedSource={focusedSource}
           transcripts={meetingData.transcripts}
           customPrompt={customPrompt}
           onPromptChange={handlePromptChange}
@@ -299,6 +303,12 @@ export default function PageContent({
           onApplySpeakerToMatching={onApplySpeakerToMatching}
         />
         <SummaryPanel
+          onRevealSource={async (source) => {
+            await onRevealTranscript?.(source.transcript_id, source.transcript_index);
+            setFocusedSource({ id: source.transcript_id, request: Date.now() });
+            document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+          }}
+          onPlaySource={isAudioReady ? async seconds => { await audioPlayer.seek(seconds); if (!audioPlayer.isPlaying) await audioPlayer.play(); } : undefined}
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
           onTitleChange={meetingData.handleTitleChange}

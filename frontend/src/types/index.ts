@@ -5,6 +5,7 @@ export interface Message {
 }
 
 export interface Transcript {
+  original_text?: string | null;
   id: string;
   text: string;
   speaker?: string; // "Me" (microphone) or "Participants" (system audio)
@@ -113,6 +114,7 @@ export interface PaginatedTranscriptsResponse {
 
 // Transcript segment data for virtualized display
 export interface TranscriptSegmentData {
+  original_text?: string | null;
   id: string;
   timestamp: number; // audio_start_time in seconds
   endTime?: number; // audio_end_time in seconds

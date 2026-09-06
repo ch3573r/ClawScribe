@@ -25,6 +25,7 @@ pub enum StreamManagerType {
 
 /// Simplified recording manager that coordinates all audio components
 pub struct RecordingManager {
+    mode: super::recording_mode::RecordingMode,
     state: Arc<RecordingState>,
     stream_manager: AudioStreamManager,
     pipeline_manager: AudioPipelineManager,
@@ -45,6 +46,7 @@ impl RecordingManager {
         let (device_monitor, device_event_receiver) = AudioDeviceMonitor::new();
 
         Self {
+            mode: super::recording_mode::RecordingMode::Live,
             state,
             stream_manager,
             pipeline_manager,
@@ -55,6 +57,10 @@ impl RecordingManager {
     }
 
     // Remove app handle storage for now - will be passed directly when saving
+    pub fn set_mode(&mut self, mode: super::recording_mode::RecordingMode) {
+        self.mode = mode;
+        self.recording_saver.set_mode(mode);
+    }
 
     /// Start recording with specified devices
     ///
@@ -129,6 +135,7 @@ impl RecordingManager {
             mic_kind,
             sys_name,
             sys_kind,
+            self.mode.transcribes(),
         )?;
 
         // Give the pipeline a moment to fully initialize before starting streams

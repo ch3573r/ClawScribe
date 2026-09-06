@@ -160,7 +160,7 @@ export function useSummaryGeneration({
         chunkSize: 40000,
         overlap: 1000,
         customPrompt: customPrompt,
-        templateId: selectedTemplate,
+        templateId: selectedTemplate || null,
         summaryLanguage,
       }) as any;
 

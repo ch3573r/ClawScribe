@@ -277,10 +277,10 @@ export function TranscriptButtonGroup({
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);
             }}
-            title="Retranscribe to enhance your recorded audio"
+            title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'}
           >
             <RefreshCw className="2xl:mr-2" size={18} />
-            <span className="hidden 2xl:inline">Enhance</span>
+            <span className={transcriptCount === 0 ? '' : 'hidden 2xl:inline'}>{transcriptCount === 0 ? 'Transcribe' : 'Enhance'}</span>
           </Button>
         )}
       </ButtonGroup>

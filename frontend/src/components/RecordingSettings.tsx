@@ -8,6 +8,8 @@ import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
 import { useConfig } from '@/contexts/ConfigContext';
 import { selectedDevicesFromPreferences } from '@/lib/audioDevicePreferences';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { RecordingModeSelect } from '@/components/RecordingModeSelect';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -23,6 +25,8 @@ interface RecordingSettingsProps {
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const { setSelectedDevices } = useConfig();
+  const { recordingMode } = useRecordingState();
+  const audioOnly = recordingMode === 'audio_only';
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
@@ -207,22 +211,23 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       </div>
 
       {/* Auto Save Toggle */}
+      <RecordingModeSelect />
       <div className="flex items-center justify-between p-4 border rounded-lg">
         <div className="flex-1">
           <div className="font-medium">Save Audio Recordings</div>
           <div className="text-sm text-muted-foreground">
-            Automatically save audio files when recording stops
+            {audioOnly ? 'Audio-only mode always saves the recording for later transcription.' : 'Automatically save audio files when recording stops'}
           </div>
         </div>
         <Switch
-          checked={preferences.auto_save}
+          checked={audioOnly || preferences.auto_save}
           onCheckedChange={handleAutoSaveToggle}
           disabled={saving}
         />
       </div>
 
       {/* Folder Location - Only shown when auto_save is enabled */}
-      {preferences.auto_save && (
+      {(audioOnly || preferences.auto_save) && (
         <div className="space-y-4">
           <div className="p-4 border rounded-lg bg-muted">
             <div className="font-medium mb-2">Save Location</div>

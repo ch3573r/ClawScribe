@@ -62,6 +62,7 @@ function MeetingDetailsContent() {
     loadedCount,
     loadMore,
     refetch,
+    revealSource,
     updateSpeaker,
     applySpeakerToMatching,
     error: transcriptError,
@@ -366,6 +367,7 @@ function MeetingDetailsContent() {
       await refetchMeetings();
     }}
     onRefetchTranscripts={refetch}
+    onRevealTranscript={revealSource}
     onUpdateTranscriptSpeaker={updateSpeaker}
     onApplySpeakerToMatching={applySpeakerToMatching}
     // Pagination props for efficient transcript loading

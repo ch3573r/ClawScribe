@@ -677,6 +677,9 @@ pub type CodexProcessingProvider = CodexAppServerProvider;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeetingNotesOutput {
+    /// Template-shaped display report; older saved outputs retain the standard renderer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_markdown: Option<String>,
     pub executive_summary: String,
     pub decisions: Vec<DecisionItem>,
     pub risks_blockers: Vec<RiskBlockerItem>,
@@ -2454,6 +2457,7 @@ pub fn output_schema_json() -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "type": "object",
         "properties": {
+            "notes_markdown": { "type": ["string", "null"], "description": "Complete Markdown report using the requested summary template, with supplied source links." },
             "executive_summary": { "type": "string" },
             "decisions": {
                 "type": "array",
@@ -2523,6 +2527,7 @@ pub fn output_schema_json() -> String {
             }
         },
         "required": [
+            "notes_markdown",
             "executive_summary",
             "decisions",
             "risks_blockers",
@@ -2577,6 +2582,13 @@ pub fn render_meeting_notes_markdown(
     meeting_title: &Option<String>,
     output: &MeetingNotesOutput,
 ) -> String {
+    if let Some(markdown) = output
+        .notes_markdown
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        return markdown.trim().to_string();
+    }
     let title = meeting_title
         .as_deref()
         .filter(|s| !s.trim().is_empty())
@@ -2602,6 +2614,37 @@ pub fn render_meeting_notes_markdown(
     ));
     markdown.push('\n');
     markdown
+}
+
+#[cfg(test)]
+mod template_report_tests {
+    use super::*;
+
+    #[test]
+    fn template_report_retains_structured_exports_and_legacy_outputs_still_render() {
+        let mut raw = serde_json::json!({
+            "executive_summary": "Synthetic decision",
+            "decisions": [], "risks_blockers": [], "open_questions": [],
+            "action_items": [{"task":"Review proposal","owner":null,"due_date":null,"source_timestamp":null,"confidence":"high"}],
+            "follow_up_email": {"subject":"Review","body_markdown":"Review proposal"}
+        });
+        let legacy: MeetingNotesOutput = serde_json::from_value(raw.clone()).unwrap();
+        assert!(render_meeting_notes_markdown(&None, &legacy).contains("## Action Items"));
+        raw["notes_markdown"] =
+            serde_json::json!("# Review\n\n## Agreed next steps\n\nReview proposal.");
+        let custom: MeetingNotesOutput = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            render_meeting_notes_markdown(&None, &custom),
+            custom.notes_markdown.as_deref().unwrap()
+        );
+        assert_eq!(custom.action_items.len(), 1);
+        assert_eq!(custom.action_items[0].task, "Review proposal");
+        let schema: serde_json::Value = serde_json::from_str(&output_schema_json()).unwrap();
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("notes_markdown")));
+    }
 }
 
 fn push_decisions(markdown: &mut String, items: &[DecisionItem]) {

@@ -105,6 +105,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
         summary: formattedSummary,
       });
 
+      setAiSummary(formattedSummary);
       console.log('✅ Save meeting summary success');
     } catch (error) {
       console.error('❌ Failed to save meeting summary:', error);
@@ -113,6 +114,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
       } else {
         setError('Failed to save meeting summary: Unknown error');
       }
+      throw error;
     }
   }, [meeting.id, meetingTitle]);
 
