@@ -77,7 +77,7 @@ impl RecordingManager {
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
         // Pass auto_save to control whether audio checkpoints are created
-        let recording_sender = self.recording_saver.start_accumulation(auto_save);
+        let recording_sender = self.recording_saver.start_accumulation(auto_save)?;
 
         // Start recording state first
         self.state.start_recording()?;
@@ -298,9 +298,9 @@ impl RecordingManager {
             error!("Error during force flush: {}", e);
         }
 
-        // CRITICAL: Full cleanup to release all Arc references and resources
-        // This ensures microphone is released even if Drop is delayed
-        self.state.cleanup();
+        // stop_recording and stop_streams already released device handles.
+        // Keep timing/error statistics until finalization and metadata complete.
+        self.state.get_buffer_pool().clear();
 
         info!("✅ Recording streams stopped with immediate flush completed");
         Ok(())
@@ -331,7 +331,7 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!("Audio could not be saved: {e}"));
             }
         }
 
@@ -377,7 +377,7 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!("Audio could not be saved: {e}"));
             }
         }
 

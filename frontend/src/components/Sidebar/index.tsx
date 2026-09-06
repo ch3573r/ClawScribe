@@ -42,6 +42,8 @@ import {
 import { VisuallyHidden } from "@/components/ui/visually-hidden";
 
 import Logo from "../Logo";
+import { useCompactLayout } from "@/hooks/useCompactLayout";
+import { MeetingNavigationItem } from "./MeetingNavigationItem";
 import {
   InputGroup,
   InputGroupAddon,
@@ -223,12 +225,13 @@ const Sidebar: React.FC = () => {
       toast.error("Failed to delete meeting", {
         description: error instanceof Error ? error.message : String(error),
       });
+      throw error;
     }
   };
 
-  const handleDeleteConfirm = () => {
+  const handleDeleteConfirm = async () => {
     if (deleteModalState.itemId) {
-      handleDelete(deleteModalState.itemId);
+      await handleDelete(deleteModalState.itemId);
     }
     setDeleteModalState({ isOpen: false, itemId: null });
   };
@@ -471,80 +474,22 @@ const Sidebar: React.FC = () => {
 
     if (isCollapsed || item.type === "folder") return null;
 
+    const href = item.id.startsWith("intro-call")
+      ? "/" : item.id.includes("-")
+        ? `/meeting-details?id=${encodeURIComponent(item.id)}` : `/notes/${encodeURIComponent(item.id)}`;
     return (
-      <div
-        key={item.id}
-        onClick={() => {
-          setCurrentMeeting({ id: item.id, title: item.title });
-          const basePath = item.id.startsWith("intro-call")
-            ? "/"
-            : item.id.includes("-")
-              ? `/meeting-details?id=${item.id}`
-              : `/notes/${item.id}`;
-          router.push(basePath);
-        }}
-        className={`group cursor-pointer rounded-md border px-2.5 py-2.5 transition ${
-          isActive
-            ? "border-primary/25 bg-primary/10 text-sidebar-foreground shadow-sm"
-            : hasTranscriptMatch
-              ? "border-amber-400/30 bg-amber-400/10 text-sidebar-foreground"
-              : "border-transparent text-sidebar-foreground hover:border-sidebar-border hover:bg-sidebar-hover"
-        }`}
-      >
-        <div className="flex items-start gap-2.5">
-          <div
-            className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-              isActive
-                ? "bg-primary/10 text-primary"
-                : "bg-background/60 text-muted-foreground"
-            }`}
-          >
-            <File className="h-4 w-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="line-clamp-2 text-sm font-medium leading-5 text-sidebar-foreground">
-              {item.title}
-            </div>
-            <div className="mt-1 text-xs text-muted-foreground">Recent meeting</div>
-          </div>
-          {isMeetingItem && (
-            <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleEditStart(item.id, item.title);
-                }}
-                className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
-                aria-label="Edit meeting title"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDeleteModalState({ isOpen: true, itemId: item.id });
-                }}
-                className="rounded-md p-1.5 text-muted-foreground hover:bg-red-500/10 hover:text-red-500"
-                aria-label="Delete meeting"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          )}
-        </div>
-
-        {hasTranscriptMatch && (
-          <div className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/10 p-2 text-xs leading-5 text-amber-800 dark:text-amber-100">
-            <span className="font-medium text-amber-800 dark:text-amber-200">Match:</span>{" "}
-            {matchingResult.matchContext}
-          </div>
-        )}
-      </div>
+      <MeetingNavigationItem key={item.id} title={item.title} href={href} active={isActive}
+        matchContext={matchingResult?.matchContext}
+        onOpen={() => setCurrentMeeting({ id: item.id, title: item.title })}
+        onEdit={isMeetingItem ? () => handleEditStart(item.id, item.title) : undefined}
+        onDelete={isMeetingItem ? () => setDeleteModalState({ isOpen: true, itemId: item.id }) : undefined}
+      />
     );
   };
 
   const onSettings = pathname === "/settings";
-  const isEffectivelyCollapsed = isCollapsed || onSettings;
+  const compact = useCompactLayout();
+  const isEffectivelyCollapsed = compact || isCollapsed || onSettings;
 
   const goToMeetings = () => {
     router.push("/meetings");

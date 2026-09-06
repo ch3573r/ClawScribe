@@ -2,6 +2,8 @@
 pub mod audio_processing;
 pub mod decoder;
 pub mod encode;
+pub(crate) mod memory_queue;
+pub(crate) mod process_runner;
 pub mod ffmpeg;
 pub mod vad;
 

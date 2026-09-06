@@ -38,6 +38,8 @@ pub struct CustomOpenAIConfig {
 
 mod chunking;
 pub mod chat_commands;
+mod chat_context;
+mod chat_guard;
 pub mod codex_provider;
 pub mod commands;
 pub(crate) mod language_detection;

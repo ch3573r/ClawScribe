@@ -5,7 +5,7 @@ use rubato::{
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use super::memory_queue::{self, MemoryReceiver, MemorySender};
 use tokio::task::JoinHandle;
 
 use super::audio_processing::{
@@ -759,7 +759,7 @@ impl AudioCapture {
 /// VAD-driven audio processing pipeline
 /// Uses Voice Activity Detection to segment speech in real-time and send only speech to Whisper
 pub struct AudioPipeline {
-    receiver: mpsc::UnboundedReceiver<AudioChunk>,
+    receiver: MemoryReceiver<AudioChunk>,
     transcription_sender: TranscriptionQueueSender,
     state: Arc<RecordingState>,
     vad_processor: ContinuousVadProcessor,
@@ -773,13 +773,13 @@ pub struct AudioPipeline {
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
-    recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    recording_sender_for_mixed: Option<MemorySender<AudioChunk>>,
     queue_write_failures: QueueWriteFailureTracker,
 }
 
 impl AudioPipeline {
     pub fn new(
-        receiver: mpsc::UnboundedReceiver<AudioChunk>,
+        receiver: MemoryReceiver<AudioChunk>,
         transcription_sender: TranscriptionQueueSender,
         state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
@@ -1086,7 +1086,11 @@ impl AudioPipeline {
                                     chunk_id: self.chunk_id_counter,
                                     device_type: DeviceType::Microphone, // Mixed audio
                                 };
-                                let _ = sender.send(recording_chunk);
+                                if let Err(error) = sender.send(recording_chunk) {
+                                    error!("Recording writer queue failed ({error}); {} bytes still pending", sender.pending_bytes());
+                                    self.state.report_error(AudioError::ResourceExhausted);
+                                    return Err(anyhow::anyhow!("Audio recording is incomplete: {error}"));
+                                }
                             }
                         }
                     }
@@ -1180,7 +1184,7 @@ impl AudioPipeline {
 /// Simple audio pipeline manager
 pub struct AudioPipelineManager {
     pipeline_handle: Option<JoinHandle<Result<()>>>,
-    audio_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+    audio_sender: Option<MemorySender<AudioChunk>>,
 }
 
 impl AudioPipelineManager {
@@ -1198,7 +1202,7 @@ impl AudioPipelineManager {
         transcription_sender: TranscriptionQueueSender,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
-        recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        recording_sender: Option<MemorySender<AudioChunk>>,
         mic_device_name: String,
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
@@ -1216,7 +1220,7 @@ impl AudioPipelineManager {
         );
 
         // Create audio processing channel
-        let (audio_sender, audio_receiver) = mpsc::unbounded_channel::<AudioChunk>();
+        let (audio_sender, audio_receiver) = memory_queue::channel::<AudioChunk>(32 * 1024 * 1024, 4096);
 
         // Set sender in state for audio captures to use
         state.set_audio_sender(audio_sender.clone());

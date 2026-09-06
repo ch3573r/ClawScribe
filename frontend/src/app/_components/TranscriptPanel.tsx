@@ -31,7 +31,7 @@ export function TranscriptPanel({
   showModal
 }: TranscriptPanelProps) {
   // Contexts
-  const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
+  const { transcripts, copyTranscript } = useTranscripts();
   const { transcriptModelConfig } = useConfig();
   const { isRecording, isPaused, status } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
@@ -52,7 +52,7 @@ export function TranscriptPanel({
   );
 
   return (
-    <div ref={transcriptContainerRef} className="w-full border-r border-border bg-card flex flex-col overflow-y-auto">
+    <div className="flex min-h-0 w-full flex-col overflow-hidden border-r border-border bg-card">
       {/* Title area - Sticky header */}
       <div className="sticky top-0 z-10 bg-card p-4 border-border">
         <div className="flex flex-col space-y-3">
@@ -104,16 +104,16 @@ export function TranscriptPanel({
       )}
 
       {/* Transcript content */}
-      <div className="pb-20">
-        <div className="flex justify-center">
-          <div className="w-2/3 max-w-[750px]">
+      <div className="min-h-0 flex-1 pb-20">
+        <div className="flex h-full min-h-0 justify-center">
+          <div className="h-full min-h-0 w-full max-w-[900px] px-2 sm:px-4">
             <VirtualizedTranscriptView
               segments={segments}
               isRecording={isRecording || isStarting}
               isPaused={isPaused}
               isProcessing={isProcessingStop}
               isStopping={isStopping}
-              enableStreaming={isRecording}
+              enableStreaming={false}
               showConfidence={true}
             />
           </div>

@@ -83,7 +83,7 @@ export function useRecordingStart(
 
       beginRecordingCalendar(pendingCal);
       setIsRecording(true);
-      clearTranscripts();
+      // TranscriptProvider resets on recording-started before accepting new events.
       setIsMeetingActive(true);
       Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();

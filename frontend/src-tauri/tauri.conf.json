@@ -15,8 +15,8 @@
                 "title": "ClawScribe",
                 "width": 1100,
                 "height": 700,
-                "minWidth": 1100,
-                "minHeight": 700,
+                "minWidth": 800,
+                "minHeight": 560,
                 "resizable": true,
                 "fullscreen": false,
                 "decorations": false

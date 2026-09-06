@@ -315,6 +315,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     let app_for_error = app.clone();
     manager.set_error_callback(move |error| {
         let _ = app_for_error.emit("recording-error", error.user_message());
+        if !error.is_recoverable() {
+            let _ = app_for_error.emit("recording-warning", error.user_message());
+        }
     });
 
     // Surface non-fatal recording warnings (for example silent system audio or
@@ -507,6 +510,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let app_for_error = app.clone();
     manager.set_error_callback(move |error| {
         let _ = app_for_error.emit("recording-error", error.user_message());
+        if !error.is_recoverable() {
+            let _ = app_for_error.emit("recording-warning", error.user_message());
+        }
     });
 
     // Surface non-fatal recording warnings (for example silent system audio or
@@ -1031,6 +1037,8 @@ pub async fn stop_recording<R: Runtime>(
         }),
     );
 
+    let capture_incomplete = manager_for_cleanup.as_ref().is_some_and(|manager| manager.has_fatal_error());
+    let mut audio_save_incomplete = false;
     // Perform final cleanup with the manager if available
     let (meeting_folder, meeting_name) = if let Some(mut manager) = manager_for_cleanup {
         info!("🧹 Performing final cleanup and saving recording data");
@@ -1053,11 +1061,13 @@ pub async fn stop_recording<R: Runtime>(
                     "⚠️ Error during recording cleanup (transcripts preserved): {}",
                     e
                 );
-                // Don't fail shutdown - transcripts are already preserved
+                audio_save_incomplete = true;
+                let _ = app.emit("recording-warning", "Audio finalization failed. Saved checkpoints were retained for recovery; the transcript may still be available.");
             }
             Err(_) => {
                 warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
-                // Don't fail shutdown - transcripts are already preserved
+                audio_save_incomplete = true;
+                let _ = app.emit("recording-warning", "Audio finalization exceeded its time limit. Do not remove the meeting folder; checkpoints may be needed for recovery.");
             }
         }
 
@@ -1091,7 +1101,7 @@ pub async fn stop_recording<R: Runtime>(
         "recording-shutdown-progress",
         serde_json::json!({
             "stage": "complete",
-            "message": "Recording stopped successfully",
+            "message": if capture_incomplete || audio_save_incomplete { "Recording stopped with an audio error; check saved audio and recovery files" } else { "Recording stopped successfully" },
             "progress": 100
         }),
     );
@@ -1100,7 +1110,13 @@ pub async fn stop_recording<R: Runtime>(
     app.emit(
         "recording-stopped",
         serde_json::json!({
-            "message": if transcription_incomplete {
+            "capture_incomplete": capture_incomplete,
+            "audio_save_incomplete": audio_save_incomplete,
+            "message": if capture_incomplete {
+                "Recording stopped after an audio error; the saved recording may be incomplete"
+            } else if audio_save_incomplete {
+                "Recording stopped; saved audio needs recovery"
+            } else if transcription_incomplete {
                 "Recording stopped; some queued audio still needs retranscription"
             } else {
                 "Recording stopped - frontend will save after all transcripts received"

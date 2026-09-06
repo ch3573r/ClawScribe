@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::mpsc;
+use super::memory_queue::{MemorySender, QueueError, QueuePayload};
 
 use super::buffer_pool::AudioBufferPool;
 use super::devices::AudioDevice;
@@ -22,6 +22,10 @@ pub struct AudioChunk {
     pub timestamp: f64,
     pub chunk_id: u64,
     pub device_type: DeviceType,
+}
+
+impl QueuePayload for AudioChunk {
+    fn heap_bytes(&self) -> usize { self.data.capacity().saturating_mul(std::mem::size_of::<f32>()) }
 }
 
 /// Processed audio chunk (post-VAD) for recording
@@ -45,6 +49,7 @@ pub enum AudioError {
     ConfigurationError,
     PermissionDenied,
     BufferOverflow,
+    ResourceExhausted,
     SampleRateUnsupported,
 }
 
@@ -62,6 +67,7 @@ impl AudioError {
             AudioError::ConfigurationError => false,
             AudioError::PermissionDenied => false,
             AudioError::BufferOverflow => true,
+            AudioError::ResourceExhausted => false,
             AudioError::SampleRateUnsupported => false,
         }
     }
@@ -78,6 +84,7 @@ impl AudioError {
             AudioError::ConfigurationError => "Audio configuration error",
             AudioError::PermissionDenied => "Microphone permission denied",
             AudioError::BufferOverflow => "Audio buffer overflow",
+            AudioError::ResourceExhausted => "Recording stopped because audio processing or storage could not keep up. The recording may be incomplete. Stop and save the accepted audio, then free resources before recording again.",
             AudioError::SampleRateUnsupported => "Audio sample rate not supported",
         }
     }
@@ -105,7 +112,7 @@ pub struct RecordingState {
     disconnected_device: Mutex<Option<(Arc<AudioDevice>, DeviceType)>>,
 
     // Audio pipeline
-    audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
+    audio_sender: Mutex<Option<MemorySender<AudioChunk>>>,
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -264,7 +271,7 @@ impl RecordingState {
     }
 
     // Audio pipeline management
-    pub fn set_audio_sender(&self, sender: mpsc::UnboundedSender<AudioChunk>) {
+    pub fn set_audio_sender(&self, sender: MemorySender<AudioChunk>) {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
@@ -274,21 +281,27 @@ impl RecordingState {
             return Ok(()); // Silently discard chunks while paused
         }
 
-        if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            sender
-                .send(chunk)
-                .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
-
-            // Update statistics
-            let mut stats = self.stats.lock().unwrap();
-            stats.chunks_processed += 1;
-            stats.last_activity = Some(Instant::now());
-            Ok(())
-        } else {
-            // Return an error when no sender is available (pipeline not ready)
-            Err(anyhow::anyhow!(
-                "Audio pipeline not ready - no sender available"
-            ))
+        // Release the sender lock BEFORE reporting an error: report_error may
+        // stop recording and clear this same sender.
+        let result = {
+            let sender = self.audio_sender.lock().unwrap();
+            match sender.as_ref() {
+                Some(sender) => sender.send(chunk),
+                None => return Err(anyhow::anyhow!("Audio pipeline not ready - no sender available")),
+            }
+        };
+        match result {
+            Ok(()) => {
+                let mut stats = self.stats.lock().unwrap();
+                stats.chunks_processed += 1;
+                stats.last_activity = Some(Instant::now());
+                Ok(())
+            }
+            Err(QueueError::Full) => {
+                self.report_error(AudioError::ResourceExhausted);
+                Err(anyhow::anyhow!("Audio processing capacity exceeded; recording is incomplete"))
+            }
+            Err(QueueError::Closed) => Err(anyhow::anyhow!("Audio processing channel closed")),
         }
     }
 

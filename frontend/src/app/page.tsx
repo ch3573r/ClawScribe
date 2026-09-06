@@ -1,4 +1,5 @@
 'use client';
+import { useCompactLayout } from '@/hooks/useCompactLayout';
 
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -175,22 +176,6 @@ export default function Home() {
     }
   };
 
-  useEffect(() => {
-    if (recordingState.isRecording) {
-      const interval = setInterval(() => {
-        setBarHeights(prev => {
-          const newHeights = [...prev];
-          newHeights[0] = Math.random() * 20 + 10 + 'px';
-          newHeights[1] = Math.random() * 20 + 10 + 'px';
-          newHeights[2] = Math.random() * 20 + 10 + 'px';
-          return newHeights;
-        });
-      }, 300);
-
-      return () => clearInterval(interval);
-    }
-  }, [recordingState.isRecording]);
-
   // Stop the recording when the sidebar "Recording…" indicator is clicked.
   // Mirrors RecordingControls.stopRecordingAction so the stop flow is identical
   // regardless of which control triggered it.
@@ -213,6 +198,7 @@ export default function Home() {
     return () => window.removeEventListener('stop-recording-from-sidebar', onStopFromSidebar);
   }, [recordingState.isRecording, isStopping, handleRecordingStop, setIsStopping]);
 
+  const compact = useCompactLayout();
   // Computed values using global status
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
   const isRecordingOrStarting = recordingState.isRecording || isStarting;
@@ -257,7 +243,7 @@ export default function Home() {
                 <div className="fixed bottom-12 left-0 right-0 z-10 pointer-events-none">
                   <div
                     className="flex justify-center pl-8 transition-[margin] duration-300"
-                    style={{ marginLeft: sidebarCollapsed ? '4rem' : '16rem' }}
+                    style={{ marginLeft: compact || sidebarCollapsed ? '4rem' : '17.5rem' }}
                   >
                     <div className="pointer-events-auto rounded-full border border-border shadow-lg">
                       <RecordingControls

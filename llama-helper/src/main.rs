@@ -1,3 +1,4 @@
+mod budget;
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -355,20 +356,14 @@ impl ModelState {
         let start_time = Instant::now();
         let model = self.model.as_ref().context("Model not loaded")?;
 
-        // Calculate thread count (conservative default: max(1, (Cores / 2) + 2))
-        // This ensures the UI thread is never starved
-        let threads: i32 = std::thread::available_parallelism()
-            .map(|n| {
-                let cores = n.get() as i32;
-                ((cores / 2) + 2).max(1)
-            })
-            .unwrap_or(2);
+        let threads = budget::thread_budget(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2));
+        let batch_size = budget::prompt_batch_size(self.context_size);
 
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(Some(
                 NonZeroU32::new(self.context_size).context("Invalid ctx size")?,
             ))
-            .with_n_batch(self.context_size)
+            .with_n_batch(batch_size as u32)
             .with_n_threads(threads)
             .with_n_threads_batch(threads);
 
@@ -382,22 +377,23 @@ impl ModelState {
 
         eprintln!("📝 Tokenized prompt: {} tokens", tokens_list.len());
 
-        // Use context size for batch capacity to handle long prompts
-        let batch_size = self.context_size as usize;
+        budget::validate_prompt(self.context_size, tokens_list.len(), max_tokens)
+            .map_err(anyhow::Error::msg)?;
+        let n_prompt_tokens = tokens_list.len() as i32;
         let mut batch = LlamaBatch::new(batch_size, 1);
-
-        let last_index: i32 = (tokens_list.len() - 1) as i32;
-        for (i, token) in (0_i32..).zip(tokens_list.into_iter()) {
-            let is_last = i == last_index;
-            batch
-                .add(token, i, &[0], is_last)
-                .context("Failed to add token to batch")?;
+        // Decode bounded prompt batches; absolute positions and last-token logits
+        // must remain correct across every batch boundary.
+        for (batch_index, tokens) in tokens_list.chunks(batch_size).enumerate() {
+            batch.clear();
+            let offset = batch_index * batch_size;
+            for (index, token) in tokens.iter().enumerate() {
+                let position = offset + index;
+                batch.add(*token, position as i32, &[0], position + 1 == tokens_list.len())
+                    .context("Failed to add prompt token")?;
+            }
+            ctx.decode(&mut batch).context("Prompt decoding failed")?;
         }
-
-        ctx.decode(&mut batch).context("llama_decode() failed")?;
         let prompt_time = start_time.elapsed();
-
-        let n_prompt_tokens = batch.n_tokens();
         let mut n_cur = n_prompt_tokens;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut output = String::new();
@@ -463,6 +459,10 @@ impl ModelState {
                     output.len()
                 );
                 break;
+            }
+
+            if n_cur >= self.context_size as i32 {
+                return Err(anyhow::anyhow!("Local context window exhausted before the answer finished. Shorten the input or increase context size."));
             }
 
             let output_bytes = match model.token_to_piece_bytes(token, 32, true, None) {
