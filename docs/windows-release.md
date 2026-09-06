@@ -62,7 +62,8 @@ a GPU driver or the Vulkan runtime for you.
 Extracting the Vulkan SDK supplies headers, libraries, and build tools; it does
 not run its bundled `Helpers/VulkanRT.exe`. The release workflow explicitly
 runs the signed runtime installer and verifies the loader before building.
-This fixes the hosted runner prerequisite, not GPU availability or performance.
+This supplies the build machine's loader prerequisite; it does not establish
+GPU availability or performance.
 
 From the repository root in **64-bit PowerShell 7**, probe without installing:
 
@@ -98,31 +99,78 @@ capture, GUI interaction, or model-quality benchmarking.
 
 ## GitHub Actions
 
-**ClawScribe Windows Release** is the manual/reusable build workflow. Important
-inputs:
+**ClawScribe Windows Release** is the manual/reusable build workflow. Installer
+builds and native Windows diagnostics run exclusively on the designated local
+Windows x64 machine. There is no GitHub-hosted fallback: if the runner is
+offline, jobs wait for it.
+
+Assign the `clawscribe` label only to that machine's repository runner. Set the
+repository Actions variable `CLAWSCRIBE_BUILD_RUNNER` to both its registered
+runner name and Windows computer name. Before checking out any source, the
+workflow requires a self-hosted environment and verifies both names against
+that variable. Missing or mismatched configuration stops the job. Keep actual
+machine names in repository settings, never in committed configuration.
+
+Only trusted maintainer code may run on this persistent machine. Native Windows
+diagnostics use manual dispatch and trusted branch pushes; pull requests run
+the separate syntax and regression checks on standard GitHub-hosted Ubuntu
+runners. Those validation jobs are free while the repository is public and do
+not produce application installers. Reassess this policy before changing
+repository visibility or using larger runners.
+
+Important inputs:
 
 | Input | Meaning |
 | --- | --- |
 | `build-ref` | Exact commit, branch, or existing tag to build. Prefer an immutable commit SHA. |
 | `feature` | `windows-gpu` for the normal Windows GPU build. |
-| `hosted-runner` | `false` uses the dedicated Windows runner; `true` uses an ephemeral `windows-2022` runner. |
 | `check-only` | Validate without producing installers. |
 | `publish` | Publish to the stable release channel; requires real capture confirmation. |
 | `draft-release` | Stage unpublished release assets for verification. Mutually exclusive with `publish`. |
 | `capture-smoke-confirmed` | Assert only after the actual microphone/system-audio smoke test described below. |
 
-Normal test builds leave both `publish` and `draft-release` false and upload a
-7-day Actions artifact. Draft builds upload to a draft GitHub Release instead.
+Normal test builds leave both `publish` and `draft-release` false. Installers
+and verification metadata remain in the local runner checkout's
+`frontend/src-tauri/target/release/bundle`. They are not uploaded to Actions;
+copy needed outputs locally before a later build replaces them. Dependency,
+SDK, and build caches also remain local, with Actions caching disabled.
+Draft builds upload to an explicitly requested draft GitHub Release instead.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
 installers, and then runs the selected summary, chunker, logger, and hardware
 tests in the native Windows crate before staging release assets.
 
 **Stage Windows release candidate** runs on `release/**` pushes and can be run
-manually. It validates frontend code, uses the hosted Windows GPU build, and
+manually. It validates frontend code, uses the designated local Windows GPU build, and
 requests a draft. A successful job named `validate` alone is not a successful
 Windows build; the native `stage` job must also succeed. Avoid pushing unrelated
 changes to a building release branch because concurrency cancels its prior run.
+
+The legacy cross-platform installer workflows have been retired. Disable their
+entries in GitHub Actions as well as historical automation workflows that can
+still build from old branches. Keep the release, candidate, and native diagnostic
+workflows disabled while deploying a change to runner policy; enable them only
+after the local-only configuration and runner variable are present on the
+intended ref. Do not dispatch or rerun historical refs that select hosted builds.
+
+### GitHub Storage And Spending
+
+The current workflows do not upload Actions artifacts or caches. Source archives
+are available from GitHub by commit, so readiness checks do not upload duplicate
+source archives. Existing artifacts and caches from earlier runs remain until
+expiration or deliberate cleanup; changing a workflow does not delete them.
+Release assets remain the explicitly requested distribution path.
+
+Check the account and organization billing pages separately. Set metered-product
+budgets to zero with usage blocking when no overage is intended, and inspect
+Actions storage, Codespaces (including stopped instances and prebuilds), Packages,
+Git LFS, larger runners, AI-credit budgets, and paid subscriptions. An online local
+runner does not establish that unrelated GitHub products are free. Account billing
+and some resource inventories require permissions beyond repository access.
+
+See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+and [budgets and alerts](https://docs.github.com/en/billing/concepts/budgets-and-alerts)
+for current allowances and blocking behavior.
 
 ## Release Identity And Notes
 

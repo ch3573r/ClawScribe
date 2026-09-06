@@ -32,8 +32,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
 
       - name: Reject private paths and committed secrets
         run: node scripts/verify-public-repo-safety.mjs
@@ -112,6 +110,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Run **Build and Test - DevTest** for unsigned builds" >> $GITHUB_STEP_SUMMARY
-          echo "2. Run **Build and Test** for signed builds on all platforms" >> $GITHUB_STEP_SUMMARY
-          echo "3. Run **Release** to create a production release" >> $GITHUB_STEP_SUMMARY
+          echo "1. Run **ClawScribe Windows Release** on the designated local runner for validation or installers" >> $GITHUB_STEP_SUMMARY
+          echo "2. Test installers remain on the build machine; request a draft release when distribution is needed" >> $GITHUB_STEP_SUMMARY
+          echo "3. Publish only after completing the Windows release checklist" >> $GITHUB_STEP_SUMMARY

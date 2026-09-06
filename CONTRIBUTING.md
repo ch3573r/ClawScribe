@@ -78,6 +78,12 @@ pnpm run tauri:build
 
 Windows release smoke checks:
 
+Run native build and packaging checks on the designated local self-hosted build
+machine. The `CLAWSCRIBE_BUILD_RUNNER` Actions variable identifies it without
+committing its name. Hosted public-repository checks validate pull requests;
+application installers and native Windows diagnostics use the local runner only.
+See [Windows releases](docs/windows-release.md) for setup and spending controls.
+
 ```powershell
 cd frontend
 .\scripts\build-windows-release.ps1 -CheckOnly

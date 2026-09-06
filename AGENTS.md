@@ -68,6 +68,12 @@ This is a public repository.
   includes publishing/releasing. Never force-push unless explicitly authorized.
 - Do not bump versions, tag, publish, or create a release unless the user asks
   for a release.
+- Run installer builds and native Windows diagnostics only on the designated
+  local self-hosted runner configured by `CLAWSCRIBE_BUILD_RUNNER`. Never select
+  a GitHub-hosted fallback or revive historical hosted build workflows. Keep
+  machine names out of committed files and build caches/test installers local.
+  Standard public-repository hosted validation is allowed; see
+  `docs/windows-release.md` for runner and spending controls.
 
 ## Source Map
 

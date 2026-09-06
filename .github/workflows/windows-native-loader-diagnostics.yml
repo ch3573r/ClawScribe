@@ -4,8 +4,6 @@ on:
   push:
     branches: ['fix/0.5.36-native-loader', 'release/**']
     paths: ['frontend/scripts/ensure-windows-vulkan-runtime.ps1', '.github/workflows/windows-native-loader-diagnostics.yml']
-  pull_request:
-    paths: ['frontend/scripts/ensure-windows-vulkan-runtime.ps1', '.github/workflows/*windows*.yml']
   workflow_dispatch:
 
 permissions:
@@ -13,9 +11,23 @@ permissions:
 
 jobs:
   loader:
-    runs-on: windows-2022
+    runs-on: [self-hosted, Windows, X64, clawscribe]
     timeout-minutes: 10
     steps:
+      - name: Require the designated local build machine
+        shell: pwsh
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
+
       - uses: actions/checkout@v4
       - name: Parse preflight and check repository safety
         shell: pwsh

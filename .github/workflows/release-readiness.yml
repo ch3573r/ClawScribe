@@ -61,18 +61,3 @@ jobs:
           path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/audio/hardware_detector.rs"
           EOF
           cargo test --manifest-path "$test_root/Cargo.toml" -- --nocapture
-      - name: Archive exact candidate source
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/clawscribe-source"
-          git archive --format=zip HEAD -o "$RUNNER_TEMP/clawscribe-source/ClawScribe-source.zip"
-          git rev-parse HEAD > "$RUNNER_TEMP/clawscribe-source/COMMIT.txt"
-      - name: Upload candidate source
-        if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: clawscribe-candidate-source
-          path: ${{ runner.temp }}/clawscribe-source/*
-          retention-days: 3
-          if-no-files-found: error

@@ -45,6 +45,12 @@ cd frontend
 .\scripts\build-windows-release.ps1
 ```
 
+Run installer builds and native Windows diagnostics on the designated local
+self-hosted machine configured by the `CLAWSCRIBE_BUILD_RUNNER` Actions variable.
+The release workflow has no hosted fallback and keeps caches and test installers
+local. Use the public-safe runner setup in `docs/windows-release.md`; never commit
+the actual machine name or revive legacy hosted installer workflows.
+
 Use GPU feature scripts only when the task is specifically about acceleration:
 
 ```bash

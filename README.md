@@ -162,6 +162,10 @@ recording tests. Run frontend checks with `pnpm typecheck` and `pnpm test`.
 Windows packaging and required sidecar staging are documented in
 [Windows releases](docs/windows-release.md).
 
+Windows installers are built on the designated local self-hosted machine, with
+no GitHub-hosted fallback. Test installers and build caches stay on that machine;
+GitHub distribution uses explicitly requested draft or published releases.
+
 ```text
 frontend/src/             React UI, hooks, services, and routes
 frontend/src-tauri/src/   Rust/Tauri audio, transcription, summary, and exports

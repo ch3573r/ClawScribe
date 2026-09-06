@@ -1,346 +1,44 @@
-# GitHub Actions Workflows Overview
-
-This document provides a quick overview of all available CI/CD workflows in this repository.
-
-**Note:** All workflows in this repository use **manual triggers only** (`workflow_dispatch`). There are no automatic triggers from push or pull request events.
-
-## Workflow Files
-
-### 1. **build-devtest.yml** - DevTest Builds
-**Purpose:** Fast builds for development and testing
-
-**Key Features:**
-- Signing OFF by default (faster builds)
-- Optional signing via workflow dispatch input
-- All platforms in parallel
-- 14-day artifact retention
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- Regular development work
-- Testing features
-- Need fast feedback
-
----
-
-### 2. **build-macos.yml** - macOS Standalone Builds
-**Purpose:** Build and test specifically for Apple Silicon (M1/M2/M3)
-
-**Key Features:**
-- Apple Developer Certificate signing (optional)
-- Notarization with Apple ID
-- Signature verification
-- macOS-focused optimizations
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- macOS-specific development
-- Testing Metal GPU acceleration
-- Verifying macOS-specific features
-
-**Outputs:**
-- `.dmg` installer
-- `.app` bundle
-
----
-
-### 3. **build-windows.yml** - Windows Standalone Builds
-**Purpose:** Build and test specifically for Windows x64
-
-**Key Features:**
-- DigiCert KeyLocker signing (cloud HSM)
-- Signs both MSI and NSIS installers
-- Signature verification with PowerShell
-- MSI installer validation
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- Windows-specific development
-- Testing CUDA/Vulkan GPU acceleration
-- Verifying Windows-specific features
-
-**Outputs:**
-- `.msi` installer
-- `.exe` NSIS installer
-
----
-
-### 4. **build-linux.yml** - Linux Standalone Builds
-**Purpose:** Build and test for Linux distributions
-
-**Key Features:**
-- Support for Ubuntu 22.04 and 24.04
-- Multiple bundle formats (DEB, AppImage, RPM)
-- Tauri updater signing
-- AppImage compatibility fixes
-- Package verification
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- Linux-specific development
-- Testing Vulkan GPU acceleration
-- Verifying package formats
-
-**Outputs:**
-- `.deb` package (Ubuntu/Debian)
-- `.AppImage` portable
-- `.rpm` package (Fedora/RHEL)
-
----
-
-### 5. **build-test.yml** - Multi-Platform Test Builds
-**Purpose:** Test builds across all platforms with signing
-
-**Key Features:**
-- Signing ON by default
-- All platforms in parallel
-- Uses reusable `build.yml` workflow
-- 30-day artifact retention
-- Artifacts prefixed with `meetily-test-`
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- Pre-release testing
-- Verifying signing infrastructure
-- Testing across all platforms simultaneously
-
----
-
-### 6. **build.yml** - Reusable Build Workflow
-**Purpose:** Shared workflow used by other workflows
-
-**Key Features:**
-- Reusable workflow (called by others)
-- Highly configurable inputs
-- Used by older cross-platform test/build workflows
-
-**Not directly triggered** - used as a building block
-
----
-
-### 7. **clawscribe-windows-release.yml** - ClawScribe Windows Release
-**Purpose:** Build Windows installers and optionally publish the updater release
-
-**Key Features:**
-- Runs on the self-hosted Windows ClawScribe runner
-- Builds the Windows MSI and NSIS setup installers
-- Stages `llama-helper` and the pinned Codex app-server runtime
-- Verifies branded icons
-- Supports CPU, Vulkan, CUDA, OpenBLAS, and optional DirectML builds
-- Generates `SHA256SUMS.txt`, `BUILD-METADATA.txt`, and `latest.json`
-- Publishes directly to a GitHub Release when `publish=true`
-- Guards against updater-invisible prerelease versions
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- Producing a Windows installer artifact for testing
-- Publishing the updater-facing GitHub Release
-- Validating a release with `check-only=true`
-
-**Outputs:**
-- GitHub Actions artifact for non-publish builds
-- GitHub Release assets for publish builds:
-  - `ClawScribe_<version>_x64-setup.exe`
-  - `ClawScribe_<version>_x64_en-US.msi`
-  - `latest.json`
-  - `SHA256SUMS.txt`
-  - `BUILD-METADATA.txt`
-
-**Note:** The old cross-platform `release.yml` workflow was removed. The
-updater uses `/releases/latest/download/latest.json`, so release publishing must
-go through the ClawScribe Windows Release workflow while Windows is the active
-distribution channel.
-
----
-
-### 8. **pr-main-check.yml** - Validation Check
-**Purpose:** Quick validation of version and configuration
-
-**Key Features:**
-- No builds triggered
-- Validates version format
-- Shows current branch info
-- Provides next steps guidance
-
-**Triggers:**
-- Manual dispatch only
-
-**Use When:**
-- Quick configuration check
-- Before running full builds
-
----
-
-## How to Run Workflows
-
-1. **Go to Actions tab** in GitHub repository
-2. **Select workflow** from left sidebar
-3. **Click "Run workflow"** button
-4. **Select branch** to run against
-5. **Configure options** (build type, signing, etc.)
-6. **Click "Run workflow"** to start
-7. **Monitor progress** in the Actions tab
-
----
-
-## Quick Decision Guide
-
-### "I'm developing a new feature..."
-- **Use `build-devtest.yml`** (manual dispatch)
-- Fast builds, no signing by default
-- Enable signing checkbox if needed
-
-### "I need to test macOS-specific code..."
-- **Use `build-macos.yml`** (manual dispatch)
-- Focus on macOS
-- Optional signing
-
-### "I need to test Windows-specific code..."
-- **Use `build-windows.yml`** (manual dispatch)
-- Focus on Windows
-- Optional signing
-
-### "I need to test Linux packages..."
-- **Use `build-linux.yml`** (manual dispatch)
-- Choose Ubuntu version
-- Choose bundle types
-
-### "I need signed builds for all platforms..."
-- **Use `build-test.yml`** (manual dispatch)
-- All platforms
-- Signing enabled
-- Full verification
-
-### "I'm ready to release..."
-- **Use `clawscribe-windows-release.yml`** (manual dispatch)
-- Select the intended feature set and DirectML option
-- Set `publish=true` only when the release notes and updater version are ready
-- Produces Windows installers and updater metadata
-
----
-
-## Workflow Dependencies
-
-```
-build.yml (reusable)
-    |-- build-test.yml (calls build.yml)
-
-Standalone (don't use build.yml):
-    |-- clawscribe-windows-release.yml (release/updater path)
-    |-- build-macos.yml
-    |-- build-windows.yml
-    |-- build-linux.yml
-    |-- build-devtest.yml
-    |-- pr-main-check.yml (validation only)
-```
-
----
-
-## Comparison Matrix
-
-| Workflow | Platforms | Default Signing | Speed | Retention | Use Case |
-|----------|-----------|----------------|-------|-----------|----------|
-| `build-devtest.yml` | All | OFF | Fast | 14 days | Development |
-| `build-macos.yml` | macOS | Optional | Medium | 30 days | macOS dev |
-| `build-windows.yml` | Windows | Optional | Medium | 30 days | Windows dev |
-| `build-linux.yml` | Linux | Optional | Medium | 30 days | Linux dev |
-| `build-test.yml` | All | ON | Slow | 30 days | Pre-release |
-| `clawscribe-windows-release.yml` | Windows | Optional updater signing | Medium | Release assets / 7-day dev artifacts | Release |
-
----
-
-## Artifact Naming Convention
-
-```
-meetily-{workflow}-{platform}-{target}-{version}
-```
-
-**Examples:**
-- `meetily-devtest-macOS-aarch64-apple-darwin-0.1.3`
-- `meetily-test-windows-x86_64-pc-windows-msvc-0.1.3`
-- `meetily-macos-aarch64-release-0.1.3`
-
----
-
-## Required Secrets
-
-All workflows require these secrets to be configured:
-
-### macOS Signing
-- `APPLE_CERTIFICATE` - Developer ID certificate (base64)
-- `APPLE_CERTIFICATE_PASSWORD` - Certificate password
-- `APPLE_ID` - Apple ID email
-- `APPLE_PASSWORD` - App-specific password
-- `APPLE_TEAM_ID` - Team ID
-- `KEYCHAIN_PASSWORD` - Temporary keychain password
-
-### Windows Signing (DigiCert)
-- `SM_HOST` - DigiCert host URL
-- `SM_API_KEY` - API key
-- `SM_CLIENT_CERT_FILE_B64` - Client cert (base64)
-- `SM_CLIENT_CERT_PASSWORD` - Client cert password
-- `SM_CODE_SIGNING_CERT_SHA1_HASH` - Certificate hash
-
-### Tauri Updater (All Platforms)
-- `TAURI_SIGNING_PRIVATE_KEY` - Ed25519 private key
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` - Key password
-
-### Application Configuration
-- `MEETILY_RSA_PUBLIC_KEY` - License validation public key
-- `SUPABASE_URL` - Online license verification
-- `SUPABASE_ANON_KEY` - Supabase anonymous key
-
----
-
-## Performance Tips
-
-1. **Use devtest workflow** for routine development (fastest)
-2. **Enable signing** only when necessary (adds 10-15 minutes)
-3. **Test specific platforms** when working on platform-specific code
-4. **Run full builds** (`build-test.yml`) before releases
-5. **Cache is enabled** - subsequent builds are faster
-
----
-
-## Troubleshooting
-
-### Build fails with version error (Windows MSI)
-- Ensure version in `tauri.conf.json` doesn't contain non-numeric pre-release identifiers
-- Use `0.1.3` not `0.1.2-pro-trial`
-
-### Signing fails
-- Verify all required secrets are configured
-- Check secret expiration dates
-- Review workflow logs for specific errors
-
-### Artifacts not available
-- Check build succeeded completely
-- Artifacts expire based on retention period
-- Ensure `upload-artifacts` is enabled
-
-### Workflow not appearing in Actions
-- Verify YAML syntax is valid
-- Check file is in `.github/workflows/` directory
-- Ensure file extension is `.yml` or `.yaml`
-
----
-
-## Support
-
-For issues with workflows:
-1. Check workflow logs in Actions tab
-2. Review this documentation
-3. Check `README_DEVTEST.md` for devtest-specific help
-4. Check `ACCELERATION_GUIDE.md` for GPU/performance info
+# GitHub Actions Workflows
+
+ClawScribe uses one designated local Windows x64 runner for application
+installers and native Windows diagnostics. The release workflow has no hosted
+fallback. Its `clawscribe` label and `CLAWSCRIBE_BUILD_RUNNER` repository variable
+must identify that machine. The workflow verifies both the registered runner
+name and Windows computer name before checking out code. Keep real machine names
+in repository settings, never in committed files.
+
+| Workflow | Trigger | Execution and output |
+| --- | --- | --- |
+| `clawscribe-windows-release.yml` | Manual or reusable call | Local Windows runner; checks or installers; explicit draft/publish options |
+| `windows-candidate.yml` | `release/**` push or manual | Standard Ubuntu frontend checks, then the local Windows GPU build and a draft release |
+| `windows-native-loader-diagnostics.yml` | Selected trusted branch pushes or manual | Local Windows runner; native Vulkan loader fixture |
+| `pr-main-check.yml` | Pull request, `main` push, or manual | Standard Ubuntu safety, version, frontend typecheck and helper tests |
+| `release-readiness.yml` | Selected pushes, pull-request paths, or manual | Standard Ubuntu isolated Rust module regressions |
+| `summary-chunking-tests.yml` | Relevant pull-request/`main` paths or manual | Standard Ubuntu isolated chunker tests |
+| `windows-script-validation.yml` | Relevant pull-request paths or release branch pushes | Standard Ubuntu PowerShell syntax and repository safety checks |
+
+Standard hosted validation is free for this public repository and does not
+produce application installers. Do not run untrusted pull-request code on the
+persistent local runner. Reassess hosted validation before making the repository
+private or selecting larger runners.
+
+The legacy DevTest, cross-platform, and standalone hosted installer workflows
+have been retired. Disable their GitHub workflow entries and historical branch
+automations that can still launch hosted builds. Do not rerun old hosted refs.
+
+Test builds keep installers and verification metadata in the local checkout's
+`frontend/src-tauri/target/release/bundle`. Copy outputs locally before another
+build replaces them. Current workflows upload no Actions artifacts or caches.
+Draft and published GitHub Release assets require an explicit release request.
+Existing artifacts/caches from older workflows require expiration or deliberate
+cleanup; removing an uploader does not delete stored resources.
+
+Use **ClawScribe Windows Release** with `check-only=true` for native preflight,
+or leave `publish` and `draft-release` false for local test installers. The normal
+acceleration feature is `windows-gpu`. Keep build workflows disabled until the
+local-only workflow revision and runner variable are configured, then enable only
+the supported workflows. A queued job waits for the local runner to come online.
+
+Follow [Windows releases](../../docs/windows-release.md) for prerequisites,
+runner configuration, metered spending checks, release identity, updater signing,
+and the required real-device capture acceptance before stable publication.
