@@ -1,0 +1,50 @@
+name: Rendered meeting UI regressions
+on:
+  push:
+    branches: ['automation/quality-review-2026-09-06']
+    paths: ['review-tools/browser-*', '.github/workflows/quality-browser.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: quality-browser-verification
+  cancel-in-progress: true
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SOURCE_COMMIT: 1efd83ddbbf44f5d16620edf353be91ff6c1b615
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: preparation
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+          path: source
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+        working-directory: source/frontend
+      - name: Install isolated browser verification tools
+        run: |
+          tools="$RUNNER_TEMP/clawscribe-ui-tools"
+          npm install --prefix "$tools" --no-save --ignore-scripts playwright@1.56.1 esbuild@0.25.10 axe-core@4.10.3
+          node "$tools/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "UI_TOOLS=$tools" >> "$GITHUB_ENV"
+          echo "BROWSER_RESULTS=$RUNNER_TEMP/clawscribe-browser-results" >> "$GITHUB_ENV"
+      - name: Exercise actual components in Chromium
+        run: node preparation/review-tools/browser-checks.cjs source
+      - name: Preserve screenshots and machine-readable results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawscribe-rendered-ui-verification
+          path: ${{ runner.temp }}/clawscribe-browser-results
+          if-no-files-found: warn
+          retention-days: 3
