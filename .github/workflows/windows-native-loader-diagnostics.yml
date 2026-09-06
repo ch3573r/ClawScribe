@@ -1,9 +1,11 @@
-name: Windows native loader diagnostics
+name: Windows Vulkan runtime validation
 
 on:
   push:
-    branches: ['fix/0.5.36-native-loader']
-    paths: ['.github/workflows/windows-native-loader-diagnostics.yml']
+    branches: ['fix/0.5.36-native-loader', 'release/**']
+    paths: ['frontend/scripts/ensure-windows-vulkan-runtime.ps1', '.github/workflows/windows-native-loader-diagnostics.yml']
+  pull_request:
+    paths: ['frontend/scripts/ensure-windows-vulkan-runtime.ps1', '.github/workflows/*windows*.yml']
   workflow_dispatch:
 
 permissions:
@@ -14,13 +16,17 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
-      - name: Probe clean image Vulkan loader
+      - uses: actions/checkout@v4
+      - name: Parse preflight and check repository safety
         shell: pwsh
         run: |
-          $handle = [IntPtr]::Zero
-          $found = [System.Runtime.InteropServices.NativeLibrary]::TryLoad('vulkan-1.dll', [ref]$handle)
-          Write-Host "CLEAN_IMAGE_VULKAN_LOADER=$found"
-          if ($found) { [System.Runtime.InteropServices.NativeLibrary]::Free($handle) }
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null
+          $parseErrors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'frontend/scripts/ensure-windows-vulkan-runtime.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          node scripts/verify-public-repo-safety.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Repository safety check failed.' }
       - name: Ensure SDK extractor
         shell: pwsh
         run: |
@@ -32,19 +38,55 @@ jobs:
         with:
           version: 1.4.309.0
           cache: false
-      - name: Inspect extracted loader and runtime installers
+      - name: Build a native load-time Vulkan dependency fixture
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          @'
+          #include <vulkan/vulkan.h>
+          #include <stdio.h>
+          int main(void) {
+              uint32_t version = 0;
+              VkResult result = vkEnumerateInstanceVersion(&version);
+              printf("Vulkan loader API: %u.%u.%u (result=%d)\n",
+                  VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version), result);
+              return result == VK_SUCCESS ? 0 : 1;
+          }
+          '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP/vulkan-loader-probe.c" -Encoding ascii
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC installation not found.' }
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          $command = 'call "{0}" && cl /nologo /I"{1}/Include" "{2}/vulkan-loader-probe.c" /Fe:"{2}/vulkan-loader-probe.exe" /Fo:"{2}/vulkan-loader-probe.obj" /link /LIBPATH:"{1}/Lib" vulkan-1.lib' -f $vcvars, $env:VULKAN_SDK, $env:RUNNER_TEMP
+          & cmd.exe /d /c $command
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan fixture compilation failed.' }
+      - name: Verify missing-runtime rejection, installation and idempotence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           $handle = [IntPtr]::Zero
           $found = [System.Runtime.InteropServices.NativeLibrary]::TryLoad('vulkan-1.dll', [ref]$handle)
           Write-Host "AFTER_SDK_EXTRACTION_VULKAN_LOADER=$found"
-          if ($found) { [System.Runtime.InteropServices.NativeLibrary]::Free($handle) }
-          Get-ChildItem -LiteralPath $env:VULKAN_SDK -Recurse -File |
-            Where-Object { $_.Name -match '(?i)vulkan.*(?:dll|exe)$|vulkanrt|runtime' } |
-            ForEach-Object { Write-Host "$($_.FullName) [$($_.Length) bytes]" }
-          Write-Host 'Relevant system DLLs:'
-          foreach ($name in @('vulkan-1.dll', 'd3d12.dll', 'dxgi.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
-            $path = Join-Path $env:SystemRoot "System32/$name"
-            Write-Host "$name=$(Test-Path -LiteralPath $path -PathType Leaf)"
+          if ($found) {
+            [System.Runtime.InteropServices.NativeLibrary]::Free($handle)
+          } else {
+            $rejected = $false
+            try { ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 } catch {
+              if ($_.Exception.Message -notlike '*Cannot load vulkan-1.dll*') { throw }
+              $rejected = $true
+              Write-Host 'Missing runtime correctly rejected without opt-in installation.'
+            }
+            if (-not $rejected) { throw 'Preflight accepted a missing Vulkan runtime.' }
+            & "$env:RUNNER_TEMP/vulkan-loader-probe.exe"
+            $before = $LASTEXITCODE
+            Write-Host "BEFORE_INSTALL_NATIVE_PROBE_EXIT=$before"
+            if ($before -ne -1073741515) { throw "Expected STATUS_DLL_NOT_FOUND, got $before." }
           }
+          ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+          & "$env:RUNNER_TEMP/vulkan-loader-probe.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Native Vulkan loader fixture failed: $LASTEXITCODE" }
+          ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+          ./frontend/scripts/ensure-windows-vulkan-runtime.ps1
+          Write-Host 'Native loader fixture passed. GPU inference and live capture were not exercised.'
