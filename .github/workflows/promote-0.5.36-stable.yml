@@ -1,0 +1,165 @@
+name: Promote verified 0.5.36 to release
+
+on:
+  push:
+    branches: ['promotion/0.5.36-stable']
+    paths: ['.github/workflows/promote-0.5.36-stable.yml']
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: promote-clawscribe-0.5.36
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.repository == 'ch3573r/ClawScribe' && github.actor == 'ch3573r'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check repository safety and install signature verifier
+        run: |
+          node scripts/verify-public-repo-safety.mjs
+          sudo apt-get update -qq
+          sudo apt-get install -y minisign
+      - name: Verify unchanged release assets and apply owner-requested channel promotion
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const assert = require('node:assert/strict');
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const os = require('node:os');
+            const crypto = require('node:crypto');
+            const { execFileSync } = require('node:child_process');
+            const repo = context.repo;
+            const commit = '1d92be1122bdcf0a6f93ed47e4981a3836e215a1';
+            const version = '0.5.36';
+            const tag = 'v0.5.36';
+            const releaseId = 383465104;
+            const buildRun = 34010383598;
+            const nsis = 'ClawScribe_0.5.36_x64-setup.exe';
+            const msi = 'ClawScribe_0.5.36_x64_en-US.msi';
+            const expected = {
+              [nsis]: [155951885, 'e581fa87c8182ee588be945f6d1f64ddc9b90bcf73e09ea1f0f7ee51f20e0431'],
+              [msi]: [220803072, '4171ae1b2cdd551b01b05fed3b83af41c8b890274d0cd115654a2848eb1b6820'],
+              'SHA256SUMS.txt': [207, 'd2585cda8f1e1928b6bb2da256d2b0d3cc3c3d23ddc0fb397f1a3e6cb475b1da'],
+              'BUILD-METADATA.txt': [677, '319d9bd9ef0e97e449f3def57e969db4242526f87e4d075c4b83847e806e5fef'],
+              'BUILD-METRICS.json': [601, '37676cd5ae9ffcb39e7e75f23ac2feed8863626a18b8e767ea6aac1726112023'],
+              'latest.json': [762, '7dc82c2c69521e10c9e7c38ecdd2422a5eeeff4fa634fd1b09af143257b98555'],
+              'RELEASE-VERIFICATION.json': [1736, '5e3b6ca134867617f6a33ab67d887d00a2b54b2e38dc53301f43f8c1a7af4c72']
+            };
+            const { data: run } = await github.rest.actions.getWorkflowRun({...repo, run_id: buildRun});
+            assert.equal(run.head_sha, commit);
+            assert.equal(run.status, 'completed');
+            assert.equal(run.conclusion, 'success');
+            const { data: verification } = await github.rest.actions.getWorkflowRun({...repo, run_id: 34020923549});
+            assert.equal(verification.conclusion, 'success');
+            const { data: ref } = await github.rest.git.getRef({...repo, ref: `tags/${tag}`});
+            assert.equal(ref.object.type, 'commit');
+            assert.equal(ref.object.sha, commit);
+            const { data: before } = await github.rest.repos.getRelease({...repo, release_id: releaseId});
+            assert.equal(before.draft, false);
+            assert.equal(before.tag_name, tag);
+            assert.equal(before.target_commitish, commit);
+            const { data: previousLatest } = await github.rest.repos.getLatestRelease(repo);
+            assert.ok([352410193, releaseId].includes(previousLatest.id), 'Do not replace an unexpected newer stable release.');
+            const snapshot = release => JSON.stringify(release.assets.map(a => [a.id, a.name, a.size, a.digest]).sort((a,b) => a[0]-b[0]));
+            const beforeAssets = snapshot(before);
+            assert.equal(before.assets.length, Object.keys(expected).length);
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clawscribe-release-'));
+            try {
+              for (const [name, [size, digest]] of Object.entries(expected)) {
+                const matches = before.assets.filter(a => a.name === name && a.state === 'uploaded');
+                assert.equal(matches.length, 1, `Missing or duplicate asset: ${name}`);
+                const asset = matches[0];
+                assert.equal(asset.size, size);
+                assert.equal(asset.digest, `sha256:${digest}`);
+                const url = `https://github.com/${repo.owner}/${repo.repo}/releases/download/${tag}/${name}`;
+                assert.equal(asset.browser_download_url, url);
+                // Public downloads never receive the repository credential.
+                const response = await fetch(url, {signal: AbortSignal.timeout(180000)});
+                assert.ok(response.ok, `Asset download failed: ${name}: ${response.status}`);
+                const bytes = Buffer.from(await response.arrayBuffer());
+                assert.equal(bytes.length, size);
+                assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), digest);
+                fs.writeFileSync(path.join(root, name), bytes);
+                core.info(`Verified unchanged asset: ${name}, SHA-256 ${digest}`);
+              }
+              const text = name => fs.readFileSync(path.join(root, name), 'utf8').replace(/^\uFEFF/, '');
+              const manifest = JSON.parse(text('latest.json'));
+              assert.equal(manifest.version, version);
+              const platform = manifest.platforms['windows-x86_64'];
+              assert.equal(platform.url, `https://github.com/${repo.owner}/${repo.repo}/releases/download/${tag}/${nsis}`);
+              const report = JSON.parse(text('RELEASE-VERIFICATION.json'));
+              assert.equal(report.version, version);
+              assert.equal(report.source_commit, commit);
+              assert.equal(report.build_run, buildRun);
+              assert.equal(report.native_test_count, 40);
+              const { data: configFile } = await github.rest.repos.getContent({...repo, path: 'frontend/src-tauri/tauri.conf.json', ref: commit});
+              assert.equal(configFile.type, 'file');
+              const config = JSON.parse(Buffer.from(configFile.content, 'base64').toString('utf8'));
+              fs.writeFileSync(path.join(root, 'updater.pub'), Buffer.from(config.plugins.updater.pubkey, 'base64'));
+              fs.writeFileSync(path.join(root, 'updater.sig'), Buffer.from(platform.signature, 'base64'));
+              core.info(execFileSync('minisign', ['-V', '-m', path.join(root, nsis), '-p', path.join(root, 'updater.pub'), '-x', path.join(root, 'updater.sig')], {encoding: 'utf8'}));
+              const notes = fs.readFileSync('docs/releases/0.5.36.md', 'utf8');
+              const start = notes.indexOf('## Meeting Content And Notes');
+              const end = notes.indexOf('## Validation And Limitations');
+              assert.ok(start >= 0 && end > start, 'Audited release-note sections must exist.');
+              const body = [
+                '# ClawScribe 0.5.36', '',
+                '**Available on the stable release/update channel.** This promotion reuses the published, verified prerelease installers without rebuilding or replacing them.', '',
+                `Binary source: \`${commit}\`. Windows x64 \`windows-gpu\` build (Whisper Vulkan and ONNX DirectML support).`, '',
+                '## Install',
+                `Use \`${nsis}\` for normal installation, or \`${msi}\` for MSI deployment. Back up existing meeting data before upgrading.`,
+                'The setup is not Authenticode-signed; Windows may display an unknown-publisher or SmartScreen warning. The NSIS Tauri updater signature is independently verified and is not Windows publisher trust.',
+                'The GPU build requires vulkan-1.dll from a supported GPU driver or the official Vulkan runtime. The installer does not install that prerequisite. Do not obtain individual DLLs from third-party sites.', '',
+                notes.slice(start, end).trim(), '',
+                '## Verified release checks',
+                '- Complete Windows application and both installer formats: passed.',
+                '- Required Windows release-profile native tests: 40 passed across summary processing, chunking, logging, and hardware detection.',
+                '- Frontend typechecking and the configured helper/control suite: passed in the pinned build.',
+                '- All seven published assets were downloaded again before promotion and matched their recorded sizes and SHA-256/GitHub digests.',
+                '- The unchanged NSIS updater signature was verified again against the exact binary commit\'s public key.',
+                `- Build: https://github.com/${repo.owner}/${repo.repo}/actions/runs/${buildRun}`, '',
+                '## Validation limits',
+                'Promoted at the repository owner\'s explicit request. Real microphone-plus-system-audio acceptance in Teams/Webex, graphical installation/upgrade acceptance, rendered Windows accessibility, and sustained i5-1235U/8 GB performance remain unconfirmed for this build. This channel change is not evidence that those tests passed; no capture-smoke confirmation has been asserted.',
+                'Review generated names, numbers, decisions, owners, and deadlines against the transcript/audio. Prompt improvements do not guarantee hallucination-free notes. Provider-wide context budgeting, resumable summary reduction, and evidence-linked actions remain further work.', '',
+                '## Update behavior',
+                'GitHub latest and the stable updater now advertise 0.5.36. Users already running the 0.5.36 prerelease have the identical binaries and do not need to reinstall. Any subsequently changed binaries require a higher numeric version.',
+                'RELEASE-VERIFICATION.json remains unchanged as the historical prerelease verification record; its channel field describes that verification, not the current release-channel setting.', '',
+                '## Installer SHA-256', '```text', text('SHA256SUMS.txt').trim(), '```'
+              ].join('\n');
+              // Recheck mutable release state immediately before the only write.
+              const { data: fresh } = await github.rest.repos.getRelease({...repo, release_id: releaseId});
+              assert.equal(snapshot(fresh), beforeAssets);
+              assert.equal(fresh.body, before.body);
+              assert.equal(fresh.target_commitish, commit);
+              assert.equal(fresh.draft, false);
+              assert.equal(fresh.prerelease, before.prerelease);
+              const { data: latestBeforeWrite } = await github.rest.repos.getLatestRelease(repo);
+              assert.equal(latestBeforeWrite.id, previousLatest.id);
+              const { data: updated } = await github.rest.repos.updateRelease({...repo, release_id: releaseId, name: 'ClawScribe v0.5.36', body, prerelease: false, make_latest: 'true'});
+              assert.equal(updated.prerelease, false);
+              assert.equal(updated.draft, false);
+              assert.equal(updated.target_commitish, commit);
+              assert.equal(snapshot(updated), beforeAssets);
+              const { data: latest } = await github.rest.repos.getLatestRelease(repo);
+              assert.equal(latest.id, releaseId);
+              const { data: finalRef } = await github.rest.git.getRef({...repo, ref: `tags/${tag}`});
+              assert.equal(finalRef.object.sha, commit);
+              core.info(`Stable release promoted: ${updated.html_url}; installers and tag unchanged.`);
+              await core.summary.addHeading('ClawScribe 0.5.36 promoted to release')
+                .addLink('Release', updated.html_url)
+                .addRaw('\nAll seven asset hashes and the NSIS updater signature verified again. No binaries rebuilt or replaced. Real-device acceptance remains unconfirmed and is disclosed in the release notes.\n').write();
+            } finally {
+              fs.rmSync(root, {recursive: true, force: true});
+            }
