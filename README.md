@@ -7,10 +7,13 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.36**. The [0.5.36 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.36)
-is available for manual evaluation with verified EXE/MSI installers and release
-notes. It does not advance the [stable update channel](https://github.com/ch3573r/ClawScribe/releases/latest).
-Read the release's validation limits before using it for important meetings.
+Source version: **0.5.36**. The [0.5.36 Windows release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.36)
+is available as the [latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest),
+using the same verified EXE/MSI installers previously published for evaluation.
+Existing 0.5.36 prerelease installations already have those exact binaries.
+Read the release's validation limits before using it for important meetings;
+real-device capture, install/upgrade acceptance, and notebook benchmarks remain
+unconfirmed for this build.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
