@@ -137,7 +137,8 @@ SDK, and build caches also remain local, with Actions caching disabled.
 Draft builds upload to an explicitly requested draft GitHub Release instead.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
-installers, and then runs the selected summary, chunker, logger, and hardware
+installers, and then runs the selected summary, chunker, logger, hardware,
+updater, audio-only, transcript correction, source reference, and template
 tests in the native Windows crate before staging release assets.
 
 **Stage Windows release candidate** runs on `release/**` pushes and can be run
