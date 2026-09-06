@@ -1,0 +1,50 @@
+name: Windows native loader diagnostics
+
+on:
+  push:
+    branches: ['fix/0.5.36-native-loader']
+    paths: ['.github/workflows/windows-native-loader-diagnostics.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loader:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Probe clean image Vulkan loader
+        shell: pwsh
+        run: |
+          $handle = [IntPtr]::Zero
+          $found = [System.Runtime.InteropServices.NativeLibrary]::TryLoad('vulkan-1.dll', [ref]$handle)
+          Write-Host "CLEAN_IMAGE_VULKAN_LOADER=$found"
+          if ($found) { [System.Runtime.InteropServices.NativeLibrary]::Free($handle) }
+      - name: Ensure SDK extractor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install 7zip -y --no-progress
+      - name: Extract the exact release SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: false
+      - name: Inspect extracted loader and runtime installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $handle = [IntPtr]::Zero
+          $found = [System.Runtime.InteropServices.NativeLibrary]::TryLoad('vulkan-1.dll', [ref]$handle)
+          Write-Host "AFTER_SDK_EXTRACTION_VULKAN_LOADER=$found"
+          if ($found) { [System.Runtime.InteropServices.NativeLibrary]::Free($handle) }
+          Get-ChildItem -LiteralPath $env:VULKAN_SDK -Recurse -File |
+            Where-Object { $_.Name -match '(?i)vulkan.*(?:dll|exe)$|vulkanrt|runtime' } |
+            ForEach-Object { Write-Host "$($_.FullName) [$($_.Length) bytes]" }
+          Write-Host 'Relevant system DLLs:'
+          foreach ($name in @('vulkan-1.dll', 'd3d12.dll', 'dxgi.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            $path = Join-Path $env:SystemRoot "System32/$name"
+            Write-Host "$name=$(Test-Path -LiteralPath $path -PathType Leaf)"
+          }
