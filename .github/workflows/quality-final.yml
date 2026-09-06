@@ -1,0 +1,176 @@
+name: Final meeting quality validation
+on:
+  push:
+    branches: ['automation/quality-review-2026-09-06']
+    paths: ['review-tools/finalize_quality.py', 'review-tools/followup*.json', '.github/workflows/quality-final.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: quality-final-validation
+  cancel-in-progress: true
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.commit.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: preparation
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 1efd83ddbbf44f5d16620edf353be91ff6c1b615
+          path: source
+          persist-credentials: false
+      - name: Apply hash-verified follow-up and permanent verification sources
+        working-directory: source
+        run: python ../preparation/review-tools/finalize_quality.py ../preparation/review-tools
+      - name: Commit isolated review source
+        id: commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'), cp=require('child_process');
+            const branch='fix/meeting-quality-and-resource-limits';
+            const base='1efd83ddbbf44f5d16620edf353be91ff6c1b615';
+            const files=cp.execFileSync('git',['diff','--cached','--name-only'],{cwd:'source',encoding:'utf8'}).trim().split('\n');
+            if(files.length!==19 || files.some(path=>path.startsWith('.github/') || path.includes('..')))throw Error('Unexpected follow-up source set: '+files.join(', '));
+            const {data:ref}=await github.rest.git.getRef({...context.repo,ref:'heads/'+branch});
+            if(ref.object.sha!==base)throw Error('Implementation branch advanced; inspect it before retrying');
+            const {data:parent}=await github.rest.git.getCommit({...context.repo,commit_sha:base});
+            const {data:tree}=await github.rest.git.createTree({...context.repo,base_tree:parent.tree.sha,tree:files.map(path=>({path,mode:'100644',type:'blob',content:fs.readFileSync('source/'+path,'utf8')}))});
+            const {data:commit}=await github.rest.git.createCommit({...context.repo,tree:tree.sha,parents:[base],message:'fix: retain final recording audio, isolate UI clocks and verify rendered controls\n\nFollow-up source hashes and safety checks passed. Native, browser, database, frontend and benchmark validation are separate required jobs; no release assets or version tags changed.'});
+            await github.rest.git.updateRef({...context.repo,ref:'heads/'+branch,sha:commit.sha,force:false});
+            core.setOutput('source_sha',commit.sha);
+            await core.summary.addHeading('Final quality review source').addRaw(commit.sha).write();
+  frontend-browser:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - name: Typecheck, all frontend regressions and full production export
+        run: pnpm typecheck && pnpm test && pnpm build
+        working-directory: frontend
+      - name: Benchmark actual transcript ingestion against pinned production baseline
+        run: |
+          mkdir -p "$RUNNER_TEMP/clawscribe-final-evidence"
+          node --expose-gc frontend/tests/performance/transcript-index.bench.mjs > "$RUNNER_TEMP/clawscribe-final-evidence/transcript-benchmark.json"
+      - name: Install isolated browser tools
+        run: |
+          tools="$RUNNER_TEMP/clawscribe-ui-tools"
+          npm install --prefix "$tools" --no-save --ignore-scripts playwright@1.56.1 esbuild@0.25.10 axe-core@4.10.3
+          node "$tools/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "UI_TOOLS=$tools" >> "$GITHUB_ENV"
+          echo "BROWSER_RESULTS=$RUNNER_TEMP/clawscribe-final-evidence" >> "$GITHUB_ENV"
+      - name: Execute rendered production UI and recording-lifecycle regressions
+        run: node frontend/tests/browser/browser-checks.cjs .
+      - name: Preserve measured results and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawscribe-final-quality-evidence
+          path: ${{ runner.temp }}/clawscribe-final-evidence
+          if-no-files-found: warn
+          retention-days: 3
+  core:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python scripts/test-quality-core.py
+  windows:
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install native prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          choco install llvm --version=20.1.8 -y --no-progress --allow-downgrade
+          choco install 7zip -y --no-progress
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+      - uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+      - name: Configure and verify Vulkan runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          "$(Join-Path $env:VULKAN_SDK 'Bin')" >> $env:GITHUB_PATH
+          "Vulkan_LIBRARY=$(Join-Path $env:VULKAN_SDK 'Lib/vulkan-1.lib')" >> $env:GITHUB_ENV
+          "Vulkan_INCLUDE_DIR=$(Join-Path $env:VULKAN_SDK 'Include')" >> $env:GITHUB_ENV
+          ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+      - name: Build and test actual local-summary sidecar
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
+          cargo test -p llama-helper --release --locked --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Force frontend/src-tauri/binaries | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/llama-helper.exe frontend/src-tauri/binaries/llama-helper-x86_64-pc-windows-msvc.exe -Force
+      - name: Stage pinned sidecar and transcription runtimes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          ./frontend/scripts/stage-codex-runtime.ps1 -TauriRoot frontend/src-tauri
+          ./frontend/scripts/stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml
+      - name: Compile actual Windows application without publishing installers
+        working-directory: frontend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+          pnpm exec tauri build --no-bundle -- --locked --features windows-gpu
+      - name: Execute permanent required native suite list
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          ./frontend/scripts/test-windows-native.ps1 -Features windows-gpu
