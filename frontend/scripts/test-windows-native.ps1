@@ -19,6 +19,13 @@ foreach ($feature in $featureList) {
 $featureArgs = @()
 if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
 
+# Vulkan is a load-time dependency even when the selected tests do not use a
+# GPU. Fail before compilation/discovery with the missing prerequisite named.
+# Installation is explicit in CI; this helper never changes the local machine.
+if ($featureList -contains "windows-gpu" -or $featureList -contains "vulkan") {
+    & (Join-Path $PSScriptRoot "ensure-windows-vulkan-runtime.ps1")
+}
+
 $requiredDlls = @("onnxruntime.dll", "sherpa-onnx-c-api.dll", "sherpa-onnx-cxx-api.dll")
 if ($featureList -contains "windows-gpu" -or $featureList -contains "directml") {
     $requiredDlls += "DirectML.dll"
