@@ -31,10 +31,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Reject private paths and committed secrets
         run: node scripts/verify-public-repo-safety.mjs
+
+      - name: Verify local build and storage policy
+        run: node --test scripts/verify-workflow-policy.test.mjs
 
       - name: Install frontend dependencies
         working-directory: frontend
