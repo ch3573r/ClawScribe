@@ -1,0 +1,66 @@
+name: Meeting quality regressions
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'llama-helper/**'
+      - 'scripts/test-quality-core.py'
+      - '.github/workflows/meeting-quality-regressions.yml'
+  push:
+    branches: [main, fix/meeting-quality-and-resource-limits]
+    paths:
+      - 'frontend/**'
+      - 'llama-helper/**'
+      - 'scripts/test-quality-core.py'
+      - '.github/workflows/meeting-quality-regressions.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: meeting-quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Repository safety and immutable frontend install
+        run: |
+          node scripts/verify-public-repo-safety.mjs
+          cd frontend
+          pnpm install --frozen-lockfile
+      - name: Typecheck, helper regressions and production export
+        working-directory: frontend
+        run: pnpm typecheck && pnpm test && pnpm build
+      - name: Isolated browser tooling
+        run: |
+          tools="$RUNNER_TEMP/browser-tools"
+          npm install --prefix "$tools" --no-save --ignore-scripts playwright@1.56.1 esbuild@0.25.10 axe-core@4.10.3
+          node "$tools/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "UI_TOOLS=$tools" >> "$GITHUB_ENV"
+          echo "BROWSER_RESULTS=$RUNNER_TEMP/meeting-ui-evidence" >> "$GITHUB_ENV"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Actual rendered component regressions with explicit native mocks
+        run: node frontend/tests/browser/browser-checks.cjs .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: meeting-ui-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/meeting-ui-evidence
+          retention-days: 3
+          if-no-files-found: warn
+  resources-and-persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Actual bounded queue/process/context modules and SQLite repository
+        run: python scripts/test-quality-core.py
