@@ -147,6 +147,14 @@ generated installers, or personal workspace paths. Use explicit placeholders
 in examples and keep diagnostics redacted. Contributor guidance is in
 [CLAUDE.md](CLAUDE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased Quality Work
+
+Source changes after the 0.5.36 tag improve chat recovery, keyboard controls,
+transcript update efficiency, and bounded recording resources. They are not yet
+included in the published 0.5.36 installers. See
+[quality verification](docs/quality-verification.md) for the implemented behaviour,
+repeatable checks, and the distinction between automated and real-device evidence.
+
 ## Development
 
 Use Node.js 24, pnpm 10, and the native prerequisites in

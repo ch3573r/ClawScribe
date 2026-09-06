@@ -22,10 +22,12 @@ export function useTranscriptStreaming(
 ) {
   const [streamingSegment, setStreamingSegment] = useState<StreamingSegment | null>(null);
   const lastSegmentIdRef = useRef<string | null>(null);
+  const lastTextRef = useRef<string | null>(null);
   const streamingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (!isRecording || !enableStreaming || segments.length === 0) {
+    const reducedMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!isRecording || !enableStreaming || reducedMotion || segments.length === 0) {
       // Clear streaming when not recording
       if (streamingIntervalRef.current) {
         clearInterval(streamingIntervalRef.current);
@@ -33,14 +35,16 @@ export function useTranscriptStreaming(
       }
       setStreamingSegment(null);
       lastSegmentIdRef.current = null;
+      lastTextRef.current = null;
       return;
     }
 
     const latestSegment = segments[segments.length - 1];
 
     // Check if this is a new segment
-    if (latestSegment.id !== lastSegmentIdRef.current) {
+    if (latestSegment.id !== lastSegmentIdRef.current || latestSegment.text !== lastTextRef.current) {
       lastSegmentIdRef.current = latestSegment.id;
+      lastTextRef.current = latestSegment.text;
 
       // Clear any existing streaming interval
       if (streamingIntervalRef.current) {
@@ -104,7 +108,7 @@ export function useTranscriptStreaming(
         streamingIntervalRef.current = null;
       }
     };
-  }, [segments, isRecording, enableStreaming]);
+  }, [segments[segments.length - 1]?.id, segments[segments.length - 1]?.text, isRecording, enableStreaming]);
 
   /**
    * Get the display text for a segment, with streaming effect if applicable

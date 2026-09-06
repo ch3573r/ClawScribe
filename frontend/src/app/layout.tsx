@@ -156,14 +156,7 @@ export default function RootLayout({
       })
   }, [])
 
-  // Disable context menu in production
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'production') {
-      const handleContextMenu = (e: MouseEvent) => e.preventDefault();
-      document.addEventListener('contextmenu', handleContextMenu);
-      return () => document.removeEventListener('contextmenu', handleContextMenu);
-    }
-  }, []);
+  // Keep native text context menus available for transcript/note editing.
   useEffect(() => {
     // Listen for tray recording toggle request
     const unlisten = listen('request-recording-toggle', () => {

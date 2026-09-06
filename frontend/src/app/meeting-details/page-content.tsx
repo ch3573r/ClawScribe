@@ -21,6 +21,7 @@ import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
+import { useCompactLayout } from '@/hooks/useCompactLayout';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 
 export default function PageContent({
@@ -61,6 +62,9 @@ export default function PageContent({
     summaryDataKeys: summaryData ? Object.keys(summaryData) : null,
     transcriptsCount: meeting.transcripts?.length
   });
+
+  const compact = useCompactLayout();
+  const [compactPanel, setCompactPanel] = useState<'transcript' | 'notes'>('notes');
 
   // State — "Add context" is persisted per meeting so it survives reopening and
   // is applied on every generate/regenerate.
@@ -271,8 +275,21 @@ export default function PageContent({
           onSeek={isAudioReady ? handleTimelineSeek : undefined}
         />
       )}
-      <div className="flex flex-1 overflow-hidden">
+      {compact && (
+        <div className="flex shrink-0 gap-2 border-b border-border p-2" aria-label="Meeting view">
+          {(['transcript', 'notes'] as const).map(panel => (
+            <button key={panel} type="button" aria-pressed={compactPanel === panel}
+              onClick={() => setCompactPanel(panel)}
+              className={`min-h-9 rounded-md px-4 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${compactPanel === panel ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}>
+              {panel === 'transcript' ? 'Transcript' : 'Meeting notes'}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className={compact ? (compactPanel === 'transcript' ? 'flex min-w-0 flex-1' : 'hidden') : 'contents'}>
         <TranscriptPanel
+          compact={compact}
           transcripts={meetingData.transcripts}
           customPrompt={customPrompt}
           onPromptChange={handlePromptChange}
@@ -298,6 +315,8 @@ export default function PageContent({
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
         />
+        </div>
+        <div className={compact && compactPanel !== 'notes' ? 'hidden' : 'flex min-w-0 flex-1'}>
         <SummaryPanel
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
@@ -333,6 +352,7 @@ export default function PageContent({
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
         />
+        </div>
       </div>
       <MeetingChat
         meetingId={meeting.id}

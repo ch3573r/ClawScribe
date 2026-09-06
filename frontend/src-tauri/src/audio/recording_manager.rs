@@ -14,7 +14,7 @@ use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 use super::devices::{default_input_device, default_output_device};
 use super::pipeline::AudioPipelineManager;
 use super::recording_saver::RecordingSaver;
-use super::recording_state::{DeviceType as RecordingDeviceType, RecordingState};
+use super::recording_state::{AudioError, DeviceType as RecordingDeviceType, RecordingState};
 use super::stream::AudioStreamManager;
 use super::transcription::queue::{transcription_queue, TranscriptionQueueReceiver};
 
@@ -77,7 +77,7 @@ impl RecordingManager {
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
         // Pass auto_save to control whether audio checkpoints are created
-        let recording_sender = self.recording_saver.start_accumulation(auto_save);
+        let recording_sender = self.recording_saver.start_accumulation(auto_save)?;
 
         // Start recording state first
         self.state.start_recording()?;
@@ -267,6 +267,7 @@ impl RecordingManager {
         // Stop audio pipeline
         if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error stopping audio pipeline: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
 
         debug!("Recording streams stopped successfully");
@@ -296,11 +297,12 @@ impl RecordingManager {
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
         if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
             error!("Error during force flush: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
 
-        // CRITICAL: Full cleanup to release all Arc references and resources
-        // This ensures microphone is released even if Drop is delayed
-        self.state.cleanup();
+        // stop_recording and stop_streams already released device handles.
+        // Keep timing/error statistics until finalization and metadata complete.
+        self.state.get_buffer_pool().clear();
 
         info!("✅ Recording streams stopped with immediate flush completed");
         Ok(())
@@ -331,7 +333,7 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!("Audio could not be saved: {e}"));
             }
         }
 
@@ -361,6 +363,7 @@ impl RecordingManager {
         // Stop audio pipeline
         if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error stopping audio pipeline: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
 
         // Save the recording with actual duration
@@ -377,12 +380,17 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!("Audio could not be saved: {e}"));
             }
         }
 
         info!("Recording manager stopped");
         Ok(())
+    }
+
+    /// Keep incomplete recordings out of the completed-handoff contract.
+    pub fn mark_incomplete(&mut self) -> Result<()> {
+        self.recording_saver.mark_incomplete()
     }
 
     /// Get recording stats from the saver

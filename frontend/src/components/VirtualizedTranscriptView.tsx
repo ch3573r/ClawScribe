@@ -184,7 +184,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     };
 
     const speakerClass = isMe
-        ? "bg-primary/10 text-primary hover:bg-primary/15"
+        ? "bg-primary/10 text-foreground hover:bg-primary/15"
         : currentSpeaker
             ? "bg-muted text-muted-foreground hover:bg-muted/80"
             : "border border-dashed border-border bg-transparent text-muted-foreground hover:bg-muted";
@@ -486,7 +486,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     }, [segments, activeTime]);
 
     return (
-        <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
+        <div ref={scrollRef} tabIndex={0} role="region" aria-label={isRecording ? "Live transcript" : "Meeting transcript"} className="flex flex-col h-full overflow-y-auto px-4 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
             <AnimatePresence>
                 {isRecording && (

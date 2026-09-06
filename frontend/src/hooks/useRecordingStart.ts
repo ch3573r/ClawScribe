@@ -40,7 +40,7 @@ export function useRecordingStart(
 ): UseRecordingStartReturn {
   const [isAutoStarting, setIsAutoStarting] = useState(false);
 
-  const { clearTranscripts, setMeetingTitle } = useTranscripts();
+  const { setMeetingTitle } = useTranscripts();
   const { setIsMeetingActive } = useSidebar();
   const { selectedDevices } = useConfig();
   const { setStatus } = useRecordingState();
@@ -83,14 +83,13 @@ export function useRecordingStart(
 
       beginRecordingCalendar(pendingCal);
       setIsRecording(true);
-      clearTranscripts();
+      // TranscriptProvider resets on recording-started before accepting new events.
       setIsMeetingActive(true);
       Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();
       return title;
     },
     [
-      clearTranscripts,
       selectedDevices,
       setIsMeetingActive,
       setIsRecording,

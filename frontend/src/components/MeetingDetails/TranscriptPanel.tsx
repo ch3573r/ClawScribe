@@ -13,6 +13,7 @@ interface TranscriptPanelProps {
   onOpenMeetingFolder: () => Promise<void>;
   isRecording: boolean;
   disableAutoScroll?: boolean;
+  compact?: boolean;
 
   // Optional pagination props (when using virtualization)
   usePagination?: boolean;
@@ -42,6 +43,7 @@ export function TranscriptPanel({
   onOpenMeetingFolder,
   isRecording,
   disableAutoScroll = false,
+  compact = false,
   usePagination = false,
   segments,
   hasMore,
@@ -75,7 +77,7 @@ export function TranscriptPanel({
   }, [transcripts, usePagination, segments]);
 
   return (
-    <div className="hidden min-w-0 shrink-0 flex-col border-r border-border bg-card md:flex md:w-[32%] xl:w-[30rem] 2xl:w-[32rem]">
+    <div className={`flex min-h-0 min-w-0 shrink-0 flex-col border-r border-border bg-card ${compact ? "h-full w-full" : "w-[32%] xl:w-[30rem] 2xl:w-[32rem]"}`}>
       {/* Title area */}
       <div className="border-b border-border px-3 py-2">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
@@ -125,6 +127,7 @@ export function TranscriptPanel({
       {!isRecording && convertedSegments.length > 0 && (
         <div className="border-t border-border p-2">
           <textarea
+            aria-label="Additional context for meeting notes"
             placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
             className="min-h-[80px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
             value={customPrompt}
