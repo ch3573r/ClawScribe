@@ -430,21 +430,16 @@ impl RecordingSaver {
             done.await.map_err(|_| "Audio writer exited without reporting completion".to_string())??;
         }
 
-        // Check if incremental saver exists (indicates auto_save was enabled)
-        let should_save_audio = self.incremental_saver.is_some();
-
-        if !should_save_audio {
-            info!("⚠️  No audio saver initialized (auto-save was disabled) - skipping audio finalization");
-            info!("✅ Transcripts and metadata already saved incrementally");
-            return Ok(None);
-        }
-
-        // Finalize incremental saver (merge checkpoints into final audio.mp4)
-        let saver = self.incremental_saver.clone().ok_or("No incremental saver initialized")?;
-        let final_audio_path = tokio::task::spawn_blocking(move || {
-            saver.lock().map_err(|_| "Audio saver lock is poisoned".to_string())?
-                .finalize().map_err(|e| format!("Failed to finalize audio: {e}"))
-        }).await.map_err(|_| "Audio finalization worker failed".to_string())??;
+        let final_audio_path = if let Some(saver) = self.incremental_saver.clone() {
+            Some(tokio::task::spawn_blocking(move || {
+                saver.lock().map_err(|_| "Audio saver lock is poisoned".to_string())?
+                    .finalize().map_err(|e| format!("Failed to finalize audio: {e}"))
+            }).await.map_err(|_| "Audio finalization worker failed".to_string())??)
+        } else {
+            // Transcript-only sessions must still flush the final snapshot and
+            // close their metadata lifecycle below, even without an audio file.
+            None
+        };
 
         // Save final transcripts.json with validation
         if let Some(folder) = &self.meeting_folder {
@@ -492,11 +487,12 @@ impl RecordingSaver {
                 "✅ Metadata updated with duration: {:?}s",
                 metadata.duration_seconds
             );
+            self.metadata = Some(metadata);
         }
 
         // Emit save event with audio and transcript paths
         let save_event = serde_json::json!({
-            "audio_file": final_audio_path.to_string_lossy(),
+            "audio_file": final_audio_path.as_ref().map(|path| path.to_string_lossy().to_string()),
             "transcript_file": self.meeting_folder.as_ref()
                 .map(|f| f.join("transcripts.json").to_string_lossy().to_string()),
             "meeting_name": self.meeting_name,
@@ -513,7 +509,17 @@ impl RecordingSaver {
             segments.clear();
         }
 
-        Ok(Some(final_audio_path.to_string_lossy().to_string()))
+        Ok(final_audio_path.map(|path| path.to_string_lossy().to_string()))
+    }
+
+    /// Persist an explicit error status without deleting saved audio/checkpoints.
+    pub fn mark_incomplete(&mut self) -> Result<()> {
+        if let (Some(folder), Some(mut metadata)) = (&self.meeting_folder, self.metadata.clone()) {
+            metadata.status = "error".to_string();
+            self.write_metadata(folder, &metadata)?;
+            self.metadata = Some(metadata);
+        }
+        Ok(())
     }
 
     /// Get the meeting folder path (for passing to backend)

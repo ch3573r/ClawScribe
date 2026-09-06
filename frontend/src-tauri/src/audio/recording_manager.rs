@@ -14,7 +14,7 @@ use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 use super::devices::{default_input_device, default_output_device};
 use super::pipeline::AudioPipelineManager;
 use super::recording_saver::RecordingSaver;
-use super::recording_state::{DeviceType as RecordingDeviceType, RecordingState};
+use super::recording_state::{AudioError, DeviceType as RecordingDeviceType, RecordingState};
 use super::stream::AudioStreamManager;
 use super::transcription::queue::{transcription_queue, TranscriptionQueueReceiver};
 
@@ -267,6 +267,7 @@ impl RecordingManager {
         // Stop audio pipeline
         if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error stopping audio pipeline: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
 
         debug!("Recording streams stopped successfully");
@@ -296,6 +297,7 @@ impl RecordingManager {
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
         if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
             error!("Error during force flush: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
 
         // stop_recording and stop_streams already released device handles.
@@ -361,6 +363,7 @@ impl RecordingManager {
         // Stop audio pipeline
         if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error stopping audio pipeline: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
 
         // Save the recording with actual duration
@@ -383,6 +386,11 @@ impl RecordingManager {
 
         info!("Recording manager stopped");
         Ok(())
+    }
+
+    /// Keep incomplete recordings out of the completed-handoff contract.
+    pub fn mark_incomplete(&mut self) -> Result<()> {
+        self.recording_saver.mark_incomplete()
     }
 
     /// Get recording stats from the saver

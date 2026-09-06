@@ -1071,6 +1071,11 @@ pub async fn stop_recording<R: Runtime>(
             }
         }
 
+        if capture_incomplete || audio_save_incomplete || transcription_incomplete {
+            if let Err(error) = manager.mark_incomplete() {
+                warn!("Could not persist incomplete recording status: {error}");
+            }
+        }
         (meeting_folder, meeting_name)
     } else {
         info!("ℹ️ No recording manager available for cleanup");
@@ -1128,11 +1133,11 @@ pub async fn stop_recording<R: Runtime>(
     )
     .map_err(|e| e.to_string())?;
 
-    crate::openclaw::submit_completed_recording(
-        app.clone(),
-        folder_path_str.clone(),
-        meeting_name_str.clone(),
-    );
+    if !capture_incomplete && !audio_save_incomplete && !transcription_incomplete {
+        crate::openclaw::submit_completed_recording(app.clone(), folder_path_str.clone(), meeting_name_str.clone());
+    } else {
+        warn!("Automatic completed-meeting handoff skipped: recording needs review or recovery");
+    }
 
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);

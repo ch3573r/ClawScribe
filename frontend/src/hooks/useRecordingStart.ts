@@ -40,7 +40,7 @@ export function useRecordingStart(
 ): UseRecordingStartReturn {
   const [isAutoStarting, setIsAutoStarting] = useState(false);
 
-  const { clearTranscripts, setMeetingTitle } = useTranscripts();
+  const { setMeetingTitle } = useTranscripts();
   const { setIsMeetingActive } = useSidebar();
   const { selectedDevices } = useConfig();
   const { setStatus } = useRecordingState();
@@ -90,7 +90,6 @@ export function useRecordingStart(
       return title;
     },
     [
-      clearTranscripts,
       selectedDevices,
       setIsMeetingActive,
       setIsRecording,

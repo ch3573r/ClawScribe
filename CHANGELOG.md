@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Fix meeting-chat history/send/clear races, recoverable retries, stale meeting replies, and idempotent native persistence.
+- Disclose partial transcript coverage; bound chat source/history preparation without claiming full-context retrieval.
+- Improve keyboard navigation, destructive confirmations, transcript focus/contrast, and compact meeting views; restore native text context menus.
+- Reduce transcript ingestion overhead, retain final corrections, display finalized text immediately, and isolate recording clock subscriptions.
+- Bound capture/writer queues with explicit incomplete-recording errors, drain accepted audio and short mixer tails before finalization, and preserve recovery checkpoints on failure.
+- Move encoder/finalization work off async executor threads, bound child diagnostics/time, and avoid marking failed recordings ready for automatic handoff.
+- Cap local-summary prompt batch/thread defaults and reject exhausted context instead of returning incomplete output as successful.
+- Add reproducible frontend, native, SQLite, rendered-browser and transcript benchmark checks. See `docs/quality-verification.md` for scope and outstanding real-device acceptance.
+
 ## 0.5.36
 
 - Fix native Windows test execution by explicitly loading the same staged sherpa/ONNX runtime DLLs as the installer; keep tests mandatory and run them against release-profile code.
