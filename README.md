@@ -7,9 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.36**. See [Windows releases](https://github.com/ch3573r/ClawScribe/releases)
-for available installers and their publication status. A source-version bump
-or a green helper-test run does not mean an installer has been published.
+Source version: **0.5.36**. The [0.5.36 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.36)
+is available for manual evaluation with verified EXE/MSI installers and release
+notes. It does not advance the [stable update channel](https://github.com/ch3573r/ClawScribe/releases/latest).
+Read the release's validation limits before using it for important meetings.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -21,6 +22,12 @@ Use the NSIS setup installer from the selected GitHub Release; an MSI is also
 provided for deployment scenarios. Read that release's validation and signing
 notes before installing. Draft builds are unpublished, and prereleases do not
 advance the stable automatic-update channel.
+
+The Windows GPU build needs the Vulkan loader (`vulkan-1.dll`) at startup, even
+when selecting a non-Vulkan model. Use a supported GPU driver or the official
+Vulkan runtime. The CI runtime fix does not install a driver or runtime on your
+PC. See [Windows runtime prerequisites](docs/windows-release.md#windows-runtime-prerequisite)
+for diagnosis; never download individual DLLs from third-party sites.
 
 Choose a microphone and the output device used by Teams, Webex, or the other
 meeting application. Make a short test recording and verify that both your
