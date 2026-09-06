@@ -313,6 +313,14 @@ jobs:
           "Vulkan_LIBRARY=$libDir\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Vulkan_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # SDK extraction does not execute Helpers/VulkanRT.exe. Hosted Windows
+      # images have no Vulkan loader, so GPU-linked test executables otherwise
+      # terminate before discovery with STATUS_DLL_NOT_FOUND (0xC0000135).
+      - name: Install and verify Vulkan runtime
+        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
+        shell: pwsh
+        run: ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+
       - name: Build llama-helper sidecar
         shell: pwsh
         run: |
