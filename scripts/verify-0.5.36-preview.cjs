@@ -61,7 +61,7 @@ module.exports = async ({ github, context, core }) => {
   }
   const nativeTestCount = Object.values(groups).reduce((a, b) => a + b, 0);
   // Drafts have no published tag endpoint yet; pin the actual staged release ID.
-  const { data: release } = await github.rest.repos.getRelease({ ...context.repo, release_id: 378090194 });
+  const { data: release } = await github.rest.repos.getRelease({ ...context.repo, release_id: 383465104 });
   if (!release.draft || release.target_commitish !== expectedCommit || release.tag_name !== tag) throw new Error('Draft identity mismatch or already public.');
   const { data: previousStable } = await github.rest.repos.getLatestRelease(context.repo);
   if (previousStable.tag_name === tag) throw new Error('Candidate already owns stable channel.');
