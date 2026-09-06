@@ -1,0 +1,156 @@
+name: Complete meeting quality verification
+on:
+  push:
+    branches: ['automation/quality-review-2026-09-06']
+    paths: ['.github/workflows/quality-completion.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.patch.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b4c770c3b32308b1210e1df4fd8cc9cd7078ab88
+          persist-credentials: false
+      - name: Correct two verification-only defects
+        id: patch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'),cp=require('child_process');
+            const base='b4c770c3b32308b1210e1df4fd8cc9cd7078ab88';
+            const branch='fix/meeting-quality-and-resource-limits';
+            const edits=[
+              ['frontend/tests/browser/browser-checks.cjs',"await page.getByText('Meeting deleted',{exact:true}).waitFor();assert.equal(await page.getByRole('dialog').count(),0);","await page.getByText('Meeting deleted',{exact:true}).waitFor();await page.getByRole('dialog').waitFor({state:'hidden'});assert.equal(await page.getByRole('dialog').count(),0);"],
+              ['frontend/scripts/test-windows-native.ps1','"audio::recording_saver::tests"','"audio::recording_saver::snapshot_tests"']
+            ];
+            const treeEntries=[];
+            for(const [path,before,after]of edits){
+              const original=fs.readFileSync(path,'utf8');
+              if(original.split(before).length!==2)throw Error('Expected exact verification defect: '+path);
+              const content=original.replace(before,after);fs.writeFileSync(path,content);
+              treeEntries.push({path,mode:'100644',type:'blob',content});
+            }
+            cp.execFileSync('node',['scripts/verify-public-repo-safety.mjs'],{stdio:'inherit'});
+            cp.execFileSync('git',['diff','--check'],{stdio:'inherit'});
+            const {data:ref}=await github.rest.git.getRef({...context.repo,ref:'heads/'+branch});
+            if(ref.object.sha!==base)throw Error('Source advanced: re-review before applying');
+            const {data:parent}=await github.rest.git.getCommit({...context.repo,commit_sha:base});
+            const {data:tree}=await github.rest.git.createTree({...context.repo,base_tree:parent.tree.sha,tree:treeEntries});
+            const {data:commit}=await github.rest.git.createCommit({...context.repo,tree:tree.sha,parents:[base],message:'test: select actual saver regressions and wait for modal close animation\n\nNo application changes. Preserve nonempty-test enforcement; correct the existing snapshot_tests module name. Browser deletion waits for actual modal exit rather than asserting synchronous unmount.'});
+            await github.rest.git.updateRef({...context.repo,ref:'heads/'+branch,sha:commit.sha,force:false});
+            core.setOutput('source_sha',commit.sha);core.notice('Final source '+commit.sha);
+  browser:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: pnpm typecheck && pnpm test && pnpm build
+        working-directory: frontend
+      - name: Reproduce production transcript ingestion measurements
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality-evidence"
+          node --expose-gc frontend/tests/performance/transcript-index.bench.mjs > "$RUNNER_TEMP/quality-evidence/transcript-benchmark.json"
+      - name: Prepare browser tools outside app dependencies
+        run: |
+          tools="$RUNNER_TEMP/browser-tools"
+          npm install --prefix "$tools" --no-save --ignore-scripts playwright@1.56.1 esbuild@0.25.10 axe-core@4.10.3
+          node "$tools/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "UI_TOOLS=$tools" >> "$GITHUB_ENV"
+          echo "BROWSER_RESULTS=$RUNNER_TEMP/quality-evidence" >> "$GITHUB_ENV"
+      - run: node frontend/tests/browser/browser-checks.cjs .
+      - name: Preserve exact source and visible/test evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality-evidence"
+          git archive HEAD -o "$RUNNER_TEMP/quality-evidence/reviewed-source.zip"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clawscribe-completed-quality-evidence
+          path: ${{ runner.temp }}/quality-evidence
+          retention-days: 3
+  native:
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install pinned native prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          choco install llvm --version=20.1.8 -y --no-progress --allow-downgrade
+          choco install 7zip -y --no-progress
+          'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> $env:GITHUB_ENV
+          'C:\Program Files\LLVM\bin' >> $env:GITHUB_PATH
+      - uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+      - name: Configure Vulkan build and runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          "$(Join-Path $env:VULKAN_SDK 'Bin')" >> $env:GITHUB_PATH
+          "Vulkan_LIBRARY=$(Join-Path $env:VULKAN_SDK 'Lib/vulkan-1.lib')" >> $env:GITHUB_ENV
+          "Vulkan_INCLUDE_DIR=$(Join-Path $env:VULKAN_SDK 'Include')" >> $env:GITHUB_ENV
+          ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+      - name: Build and test actual local summary helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
+          cargo test -p llama-helper --release --locked --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Force frontend/src-tauri/binaries | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/llama-helper.exe frontend/src-tauri/binaries/llama-helper-x86_64-pc-windows-msvc.exe -Force
+      - name: Stage pinned bundled runtimes and frontend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          ./frontend/scripts/stage-codex-runtime.ps1 -TauriRoot frontend/src-tauri
+          ./frontend/scripts/stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml
+          cd frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Compile and execute complete required native suite list
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          ./frontend/scripts/test-windows-native.ps1 -Features windows-gpu
