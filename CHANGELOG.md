@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.37
+
+- Publish a Windows GPU preview for manual installation and real-device testing. Runtime version `0.5.37` advances beyond `0.5.36`; this prerelease does not advance the stable automatic-update channel.
+- Preserve captured audio in a recovery spool while encoding, drain accepted saver work at stop, and retain recoverable audio after encoder or finalization failure.
+- Bound capture buffering, move native inference off the async executor, and make cancellation and incomplete-transcription outcomes visible and persistent. Automatic notes wait when recovery is needed.
+- Prepare long imports and retranscription on disk, processing bounded speech segments instead of retaining the entire decoded recording in memory. Prevent competing local jobs from changing active models.
+- Preserve existing transcripts when retranscription returns empty or incomplete text, and retain the prior transcript revision after a successful replacement. Let SQLite recover committed WAL data without deleting its transaction history.
+- Migrate provider credentials to provider-isolated OS credential storage with an encrypted Windows fallback; remove sensitive content from reviewed diagnostic paths.
+- Budget long-meeting summaries across providers, reject failed or incomplete reductions, and retrieve question-relevant chat excerpts from throughout the transcript.
+- Show unavailable confidence honestly, preserve short utterances, and improve recording warnings, smaller-window layouts, onboarding labels, and progress accessibility.
+- Respect Microsoft Graph `Retry-After` delays and preserve the designated local Windows build/storage policy.
+- Real microphone/system-audio capture, graphical installation/upgrade, multilingual quality, native UI scaling, and sustained i5/8 GB performance still need acceptance testing. Long-recording diarization remains memory intensive; an active Parakeet native call may finish after cancellation. Updater signatures are separate from Windows publisher signing.
+
 ## 0.5.36
 
 - Fix native Windows test execution by explicitly loading the same staged sherpa/ONNX runtime DLLs as the installer; keep tests mandatory and run them against release-profile code.

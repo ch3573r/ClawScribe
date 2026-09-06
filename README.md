@@ -7,13 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.36**. The [0.5.36 Windows release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.36)
-is available as the [latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest),
-using the same verified EXE/MSI installers previously published for evaluation.
-Existing 0.5.36 prerelease installations already have those exact binaries.
-Read the release's validation limits before using it for important meetings;
-real-device capture, install/upgrade acceptance, and notebook benchmarks remain
-unconfirmed for this build.
+Source version: **0.5.37**. The [0.5.37 Windows preview](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.37)
+is for manual installation and evaluation of recording, transcription, and notes.
+The [0.5.36 stable release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.36)
+remains on the automatic-update channel. Read the preview's validation limits:
+real-device capture, install/upgrade acceptance, and sustained notebook
+performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -95,9 +94,9 @@ prove attendance.
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
-## Reliability In The Current Source
+## What Changed In 0.5.37
 
-The current source keeps captured audio in a recovery spool while encoding,
+This preview keeps captured audio in a recovery spool while encoding,
 limits in-memory capture and inference work, and preserves incomplete-recording
 status across restarts. A failed live transcript does not stop the UI from
 showing that recording is still active. After stopping, recovery notices explain
@@ -114,23 +113,10 @@ compatible providers expose a context-window setting. Meeting chat searches
 across the meeting and labels selected excerpts. Confidence is shown only when
 available, and the desktop window supports smaller notebook layouts.
 
-These source changes are not a new installer release. Real-device capture and
-sustained notebook performance still require the acceptance checks in the
-[meeting-quality guide](docs/meeting-quality.md).
-
-## What Changed In 0.5.36
-
-This version fixes skipped source text at shared-summary chunk boundaries,
-preserves meaningful multilingual words in the transcript view, improves live
-scrolling and speaker-save feedback, and limits diagnostic logging overhead.
-Windows Whisper uses measured physical RAM and a more conservative thread
-budget on low-memory machines. Previously unreleased fixes protect the Windows
-Microsoft-token fallback with DPAPI and stop a transcript-length heuristic from
-discarding short utterances.
-
-These are implementation changes, not a guarantee of error-free recognition,
-hallucination-free notes, or real-time performance on every notebook. See the
-[0.5.36 release notes](docs/releases/0.5.36.md),
+These implementation changes do not establish error-free recognition,
+hallucination-free notes, or real-time performance on every notebook. Long-file
+speaker diarization still needs a bounded-memory processing path. See the
+[0.5.37 release notes](docs/releases/0.5.37.md),
 [meeting-quality guide](docs/meeting-quality.md), and [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
