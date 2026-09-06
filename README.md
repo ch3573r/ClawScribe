@@ -7,10 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.38**. The [0.5.38 Windows release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.38)
-uses the stable automatic-update channel and adds an optional prerelease channel.
-It includes the recording, transcription, and notes improvements from 0.5.37.
-Read the [release validation limits](docs/releases/0.5.38.md): real-device capture,
+Source version: **0.5.39 Preview**. The [0.5.39 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.39)
+adds audio-only recording, transcript corrections, summary source links, and
+editable summary templates. Enable **Include prereleases** in 0.5.38 or install
+manually; the stable channel remains on 0.5.38.
+Read the [release validation limits](docs/releases/0.5.39.md): real-device capture,
 install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
@@ -120,7 +121,17 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.38
+## What Changed In 0.5.39 Preview
+
+- Record audio now and transcribe later, with audio saving always enabled in
+  audio-only mode.
+- Correct transcript passages, preview find-and-replace, and undo corrections.
+  Summary replacement preserves formatting and links.
+- Open summary source links to review transcript passages or play their audio;
+  corrected passages invalidate outdated references.
+- Create and edit summary templates and keep a default across meetings.
+
+The optional preview updater and earlier recording improvements are included:
 
 - Optional prerelease updates with a persistent opt-in in Preferences and About;
   stable releases remain the default.
@@ -152,7 +163,7 @@ available, and the desktop window supports smaller notebook layouts.
 These implementation changes do not establish error-free recognition,
 hallucination-free notes, or real-time performance on every notebook. Long-file
 speaker diarization still needs a bounded-memory processing path. See the
-[0.5.38 release notes](docs/releases/0.5.38.md),
+[0.5.39 preview release notes](docs/releases/0.5.39.md),
 [meeting-quality guide](docs/meeting-quality.md), and [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status

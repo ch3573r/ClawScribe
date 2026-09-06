@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.39
+
+- Publish a Windows GPU prerelease for manual evaluation and the opt-in **Include prereleases** update channel. Runtime version `0.5.39` advances beyond `0.5.38`; stable users remain on `0.5.38`.
+- Add **Record now, transcribe later**: audio-only recording always saves audio, skips live recognition, and offers **Transcribe** on the saved meeting.
+- Edit transcript passages, preview literal find-and-replace across a meeting, and undo corrections while retaining original recognition and segment timing. Failed recording-file synchronization remains visible and retryable.
+- Find and replace summary text while preserving formatting and source links. Save corrected notes without a later title change restoring an older summary.
+- Request summary links to supporting transcript passages. Inspect the source, reveal it in the transcript, or play its audio; flag references made stale by corrections. Citation coverage and factual support still require review.
+- Create and edit summary templates and persist a default, with optional per-meeting selection. Structured summary providers retain export fields while rendering the selected template.
+- Require native regressions for audio-only preservation, transcript edit/undo persistence, source references, and template storage/rendering. Publish detached updater signatures for both installers.
+- Real microphone/system-audio recording, graphical installation/upgrade, model-generated citation quality, and sustained notebook performance remain unconfirmed. This preview does not assert capture-smoke confirmation or stable readiness. Updater signatures are separate from Windows publisher signing; the Vulkan loader remains a startup prerequisite.
+
 ## 0.5.38
 
 - Publish version `0.5.38` to the stable update channel so installed `0.5.36` and `0.5.37` builds can discover it. The new prerelease option becomes available after upgrading.
