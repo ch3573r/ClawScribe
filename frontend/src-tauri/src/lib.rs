@@ -62,6 +62,7 @@ pub mod state;
 pub mod summary;
 pub mod teams_detection;
 pub mod tray;
+pub mod updates;
 pub mod utils;
 pub mod whisper_engine;
 
@@ -706,6 +707,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            updates::get_update_channel,
+            updates::set_update_channel,
+            updates::check_app_update,
             start_recording,
             stop_recording,
             is_recording,

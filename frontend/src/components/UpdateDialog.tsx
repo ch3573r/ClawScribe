@@ -1,306 +1,65 @@
-import React, { useState, useEffect } from 'react';
-import { Download, X, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from './ui/dialog';
+import React, { useEffect, useRef, useState } from 'react';
+import { AlertCircle, CheckCircle2, Download, Loader2 } from 'lucide-react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
-import { updateService, UpdateInfo, UpdateProgress } from '@/services/updateService';
-import { check, Update } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
-import { toast } from 'sonner';
+import { useUpdateCheckContext } from './UpdateCheckProvider';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { updateService, type UpdateProgress } from '@/services/updateService';
 
-interface UpdateDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  updateInfo: UpdateInfo | null;
-}
-
-export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogProps) {
-  const [isDownloading, setIsDownloading] = useState(false);
+export function UpdateDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { updateInfo, channel, currentVersion, isChecking, isInstalling, isSavingChannel, error, checkForUpdates } = useUpdateCheckContext();
+  const recording = useRecordingState();
+  const canInstall = !(recording.isRecording || recording.isStarting || recording.isStopping || recording.isProcessing || recording.isSaving);
+  const canInstallRef = useRef(canInstall);
+  canInstallRef.current = canInstall;
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [update, setUpdate] = useState<Update | null>(null);
+  const busy = isChecking || isInstalling || isSavingChannel;
+  useEffect(() => { if (!isInstalling) setProgress(null); }, [open, updateInfo, isInstalling]);
 
-  useEffect(() => {
-    if (open && updateInfo?.available) {
-      // Reset state when dialog opens
-      setIsDownloading(false);
-      setProgress(null);
-      setError(null);
-
-      // Get the update object when dialog opens
-      check().then((updateResult) => {
-        if (updateResult?.available) {
-          setUpdate(updateResult);
-        } else {
-          setError('Update no longer available');
-        }
-      }).catch((err) => {
-        console.error('Failed to get update object:', err);
-        setError('Failed to prepare update: ' + (err.message || 'Unknown error'));
-      });
-    } else {
-      // Reset state when dialog closes
-      setIsDownloading(false);
-      setProgress(null);
-      setError(null);
-      setUpdate(null);
-    }
-  }, [open, updateInfo]);
-
-  const handleDownloadAndInstall = async () => {
-    // Get update object if not already available
-    let updateToUse: Update | null = update;
-    if (!updateToUse) {
-      try {
-        const updateResult = await check();
-        if (updateResult?.available) {
-          updateToUse = updateResult;
-          setUpdate(updateResult);
-        } else {
-          setError('Update not available');
-          return;
-        }
-      } catch (err: any) {
-        setError('Failed to get update: ' + (err.message || 'Unknown error'));
-        return;
-      }
-    }
-
-    // At this point, updateToUse is guaranteed to be non-null
-    if (!updateToUse) {
-      return; // This should never happen, but TypeScript needs this check
-    }
-
-    setIsDownloading(true);
-    setError(null);
-    setProgress({ downloaded: 0, total: 0, percentage: 0 });
-
+  const install = async () => {
+    if (!updateInfo || !canInstallRef.current) return;
     try {
-      let downloaded = 0;
-      let contentLength = 0;
-
-      // Use the official Tauri updater API with progress callbacks
-      await updateToUse.downloadAndInstall((event) => {
-        switch (event.event) {
-          case 'Started':
-            contentLength = event.data.contentLength || 0;
-            console.log(`[UpdateDialog] Started downloading ${contentLength} bytes`);
-            setProgress({
-              downloaded: 0,
-              total: contentLength,
-              percentage: 0,
-            });
-            break;
-
-          case 'Progress':
-            downloaded += event.data.chunkLength || 0;
-            const percentage = contentLength > 0
-              ? Math.round((downloaded / contentLength) * 100)
-              : 0;
-            console.log(`[UpdateDialog] Progress: ${downloaded} / ${contentLength} bytes (${percentage}%)`);
-            setProgress({
-              downloaded,
-              total: contentLength,
-              percentage,
-            });
-            break;
-
-          case 'Finished':
-            console.log('[UpdateDialog] Download finished');
-            setProgress({
-              downloaded: contentLength,
-              total: contentLength,
-              percentage: 100,
-            });
-            break;
-        }
-      });
-
-      console.log('[UpdateDialog] Update installed successfully');
-      toast.success('Update installed successfully. The app will restart...');
-
-      // Mark download as complete before closing
-      setIsDownloading(false);
-
-      // Close dialog before relaunch
-      handleOpenChange(false);
-
-      // Relaunch the app
-      await relaunch();
-    } catch (err: any) {
-      console.error('Update failed:', err);
-      setError(err.message || 'Failed to download or install update');
-      setIsDownloading(false);
-      toast.error('Update failed: ' + (err.message || 'Unknown error'));
-    }
+      await updateService.downloadAndInstall(updateInfo, setProgress, () => canInstallRef.current);
+    } catch { /* The shared service keeps the actionable error visible. */ }
   };
-
-  const formatDate = (dateString?: string) => {
-    if (!dateString) return '';
-    try {
-      return new Date(dateString).toLocaleDateString();
-    } catch {
-      return dateString;
-    }
-  };
-
-  // Prevent closing the dialog when downloading
-  const handleOpenChange = (newOpen: boolean) => {
-    // If trying to close while downloading, prevent it
-    if (!newOpen && isDownloading) {
-      return;
-    }
-    // Otherwise, allow normal close behavior
-    onOpenChange(newOpen);
-  };
-
-  // Prevent ESC key from closing dialog during download
-  const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isDownloading) {
-      event.preventDefault();
-    }
-  };
-
-  // Prevent outside clicks from closing dialog during download
-  const handleInteractOutside = (event: Event) => {
-    if (isDownloading) {
-      event.preventDefault();
-    }
-  };
-
-  if (!updateInfo?.available) {
-    return null;
-  }
+  const title = isInstalling ? (progress?.phase === 'installing' ? 'Installing update' : 'Downloading update')
+    : isChecking ? 'Checking for updates' : error ? 'Update could not be completed'
+    : updateInfo?.available ? 'Update available' : 'ClawScribe updates';
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent
-        className="sm:max-w-[500px]"
-        onEscapeKeyDown={handleEscapeKeyDown}
-        onInteractOutside={handleInteractOutside}
-      >
+    <Dialog open={open} onOpenChange={value => { if (!isInstalling) onOpenChange(value); }}>
+      <DialogContent className="sm:max-w-[500px]" onEscapeKeyDown={event => { if (isInstalling) event.preventDefault(); }} onInteractOutside={event => { if (isInstalling) event.preventDefault(); }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {isDownloading ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                Downloading Update
-              </>
-            ) : error ? (
-              <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
-                Update Error
-              </>
-            ) : (
-              <>
-                <Download className="h-5 w-5 text-primary" />
-                Update Available
-              </>
-            )}
+            {busy ? <Loader2 className="h-5 w-5 animate-spin text-primary" /> : error ? <AlertCircle className="h-5 w-5 text-destructive" /> : <Download className="h-5 w-5 text-primary" />}
+            {title}
           </DialogTitle>
-          <DialogDescription>
-            {isDownloading
-              ? 'Downloading the latest version...'
-              : error
-              ? 'An error occurred while updating'
-              : `A new version (${updateInfo.version}) is available`}
-          </DialogDescription>
+          <DialogDescription>{isInstalling ? 'ClawScribe will restart after installation.' : channel === 'preview' ? 'Checking stable releases and prereleases.' : 'Checking stable releases only.'}</DialogDescription>
         </DialogHeader>
-
-        <div className="space-y-4 py-4">
-          {!isDownloading && !error && (
+        <div className="space-y-4 py-2" aria-live="polite">
+          {currentVersion && <p className="text-sm text-muted-foreground">Installed version: {currentVersion}</p>}
+          {!busy && !error && updateInfo && !updateInfo.available && <p className="flex items-start gap-2 text-sm"><CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />No newer {channel === 'preview' ? 'stable release or prerelease' : 'stable release'} is available.</p>}
+          {!busy && updateInfo?.available && (
             <>
-              <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Current Version:</span>
-                  <span className="font-medium">{updateInfo.currentVersion}</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">New Version:</span>
-                  <span className="font-medium text-primary">{updateInfo.version}</span>
-                </div>
-                {updateInfo.date && (
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Release Date:</span>
-                    <span className="font-medium">{formatDate(updateInfo.date)}</span>
-                  </div>
-                )}
-              </div>
-
-              {updateInfo.body && (
-                <div className="bg-muted rounded-lg p-3 max-h-40 overflow-y-auto">
-                  <p className="text-sm text-foreground whitespace-pre-wrap">
-                    {updateInfo.body}
-                  </p>
-                </div>
-              )}
+              <div className="flex items-center justify-between gap-3"><span className="text-lg font-semibold">ClawScribe {updateInfo.version}</span><span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">{updateInfo.prerelease ? 'Prerelease' : 'Stable'}</span></div>
+              {updateInfo.prerelease && <p className="text-sm text-muted-foreground">This preview may contain unfinished features. Turning off prereleases later waits for a newer stable version; it does not downgrade your installation.</p>}
+              {updateInfo.body && <div className="max-h-48 overflow-y-auto rounded-md bg-muted p-3 text-sm whitespace-pre-wrap break-words">{updateInfo.body}</div>}
             </>
           )}
-
-          {isDownloading && progress && (
+          {isInstalling && progress && (
             <div className="space-y-2">
-              <div className="relative">
-                <div className="w-full bg-secondary rounded-full h-3">
-                  <div
-                    className="bg-primary h-3 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${Math.min(progress.percentage, 100)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                  <span>{Math.round(progress.percentage)}% complete</span>
-                  {progress.total > 0 && (
-                    <span>
-                      {formatBytes(progress.downloaded)} / {formatBytes(progress.total)}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <p className="text-sm text-muted-foreground text-center">
-                The app will restart automatically after installation
-              </p>
+              <div role="progressbar" aria-label="Update download" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.total ? progress.percentage : undefined} className="h-2 overflow-hidden rounded-full bg-secondary"><div className={`h-full bg-primary transition-[width] ${progress.total ? '' : 'animate-pulse'}`} style={{ width: progress.total ? `${progress.percentage}%` : '100%' }} /></div>
+              <p className="text-sm text-muted-foreground">{progress.phase === 'installing' ? 'Installer starting…' : `${(progress.downloaded / 1024 / 1024).toFixed(1)} MB downloaded${progress.total ? ` (${progress.percentage}%)` : ''}`}</p>
             </div>
           )}
-
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
-            </div>
-          )}
+          {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+          {!canInstall && updateInfo?.available && <p className="text-sm text-muted-foreground">Finish recording and saving your meeting before installing.</p>}
         </div>
-
         <DialogFooter>
-          {!isDownloading && !error && (
-            <>
-              <Button variant="outline" onClick={() => handleOpenChange(false)}>
-                Later
-              </Button>
-              <Button onClick={handleDownloadAndInstall} className="bg-primary hover:bg-primary">
-                <Download className="h-4 w-4 mr-2" />
-                Download & Install
-              </Button>
-            </>
-          )}
-          {error && (
-            <Button variant="outline" onClick={() => handleOpenChange(false)}>
-              Close
-            </Button>
-          )}
+          <Button variant="outline" disabled={isInstalling} onClick={() => onOpenChange(false)}>{updateInfo?.available ? 'Later' : 'Close'}</Button>
+          {error || !updateInfo ? <Button disabled={busy} onClick={() => void checkForUpdates(true)}>Try again</Button> : updateInfo.available && <Button disabled={busy || !canInstall} onClick={() => void install()}><Download className="mr-2 h-4 w-4" />Download &amp; install</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }

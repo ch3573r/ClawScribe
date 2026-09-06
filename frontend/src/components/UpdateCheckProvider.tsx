@@ -1,104 +1,72 @@
-'use client'
+'use client';
 
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { useUpdateCheck } from '@/hooks/useUpdateCheck';
-import { UpdateInfo } from '@/services/updateService';
+import React, { createContext, useContext, useState, useCallback, useEffect, useSyncExternalStore } from 'react';
+import { updateService, type UpdateChannel, type UpdateSnapshot } from '@/services/updateService';
 import { UpdateDialog } from './UpdateDialog';
-import { setUpdateDialogCallback, showUpdateNotification } from './UpdateNotification';
-import {
-  AUTO_UPDATE_CHECK_CHANGED_EVENT,
-  getAutoUpdateCheckEnabled,
-} from '@/lib/updatePreferences';
+import { showUpdateNotification } from './UpdateNotification';
+import { toast } from 'sonner';
+import { AUTO_UPDATE_CHECK_CHANGED_EVENT, getAutoUpdateCheckEnabled } from '@/lib/updatePreferences';
 
-interface UpdateCheckContextType {
-  updateInfo: UpdateInfo | null;
-  isChecking: boolean;
+interface UpdateCheckContextType extends UpdateSnapshot {
   checkForUpdates: (force?: boolean) => Promise<void>;
+  setChannel: (channel: UpdateChannel) => Promise<void>;
   showUpdateDialog: () => void;
 }
-
 const UpdateCheckContext = createContext<UpdateCheckContextType | undefined>(undefined);
 
 export function UpdateCheckProvider({ children }: { children: React.ReactNode }) {
+  const snapshot = useSyncExternalStore(updateService.subscribe, updateService.getSnapshot, updateService.getServerSnapshot);
   const [showDialog, setShowDialog] = useState(false);
-  const [autoUpdateCheckEnabled, setAutoUpdateCheckEnabled] = useState<boolean | null>(null);
+  const [autoCheck, setAutoCheck] = useState(false);
+  const handleShowDialog = useCallback(() => setShowDialog(true), []);
 
-  const handleShowDialog = useCallback(() => {
-    setShowDialog(true);
-  }, []);
+  useEffect(() => { toast.dismiss('clawscribe-update'); }, [snapshot.channel]);
 
   useEffect(() => {
-    const syncAutoUpdatePreference = (event?: Event) => {
-      if (event instanceof CustomEvent && typeof event.detail === 'boolean') {
-        setAutoUpdateCheckEnabled(event.detail);
-        return;
-      }
-
-      setAutoUpdateCheckEnabled(getAutoUpdateCheckEnabled());
+    void updateService.initialize().catch(() => {});
+    const sync = (event?: Event) => {
+      setAutoCheck(event instanceof CustomEvent && typeof event.detail === 'boolean' ? event.detail : getAutoUpdateCheckEnabled());
     };
-
-    syncAutoUpdatePreference();
-    window.addEventListener('storage', syncAutoUpdatePreference);
-    window.addEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, syncAutoUpdatePreference);
-
+    sync();
+    window.addEventListener('storage', sync);
+    window.addEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, sync);
     return () => {
-      window.removeEventListener('storage', syncAutoUpdatePreference);
-      window.removeEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, syncAutoUpdatePreference);
+      window.removeEventListener('storage', sync);
+      window.removeEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, sync);
     };
   }, []);
 
-  const handleUpdateAvailable = useCallback((info: UpdateInfo) => {
-    showUpdateNotification(info, handleShowDialog);
+  const checkForUpdates = useCallback(async (force = true) => {
+    if (force) setShowDialog(true);
+    try {
+      const info = await updateService.checkForUpdates(force);
+      if (info?.available && !force) showUpdateNotification(info, handleShowDialog);
+    } catch { /* Manual checks show the shared error; startup stays quiet. */ }
   }, [handleShowDialog]);
 
-  const { updateInfo, isChecking, checkForUpdates } = useUpdateCheck({
-    checkOnMount: autoUpdateCheckEnabled === true,
-    showNotification: true,
-    onUpdateAvailable: handleUpdateAvailable,
-  });
+  useEffect(() => {
+    if (!autoCheck || !snapshot.ready) return;
+    const timer = setTimeout(() => void checkForUpdates(false), 2000);
+    return () => clearTimeout(timer);
+  }, [autoCheck, snapshot.ready, snapshot.channel, checkForUpdates]);
 
   useEffect(() => {
-    // Register the callback so UpdateNotification can trigger the dialog
-    setUpdateDialogCallback(handleShowDialog);
-    return () => {
-      setUpdateDialogCallback(() => {});
-    };
-  }, [handleShowDialog]);
-
-  // Listen for tray menu events
-  useEffect(() => {
-    const handleTrayCheck = () => {
-      checkForUpdates(true); // Force check from tray
-      setShowDialog(true);
-    };
-
+    const handleTrayCheck = () => void checkForUpdates(true);
     window.addEventListener('check-updates-from-tray', handleTrayCheck);
     return () => window.removeEventListener('check-updates-from-tray', handleTrayCheck);
   }, [checkForUpdates]);
 
+  const setChannel = useCallback((channel: UpdateChannel) => updateService.setChannel(channel), []);
   return (
-    <UpdateCheckContext.Provider
-      value={{
-        updateInfo,
-        isChecking,
-        checkForUpdates,
-        showUpdateDialog: handleShowDialog,
-      }}
-    >
+    <UpdateCheckContext.Provider value={{ ...snapshot, checkForUpdates, setChannel, showUpdateDialog: handleShowDialog }}>
       {children}
-      <UpdateDialog
-        open={showDialog}
-        onOpenChange={setShowDialog}
-        updateInfo={updateInfo}
-      />
+      <UpdateDialog open={showDialog} onOpenChange={setShowDialog} />
     </UpdateCheckContext.Provider>
   );
 }
 
 export function useUpdateCheckContext() {
   const context = useContext(UpdateCheckContext);
-  if (context === undefined) {
-    throw new Error('useUpdateCheckContext must be used within UpdateCheckProvider');
-  }
+  if (!context) throw new Error('useUpdateCheckContext must be used within UpdateCheckProvider');
   return context;
 }

@@ -3,21 +3,7 @@ import { Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { UpdateInfo } from '@/services/updateService';
 
-let globalShowDialogCallback: (() => void) | null = null;
-
-export function setUpdateDialogCallback(callback: () => void) {
-  globalShowDialogCallback = callback;
-}
-
-export function showUpdateNotification(updateInfo: UpdateInfo, onUpdateClick?: () => void) {
-  const handleClick = () => {
-    if (onUpdateClick) {
-      onUpdateClick();
-    } else if (globalShowDialogCallback) {
-      globalShowDialogCallback();
-    }
-  };
-
+export function showUpdateNotification(updateInfo: UpdateInfo, onUpdateClick: () => void) {
   toast.info(
     <div className="flex items-center justify-between gap-4">
       <div className="flex items-center gap-2">
@@ -25,14 +11,14 @@ export function showUpdateNotification(updateInfo: UpdateInfo, onUpdateClick?: (
         <div>
           <p className="font-medium">Update Available</p>
           <p className="text-sm text-muted-foreground">
-            Version {updateInfo.version} is now available
+            {updateInfo.prerelease ? 'Prerelease' : 'Version'} {updateInfo.version} is now available
           </p>
         </div>
       </div>
       <button
         onClick={(e) => {
           e.stopPropagation();
-          handleClick();
+          onUpdateClick();
         }}
         className="text-sm font-medium text-primary hover:text-primary underline"
       >
@@ -40,6 +26,7 @@ export function showUpdateNotification(updateInfo: UpdateInfo, onUpdateClick?: (
       </button>
     </div>,
     {
+      id: 'clawscribe-update',
       duration: 10000,
       position: 'bottom-center',
     }

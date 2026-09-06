@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { Switch } from "./ui/switch";
+import { UpdateChannelSettings } from "./UpdateChannelSettings";
 import { FolderOpen, RefreshCw } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import Analytics from "@/lib/analytics";
@@ -210,6 +211,9 @@ export function PreferenceSettings() {
             onCheckedChange={handleAutoUpdateCheckChange}
             aria-label="Check for updates at launch"
           />
+        </div>
+        <div className="mt-5 border-t border-border pt-5">
+          <UpdateChannelSettings id="preferences-prerelease-updates" />
         </div>
       </div>
 

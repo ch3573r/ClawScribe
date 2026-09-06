@@ -94,6 +94,17 @@ prove attendance.
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
+## Update Preferences
+
+ClawScribe checks **stable releases** by default. Enable **Include prereleases**
+under **Settings > Preferences > Updates** or **About** to receive preview builds
+as well. The choice persists across restarts and applies to manual and startup
+checks. You still choose when to install; checking at launch is a separate option.
+
+Preview builds may contain unfinished features. Turning previews off waits for a
+newer stable version and never downgrades your installation. Update downloads
+retain Tauri signature verification and remain subject to Windows security policy.
+
 ## What Changed In 0.5.37
 
 This preview keeps captured audio in a recovery spool while encoding,

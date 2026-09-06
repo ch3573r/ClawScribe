@@ -233,11 +233,39 @@ Tauri updater signatures require `TAURI_SIGNING_PRIVATE_KEY`; draft/stable
 staging that generates updater metadata fails when the expected signature is
 missing. Do not publish an empty signature to work around that failure.
 
-## Stable Update Channel
+## Update Channels
 
-The app checks the latest non-draft, non-prerelease release's `latest.json`.
-Drafts are unpublished. A public prerelease is for manual testing and is not a
-stable update. Do not promote a candidate to stable solely because it compiled.
+Stable releases are the default. The app checks the latest non-draft,
+non-prerelease release's `latest.json`. Users can enable **Include prereleases**
+in Settings > Preferences > Updates or About. This choice persists locally in
+the Tauri-owned `updater.json` store and applies to startup checks, manual checks,
+and the tray. Checking at launch is a separate preference; opting into previews
+does not turn on automatic checks or install anything automatically.
+
+The preview channel considers the stable update and the newest eligible Windows
+x64 release in GitHub's 100 most recent release entries. It compares numeric
+runtime versions, rather than publication order or version strings. Drafts,
+incomplete asset uploads, empty assets, and releases without the Windows setup
+and updater manifest are excluded. Discovery uses GitHub's public API without
+credentials, with bounded response size and timeouts. Rate limits and network
+failures are shown for manual checks and remain retryable.
+
+The Rust checker owns endpoint selection. It validates preview manifest identity
+and installer location, then returns a Tauri updater resource to the shared UI
+service. The dialog installs that exact checked release without a second stable
+check. Both channels use the existing pinned updater public key and Tauri's
+signature verification. Changing channels invalidates cached and in-flight
+results; leaving previews never downgrades an installed build. Finish recording
+and saving a meeting before installation. Device security policy still applies
+to the installer; selecting a channel does not bypass Windows security blocks.
+
+To distribute a preview, stage a draft, verify its assets, then publish it as a
+GitHub prerelease without marking it latest. The workflow's direct `publish`
+path remains the stable channel.
+
+Public prereleases remain outside the stable channel. Apps released before the
+opt-in feature need a stable update or manual installation to gain it. Do not
+promote a candidate to stable solely because it compiled.
 
 Windows installer/runtime versions cannot distinguish source prerelease suffixes
 in this workflow. A candidate and final release sharing the same numeric runtime

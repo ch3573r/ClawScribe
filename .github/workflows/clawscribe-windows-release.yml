@@ -651,10 +651,9 @@ jobs:
           body_path: frontend/src-tauri/target/release/bundle/RELEASE-NOTES.md
           target_commitish: ${{ steps.build_identity.outputs.commit }}
           draft: ${{ inputs['draft-release'] }}
-          # Drafts never advance the installed stable updater.
-          # The app updater points at /releases/latest/download/latest.json.
-          # GitHub excludes prereleases from that route, so alpha builds must be
-          # published as normal releases while this is the active update channel.
+          # This publication path targets stable updates. Stage preview builds
+          # as drafts, verify their assets, then mark them as public prereleases
+          # without making them latest. Opted-in apps discover them separately.
           prerelease: false
           make_latest: ${{ inputs['draft-release'] && 'false' || 'true' }}
           fail_on_unmatched_files: true
