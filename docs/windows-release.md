@@ -202,6 +202,7 @@ ClawScribe_0.5.38_x64-setup.exe
 ClawScribe_0.5.38_x64_en-US.msi
 ```
 
+Published installers include detached Tauri updater signatures (`.sig`).
 Release bundles also include `SHA256SUMS.txt`, `BUILD-METADATA.txt`, and
 `BUILD-METRICS.json`; updater-capable releases include `latest.json` containing
 the NSIS URL and its Tauri signature. Verify that the assets exist and are

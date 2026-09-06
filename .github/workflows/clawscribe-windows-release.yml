@@ -443,7 +443,11 @@ jobs:
           $destMsiFull = [System.IO.Path]::GetFullPath($destMsi)
           $destNsisFull = [System.IO.Path]::GetFullPath($destNsis)
           if ($sourceMsi.FullName -ne $destMsiFull) {
+            $sourceMsiSig = "$($sourceMsi.FullName).sig"
             Move-Item -LiteralPath $sourceMsi.FullName -Destination $destMsi -Force
+            if (Test-Path -LiteralPath $sourceMsiSig -PathType Leaf) {
+              Move-Item -LiteralPath $sourceMsiSig -Destination "$destMsi.sig" -Force
+            }
           }
           if ($sourceNsis.FullName -ne $destNsisFull) {
             $sourceNsisSig = "$($sourceNsis.FullName).sig"
@@ -659,7 +663,9 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64_en-US.msi
+            frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64_en-US.msi.sig
             frontend/src-tauri/target/release/bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64-setup.exe
+            frontend/src-tauri/target/release/bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64-setup.exe.sig
             frontend/src-tauri/target/release/bundle/latest.json
             frontend/src-tauri/target/release/bundle/SHA256SUMS.txt
             frontend/src-tauri/target/release/bundle/BUILD-METADATA.txt
