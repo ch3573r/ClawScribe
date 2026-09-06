@@ -107,7 +107,7 @@ let server,browser;
     await page.getByRole('alert').filter({hasText:'could not be completed'}).waitFor();
     assert.equal(await page.locator('a[href="#opened"]').count(),1,'The background row remains in the DOM while the dialog correctly hides it from assistive technology');
     await page.evaluate(()=>window.failDelete=false);await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
-    await page.getByText('Meeting deleted',{exact:true}).waitFor();assert.equal(await page.getByRole('dialog').count(),0);
+    await page.getByText('Meeting deleted',{exact:true}).waitFor();await page.getByRole('dialog').waitFor({state:'hidden'});assert.equal(await page.getByRole('dialog').count(),0);
   });
   await run('history loading prevents new-send overwrite', {holdHistory:true}, async page=>{
     await openChat(page);assert.equal(await question(page).isDisabled(),true);

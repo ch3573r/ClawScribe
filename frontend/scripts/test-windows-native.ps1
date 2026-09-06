@@ -69,7 +69,7 @@ try {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $testDirectory $_.Name) -Force
     }
 
-    foreach ($filter in @("summary::processor::tests", "summary::chunking::tests", "audio::async_logger::tests", "audio::hardware_detector::tests", "audio::memory_queue::tests", "audio::process_runner::tests", "audio::incremental_saver::tests", "audio::recording_saver::tests", "audio::pipeline::tail_tests", "audio::recording_state::lifecycle_tests", "summary::chat_context::tests", "summary::chat_guard::tests", "database::repositories::ai_chat::tests")) {
+    foreach ($filter in @("summary::processor::tests", "summary::chunking::tests", "audio::async_logger::tests", "audio::hardware_detector::tests", "audio::memory_queue::tests", "audio::process_runner::tests", "audio::incremental_saver::tests", "audio::recording_saver::snapshot_tests", "audio::pipeline::tail_tests", "audio::recording_state::lifecycle_tests", "summary::chat_context::tests", "summary::chat_guard::tests", "database::repositories::ai_chat::tests")) {
         $listing = & $testExecutable $filter --list
         if ($LASTEXITCODE -ne 0) { throw "Native test discovery failed for '$filter'." }
         $testCount = @($listing | Where-Object { $_ -match ': test$' }).Count
