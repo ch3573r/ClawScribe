@@ -7,12 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.37**. The [0.5.37 Windows preview](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.37)
-is for manual installation and evaluation of recording, transcription, and notes.
-The [0.5.36 stable release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.36)
-remains on the automatic-update channel. Read the preview's validation limits:
-real-device capture, install/upgrade acceptance, and sustained notebook
-performance remain unconfirmed.
+Source version: **0.5.38**. The [0.5.38 Windows release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.38)
+uses the stable automatic-update channel and adds an optional prerelease channel.
+It includes the recording, transcription, and notes improvements from 0.5.37.
+Read the [release validation limits](docs/releases/0.5.38.md): real-device capture,
+install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -105,9 +104,19 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.37
+## What Changed In 0.5.38
 
-This preview keeps captured audio in a recovery spool while encoding,
+- Optional prerelease updates with a persistent opt-in in Preferences and About;
+  stable releases remain the default.
+- One shared checked release across startup, Settings, About, the tray, and the
+  installation dialog; stale channel results and duplicate checks are discarded.
+- Clear update status, preview labels, accessible controls, immediate retries
+  after failures, and recording checks before installation.
+
+The recording and meeting-quality improvements first shipped in 0.5.37 are
+included:
+
+ClawScribe keeps captured audio in a recovery spool while encoding,
 limits in-memory capture and inference work, and preserves incomplete-recording
 status across restarts. A failed live transcript does not stop the UI from
 showing that recording is still active. After stopping, recovery notices explain
@@ -127,7 +136,7 @@ available, and the desktop window supports smaller notebook layouts.
 These implementation changes do not establish error-free recognition,
 hallucination-free notes, or real-time performance on every notebook. Long-file
 speaker diarization still needs a bounded-memory processing path. See the
-[0.5.37 release notes](docs/releases/0.5.37.md),
+[0.5.38 release notes](docs/releases/0.5.38.md),
 [meeting-quality guide](docs/meeting-quality.md), and [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status

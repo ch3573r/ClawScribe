@@ -56,7 +56,7 @@ The `windows-gpu` and `vulkan` builds have a load-time dependency on
 `vulkan-1.dll`. A machine without the loader can fail before the app opens or
 native tests are discovered, even if no GPU inference is requested. Use a
 supported GPU driver or the official LunarG Vulkan runtime. Do not download
-individual DLLs from third-party sites. The 0.5.37 installer does not install
+individual DLLs from third-party sites. The 0.5.38 installer does not install
 a GPU driver or the Vulkan runtime for you.
 
 Extracting the Vulkan SDK supplies headers, libraries, and build tools; it does
@@ -194,11 +194,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.5.37, installer filenames are:
+For source version 0.5.38, installer filenames are:
 
 ```text
-ClawScribe_0.5.37_x64-setup.exe
-ClawScribe_0.5.37_x64_en-US.msi
+ClawScribe_0.5.38_x64-setup.exe
+ClawScribe_0.5.38_x64_en-US.msi
 ```
 
 Release bundles also include `SHA256SUMS.txt`, `BUILD-METADATA.txt`, and

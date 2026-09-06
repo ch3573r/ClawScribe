@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.38
+
+- Publish version `0.5.38` to the stable update channel so installed `0.5.36` and `0.5.37` builds can discover it. The new prerelease option becomes available after upgrading.
+- Add a persistent **Include prereleases** switch in Preferences and About. Stable remains the default; opting in applies to startup, manual, and tray checks without automatically installing anything.
+- Select the newest eligible numeric Windows version across stable and preview releases. Ignore drafts and incomplete uploads, preserve signature verification, and never downgrade when leaving previews.
+- Install the exact checked release, share concurrent checks, invalidate stale results when switching channels, and allow immediate retries after network or GitHub rate-limit errors.
+- Show clear no-update results, preview labels, accessible controls, and download progress. Check recording state before download and installation, and release downloaded resources after failures.
+- Include the recording recovery, bounded import/retranscription, transcript preservation, credential protection, and meeting-notes improvements from the 0.5.37 preview.
+- Windows security policy can still block installer execution; updater signatures are separate from Authenticode signing. Real dual-source capture, graphical installation/upgrade, native UI scaling, multilingual accuracy, and sustained i5/8 GB performance remain unconfirmed. Long-recording diarization is still memory intensive.
+
 ## 0.5.37
 
 - Publish a Windows GPU preview for manual installation and real-device testing. Runtime version `0.5.37` advances beyond `0.5.36`; this prerelease does not advance the stable automatic-update channel.
