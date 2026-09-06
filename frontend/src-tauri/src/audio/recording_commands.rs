@@ -1194,6 +1194,9 @@ pub async fn get_transcription_status() -> TranscriptionStatus {
             queued_audio_seconds: 0.0,
             processing_realtime_factor: None,
             estimated_seconds_remaining: None,
+            spool_bytes: 0,
+            total_chunks_queued: 0,
+            total_chunks_completed: 0,
         };
     }
     match transcription::current_transcription_metrics() {
