@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.40
+
+- Publish a Windows GPU prerelease with runtime/updater version `0.5.40`, newer than `0.5.39`. Enable **Include prereleases** to discover it; stable remains `0.5.38`.
+- Preserve legitimate Whisper words, repetitions, and short German answers. Fix Whisper/Parakeet model-switch deadlocks, move speech-model loading off async workers, and avoid redundant batch PCM copies.
+- Cancel hosted import/retranscription requests without starting local fallback. Resolve Nemotron Auto consistently from the system locale and avoid falsely labeling Parakeet Auto as English.
+- Discard stale meeting, summary, source-page, and recording-poll results. Finish transcript animations, preserve edits made during saves, and avoid rewriting notes for title-only changes. Automatic summaries wait for saved notes and a configured provider.
+- Share configured summary requests across chat and reviewed task polishing. Bound API response memory, keep cancellation active through response bodies, reject explicitly truncated/refused output, and preserve all Claude text blocks.
+- Prevent duplicate summary jobs and stale cancellation updates. Serialize local sidecar request/reply exchanges and scan only appended output plus stop-marker overlap, retaining Unicode boundaries and discarding text after the earliest marker.
+- Add a transcript paging index and consistent database snapshots. A synthetic 150,000-row count/page benchmark improved from median 12.813 ms to 0.342 ms; this is database paging, not transcription speed.
+- Checkpoint each Microsoft export attempt and result. Block exports when history is invalid/unavailable, require review for unknown submissions, and preserve OneNote sections when a page may have been created. Remove sensitive provider diagnostics from reviewed paths.
+- Pass 70 frontend tests and 293 Windows native tests in the GPU preflight, and restore full-workspace Rust formatting checks. Installer publication additionally requires native build/tests and downloaded signature/checksum verification.
+- Real dual-source recording, graphical install/upgrade and installed-app update discovery, multilingual model quality, accessibility, and sustained notebook performance remain unconfirmed. MAI conversion and diarization can still use full-file memory; running native/conversion work may finish after cancellation. This preview does not assert capture-smoke confirmation or stable readiness. Updater signatures are separate from Windows publisher signing; the Vulkan loader remains a startup prerequisite.
+
 ## 0.5.39
 
 - Publish a Windows GPU prerelease for manual evaluation and the opt-in **Include prereleases** update channel. Runtime version `0.5.39` advances beyond `0.5.38`; stable users remain on `0.5.38`.

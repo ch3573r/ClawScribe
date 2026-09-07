@@ -7,11 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.39 Preview**. The [0.5.39 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.39)
+Source version: **0.5.40 Preview**. The [0.5.40 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.40)
 adds audio-only recording, transcript corrections, summary source links, and
 editable summary templates. Enable **Include prereleases** in 0.5.38 or install
 manually; the stable channel remains on 0.5.38.
-Read the [release validation limits](docs/releases/0.5.39.md): real-device capture,
+Read the [release validation limits](docs/releases/0.5.40.md): real-device capture,
 install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
@@ -136,50 +136,26 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.39 Preview
+## What Changed In 0.5.40 Preview
 
-- Record audio now and transcribe later, with audio saving always enabled in
-  audio-only mode.
-- Correct transcript passages, preview find-and-replace, and undo corrections.
-  Summary replacement preserves formatting and links.
-- Open summary source links to review transcript passages or play their audio;
-  corrected passages invalidate outdated references.
-- Create and edit summary templates and keep a default across meetings.
+- Preserve legitimate Whisper words and repetitions; fix model-switch deadlocks
+  and move speech-model initialization off async workers.
+- Reduce batch audio copies and cancel hosted transcription requests without
+  starting local fallback. Keep Nemotron Auto behavior consistent across paths.
+- Prevent stale meeting/recording responses and incomplete transcript animations.
+  Preserve edits during saves and avoid rewriting notes for title-only changes.
+- Share summary provider configuration, reject explicitly truncated answers,
+  serialize local sidecar exchanges, and scan stop markers incrementally.
+- Index transcript paging. A synthetic 150,000-row count/page query improved from
+  12.813 ms to 0.342 ms; this measures database paging only.
+- Persist Microsoft export attempts and results before proceeding. Stop blind
+  retries when a submission has an unknown outcome.
 
-The optional preview updater and earlier recording improvements are included:
-
-- Optional prerelease updates with a persistent opt-in in Preferences and About;
-  stable releases remain the default.
-- One shared checked release across startup, Settings, About, the tray, and the
-  installation dialog; stale channel results and duplicate checks are discarded.
-- Clear update status, preview labels, accessible controls, immediate retries
-  after failures, and recording checks before installation.
-
-The recording and meeting-quality improvements first shipped in 0.5.37 are
-included:
-
-ClawScribe keeps captured audio in a recovery spool while encoding,
-limits in-memory capture and inference work, and preserves incomplete-recording
-status across restarts. A failed live transcript does not stop the UI from
-showing that recording is still active. After stopping, recovery notices explain
-when to inspect audio and retranscribe before generating notes.
-
-Imports and retranscription prepare audio on disk and load bounded speech
-segments. Empty retranscription cannot erase an existing transcript. Local
-recording, batch transcription, and built-in summary inference cannot compete
-for the same model resources. Provider credentials migrate to the OS credential
-store, with an encrypted Windows fallback.
-
-Summary routes reduce long transcripts through bounded context windows; custom
-compatible providers expose a context-window setting. Meeting chat searches
-across the meeting and labels selected excerpts. Confidence is shown only when
-available, and the desktop window supports smaller notebook layouts.
-
-These implementation changes do not establish error-free recognition,
-hallucination-free notes, or real-time performance on every notebook. Long-file
-speaker diarization still needs a bounded-memory processing path. See the
-[0.5.39 preview release notes](docs/releases/0.5.39.md),
-[meeting-quality guide](docs/meeting-quality.md), and [changelog](CHANGELOG.md).
+The transcript corrections, summary source links, editable templates, and deferred
+transcription introduced in 0.5.39 remain available. See the
+[0.5.40 preview release notes](docs/releases/0.5.40.md),
+[meeting-quality guide](docs/meeting-quality.md), and [changelog](CHANGELOG.md)
+for validation results and remaining device/model acceptance.
 
 ## Notebook Performance And Product Status
 
