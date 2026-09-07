@@ -7,7 +7,8 @@
 //! sections of the OneNote/Planner design docs.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +56,8 @@ pub struct ExportLedger {
     /// Keyed by dedupe key. Covers both OneNote pages and Planner tasks.
     #[serde(default)]
     pub entries: BTreeMap<String, LedgerEntry>,
+    #[serde(skip)]
+    storage_dir: Option<PathBuf>,
 }
 
 impl ExportLedger {
@@ -63,33 +66,62 @@ impl ExportLedger {
             schema: LEDGER_SCHEMA.to_string(),
             meeting_id: meeting_id.into(),
             entries: BTreeMap::new(),
+            storage_dir: None,
         }
     }
 
     /// Load the ledger for a recording folder, or start a fresh one if absent.
     pub fn load_or_new(folder: &Path, meeting_id: &str) -> Result<Self, String> {
-        let path = folder.join(LEDGER_FILENAME);
-        if !path.exists() {
-            return Ok(ExportLedger::new(meeting_id));
+        let mut ledger = match std::fs::read_to_string(folder.join(LEDGER_FILENAME)) {
+            Ok(raw) => serde_json::from_str::<Self>(&raw).map_err(|_| {
+                "Export history is invalid. Restore it before exporting to avoid duplicates."
+            })?,
+            Err(error) if error.kind() == ErrorKind::NotFound => Self::new(meeting_id),
+            Err(_) => {
+                return Err(
+                    "Could not read export history. Restore access before exporting.".into(),
+                )
+            }
+        };
+        if ledger.schema != LEDGER_SCHEMA || ledger.meeting_id != meeting_id {
+            return Err("Export history does not match this meeting or supported format.".into());
         }
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read {LEDGER_FILENAME}: {e}"))?;
-        let ledger: ExportLedger = serde_json::from_str(&raw)
-            .map_err(|e| format!("Failed to parse {LEDGER_FILENAME}: {e}"))?;
+        // A crash after submission can leave a pending create. Never replay it.
+        for entry in ledger.entries.values_mut() {
+            if entry.status == ExportStatus::Pending {
+                entry.status = ExportStatus::UnknownAfterSubmit;
+                entry.code = Some("interrupted_export_review_required".into());
+            }
+        }
+        ledger.storage_dir = Some(folder.to_path_buf());
         Ok(ledger)
     }
 
-    /// Atomically persist the ledger to `folder/exports.json` (temp file +
-    /// rename) so a crash mid-write can't truncate the existing ledger.
+    /// Atomically replace the history only after its new contents reach disk.
     pub fn save(&self, folder: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(folder)
-            .map_err(|e| format!("Failed to create export folder: {e}"))?;
-        let path = folder.join(LEDGER_FILENAME);
-        let tmp = folder.join(format!("{LEDGER_FILENAME}.tmp"));
-        let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, body).map_err(|e| format!("Failed to write export ledger: {e}"))?;
-        std::fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit export ledger: {e}"))?;
+        std::fs::create_dir_all(folder).map_err(|_| "Could not create export history storage.")?;
+        let mut file = tempfile::NamedTempFile::new_in(folder)
+            .map_err(|_| "Could not stage export history.")?;
+        let body = serde_json::to_vec(self).map_err(|_| "Could not serialize export history.")?;
+        file.write_all(&body)
+            .map_err(|_| "Could not write export history.")?;
+        file.as_file()
+            .sync_all()
+            .map_err(|_| "Could not flush export history.")?;
+        file.persist(folder.join(LEDGER_FILENAME))
+            .map_err(|_| "Could not replace export history.")?;
         Ok(())
+    }
+
+    /// Persist before and after each remote create without blocking async work.
+    pub async fn checkpoint(&self) -> Result<(), String> {
+        let Some(folder) = self.storage_dir.clone() else {
+            return Ok(());
+        };
+        let snapshot = self.clone();
+        tokio::task::spawn_blocking(move || snapshot.save(&folder))
+            .await
+            .map_err(|_| "Export history writer failed.")?
     }
 
     pub fn entry(&self, dedupe_key: &str) -> Option<&LedgerEntry> {
@@ -113,7 +145,7 @@ impl ExportLedger {
         match self.entry(dedupe_key) {
             None => true,
             Some(e) if e.status.is_terminal_success() => false,
-            Some(e) => e.status.allows_automatic_retry() || e.status == ExportStatus::Pending,
+            Some(e) => e.status.allows_automatic_retry(),
         }
     }
 
@@ -232,6 +264,50 @@ mod tests {
 
         ledger.record_failure("gone", ExportStatus::DestinationNotFound, None, None);
         assert!(!ledger.may_attempt("gone"));
+    }
+
+    #[test]
+    fn unreadable_or_mismatched_history_never_becomes_a_fresh_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEDGER_FILENAME);
+        std::fs::write(&path, "invalid history").unwrap();
+        assert!(ExportLedger::load_or_new(dir.path(), "m1").is_err());
+        let mut ledger = ExportLedger::new("another-meeting");
+        ledger.save(dir.path()).unwrap();
+        assert!(ExportLedger::load_or_new(dir.path(), "m1").is_err());
+        ledger.meeting_id = "m1".into();
+        ledger.schema = "unknown-schema".into();
+        ledger.save(dir.path()).unwrap();
+        assert!(ExportLedger::load_or_new(dir.path(), "m1").is_err());
+    }
+
+    #[tokio::test]
+    async fn interrupted_creates_require_review_and_completed_creates_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(dir.path(), "m1").unwrap();
+        ledger.begin_attempt("pending", None);
+        ledger.checkpoint().await.unwrap();
+        assert!(!ledger.may_attempt("pending"));
+        let interrupted = ExportLedger::load_or_new(dir.path(), "m1").unwrap();
+        assert_eq!(
+            interrupted.entry("pending").unwrap().status,
+            ExportStatus::UnknownAfterSubmit
+        );
+        assert!(!interrupted.may_attempt("pending"));
+        ledger.record_success("pending", Some("task-id".into()), None, None);
+        ledger.checkpoint().await.unwrap();
+        let completed = ExportLedger::load_or_new(dir.path(), "m1").unwrap();
+        assert_eq!(
+            completed
+                .already_succeeded("pending")
+                .unwrap()
+                .resource_id
+                .as_deref(),
+            Some("task-id")
+        );
+        assert!(!std::fs::read_to_string(dir.path().join(LEDGER_FILENAME))
+            .unwrap()
+            .contains("storageDir"));
     }
 
     #[test]

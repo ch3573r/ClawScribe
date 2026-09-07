@@ -34,6 +34,21 @@ pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> =
 static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+/// Holds one generation slot from command acceptance through persistence.
+/// Early returns and cancelled futures always remove their registered token.
+pub(crate) struct SummaryJob {
+    meeting_id: String,
+    token: CancellationToken,
+}
+
+impl Drop for SummaryJob {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
+            registry.remove(&self.meeting_id);
+        }
+    }
+}
+
 /// Strips the first `#` heading line; returns "" if no `#` is found.
 fn strip_leading_title(markdown: &str) -> String {
     if let Some(hash_pos) = markdown.find('#') {
@@ -198,14 +213,19 @@ fn extract_cached_english_markdown(
 pub struct SummaryService;
 
 impl SummaryService {
-    /// Registers a new cancellation token for a meeting
-    fn register_cancellation_token(meeting_id: &str) -> CancellationToken {
-        let token = CancellationToken::new();
-        if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
-            registry.insert(meeting_id.to_string(), token.clone());
-            info!("Registered cancellation token for meeting: {}", meeting_id);
+    pub(crate) fn register_job(meeting_id: &str) -> Result<SummaryJob, String> {
+        let mut registry = CANCELLATION_REGISTRY
+            .lock()
+            .map_err(|_| "Could not lock summary jobs")?;
+        if registry.contains_key(meeting_id) {
+            return Err("This meeting already has a summary in progress. Wait for it to finish or cancel it.".into());
         }
-        token
+        let token = CancellationToken::new();
+        registry.insert(meeting_id.to_string(), token.clone());
+        Ok(SummaryJob {
+            meeting_id: meeting_id.to_string(),
+            token,
+        })
     }
 
     /// Cancels the summary generation for a meeting
@@ -222,15 +242,6 @@ impl SummaryService {
             meeting_id
         );
         false
-    }
-
-    /// Cleans up the cancellation token after processing completes
-    fn cleanup_cancellation_token(meeting_id: &str) {
-        if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
-            if registry.remove(meeting_id).is_some() {
-                info!("Cleaned up cancellation token for meeting: {}", meeting_id);
-            }
-        }
     }
 
     async fn read_detected_summary_language(pool: &SqlitePool, meeting_id: &str) -> Option<String> {
@@ -302,7 +313,7 @@ impl SummaryService {
     /// * `model_name` - Specific model (e.g., "gpt-4", "llama3.2:latest")
     /// * `custom_prompt` - Optional user-provided context
     /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
-    pub async fn process_transcript_background<R: tauri::Runtime>(
+    pub(crate) async fn process_transcript_background<R: tauri::Runtime>(
         _app: AppHandle<R>,
         pool: SqlitePool,
         meeting_id: String,
@@ -312,6 +323,7 @@ impl SummaryService {
         custom_prompt: String,
         template_id: String,
         summary_language: Option<String>,
+        job: SummaryJob,
     ) {
         let start_time = Instant::now();
         info!(
@@ -337,8 +349,7 @@ impl SummaryService {
             )
         };
 
-        // Register cancellation token for this meeting
-        let cancellation_token = Self::register_cancellation_token(&meeting_id);
+        let cancellation_token = &job.token;
 
         // Parse provider
         let provider = match LLMProvider::from_str(&model_provider) {
@@ -412,7 +423,7 @@ impl SummaryService {
         ) = if provider == LLMProvider::CustomOpenAI {
             match SettingsRepository::get_custom_openai_config(&pool).await {
                 Ok(Some(config)) => {
-                    info!("✓ Using custom OpenAI endpoint: {}", config.endpoint);
+                    info!("Using the configured OpenAI-compatible endpoint");
                     (
                         Some(config.endpoint),
                         config.api_key,
@@ -435,10 +446,7 @@ impl SummaryService {
         } else if provider == LLMProvider::OpenClaw {
             match crate::openclaw::load_config(&_app) {
                 Ok(config) if config.enabled && !config.bearer_token.trim().is_empty() => {
-                    info!(
-                        "✓ Using OpenClaw managed model endpoint: {}",
-                        config.model_endpoint
-                    );
+                    info!("Using the configured OpenClaw model endpoint");
                     (
                         Some(config.model_endpoint),
                         Some(config.bearer_token),
@@ -542,7 +550,6 @@ impl SummaryService {
                 | LLMProvider::OpenClaw
         ) {
             if cancellation_token.is_cancelled() {
-                Self::cleanup_cancellation_token(&meeting_id);
                 if let Err(db_err) =
                     SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id).await
                 {
@@ -641,7 +648,7 @@ impl SummaryService {
                                 custom_prompt: Some(custom_prompt.clone()),
                                 output_dir,
                             },
-                            Some(&cancellation_token),
+                            Some(cancellation_token),
                         )
                         .await
                 }
@@ -649,7 +656,6 @@ impl SummaryService {
             };
 
             let duration = start_time.elapsed().as_secs_f64();
-            Self::cleanup_cancellation_token(&meeting_id);
 
             match result {
                 Ok(api_result) => {
@@ -704,7 +710,6 @@ impl SummaryService {
 
         if provider == LLMProvider::Codex {
             if cancellation_token.is_cancelled() {
-                Self::cleanup_cancellation_token(&meeting_id);
                 if let Err(db_err) =
                     SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id).await
                 {
@@ -729,22 +734,23 @@ impl SummaryService {
 
             let result = match provider_from_app(&_app) {
                 Ok(codex_provider) => {
-                    codex_provider
-                        .process_meeting(CodexMeetingProcessRequest {
+                    super::llm_client::with_cancellation(
+                        Some(cancellation_token),
+                        codex_provider.process_meeting(CodexMeetingProcessRequest {
                             meeting_id: meeting_id.clone(),
                             meeting_title,
                             transcript: text.clone(),
                             custom_prompt: Some(custom_prompt.clone()),
                             output_dir,
                             scratch_root: None,
-                        })
-                        .await
+                        }),
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             };
 
             let duration = start_time.elapsed().as_secs_f64();
-            Self::cleanup_cancellation_token(&meeting_id);
 
             match result {
                 Ok(codex_result) => {
@@ -856,7 +862,7 @@ impl SummaryService {
             custom_openai_temperature,
             custom_openai_top_p,
             app_data_dir.as_ref(),
-            Some(&cancellation_token),
+            Some(cancellation_token),
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
@@ -864,9 +870,6 @@ impl SummaryService {
         .await;
 
         let duration = start_time.elapsed().as_secs_f64();
-
-        // Clean up cancellation token regardless of outcome
-        Self::cleanup_cancellation_token(&meeting_id);
 
         match result {
             Ok((final_markdown, english_markdown, num_chunks)) => {
@@ -879,7 +882,7 @@ impl SummaryService {
                 if let Some(name) =
                     extract_meeting_name_from_markdown(&final_markdown).filter(|n| !n.is_empty())
                 {
-                    info!("Extracted meeting name from summary: '{}'", name);
+                    info!("Extracted a meeting title from the summary");
                     if let Err(e) =
                         MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name).await
                     {
@@ -960,6 +963,20 @@ impl SummaryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_job_guards_reject_duplicates_and_release_early_failures() {
+        let meeting = "summary-job-guard-test";
+        let job = SummaryService::register_job(meeting).unwrap();
+        assert!(SummaryService::register_job(meeting).is_err());
+        assert!(SummaryService::cancel_summary(meeting));
+        assert!(job.token.is_cancelled());
+        assert!(SummaryService::register_job(meeting).is_err());
+        drop(job);
+        assert!(!SummaryService::cancel_summary(meeting));
+        let next = SummaryService::register_job(meeting).unwrap();
+        assert!(!next.token.is_cancelled());
+    }
 
     #[test]
     fn test_strip_leading_title_with_body() {

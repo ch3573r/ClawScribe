@@ -235,8 +235,11 @@ impl NemotronEngine {
         let cpu_capable = variant_for(model_name)
             .map(|v| v.cpu_capable)
             .unwrap_or(true);
-        let model = NemotronModel::new(&path, cpu_capable)
-            .map_err(|e| anyhow!("Failed to load Nemotron model {}: {}", model_name, e))?;
+        let model = crate::audio::inference::run(move |_cancelled| {
+            NemotronModel::new(&path, cpu_capable).map_err(anyhow::Error::from)
+        })
+        .await
+        .map_err(|e| anyhow!("Failed to load Nemotron model {}: {}", model_name, e))?;
 
         *self.current_model.write().await = Some(model);
         *self.current_model_name.write().await = Some(model_name.to_string());
@@ -266,16 +269,20 @@ impl NemotronEngine {
         samples: Vec<f32>,
         language: Option<String>,
     ) -> Result<String> {
+        // Resolve once at the engine boundary so live, import and retranscription
+        // apply the same Auto/translation policy.
+        let requested_language =
+            crate::audio::transcription::nemotron_provider::resolve_requested_language(
+                language.as_deref(),
+                sys_locale::get_locale().as_deref(),
+            )?;
         let mut guard = self.current_model.clone().write_owned().await;
         crate::audio::inference::run(move |cancelled| {
             let model = guard
                 .as_mut()
                 .ok_or_else(|| anyhow!("No Nemotron model loaded"))?;
-            let requested_language = language
-                .as_deref()
-                .ok_or_else(|| anyhow!("Nemotron requires an explicit transcription language"))?;
             let slot = model
-                .resolve_lang_slot(Some(requested_language))
+                .resolve_lang_slot(Some(&requested_language))
                 .ok_or_else(|| {
                     anyhow!(
                         "Nemotron does not have a prompt slot for language '{}'",

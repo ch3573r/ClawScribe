@@ -54,11 +54,17 @@ Mapping rules:
 
 ## Duplicate Protection
 
-Planner task creation is not naturally idempotent. ClawScribe keeps local
-metadata for exported action items so retrying a meeting does not create the
-same task again.
+Planner task creation is not naturally idempotent. ClawScribe saves an attempt
+before each remote create and its result immediately afterwards. A matching
+re-export skips confirmed tasks, including successful items from a partial batch.
+Exports stop when this history cannot be read or saved.
 
-The ledger may store:
+An interrupted submission can have an unknown outcome and is not automatically
+retried. Check Planner before creating another task; changing its reviewed title
+or destination creates a different export identity. See
+[export history and recovery](microsoft-graph.md#export-history-and-recovery).
+
+The ledger stores:
 
 - local action IDs
 - task IDs

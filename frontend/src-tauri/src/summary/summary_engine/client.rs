@@ -229,7 +229,7 @@ pub async fn generate_with_builtin(
 
     // Parse response
     let response: Response = serde_json::from_str(&response_json)
-        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+        .context("Invalid response from the local summary engine")?;
 
     match response {
         Response::Response { text, error } => {

@@ -56,10 +56,11 @@ user. A legacy plaintext fallback is removed only after successful encrypted
 migration; failed migration can leave the legacy file in place. Non-Windows
 platforms do not write a new plaintext Microsoft-token fallback.
 
-This is not encryption of recordings or the meeting database and does not
-protect every other provider's key. Some AI/hosted transcription credentials
-remain in local settings/database storage. Treat application data and backups
-as sensitive. See [privacy and data handling](../../PRIVACY_POLICY.md).
+AI and hosted-transcription keys use separate provider-specific protected
+credential references; Microsoft sign-in does not supply those credentials.
+Recordings and transcripts are not encrypted by credential storage. Treat
+application data and backups as sensitive. See
+[privacy and data handling](../../PRIVACY_POLICY.md).
 
 Expected connection states:
 
@@ -148,6 +149,29 @@ See [todo-export.md](todo-export.md).
 - OneNote `10008`: skip section listing and use create-new/saved-ID flows.
 
 Graph failures should not delete local meeting artifacts.
+
+## Export History And Recovery
+
+OneNote page and Planner/To Do task creation save a pending attempt locally before
+contacting Graph, then save each result. Completed items survive an interrupted
+batch and are skipped on a matching re-export. Exports run one at a time so
+separate dialogs cannot overwrite each other's history.
+
+Unreadable or invalid history blocks export. A history write failure stops the
+batch; it never silently disables duplicate protection. Restore access to the
+existing history before retrying rather than deleting it.
+
+If a response is lost, the app restarts during submission, or a result cannot be
+saved locally, an item can have an **unknown outcome** (`unknown_after_submit`).
+ClawScribe cannot determine from that state whether Microsoft created it and
+will not automatically submit that item again. Inspect the selected destination
+for the page or task before taking further action. There is no automatic remote
+reconciliation or reset control for these entries. Changing a title or destination
+can create a different export identity and must not be used as a blind retry.
+
+OneNote retains a newly created section if a page is confirmed or may have been
+created. Duplicate protection applies to matching content and destinations; it
+does not make Graph's create operations intrinsically idempotent.
 
 ## Test And Review Checklist
 

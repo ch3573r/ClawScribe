@@ -306,7 +306,10 @@ mod tests {
         assert_eq!(HardwareProfile::resolve_memory_gb(None, 32 * gib), 32);
         assert_eq!(HardwareProfile::resolve_memory_gb(Some("16"), 8 * gib), 16);
         for invalid in ["0", "-1", "bad", "256", ""] {
-            assert_eq!(HardwareProfile::resolve_memory_gb(Some(invalid), 8 * gib), 8);
+            assert_eq!(
+                HardwareProfile::resolve_memory_gb(Some(invalid), 8 * gib),
+                8
+            );
         }
         assert_eq!(HardwareProfile::resolve_memory_gb(None, 0), 4);
         assert_eq!(HardwareProfile::resolve_memory_gb(None, u64::MAX), 255);

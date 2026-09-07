@@ -1,6 +1,6 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { Transcript, Summary } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -30,6 +30,9 @@ function MeetingDetailsContent() {
   const router = useRouter();
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
   const [meetingSummary, setMeetingSummary] = useState<Summary | null>(null);
+  const [isSummaryLoading, setIsSummaryLoading] = useState(true);
+  const autoGenRequest = useRef(0);
+  const autoGenPending = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [shouldAutoGenerate, setShouldAutoGenerate] = useState<boolean>(false);
   const [hasCheckedAutoGen, setHasCheckedAutoGen] = useState<boolean>(false);
@@ -68,70 +71,31 @@ function MeetingDetailsContent() {
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
 
-  // Set up auto-generation - respects DB as source of truth
+  // Automatic generation uses only the provider the user has already configured.
   const setupAutoGeneration = useCallback(async () => {
-    if (hasCheckedAutoGen) return; // Only check once
-
-    // Only auto-generate if navigated from recording
-    if (source !== 'recording') {
-      setHasCheckedAutoGen(true);
-      return;
-    }
-
-    // Respect user's auto-summary toggle preference
-    if (!isAutoSummary) {
-      setHasCheckedAutoGen(true);
-      return;
-    }
-
+    if (hasCheckedAutoGen || autoGenPending.current) return;
+    const request = autoGenRequest.current;
+    autoGenPending.current = true;
     try {
+      if (source !== 'recording' || !isAutoSummary) return;
       const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
-      if (outcome && recordingRecoveryMessage(outcome)) {
-        setShouldAutoGenerate(false);
+      if (request !== autoGenRequest.current || (outcome && recordingRecoveryMessage(outcome))) return;
+      const config = await invoke<{ model?: string }>('api_get_model_config');
+      if (request === autoGenRequest.current && config?.model) setShouldAutoGenerate(true);
+    } catch {
+      // A failed readiness check must never start generation or change providers.
+      console.error('Could not check automatic summary readiness.');
+    } finally {
+      if (request === autoGenRequest.current) {
+        autoGenPending.current = false;
         setHasCheckedAutoGen(true);
-        return;
       }
-      // Check what's currently in database
-      const currentConfig = await invoke('api_get_model_config') as any;
-
-      // If DB already has a model, use it (never override!)
-      if (currentConfig && currentConfig.model) {
-        setShouldAutoGenerate(true);
-        setHasCheckedAutoGen(true);
-        return;
-      }
-
-
-      await invoke('api_save_custom_openai_config', {
-        endpoint: 'https://api.openai.com/v1',
-        apiKey: null,
-        model: 'gpt-4o-mini',
-        maxTokens: null,
-        temperature: null,
-        topP: null,
-        timeoutSeconds: 300,
-        organization: null,
-        project: null,
-      });
-
-      await invoke('api_save_model_config', {
-        provider: 'custom-openai',
-        model: 'gpt-4o-mini',
-        whisperModel: 'large-v3',
-        apiKey: null,
-        ollamaEndpoint: null,
-      });
-
-    } catch (error) {
-      console.error("❌ Failed to setup auto-generation:");
     }
-
-    setHasCheckedAutoGen(true);
   }, [hasCheckedAutoGen, source, isAutoSummary, meetingId]);
 
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {
-    if (metadata && (!meetingId || meetingId === 'intro-call')) {
+    if (metadata && (metadata.id !== meetingId || meetingId === 'intro-call')) {
       // If invalid meeting ID, don't sync
       return;
     }
@@ -173,12 +137,15 @@ function MeetingDetailsContent() {
 
   // Reset states when meetingId changes (prevent race conditions)
   useEffect(() => {
+    autoGenRequest.current++;
+    autoGenPending.current = false;
     setMeetingDetails(null);
     setMeetingSummary(null);
     setError(null);
     // Reset auto-generation state to allow new meeting to be checked
     setHasCheckedAutoGen(false);
     setShouldAutoGenerate(false);
+    return () => { autoGenRequest.current++; };
   }, [meetingId]);
 
   // Cleanup: Stop polling when navigating away from a meeting
@@ -202,14 +169,16 @@ function MeetingDetailsContent() {
 
     setMeetingDetails(null);
     setMeetingSummary(null);
+    setIsSummaryLoading(true);
     setError(null);
+    let active = true;
 
     const fetchMeetingSummary = async () => {
       try {
         const summary = await invoke('api_get_summary', {
           meetingId: meetingId,
         }) as any;
-
+        if (!active) return;
 
         // Check if the summary request failed with 404 or error status, or if no summary exists yet (idle)
         // Note: 'cancelled' and 'failed' statuses can still have data if backup was restored
@@ -295,13 +264,18 @@ function MeetingDetailsContent() {
 
         setMeetingSummary(formattedSummary);
       } catch (error) {
+        if (!active) return;
+        setHasCheckedAutoGen(true);
         console.error("FETCH SUMMARY: Error fetching meeting summary:");
         // Don't set error state for summary fetch failure, set to null to show generate button
         setMeetingSummary(null);
+      } finally {
+        if (active) setIsSummaryLoading(false);
       }
     };
 
-    fetchMeetingSummary();
+    void fetchMeetingSummary();
+    return () => { active = false; };
   }, [meetingId]);
 
   // Auto-generation check: runs when meeting is loaded with no summary
@@ -313,7 +287,8 @@ function MeetingDetailsContent() {
       // 3. Meeting has transcripts
       // 4. Haven't checked yet
       if (
-        meetingDetails &&
+        meetingDetails?.id === meetingId &&
+        !isSummaryLoading &&
         meetingSummary === null &&
         meetingDetails.transcripts &&
         meetingDetails.transcripts.length > 0 &&
@@ -324,7 +299,7 @@ function MeetingDetailsContent() {
     };
 
     checkAutoGen();
-  }, [meetingDetails, meetingSummary, hasCheckedAutoGen, setupAutoGeneration]);
+  }, [meetingDetails, meetingId, meetingSummary, isSummaryLoading, hasCheckedAutoGen, setupAutoGeneration]);
 
   if (error) {
     return (
@@ -345,7 +320,7 @@ function MeetingDetailsContent() {
   // Show the full-page spinner only for the initial load. Post-processing
   // refetches must keep PageContent mounted so completion benchmark dialogs
   // are not destroyed as soon as retranscription/diarization finishes.
-  if (!meetingDetails) {
+  if (!meetingDetails || meetingDetails.id !== meetingId) {
     return <div className="flex h-full items-center justify-center">
       <LoaderIcon className="animate-spin size-6 " />
     </div>;
@@ -356,6 +331,7 @@ function MeetingDetailsContent() {
       <strong>Meeting needs review. </strong>{recoveryMessage} Automatic notes are paused.
     </div>}
     <div className="min-h-0 flex-1"><PageContent
+    key={meetingDetails.id}
     meeting={meetingDetails}
     summaryData={meetingSummary}
     shouldAutoGenerate={shouldAutoGenerate}

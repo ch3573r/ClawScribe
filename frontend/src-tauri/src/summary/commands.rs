@@ -1,11 +1,10 @@
-use crate::database::repositories::setting::SettingsRepository;
 use crate::database::repositories::{
     meeting::MeetingsRepository, summary::SummaryProcessesRepository,
     transcript_chunk::TranscriptChunksRepository,
 };
 use crate::state::AppState;
 use crate::summary::language_detection::{detect_summary_language, SummaryLanguageDetection};
-use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::llm_client::generate_configured_text;
 use crate::summary::metadata::{
     read_detected_summary_language_from_metadata, read_summary_language_from_metadata,
     write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
@@ -368,6 +367,8 @@ pub async fn api_process_transcript<R: Runtime>(
         }
     });
 
+    let job = SummaryService::register_job(&m_id)?;
+
     // Create or reset the process entry in the database
     SummaryProcessesRepository::create_or_reset_process(&pool, &m_id)
         .await
@@ -406,6 +407,7 @@ pub async fn api_process_transcript<R: Runtime>(
             final_prompt,
             final_template_id,
             summary_language,
+            job,
         )
         .await;
     });
@@ -423,48 +425,20 @@ pub async fn api_process_transcript<R: Runtime>(
 /// This command triggers the cancellation token for the specified meeting,
 /// stopping the summary generation gracefully.
 #[tauri::command]
-pub async fn api_cancel_summary<R: Runtime>(
-    _app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
-    meeting_id: String,
-) -> Result<serde_json::Value, String> {
+pub async fn api_cancel_summary(meeting_id: String) -> Result<serde_json::Value, String> {
     log_info!("api_cancel_summary called for meeting_id: {}", meeting_id);
 
-    // Trigger cancellation via the service
+    // The background job owns the final database status. A second async write
+    // here could arrive after that job exits and mark its replacement cancelled.
     let cancelled = SummaryService::cancel_summary(&meeting_id);
-
-    if cancelled {
-        // Update database status to cancelled
-        let pool = state.db_manager.pool();
-        if let Err(e) =
-            SummaryProcessesRepository::update_process_cancelled(pool, &meeting_id).await
-        {
-            log_error!(
-                "Failed to update DB status to cancelled for {}: {}",
-                meeting_id,
-                e
-            );
-            return Err(format!("Failed to update cancellation status: {}", e));
-        }
-
-        log_info!(
-            "Successfully cancelled summary generation for meeting_id: {}",
-            meeting_id
-        );
-        Ok(serde_json::json!({
-            "message": "Summary generation cancelled successfully",
-            "meeting_id": meeting_id,
-        }))
-    } else {
-        log_warn!(
-            "No active summary generation found for meeting_id: {}",
-            meeting_id
-        );
-        Ok(serde_json::json!({
-            "message": "No active summary generation to cancel",
-            "meeting_id": meeting_id,
-        }))
-    }
+    Ok(serde_json::json!({
+        "message": if cancelled {
+            "Summary cancellation requested"
+        } else {
+            "No active summary generation to cancel"
+        },
+        "meeting_id": meeting_id,
+    }))
 }
 
 // ── Planner task AI polish ───────────────────────────────────────────────
@@ -501,8 +475,6 @@ pub async fn polish_planner_tasks<R: Runtime>(
         return Ok(Vec::new());
     }
 
-    let provider = LLMProvider::from_str(&model)?;
-
     // Build the polish prompt (same instructions for every provider).
     let system = "You turn raw meeting action items into clean Microsoft Planner tasks. \
 Respond with ONLY a JSON array — no prose, no code fences.";
@@ -524,84 +496,7 @@ Action items:\n",
         user.push('\n');
     }
 
-    let raw = if matches!(provider, LLMProvider::Codex) {
-        // Codex runs through its app-server via a single raw-text turn.
-        let codex = crate::summary::codex_provider::provider_from_app(&app)
-            .map_err(|e| format!("Codex app-server unavailable: {e}"))?;
-        codex
-            .run_text_prompt(&format!("{system}\n\n{user}"))
-            .await?
-    } else {
-        // Everything else goes through the chat-completions client; resolve the
-        // provider's key/endpoint the same way the summary does.
-        let pool = state.db_manager.pool().clone();
-        let mut api_key = String::new();
-        let mut ollama_endpoint: Option<String> = None;
-        let mut custom_openai_endpoint: Option<String> = None;
-        let mut max_tokens: Option<u32> = None;
-        let mut temperature: Option<f32> = None;
-        let mut top_p: Option<f32> = None;
-
-        match provider {
-            LLMProvider::Ollama | LLMProvider::BuiltInAI => {}
-            LLMProvider::CustomOpenAI => {
-                let cfg = SettingsRepository::get_custom_openai_config(&pool)
-                    .await
-                    .map_err(|e| format!("Failed to read OpenAI-compatible config: {e}"))?
-                    .ok_or("No OpenAI-compatible configuration found")?;
-                custom_openai_endpoint = Some(cfg.endpoint);
-                api_key = cfg.api_key.unwrap_or_default();
-                max_tokens = cfg.max_tokens.map(|t| t as u32);
-                temperature = cfg.temperature;
-                top_p = cfg.top_p;
-            }
-            LLMProvider::OpenClaw => {
-                let cfg = crate::openclaw::load_config(&app)
-                    .map_err(|e| format!("Failed to load OpenClaw config: {e}"))?;
-                if !cfg.enabled || cfg.bearer_token.trim().is_empty() {
-                    return Err(
-                        "OpenClaw handoff is disabled or missing a bearer token.".to_string()
-                    );
-                }
-                custom_openai_endpoint = Some(cfg.model_endpoint);
-                api_key = cfg.bearer_token;
-            }
-            _ => {
-                api_key = SettingsRepository::get_api_key(&pool, &model)
-                    .await
-                    .map_err(|e| format!("Failed to read API key: {e}"))?
-                    .filter(|k| !k.is_empty())
-                    .ok_or_else(|| format!("API key not found for {model}"))?;
-            }
-        }
-
-        if provider == LLMProvider::Ollama {
-            ollama_endpoint = SettingsRepository::get_model_config(&pool)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|c| c.ollama_endpoint);
-        }
-
-        let app_data_dir = app.path().app_data_dir().ok();
-        let client = reqwest::Client::new();
-        generate_summary(
-            &client,
-            &provider,
-            &model_name,
-            &api_key,
-            system,
-            &user,
-            ollama_endpoint.as_deref(),
-            custom_openai_endpoint.as_deref(),
-            max_tokens,
-            temperature,
-            top_p,
-            app_data_dir.as_ref(),
-            None,
-        )
-        .await?
-    };
+    let raw = generate_configured_text(&app, &state, &model, &model_name, system, &user).await?;
 
     // Tolerantly extract the JSON array (some models wrap it in prose/fences).
     let json_slice = match (raw.find('['), raw.rfind(']')) {

@@ -50,7 +50,10 @@ impl AsyncLogger {
             }
             Self::flush_messages(&mut buffered_messages);
         });
-        Self { sender, _handle: handle }
+        Self {
+            sender,
+            _handle: handle,
+        }
     }
 
     /// Never wait for log I/O or queue space on the audio producer thread.
@@ -94,7 +97,9 @@ pub fn get_async_logger() -> Option<Arc<AsyncLogger>> {
     if tokio::runtime::Handle::try_current().is_err() {
         return None;
     }
-    Some(Arc::clone(ASYNC_LOGGER.get_or_init(|| Arc::new(AsyncLogger::new(1000)))))
+    Some(Arc::clone(
+        ASYNC_LOGGER.get_or_init(|| Arc::new(AsyncLogger::new(1000))),
+    ))
 }
 
 // Check filtering before allocating formatted strings or initializing the logger.
@@ -136,7 +141,11 @@ mod tests {
     use super::*;
 
     fn message() -> LogMessage {
-        LogMessage { level: Level::Info, target: "test".into(), message: "test".into() }
+        LogMessage {
+            level: Level::Info,
+            target: "test".into(),
+            message: "test".into(),
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -145,13 +154,19 @@ mod tests {
         let logger = AsyncLogger::new(2);
         assert!(logger.sender.try_send(message()).is_ok());
         assert!(logger.sender.try_send(message()).is_ok());
-        assert!(matches!(logger.sender.try_send(message()), Err(mpsc::error::TrySendError::Full(_))));
+        assert!(matches!(
+            logger.sender.try_send(message()),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn zero_capacity_is_safe() {
         let logger = AsyncLogger::new(0);
         assert!(logger.sender.try_send(message()).is_ok());
-        assert!(matches!(logger.sender.try_send(message()), Err(mpsc::error::TrySendError::Full(_))));
+        assert!(matches!(
+            logger.sender.try_send(message()),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
     }
 }

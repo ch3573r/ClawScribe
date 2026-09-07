@@ -12,7 +12,7 @@ use crate::exports::discovery;
 use crate::exports::exporter::{self, ExportContext, OneNoteTarget};
 use crate::exports::files;
 use crate::exports::ledger::ExportLedger;
-use crate::exports::model::MicrosoftConnectionState;
+use crate::exports::model::{ExportStatus, MicrosoftConnectionState};
 use crate::exports::ms_auth_state::MicrosoftAuthState;
 use crate::exports::planner::PlannerDestination;
 use crate::exports::reqwest_transport::ReqwestGraphTransport;
@@ -227,31 +227,19 @@ fn export_ledger_dir<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> Result
     Ok(base.join("export-ledgers").join(safe))
 }
 
-/// Load the persisted ledger for a meeting, or a fresh one if absent/unreadable.
-/// A failure here only disables dedupe for this run; it never blocks an export.
-fn load_ledger<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> ExportLedger {
-    match export_ledger_dir(app, meeting_id) {
-        Ok(dir) => ExportLedger::load_or_new(&dir, meeting_id).unwrap_or_else(|e| {
-            log::warn!("Export ledger load failed ({e}); dedupe disabled this run");
-            ExportLedger::new(meeting_id)
-        }),
-        Err(e) => {
-            log::warn!("Export ledger dir unresolved ({e}); dedupe disabled this run");
-            ExportLedger::new(meeting_id)
-        }
-    }
-}
+// The desktop app is single-instance. Serialize ledger owners across export dialogs.
+static EXPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Best-effort persist; a save failure only risks a future duplicate export.
-fn save_ledger<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, ledger: &ExportLedger) {
-    match export_ledger_dir(app, meeting_id) {
-        Ok(dir) => {
-            if let Err(e) = ledger.save(&dir) {
-                log::warn!("Export ledger save failed ({e}); future runs may re-export");
-            }
-        }
-        Err(e) => log::warn!("Export ledger dir unresolved ({e}); not persisted"),
-    }
+/// An unreadable history must never silently disable duplicate protection.
+async fn load_ledger<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+) -> Result<ExportLedger, String> {
+    let directory = export_ledger_dir(app, meeting_id)?;
+    let meeting_id = meeting_id.to_owned();
+    tokio::task::spawn_blocking(move || ExportLedger::load_or_new(&directory, &meeting_id))
+        .await
+        .map_err(|_| "Export history reader failed.")?
 }
 
 // ── Export commands ──────────────────────────────────────────────────────
@@ -299,7 +287,10 @@ pub async fn export_to_onenote<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let mut ledger = load_ledger(&app, &meeting_id);
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     let ctx = ExportContext {
         tenant_id: &tenant_id,
@@ -315,7 +306,7 @@ pub async fn export_to_onenote<R: Runtime>(
         &ctx,
     )
     .await;
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
         let mut inner = state.inner.write().await;
@@ -345,7 +336,10 @@ pub async fn export_to_planner<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let mut ledger = load_ledger(&app, &meeting_id);
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
     let destination = PlannerDestination { plan_id, bucket_id };
 
     let ctx = ExportContext {
@@ -356,7 +350,7 @@ pub async fn export_to_planner<R: Runtime>(
 
     let result =
         exporter::export_planner(&client, &mut ledger, &meeting_export, &destination, &ctx).await;
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
     let report = result.map_err(|e| e.to_string())?;
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
@@ -399,7 +393,10 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let mut ledger = load_ledger(&app, &meeting_id);
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     let ctx = ExportContext {
         tenant_id: &tenant_id,
@@ -415,7 +412,7 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
         &ctx,
     )
     .await;
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
         let mut inner = state.inner.write().await;
@@ -446,6 +443,14 @@ fn sanitize_onenote_section_name(raw: &str) -> String {
     }
 }
 
+fn section_is_confirmed_empty(report: &exporter::ExportReport) -> bool {
+    !report.items.iter().any(|item| {
+        item.status.is_terminal_success()
+            || item.status == ExportStatus::UnknownAfterSubmit
+            || item.resource_id.is_some()
+    })
+}
+
 /// Export a meeting's summary to OneNote by creating a fresh section in the
 /// chosen notebook (named by the caller, e.g. `2026-06-16: Standup`) and writing
 /// the notes into it. Creating a section is not subject to the 5,000-item
@@ -468,6 +473,12 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
 
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
+    ledger.checkpoint().await?;
+
     // Do not enumerate sections here. Some OneDrive/SharePoint libraries trip
     // Graph's OneNote 10008 scan limit even when the selected notebook is small.
     // Creating a new dated section directly is the reliable export path.
@@ -480,7 +491,6 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
         &markdown,
     );
 
-    let mut ledger = load_ledger(&app, &meeting_id);
     let ctx = ExportContext {
         tenant_id: &tenant_id,
         user_id: &user_id,
@@ -497,11 +507,10 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
         &ctx,
     )
     .await;
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
 
-    // If no page landed in the section we just created, delete it so a failed
-    // export doesn't leave an empty orphan section behind.
-    if !report.items.iter().any(|i| i.status.is_terminal_success()) {
+    // Preserve sections when a create may have landed, including failed local checkpoints.
+    if section_is_confirmed_empty(&report) {
         if let Err(e) = discovery::delete_section(&client, &token, &section.id).await {
             log::warn!(
                 "OneNote: couldn't clean up empty section {} after a failed export: {e}",
@@ -543,7 +552,10 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let mut ledger = load_ledger(&app, &meeting_id);
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
     let destination = PlannerDestination { plan_id, bucket_id };
 
     let ctx = ExportContext {
@@ -554,7 +566,7 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
 
     let result =
         exporter::export_planner(&client, &mut ledger, &meeting_export, &destination, &ctx).await;
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
     let report = result.map_err(|e| e.to_string())?;
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
@@ -692,7 +704,10 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
     let mut expired = false;
     // One ledger for the whole meeting, shared across buckets, so re-exporting
     // the same reviewed tasks skips ones already created in Planner.
-    let mut ledger = load_ledger(&app, &meeting_id);
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     for (bucket_id, group) in by_bucket {
         let mut action_items: Vec<crate::exports::model::ExportActionItem> = group
@@ -733,7 +748,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         let report = match result {
             Ok(report) => report,
             Err(e) => {
-                save_ledger(&app, &meeting_id, &ledger);
+                ledger.checkpoint().await?;
                 return Err(e.to_string());
             }
         };
@@ -743,7 +758,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         let resp: ExportReportResponse = report.into();
         merged_items.extend(resp.items);
     }
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
 
     if expired {
         let mut inner = state.inner.write().await;
@@ -820,11 +835,14 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         summary_html: None,
     };
     let destination = ToDoDestination { list_id };
-    let mut ledger = load_ledger(&app, &meeting_id);
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
     let report = exporter::export_todo(&client, &mut ledger, &meeting_export, &destination, &ctx)
         .await
         .map_err(|e| e.to_string())?;
-    save_ledger(&app, &meeting_id, &ledger);
+    ledger.checkpoint().await?;
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
         let mut inner = state.inner.write().await;
@@ -1049,4 +1067,35 @@ pub async fn list_todo_lists(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_todo_lists(&client, &token).await
+}
+
+#[cfg(test)]
+mod export_history_tests {
+    use super::*;
+
+    #[test]
+    fn section_cleanup_preserves_confirmed_and_uncertain_pages() {
+        for (status, resource_id, empty) in [
+            (ExportStatus::Failed, None, true),
+            (ExportStatus::Succeeded, Some("page-id"), false),
+            (ExportStatus::UnknownAfterSubmit, None, false),
+            (ExportStatus::UnknownAfterSubmit, Some("page-id"), false),
+            (ExportStatus::Failed, Some("page-id"), false),
+        ] {
+            let report = exporter::ExportReport {
+                overall: status,
+                connection_state: None,
+                items: vec![exporter::ItemResult {
+                    dedupe_key: "key".into(),
+                    local_id: "item".into(),
+                    status,
+                    resource_id: resource_id.map(str::to_owned),
+                    web_url: None,
+                    code: None,
+                    graph_called: true,
+                }],
+            };
+            assert_eq!(section_is_confirmed_empty(&report), empty);
+        }
+    }
 }

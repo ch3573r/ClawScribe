@@ -29,6 +29,9 @@ pub struct SidecarManager {
     /// Stdout reader for receiving responses
     stdout_reader: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
 
+    /// Own both halves of one JSONL exchange; the protocol has no request IDs.
+    request_lock: Arc<Mutex<()>>,
+
     /// Last activity timestamp
     last_activity: Arc<RwLock<Instant>>,
 
@@ -91,6 +94,7 @@ impl SidecarManager {
             child_process: Arc::new(Mutex::new(None)),
             stdin_writer: Arc::new(Mutex::new(None)),
             stdout_reader: Arc::new(Mutex::new(None)),
+            request_lock: Arc::new(Mutex::new(())),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
@@ -417,6 +421,7 @@ impl SidecarManager {
     pub async fn send_request(&self, request_json: String, timeout: Duration) -> Result<String> {
         // Track active request
         let _guard = RequestGuard::new(self.active_request_count.clone());
+        let _exchange = self.request_lock.lock().await;
 
         // Write request to stdin
         {
@@ -476,33 +481,50 @@ impl SidecarManager {
 
     /// Send ping to keep sidecar alive
     async fn send_ping(&self) -> Result<()> {
+        // A health check must neither race a generation's response nor queue
+        // behind an expensive inference. The next interval can try again.
+        let Ok(_exchange) = self.request_lock.try_lock() else {
+            return Ok(());
+        };
         let request = serde_json::json!({"type": "ping"}).to_string();
         let timeout = Duration::from_secs(5);
 
         // Note: We don't use send_request here to avoid incrementing active_request_count
         // for internal health checks, as that would prevent graceful shutdown
 
-        // Write request
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            if let Some(stdin) = stdin_lock.as_mut() {
-                stdin.write_all(request.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-                stdin.flush().await?;
+        let result: Result<()> = async {
+            // Write request
+            {
+                let mut stdin_lock = self.stdin_writer.lock().await;
+                if let Some(stdin) = stdin_lock.as_mut() {
+                    stdin.write_all(request.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.flush().await?;
+                } else {
+                    return Err(anyhow!("Sidecar not running"));
+                }
+            }
+
+            // Read response
+            let response = tokio::time::timeout(timeout, self.read_response()).await??;
+
+            let resp: serde_json::Value = serde_json::from_str(&response)?;
+            if resp.get("type").and_then(|t| t.as_str()) == Some("pong") {
+                Ok(())
             } else {
-                return Err(anyhow!("Sidecar not running"));
+                Err(anyhow!(
+                    "Unexpected response to the local summary engine health check"
+                ))
             }
         }
-
-        // Read response
-        let response = tokio::time::timeout(timeout, self.read_response()).await??;
-
-        let resp: serde_json::Value = serde_json::from_str(&response)?;
-        if resp.get("type").and_then(|t| t.as_str()) == Some("pong") {
-            Ok(())
-        } else {
-            Err(anyhow!("Unexpected ping response: {}", response))
+        .await;
+        if result.is_err() {
+            // A late pong must never become the next generation's response.
+            // shutdown does not acquire request_lock, so it can reset this
+            // connection before ownership passes to a queued generation.
+            let _ = self.shutdown().await;
         }
+        result
     }
 
     /// Gracefully shutdown the sidecar
@@ -628,6 +650,7 @@ impl SidecarManager {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
+            request_lock: self.request_lock.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -676,6 +699,7 @@ impl SidecarManager {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
+            request_lock: self.request_lock.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -735,5 +759,136 @@ impl Drop for SidecarManager {
         // Note: Actual cleanup happens in shutdown() method
         // We can't do async work in Drop, so this is best-effort
         log::debug!("SidecarManager dropped");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod protocol_tests {
+    use super::*;
+    use tokio::process::{ChildStderr, Command};
+
+    async fn fake_sidecar(script: &str) -> (Arc<SidecarManager>, BufReader<ChildStderr>) {
+        // Separate process startup from the protocol deadlines being tested.
+        let script = format!("[Console]::Error.WriteLine('started');\n{script}");
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script.as_str(),
+            ])
+            .creation_flags(0x08000000)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut started = String::new();
+        tokio::time::timeout(Duration::from_secs(15), stderr.read_line(&mut started))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(started.trim(), "started");
+        let manager = Arc::new(SidecarManager {
+            child_process: Arc::new(Mutex::new(Some(child))),
+            stdin_writer: Arc::new(Mutex::new(Some(stdin))),
+            stdout_reader: Arc::new(Mutex::new(Some(BufReader::new(stdout)))),
+            request_lock: Arc::new(Mutex::new(())),
+            last_activity: Arc::new(RwLock::new(Instant::now())),
+            is_healthy: Arc::new(AtomicBool::new(true)),
+            should_shutdown: Arc::new(AtomicBool::new(false)),
+            active_request_count: Arc::new(AtomicUsize::new(0)),
+            helper_binary_path: PathBuf::new(),
+            current_model_path: Arc::new(RwLock::new(None)),
+            idle_timeout_secs: 600,
+        });
+        (manager, stderr)
+    }
+
+    #[tokio::test]
+    async fn health_check_and_generation_cannot_overlap_jsonl_exchanges() {
+        let script = r#"
+$reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput())
+$first = $reader.ReadLine()
+[Console]::Error.WriteLine('ready')
+$next = $reader.ReadLineAsync()
+if ($next.Wait(300)) {
+    [Console]::Out.WriteLine('{"type":"error","message":"overlapping requests"}')
+    [Console]::Out.WriteLine('{"type":"error","message":"overlapping requests"}')
+    exit
+}
+[Console]::Out.WriteLine('{"type":"pong"}')
+$line = $next.GetAwaiter().GetResult()
+[Console]::Out.WriteLine('{"type":"response","text":"Complete answer","error":null}')
+"#;
+        let (manager, mut stderr) = fake_sidecar(script).await;
+        let ping_manager = manager.clone();
+        let ping = tokio::spawn(async move { ping_manager.send_ping().await });
+        let mut ready = String::new();
+        tokio::time::timeout(Duration::from_secs(10), stderr.read_line(&mut ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let result = manager
+            .send_request(
+                r#"{"type":"generate","prompt":"Question"}"#.into(),
+                Duration::from_secs(5),
+            )
+            .await;
+        let ping_result = ping.await.unwrap();
+        manager.shutdown().await.unwrap();
+        ping_result.unwrap();
+        let response: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(response["text"], "Complete answer");
+    }
+
+    #[tokio::test]
+    async fn failed_health_exchange_is_closed_before_the_next_request() {
+        let (manager, _stderr) = fake_sidecar(
+            r#"
+[Console]::In.ReadLine() | Out-Null
+[Console]::Out.WriteLine('{"type":"unexpected"}')
+Start-Sleep -Seconds 60
+"#,
+        )
+        .await;
+        let result = tokio::time::timeout(Duration::from_secs(10), manager.send_ping())
+            .await
+            .unwrap();
+        assert!(result.is_err());
+        assert!(!manager.is_healthy());
+        assert!(manager
+            .send_request(
+                r#"{"type":"generate","prompt":"Question"}"#.into(),
+                Duration::from_secs(1)
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not running"));
+    }
+
+    #[tokio::test]
+    async fn stalled_exchange_times_out_without_blocking_force_shutdown() {
+        let (manager, _stderr) =
+            fake_sidecar("[Console]::In.ReadLine() | Out-Null; Start-Sleep -Seconds 60").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            manager.send_request(
+                r#"{"type":"generate","prompt":"Question"}"#.into(),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(!manager.is_healthy());
+        assert_eq!(manager.active_request_count.load(Ordering::SeqCst), 0);
     }
 }

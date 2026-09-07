@@ -453,15 +453,20 @@ impl ParakeetEngine {
 
     /// Load a Parakeet model
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
-        let models = self.available_models.read().await;
-        let model_info = models
+        let model_info = self
+            .available_models
+            .read()
+            .await
             .get(model_name)
+            .cloned()
             .ok_or_else(|| anyhow!("Model {} not found", model_name))?;
 
         match model_info.status {
             ModelStatus::Available => {
                 // Check if this model is already loaded
-                if let Some(current_model) = self.current_model_name.read().await.as_ref() {
+                // Drop the read guard before unload_model takes the write lock.
+                let loaded_model = self.get_current_model().await;
+                if let Some(current_model) = loaded_model.as_deref() {
                     if current_model == model_name {
                         log::info!(
                             "Parakeet model {} is already loaded, skipping reload",
@@ -485,8 +490,13 @@ impl ParakeetEngine {
                 let precision_suffix = model_info.quantization.model_suffix();
                 // Beta opt-in: route inference through DirectML (Windows GPU) when enabled.
                 let use_directml = USE_PARAKEET_DIRECTML.load(std::sync::atomic::Ordering::Relaxed);
-                let model = ParakeetModel::new(&model_info.path, precision_suffix, use_directml)
-                    .map_err(|e| anyhow!("Failed to load Parakeet model {}: {}", model_name, e))?;
+                let path = model_info.path.clone();
+                let model = crate::audio::inference::run(move |_cancelled| {
+                    ParakeetModel::new(&path, precision_suffix, use_directml)
+                        .map_err(anyhow::Error::from)
+                })
+                .await
+                .map_err(|e| anyhow!("Failed to load Parakeet model {}: {}", model_name, e))?;
 
                 // Update current model and model name
                 *self.current_model.write().await = Some(model);
@@ -1279,5 +1289,37 @@ impl ParakeetEngine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod model_switch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn switching_model_releases_name_lock_before_unloading() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine =
+            ParakeetEngine::new_with_models_dir(Some(directory.path().to_path_buf())).unwrap();
+        *engine.current_model_name.write().await = Some("previous".to_string());
+        engine.available_models.write().await.insert(
+            "replacement".to_string(),
+            ModelInfo {
+                name: "replacement".to_string(),
+                path: directory.path().join("missing"),
+                size_mb: 0,
+                quantization: QuantizationType::Int8,
+                speed: String::new(),
+                status: ModelStatus::Available,
+                description: String::new(),
+            },
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(5), engine.load_model("replacement"))
+            .await
+            .expect("model switching must not deadlock");
+        assert!(result.is_err());
+        assert_eq!(engine.get_current_model().await, None);
+        assert!(!engine.is_model_loaded().await);
     }
 }

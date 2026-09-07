@@ -10,8 +10,8 @@ use crate::database::models::AiChatMessage;
 use crate::database::repositories::ai_chat::AiChatRepository;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
-use crate::summary::llm_client::{generate_summary, LLMProvider};
-use tauri::{AppHandle, Manager, Runtime};
+use crate::summary::llm_client::{generate_configured_text, LLMProvider};
+use tauri::{AppHandle, Runtime};
 
 const MAX_HISTORY_TURNS: usize = 20;
 
@@ -35,92 +35,6 @@ fn build_transcript_context(
         })
         .collect();
     super::chat_context::retrieve(&rows, question, budget)
-}
-
-/// Resolve the configured provider's key/endpoint and run one system+user turn.
-/// This is the same resolution `polish_planner_tasks` uses, kept local so the
-/// chat path stays self-contained.
-async fn run_turn<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &tauri::State<'_, AppState>,
-    model: &str,
-    model_name: &str,
-    system: &str,
-    user: &str,
-) -> Result<String, String> {
-    let provider = LLMProvider::from_str(model)?;
-
-    if matches!(provider, LLMProvider::Codex) {
-        let codex = crate::summary::codex_provider::provider_from_app(app)
-            .map_err(|e| format!("Codex app-server unavailable: {e}"))?;
-        return codex.run_text_prompt(&format!("{system}\n\n{user}")).await;
-    }
-
-    let pool = state.db_manager.pool().clone();
-    let mut api_key = String::new();
-    let mut ollama_endpoint: Option<String> = None;
-    let mut custom_openai_endpoint: Option<String> = None;
-    let mut max_tokens: Option<u32> = None;
-    let mut temperature: Option<f32> = None;
-    let mut top_p: Option<f32> = None;
-
-    match provider {
-        LLMProvider::Ollama | LLMProvider::BuiltInAI => {}
-        LLMProvider::CustomOpenAI => {
-            let cfg = SettingsRepository::get_custom_openai_config(&pool)
-                .await
-                .map_err(|e| format!("Failed to read OpenAI-compatible config: {e}"))?
-                .ok_or("No OpenAI-compatible configuration found")?;
-            custom_openai_endpoint = Some(cfg.endpoint);
-            api_key = cfg.api_key.unwrap_or_default();
-            max_tokens = cfg.max_tokens.map(|t| t as u32);
-            temperature = cfg.temperature;
-            top_p = cfg.top_p;
-        }
-        LLMProvider::OpenClaw => {
-            let cfg = crate::openclaw::load_config(app)
-                .map_err(|e| format!("Failed to load OpenClaw config: {e}"))?;
-            if !cfg.enabled || cfg.bearer_token.trim().is_empty() {
-                return Err("OpenClaw handoff is disabled or missing a bearer token.".to_string());
-            }
-            custom_openai_endpoint = Some(cfg.model_endpoint);
-            api_key = cfg.bearer_token;
-        }
-        _ => {
-            api_key = SettingsRepository::get_api_key(&pool, model)
-                .await
-                .map_err(|e| format!("Failed to read API key: {e}"))?
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| format!("API key not found for {model}"))?;
-        }
-    }
-
-    if provider == LLMProvider::Ollama {
-        ollama_endpoint = SettingsRepository::get_model_config(&pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|c| c.ollama_endpoint);
-    }
-
-    let app_data_dir = app.path().app_data_dir().ok();
-    let client = reqwest::Client::new();
-    generate_summary(
-        &client,
-        &provider,
-        model_name,
-        &api_key,
-        system,
-        user,
-        ollama_endpoint.as_deref(),
-        custom_openai_endpoint.as_deref(),
-        max_tokens,
-        temperature,
-        top_p,
-        app_data_dir.as_ref(),
-        None,
-    )
-    .await
 }
 
 /// Full chat history for a meeting, oldest first.
@@ -275,7 +189,7 @@ when it helps (lists, bold). Do not invent attendees, decisions, or action items
         .await
         .map_err(|e| format!("Failed to save question: {e}"))?;
 
-    let answer = run_turn(&app, &state, &model, &model_name, system, &user)
+    let answer = generate_configured_text(&app, &state, &model, &model_name, system, &user)
         .await?
         .trim()
         .to_string();

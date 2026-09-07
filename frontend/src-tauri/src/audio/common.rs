@@ -11,18 +11,10 @@ use uuid::Uuid;
 static ENGINE_LIFECYCLE_LOCK: Lazy<Arc<AsyncMutex<()>>> =
     Lazy::new(|| Arc::new(AsyncMutex::new(())));
 
-pub(crate) fn transcription_source_language_hint(
-    provider: Option<&str>,
-    language: Option<&str>,
-) -> Option<String> {
-    if let Some(language) = normalise_fixed_language(language) {
-        return Some(language);
-    }
-
-    match provider.map(normalise_provider_name).as_deref() {
-        Some("parakeet") => Some("en".to_string()),
-        _ => None,
-    }
+pub(crate) fn transcription_source_language_hint(language: Option<&str>) -> Option<String> {
+    // Auto is not a language measurement. In particular, Parakeet v3 is
+    // multilingual, so a provider name must not turn unknown speech into English.
+    normalise_fixed_language(language)
 }
 
 fn normalise_fixed_language(language: Option<&str>) -> Option<String> {
@@ -33,15 +25,6 @@ fn normalise_fixed_language(language: Option<&str>) -> Option<String> {
 
     language_name_from_code(&code)?;
     Some(code)
-}
-
-fn normalise_provider_name(provider: &str) -> String {
-    match provider.trim().to_ascii_lowercase().as_str() {
-        "localwhisper" | "whisper" => "localwhisper".to_string(),
-        "parakeet" => "parakeet".to_string(),
-        "nemotron" => "nemotron".to_string(),
-        other => other.to_string(),
-    }
 }
 
 pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
@@ -764,43 +747,33 @@ mod tests {
     #[test]
     fn source_language_hint_uses_fixed_language_for_multilingual_engines() {
         assert_eq!(
-            transcription_source_language_hint(Some("localWhisper"), Some("de")),
+            transcription_source_language_hint(Some("de")),
             Some("de".to_string())
         );
         assert_eq!(
-            transcription_source_language_hint(Some("nemotron"), Some("zh-cn")),
+            transcription_source_language_hint(Some("zh-cn")),
             Some("zh-cn".to_string())
         );
         assert_eq!(
-            transcription_source_language_hint(Some("parakeet"), Some("fr")),
+            transcription_source_language_hint(Some("fr")),
             Some("fr".to_string())
         );
     }
 
     #[test]
-    fn source_language_hint_handles_auto_modes_by_provider() {
+    fn source_language_hint_does_not_invent_english_for_auto_modes() {
         assert_eq!(
-            transcription_source_language_hint(Some("parakeet"), Some("auto-translate")),
-            Some("en".to_string())
-        );
-        assert_eq!(
-            transcription_source_language_hint(Some("parakeet"), None),
-            Some("en".to_string())
-        );
-        assert_eq!(
-            transcription_source_language_hint(Some("nemotron"), Some("auto")),
+            transcription_source_language_hint(Some("auto-translate")),
             None
         );
-        assert_eq!(
-            transcription_source_language_hint(Some("localWhisper"), Some("auto-translate")),
-            None
-        );
+        assert_eq!(transcription_source_language_hint(None), None);
+        assert_eq!(transcription_source_language_hint(Some("auto")), None);
     }
 
     #[test]
     fn source_language_hint_rejects_unknown_language_codes() {
         assert_eq!(
-            transcription_source_language_hint(Some("nemotron"), Some("not-a-language")),
+            transcription_source_language_hint(Some("not-a-language")),
             None
         );
     }

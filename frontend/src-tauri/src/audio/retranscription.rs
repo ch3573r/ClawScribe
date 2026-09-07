@@ -177,14 +177,20 @@ async fn run_retranscription<R: Runtime>(
                 5,
                 "Uploading audio for cloud transcription...",
             );
-            match super::transcription::cloud::transcribe_whole_file(
-                &app,
-                &provider_id,
-                model.as_deref(),
-                &audio_path,
-                language.as_deref(),
+            match super::batch_audio::cancel_aware(
+                async {
+                    Ok(super::transcription::cloud::transcribe_whole_file(
+                        &app,
+                        &provider_id,
+                        model.as_deref(),
+                        &audio_path,
+                        language.as_deref(),
+                    )
+                    .await)
+                },
+                &RETRANSCRIPTION_CANCELLED,
             )
-            .await
+            .await?
             {
                 Ok(outcome) => {
                     let mut duration_seconds =
@@ -212,10 +218,8 @@ async fn run_retranscription<R: Runtime>(
                     } else {
                         outcome.segments
                     };
-                    let source_language = super::common::transcription_source_language_hint(
-                        Some(&outcome.provider),
-                        language.as_deref(),
-                    );
+                    let source_language =
+                        super::common::transcription_source_language_hint(language.as_deref());
                     return save_retranscription_transcripts(
                         &app,
                         &meeting_id,
@@ -426,7 +430,7 @@ async fn run_retranscription<R: Runtime>(
         let (text, conf, word_timestamps) = if use_nemotron {
             let engine = nemotron_engine.as_ref().unwrap();
             let text = super::batch_audio::cancel_aware(
-                engine.transcribe_audio(segment.samples.clone(), language.clone()),
+                engine.transcribe_audio(segment.samples, language.clone()),
                 &RETRANSCRIPTION_CANCELLED,
             )
             .await
@@ -435,7 +439,7 @@ async fn run_retranscription<R: Runtime>(
         } else if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
             let result = super::batch_audio::cancel_aware(
-                engine.transcribe_audio_timestamped(segment.samples.clone()),
+                engine.transcribe_audio_timestamped(segment.samples),
                 &RETRANSCRIPTION_CANCELLED,
             )
             .await
@@ -454,7 +458,7 @@ async fn run_retranscription<R: Runtime>(
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, partial) = super::batch_audio::cancel_aware(
-                engine.transcribe_audio_with_confidence(segment.samples.clone(), language.clone()),
+                engine.transcribe_audio_with_confidence(segment.samples, language.clone()),
                 &RETRANSCRIPTION_CANCELLED,
             )
             .await
@@ -527,8 +531,7 @@ async fn run_retranscription<R: Runtime>(
     }
     .or_else(|| model.clone())
     .unwrap_or_default();
-    let source_language =
-        super::common::transcription_source_language_hint(Some(used_provider), language.as_deref());
+    let source_language = super::common::transcription_source_language_hint(language.as_deref());
 
     save_retranscription_transcripts(
         &app,

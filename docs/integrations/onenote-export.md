@@ -80,10 +80,18 @@ OneNote HTML constraints:
 
 ## Idempotency
 
-OneNote page creation is not naturally idempotent. ClawScribe uses local export
-metadata so retries do not blindly create duplicates.
+OneNote page creation is not naturally idempotent. ClawScribe saves an attempt
+before each page create and checkpoints the result immediately afterwards.
+Matching re-exports skip confirmed pages; unavailable or invalid local history
+blocks export instead of disabling duplicate protection.
 
-The ledger may store:
+An interrupted or uncertain submission is not automatically repeated. Inspect
+OneNote before creating another export, since choosing a fresh section is a new
+destination. A newly created section is retained when a page was created or its
+outcome is unknown, including a failure to save the result locally. See
+[export history and recovery](microsoft-graph.md#export-history-and-recovery).
+
+The ledger stores:
 
 - destination IDs
 - page IDs / URLs

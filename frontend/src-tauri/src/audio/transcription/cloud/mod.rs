@@ -470,9 +470,7 @@ async fn transcode_to_mai_wav(audio_path: &Path) -> Result<Vec<u8>, CloudTranscr
         mai_wav_upload_from_samples(&samples)
     })
     .await
-    .map_err(|e| {
-        CloudTranscriptionError::transient(format!("Audio conversion task failed: {e}"))
-    })?
+    .map_err(|e| CloudTranscriptionError::transient(format!("Audio conversion task failed: {e}")))?
 }
 
 fn mai_wav_upload_from_samples(samples: &[f32]) -> Result<Vec<u8>, CloudTranscriptionError> {

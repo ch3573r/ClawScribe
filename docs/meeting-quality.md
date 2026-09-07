@@ -24,11 +24,26 @@ English fillers in other languages. It does not silently remove German `er` or
 `um`. Concision belongs in the notes rather than an unmarked edit of the source
 transcript.
 
+Whisper also preserves repeated words and phrases such as "I had had enough"
+or an actual mention of applause. Its final text normalization only collapses
+whitespace. This avoids deleting legitimate speech; it does not prove a model's
+output is correct. Check suspected hallucinations against the saved audio.
+
 Use a timestamp button to play the associated audio. Scroll back to review
 previous text without being pulled to the newest segment; **Jump to live
 transcript** resumes following during recording. Speaker-name edits report
 failures visibly and retain custom input for retry. A manually assigned speaker
 label is not independently verified speaker identity.
+
+Refreshing transcript rows does not interrupt the display of an arriving
+utterance; stopping shows its complete text. Reloading the interface restores an
+active recording's state. Older polling responses cannot reverse a newer pause
+or stop event.
+
+Nemotron's **Auto** uses the system locale for its language prompt, including
+imports and retranscription. It does not detect the spoken language or translate;
+choose the spoken language explicitly when it differs from the system setting.
+Parakeet Auto does not record English as the source language without evidence.
 
 With audio saving enabled, captured mixed audio is staged in one-second batches under the meeting's
 `.audio-spool` folder while AAC checkpoints are encoded separately. Accepted
@@ -65,6 +80,13 @@ minimum of one. This is not a process-wide limit, a CPU reservation, or a budget
 for Parakeet, Nemotron, or external summary providers. Do not claim universal
 real-time performance from this setting alone.
 
+Native speech-model loading runs outside the async executor. Import and
+retranscription pass each bounded speech buffer into inference without making
+another full copy. Cloud upload requests can be cancelled while waiting for a
+response. MAI conversion from other formats remains a separate limitation: it
+decodes the whole file in memory, and that background conversion can continue
+after cancellation. Its memory use is not covered by the local ASR segment bound.
+
 For an i5-1235U / 8 GB notebook, choose models based on a measured session with
 Teams/Webex and the normal concurrent workload. Compare sustained backlog,
 recognition quality, responsiveness, memory pressure, and finalization time.
@@ -80,6 +102,12 @@ and a future bounded analysis path before it can be treated as low-memory work.
 
 ## Summary Reliability
 
+Automatic notes use an already-configured provider and wait for the saved
+summary lookup before deciding whether generation is needed. Switching meetings
+discards old summary and transcript loading results. Title-only saves leave notes
+unchanged, and save failures retain drafts for retry; edits made during a write
+remain available for the next save.
+
 The shared summary processor now advances chunks from their actual emitted
 boundaries, rejects failed or empty chunk results, and stops rather than presenting
 an incomplete multi-chunk result as successful. It rejects empty transcript input.
@@ -93,6 +121,12 @@ to eight passes. Unknown API limits default to 8,192 tokens; compatible provider
 settings can specify the actual context. Built-in and Ollama inference cap the
 requested context at 8,192 tokens to limit local memory use. These limits may
 increase the number of reduction requests; they do not prove factual accuracy.
+
+Provider responses that report reaching an output or context limit are rejected
+as incomplete. Reduce the requested report or increase a supported output/context
+limit before retrying. API responses are capped at 8 MiB, and cancellation remains
+active while their response body is arriving. Claude text responses retain all
+returned text blocks rather than only the first.
 
 Meeting chat ranks excerpts across the entire transcript using the question,
 includes nearby context and timeline coverage, and labels when only selected

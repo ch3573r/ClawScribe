@@ -2814,7 +2814,7 @@ fn write_processing_log_at(
 fn truncate_for_log(value: &str) -> String {
     let redacted = redact_secrets(value);
     if redacted.len() > 4000 {
-        format!("{}…", &redacted[..4000])
+        format!("{}…", super::context_budget::prefix_bytes(&redacted, 4000))
     } else {
         redacted
     }
@@ -3282,5 +3282,15 @@ exit 2
         let redacted = redact_secrets("stderr Authorization: Bearer testbearertokenabcdefghijklmnopqrstuvwxyz123 api_key = OPENAIAPIKEYREDACTME12345");
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
+    }
+}
+
+#[cfg(test)]
+mod unicode_log_tests {
+    #[test]
+    fn truncation_never_splits_a_unicode_character() {
+        let diagnostic = format!("{}😀", "a".repeat(3999));
+        let truncated = super::truncate_for_log(&diagnostic);
+        assert_eq!(truncated, format!("{}…", "a".repeat(3999)));
     }
 }

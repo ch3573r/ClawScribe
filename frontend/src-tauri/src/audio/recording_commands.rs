@@ -1576,7 +1576,6 @@ async fn resolve_transcription_info<R: Runtime>(
         };
     let language_preference = crate::get_language_preference_internal();
     let source_language = super::common::transcription_source_language_hint(
-        Some(provider.as_str()),
         language_preference.as_deref(),
     )
     .or_else(|| {

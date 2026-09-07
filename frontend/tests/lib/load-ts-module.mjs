@@ -76,6 +76,10 @@ export function loadTsModule(filePath, mocks = {}) {
     window: globalThis.window,
     Event: globalThis.Event,
     CustomEvent: globalThis.CustomEvent,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
   }, {
     filename: resolvedPath,
   });

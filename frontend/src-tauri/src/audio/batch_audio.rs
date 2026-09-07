@@ -231,4 +231,36 @@ mod tests {
         .unwrap();
         assert!(result.unwrap_err().to_string().contains("cancelled"));
     }
+    #[tokio::test]
+    async fn cancelling_in_progress_work_drops_the_upload_future() {
+        static CANCELLED_UPLOAD: AtomicBool = AtomicBool::new(false);
+        struct Dropped(std::sync::Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let dropped = std::sync::Arc::new(AtomicBool::new(false));
+        let drop_signal = Dropped(dropped.clone());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let upload = tokio::spawn(cancel_aware(
+            async move {
+                let _drop_signal = drop_signal;
+                let _ = started_tx.send(());
+                std::future::pending::<Result<()>>().await
+            },
+            &CANCELLED_UPLOAD,
+        ));
+        started_rx.await.unwrap();
+        CANCELLED_UPLOAD.store(true, Ordering::Release);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "cancel must release request data"
+        );
+    }
 }
