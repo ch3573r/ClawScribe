@@ -45,3 +45,10 @@ Microsoft To Do task creation is not naturally idempotent. ClawScribe keeps a
 local export ledger keyed by tenant, user, list, meeting artifact hash, action
 ID, and reviewed title hash. Re-exporting the same reviewed task skips the
 already-created task; editing the title creates a new task intentionally.
+
+The ledger saves each pending attempt before contacting Graph and each result
+afterwards. Unreadable history or a failed write stops export. Interrupted or
+uncertain submissions are not automatically repeated; inspect the To Do list
+before creating another task. A title change must not be used to bypass an
+unknown outcome. See
+[export history and recovery](microsoft-graph.md#export-history-and-recovery).

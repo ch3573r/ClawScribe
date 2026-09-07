@@ -83,6 +83,18 @@ imports/retranscription to temporary PCM on disk, uses one continuous VAD state,
 and reads one bounded speech segment for inference. Preparation needs temporary
 disk capacity; it does not retain a full decoded meeting in RAM.
 
+Whisper, Parakeet, and Nemotron model construction also runs behind the native
+permit on a blocking worker. Model switches release name-read guards before
+unloading the previous model. Nemotron resolves language at the engine boundary
+so live, import, and retranscription use the same system-locale Auto policy.
+Unknown source language remains unset instead of being inferred from the engine
+name. Whisper's text normalization collapses whitespace and preserves words.
+
+`RecordingStateContext` subscribes before reading the initial recording snapshot,
+restores polling for an active session after a reload, and permits one poll at a
+time. Lifecycle events invalidate older polls. Cleanup also removes subscriptions
+whose asynchronous registration finishes after the provider unmounts.
+
 `audio/transcription/queue.rs` serves both live recognition and the retained
 recording spool. `audio/audio_spool.rs` recovers mixed float PCM into a playable
 WAV. `audio/outcome.rs` persists recording failures before the completion event;
@@ -125,6 +137,13 @@ pagination. Source identity checks establish which passage was cited, not whethe
 the passage entails the model's claim. Legacy summaries remain readable without
 references; regeneration requests sources.
 
+Transcript pages use indexed `(meeting_id, audio_start_time, id)` ordering and
+read the count and rows in one database snapshot. The UI fetches metadata and the
+first page concurrently; navigation and refetches invalidate earlier responses,
+including source-page requests. A synchronous loading guard coalesces duplicate
+page requests. Transcript animation tracks the last segment's identity and text,
+so refreshing the surrounding array cannot leave an utterance partly hidden.
+
 User template edits are validated and atomically stored as personal JSON files
 in the existing template directory. Overrides take precedence over bundled
 versions. The default template uses `summary_preferences.json`; a missing saved
@@ -135,6 +154,29 @@ the standard renderer. Manual summary saves retain source identities and
 invalidate the English generation cache. Summary replacement edits inline text,
 preserves block IDs/formatting/link destinations, checks its preview snapshot,
 and uses the editor's normal undo and save flow.
+
+Meeting saves write only dirty content, preserve later edits while a write is in
+flight, and report title failures without claiming success. Summary loads are
+scoped to the current meeting. Automatic generation waits for the saved summary
+lookup and requires a configured provider; it never installs a default cloud
+configuration. API summary response readers enforce an 8 MiB limit, reject
+reported output truncation, and keep cancellation active while reading the body.
+Chat and reviewed task polishing share provider configuration resolution.
+
+## Microsoft Export Persistence
+
+`exports/commands.rs` serializes export owners so separate dialogs cannot race
+on the same local history. `exports/ledger.rs` validates the meeting/schema and
+atomically checkpoints pending attempts before remote page/task creation, then
+checkpoints each result. File writes run on blocking workers. A history read or
+write failure stops export instead of disabling duplicate protection.
+
+An interrupted pending attempt becomes `unknown_after_submit` on reload and
+cannot be automatically replayed. A failed checkpoint after submission also
+requires destination review. This prevents blind retries; it cannot establish
+whether Microsoft accepted a request whose response was lost. OneNote cleanup
+retains a new section when a page is confirmed or may have been created. See
+[Microsoft export recovery](integrations/microsoft-graph.md#export-history-and-recovery).
 
 ## Compatibility Boundaries
 

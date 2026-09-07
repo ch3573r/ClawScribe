@@ -68,6 +68,11 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 Models are downloaded in the app. Downloads are checked against expected file
 sizes to reject incomplete downloads and LFS pointer files.
 
+Whisper preserves recognized repetitions and short answers instead of removing
+them through phrase matching. Nemotron's **Auto** language follows the system
+locale; select the spoken language explicitly when it differs. Parakeet's Auto
+selection does not label an unknown language as English.
+
 Cloud transcription requires explicit opt-in. Hosted Whisper can provide word
 timestamps; MAI has sentence-level timing and may use approximate local VAD-row
 alignment, not fabricated word timestamps. The implemented OpenAI-hosted upload
@@ -89,6 +94,11 @@ default. Each meeting can use a different template when generating notes.
 Summary find-and-replace preserves formatting and source links; review the
 changes, then select Save. Use the editor's undo command to revert changes.
 
+Saving a title leaves unchanged notes alone. Failed saves retain drafts, and
+edits made during a save remain available to save again. Switching meetings
+discards late loading results from the previous meeting. Automatic summaries
+wait for saved notes to load and use the provider you have configured.
+
 New summaries request links to supporting transcript passages. Open a source
 link to inspect the text, reveal it in the transcript, or play its saved audio.
 Changed or replaced passages are flagged and require regenerated references.
@@ -102,10 +112,15 @@ prove attendance.
 - **OneNote:** choose or create a notebook and export notes/transcripts into a
   fresh dated section, avoiding large-library section-listing problems.
 - **Planner and Microsoft To Do:** review and edit action items before exporting;
-  a local ledger protects supported re-export paths against duplicates.
+  saved export history protects supported re-export paths against duplicates.
 - **Confluence:** copy rich text into a browser draft, or publish through a
   configured self-hosted Server/Data Center REST endpoint.
 - **OpenClaw:** optional handoff of completed Meetily-compatible recording folders.
+
+Microsoft exports stop if duplicate-protection history cannot be read or saved.
+An interrupted export with an unknown outcome is not automatically repeated;
+check the destination before creating another page or task. See
+[Microsoft export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
