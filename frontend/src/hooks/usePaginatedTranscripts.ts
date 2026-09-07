@@ -64,12 +64,13 @@ export function usePaginatedTranscripts({
     const [error, setError] = useState<string | null>(null);
 
     const offsetRef = useRef(0);
-    const loadedMeetingIdRef = useRef<string | null>(null);
+    const generationRef = useRef(0);
     const isLoadingRef = useRef(false);
-    const lastLoadTimeRef = useRef(0); // Debounce protection
 
     // Reset state when meeting changes
     const reset = useCallback(() => {
+        generationRef.current++;
+        isLoadingRef.current = false;
         setMetadata(null);
         setTranscripts([]);
         setTotalCount(0);
@@ -81,16 +82,18 @@ export function usePaginatedTranscripts({
     }, []);
 
     // Load meeting metadata
-    const loadMetadata = useCallback(async (): Promise<MeetingMetadata | null> => {
+    const loadMetadata = useCallback(async (generation: number): Promise<MeetingMetadata | null> => {
         if (!meetingId) return null;
 
         try {
             const data = await invoke<MeetingMetadata>('api_get_meeting_metadata', {
                 meetingId,
             });
+            if (generation !== generationRef.current) return null;
             setMetadata(data);
             return data;
         } catch (err) {
+            if (generation !== generationRef.current) return null;
             console.error('Failed to load meeting metadata:', err);
             setError('Failed to load meeting details');
             return null;
@@ -100,7 +103,8 @@ export function usePaginatedTranscripts({
     // Load transcripts at specific offset
     const loadTranscriptsAtOffset = useCallback(async (
         offset: number,
-        append: boolean = true
+        append: boolean,
+        generation: number,
     ): Promise<Transcript[]> => {
         if (!meetingId) return [];
 
@@ -114,6 +118,7 @@ export function usePaginatedTranscripts({
                 }
             );
 
+            if (generation !== generationRef.current) return [];
             const newTranscripts = response.transcripts;
 
             if (append) {
@@ -123,7 +128,7 @@ export function usePaginatedTranscripts({
                     const uniqueNew = newTranscripts.filter(t => !existingIds.has(t.id));
                     // Sort by audio_start_time
                     return [...prev, ...uniqueNew].sort((a, b) =>
-                        (a.audio_start_time ?? 0) - (b.audio_start_time ?? 0)
+                        (a.audio_start_time ?? 0) - (b.audio_start_time ?? 0) || a.id.localeCompare(b.id)
                     );
                 });
             } else {
@@ -136,50 +141,54 @@ export function usePaginatedTranscripts({
 
             return newTranscripts;
         } catch (err) {
+            if (generation !== generationRef.current) return [];
             console.error('Failed to load transcripts:', err);
             setError('Failed to load transcripts');
             return [];
         }
     }, [meetingId]);
 
-    // Load next page with debounce protection
+    // A synchronous lock prevents duplicate pages before React renders the loading state.
     const loadMore = useCallback(async () => {
-        const now = Date.now();
-        // Debounce: require at least 100ms between calls
-        if (now - lastLoadTimeRef.current < 100) {
-            return;
-        }
-
         if (isLoadingRef.current || !hasMore || !meetingId || isLoading) return;
-
-        lastLoadTimeRef.current = now;
+        const generation = generationRef.current;
         isLoadingRef.current = true;
         setIsLoadingMore(true);
         try {
-            await loadTranscriptsAtOffset(offsetRef.current, true);
+            await loadTranscriptsAtOffset(offsetRef.current, true, generation);
         } finally {
-            setIsLoadingMore(false);
-            isLoadingRef.current = false;
+            if (generation === generationRef.current) {
+                setIsLoadingMore(false);
+                isLoadingRef.current = false;
+            }
         }
     }, [hasMore, meetingId, loadTranscriptsAtOffset, isLoading]);
 
-    // Force refetch of data (e.g., after retranscription)
+    // Invalidates every earlier page, including source pages and previous refetches.
     const refetch = useCallback(async () => {
+        const generation = ++generationRef.current;
         if (!meetingId) return;
-
         offsetRef.current = 0;
+        isLoadingRef.current = true;
         setIsLoading(true);
+        setIsLoadingMore(false);
         setError(null);
         try {
-            await loadMetadata();
-            await loadTranscriptsAtOffset(0, false);
+            await Promise.all([
+                loadMetadata(generation),
+                loadTranscriptsAtOffset(0, false, generation),
+            ]);
         } finally {
-            setIsLoading(false);
+            if (generation === generationRef.current) {
+                setIsLoading(false);
+                isLoadingRef.current = false;
+            }
         }
     }, [meetingId, loadMetadata, loadTranscriptsAtOffset]);
 
     const updateSpeaker = useCallback(async (transcriptId: string, speaker: string | null) => {
         if (!meetingId) return;
+        const generation = generationRef.current;
         const nextSpeaker = normalizeSpeaker(speaker);
         setTranscripts(prev =>
             prev.map(t => t.id === transcriptId ? { ...t, speaker: nextSpeaker ?? undefined } : t)
@@ -191,6 +200,7 @@ export function usePaginatedTranscripts({
                 speaker: nextSpeaker,
             });
         } catch (err) {
+            if (generation !== generationRef.current) throw err;
             console.error('Failed to update transcript speaker:', err);
             setError('Failed to update speaker label');
             await refetch();
@@ -204,6 +214,7 @@ export function usePaginatedTranscripts({
     ): Promise<number> => {
         if (!meetingId) return 0;
         const currentSpeaker = normalizeSpeaker(fromSpeaker);
+        const generation = generationRef.current;
         const nextSpeaker = normalizeSpeaker(speaker);
         setTranscripts(prev =>
             prev.map(t => {
@@ -219,6 +230,7 @@ export function usePaginatedTranscripts({
             });
             return response.updated;
         } catch (err) {
+            if (generation !== generationRef.current) throw err;
             console.error('Failed to update matching transcript speakers:', err);
             setError('Failed to update matching speaker labels');
             await refetch();
@@ -226,40 +238,22 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId, refetch]);
 
-    // Initial load
     useEffect(() => {
-        if (!meetingId) {
-            reset();
-            return;
-        }
-
-        // Avoid reloading the same meeting
-        if (loadedMeetingIdRef.current === meetingId) return;
-        loadedMeetingIdRef.current = meetingId;
-
         reset();
-
-        const loadInitial = async () => {
-            setIsLoading(true);
-            try {
-                await loadMetadata();
-                await loadTranscriptsAtOffset(0, false);
-            } finally {
-                setIsLoading(false);
-            }
-        };
-
-        loadInitial();
-    }, [meetingId, reset, loadMetadata, loadTranscriptsAtOffset]);
+        if (meetingId) void refetch();
+        else setIsLoading(false);
+        return () => { generationRef.current++; };
+    }, [meetingId, reset, refetch]);
 
     // Fetch the cited page without advancing sequential pagination past unloaded pages.
     const revealSource = useCallback(async (id: string, index: number) => {
         if (!meetingId || !Number.isInteger(index) || index < 0) throw new Error('Invalid source position.');
         if (transcripts.some(row => row.id === id)) return;
+        const generation = generationRef.current;
         const response = await invoke<PaginatedTranscriptsResponse>('api_get_meeting_transcripts', {
             meetingId, limit: DEFAULT_PAGE_SIZE, offset: Math.floor(index / DEFAULT_PAGE_SIZE) * DEFAULT_PAGE_SIZE,
         });
-        if (loadedMeetingIdRef.current !== meetingId) return;
+        if (generation !== generationRef.current) return;
         if (!response.transcripts.some(row => row.id === id)) throw new Error('The transcript changed. Open the source reference again.');
         setTranscripts(previous => {
             const byId = new Map(previous.map(row => [row.id, row]));

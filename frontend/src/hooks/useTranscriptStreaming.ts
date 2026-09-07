@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { TranscriptSegmentData } from '@/types';
 
 const INTERVAL_MS = 15; // Character reveal interval
@@ -21,96 +21,36 @@ export function useTranscriptStreaming(
   enableStreaming: boolean
 ) {
   const [streamingSegment, setStreamingSegment] = useState<StreamingSegment | null>(null);
-  const lastSegmentIdRef = useRef<string | null>(null);
-  const streamingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const latestSegment = segments[segments.length - 1];
+  const latestId = latestSegment?.id;
+  const latestText = latestSegment?.text;
 
   useEffect(() => {
-    if (!isRecording || !enableStreaming || segments.length === 0) {
-      // Clear streaming when not recording
-      if (streamingIntervalRef.current) {
-        clearInterval(streamingIntervalRef.current);
-        streamingIntervalRef.current = null;
-      }
+    if (!isRecording || !enableStreaming || latestId === undefined || latestText === undefined) {
       setStreamingSegment(null);
-      lastSegmentIdRef.current = null;
       return;
     }
 
-    const latestSegment = segments[segments.length - 1];
+    const fullText = latestText;
+    let charIndex = Math.min(INITIAL_CHARS, fullText.length);
+    setStreamingSegment({ id: latestId, fullText, visibleText: fullText.substring(0, charIndex) });
+    if (charIndex === fullText.length) return;
 
-    // Check if this is a new segment
-    if (latestSegment.id !== lastSegmentIdRef.current) {
-      lastSegmentIdRef.current = latestSegment.id;
-
-      // Clear any existing streaming interval
-      if (streamingIntervalRef.current) {
-        clearInterval(streamingIntervalRef.current);
-        streamingIntervalRef.current = null;
-      }
-
-      const fullText = latestSegment.text;
-
-      // Show first characters immediately
-      const initialText = fullText.substring(0, Math.min(INITIAL_CHARS, fullText.length));
-
-      setStreamingSegment({
-        id: latestSegment.id,
-        fullText,
-        visibleText: initialText,
-      });
-
-      // If text is short enough, no need to stream
-      if (fullText.length <= INITIAL_CHARS) {
-        return;
-      }
-
-      // Calculate how many characters to reveal per tick
-      const totalTicks = Math.floor(DURATION_MS / INTERVAL_MS);
-      const remainingChars = fullText.length - INITIAL_CHARS;
-      const charsPerTick = Math.max(2, Math.ceil(remainingChars / totalTicks));
-
-      let charIndex = INITIAL_CHARS;
-
-      streamingIntervalRef.current = setInterval(() => {
-        charIndex += charsPerTick;
-
-        if (charIndex >= fullText.length) {
-          // Streaming complete - show full text
-          setStreamingSegment({
-            id: latestSegment.id,
-            fullText,
-            visibleText: fullText,
-          });
-
-          // Clear interval
-          if (streamingIntervalRef.current) {
-            clearInterval(streamingIntervalRef.current);
-            streamingIntervalRef.current = null;
-          }
-        } else {
-          // Update visible text
-          setStreamingSegment(prev => prev ? {
-            ...prev,
-            visibleText: fullText.substring(0, charIndex),
-          } : null);
-        }
-      }, INTERVAL_MS);
-    }
-
-    // Cleanup on unmount or when dependencies change
-    return () => {
-      if (streamingIntervalRef.current) {
-        clearInterval(streamingIntervalRef.current);
-        streamingIntervalRef.current = null;
-      }
-    };
-  }, [segments, isRecording, enableStreaming]);
+    const totalTicks = Math.floor(DURATION_MS / INTERVAL_MS);
+    const charsPerTick = Math.max(2, Math.ceil((fullText.length - INITIAL_CHARS) / totalTicks));
+    const timer = setInterval(() => {
+      charIndex = Math.min(fullText.length, charIndex + charsPerTick);
+      setStreamingSegment({ id: latestId, fullText, visibleText: fullText.substring(0, charIndex) });
+      if (charIndex === fullText.length) clearInterval(timer);
+    }, INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [latestId, latestText, isRecording, enableStreaming]);
 
   /**
    * Get the display text for a segment, with streaming effect if applicable
    */
   const getDisplayText = (segment: TranscriptSegmentData): string => {
-    if (streamingSegment && segment.id === streamingSegment.id) {
+    if (isRecording && enableStreaming && streamingSegment && segment.id === streamingSegment.id && segment.text === streamingSegment.fullText) {
       return streamingSegment.visibleText;
     }
     return segment.text;

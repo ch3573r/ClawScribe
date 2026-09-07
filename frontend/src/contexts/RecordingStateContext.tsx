@@ -80,7 +80,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     });
     void invoke<RecordingMode>('get_recording_mode').then(mode => {
       if (active && request === modeVersion.current) updateRecordingMode(mode);
-    }).catch(() => { if (active) setModeError('Could not load recording mode. Choose a mode to retry.'); });
+    }).catch(() => { if (active && request === modeVersion.current) setModeError('Could not load recording mode. Choose a mode to retry.'); });
+    void subscription.catch(() => { if (active) setModeError('Could not watch recording mode changes. Reopen ClawScribe to retry.'); });
     return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, []);
   const setRecordingMode = useCallback(async (mode: RecordingMode) => {
@@ -101,177 +102,112 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     statusMessage: undefined,       // NEW: No message initially
   });
 
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  // NEW: Status setter with logging
   const setStatus = useCallback((status: RecordingStatus, message?: string) => {
-    console.log(`[RecordingState] Status: ${state.status} → ${status}`, message || '');
-
-    setState(prev => ({
-      ...prev,
-      status,
-      statusMessage: message,
-    }));
-  }, [state.status, state.isRecording, state.isPaused]);
-
-  /**
-   * Sync recording state with backend
-   * Called on mount (fixes refresh desync) and periodically while recording
-   */
-  const syncWithBackend = async () => {
-    try {
-      const backendState = await recordingService.getRecordingState();
-
-      // This runs every 500ms while recording. Bail out with the previous
-      // object when nothing changed so context consumers don't re-render
-      // twice a second for the entire meeting.
-      setState(prev => {
-        if (
-          prev.sessionMode === (backendState.recording_mode ?? 'live') &&
-          prev.isRecording === backendState.is_recording &&
-          prev.isPaused === backendState.is_paused &&
-          prev.isActive === backendState.is_active &&
-          prev.recordingDuration === backendState.recording_duration &&
-          prev.activeDuration === backendState.active_duration
-        ) {
-          return prev;
-        }
-        return {
-          ...prev,
-          sessionMode: backendState.recording_mode ?? 'live',
-          isRecording: backendState.is_recording,
-          isPaused: backendState.is_paused,
-          isActive: backendState.is_active,
-          recordingDuration: backendState.recording_duration,
-          activeDuration: backendState.active_duration,
-        };
-      });
-    } catch (error) {
-      console.error('[RecordingStateContext] Failed to sync with backend:', error);
-      // Don't update state on error - keep current state
-    }
-  };
-
-  /**
-   * Start polling backend state (called when recording starts)
-   */
-  const startPolling = () => {
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-    }
-
-    console.log('[RecordingStateContext] Starting state polling (500ms interval)');
-    pollingIntervalRef.current = setInterval(syncWithBackend, 500);
-  };
-
-  /**
-   * Stop polling backend state (called when recording stops)
-   */
-  const stopPolling = () => {
-    if (pollingIntervalRef.current) {
-      console.log('[RecordingStateContext] Stopping state polling');
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
-    }
-  };
-
-  /**
-   * Set up event listeners for backend state changes
-   */
-  useEffect(() => {
-    console.log('[RecordingStateContext] Setting up event listeners');
-    const unsubscribers: (() => void)[] = [];
-
-    const setupListeners = async () => {
-      try {
-        // Recording started
-        const unlistenStarted = await recordingService.onRecordingStarted((mode) => {
-          console.log('[RecordingStateContext] Recording started event');
-          setState(prev => ({
-            ...prev,
-            isRecording: true,
-            sessionMode: mode,
-            isPaused: false,
-            isActive: true,
-            status: RecordingStatus.RECORDING,  // NEW: Set status to RECORDING
-          }));
-          startPolling();
-        });
-        unsubscribers.push(unlistenStarted);
-
-        // Recording stopped
-        const unlistenStopped = await recordingService.onRecordingStopped((payload) => {
-          console.log('[RecordingStateContext] Recording stopped event:', payload);
-          setState(prev => {
-            // Set status to STOPPING if not already in stop flow
-            // This ensures smooth UI transition for tray/keyboard stops
-            const newStatus = [
-              RecordingStatus.STOPPING,
-              RecordingStatus.PROCESSING_TRANSCRIPTS,
-              RecordingStatus.SAVING
-            ].includes(prev.status)
-              ? prev.status  // Already in stop flow
-              : RecordingStatus.STOPPING;  // New stop, transition smoothly
-
-            return {
-              ...prev,
-              status: newStatus,
-              statusMessage: newStatus === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
-              isRecording: false,
-              isPaused: false,
-              isActive: false,
-              recordingDuration: null,
-              activeDuration: null,
-            };
-          });
-          stopPolling();
-        });
-        unsubscribers.push(unlistenStopped);
-
-        // Recording paused
-        const unlistenPaused = await recordingService.onRecordingPaused(() => {
-          console.log('[RecordingStateContext] Recording paused event');
-          setState(prev => ({
-            ...prev,
-            isPaused: true,
-            isActive: false,
-          }));
-        });
-        unsubscribers.push(unlistenPaused);
-
-        // Recording resumed
-        const unlistenResumed = await recordingService.onRecordingResumed(() => {
-          console.log('[RecordingStateContext] Recording resumed event');
-          setState(prev => ({
-            ...prev,
-            isPaused: false,
-            isActive: true,
-          }));
-        });
-        unsubscribers.push(unlistenResumed);
-
-        console.log('[RecordingStateContext] Event listeners set up successfully');
-      } catch (error) {
-        console.error('[RecordingStateContext] Failed to set up event listeners:', error);
-      }
-    };
-
-    setupListeners();
-
-    return () => {
-      console.log('[RecordingStateContext] Cleaning up event listeners');
-      unsubscribers.forEach(unsub => unsub());
-      stopPolling();
-    };
+    setState(prev => ({ ...prev, status, statusMessage: message }));
   }, []);
 
-  /**
-   * Initial sync on mount - CRITICAL for fixing refresh desync bug
-   * If backend is recording but UI state is false, this will correct it
-   */
   useEffect(() => {
-    console.log('[RecordingStateContext] Initial mount - syncing with backend');
-    syncWithBackend();
+    let active = true;
+    let revision = 0;
+    let syncing = false;
+    let polling: ReturnType<typeof setInterval> | undefined;
+    const unsubscribers: (() => void)[] = [];
+    const stopPolling = () => {
+      if (polling !== undefined) clearInterval(polling);
+      polling = undefined;
+    };
+    const startPolling = () => {
+      if (polling === undefined) polling = setInterval(() => { void sync(); }, 500);
+    };
+    const sync = async () => {
+      if (!active || syncing) return;
+      syncing = true;
+      const request = revision;
+      try {
+        const backend = await recordingService.getRecordingState();
+        // A stop/pause event is newer than a poll that began before it.
+        if (!active || request !== revision) return;
+        if (backend.is_recording) startPolling();
+        else stopPolling();
+        setState(prev => {
+          const status = backend.is_recording && prev.status === RecordingStatus.IDLE
+            ? RecordingStatus.RECORDING : prev.status;
+          if (
+            prev.status === status &&
+            prev.sessionMode === (backend.recording_mode ?? 'live') &&
+            prev.isRecording === backend.is_recording &&
+            prev.isPaused === backend.is_paused &&
+            prev.isActive === backend.is_active &&
+            prev.recordingDuration === backend.recording_duration &&
+            prev.activeDuration === backend.active_duration
+          ) return prev;
+          return {
+            ...prev, status,
+            sessionMode: backend.recording_mode ?? 'live',
+            isRecording: backend.is_recording,
+            isPaused: backend.is_paused,
+            isActive: backend.is_active,
+            recordingDuration: backend.recording_duration,
+            activeDuration: backend.active_duration,
+          };
+        });
+      } catch {
+        if (active) console.error('Could not synchronize recording state.');
+      } finally {
+        syncing = false;
+      }
+    };
+    const subscribe = async (subscription: Promise<() => void>) => {
+      try {
+        const unsubscribe = await subscription;
+        if (active) unsubscribers.push(unsubscribe);
+        else unsubscribe();
+      } catch {
+        if (active) console.error('Could not subscribe to recording state changes.');
+      }
+    };
+    // Register all events before the initial snapshot, including after a WebView reload.
+    void Promise.all([
+      subscribe(recordingService.onRecordingStarted(mode => {
+        if (!active) return;
+        revision++;
+        setState(prev => ({
+          ...prev, sessionMode: mode, isRecording: true, isPaused: false,
+          isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined,
+        }));
+        startPolling();
+      })),
+      subscribe(recordingService.onRecordingStopped(() => {
+        if (!active) return;
+        revision++;
+        stopPolling();
+        setState(prev => {
+          const status = [RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
+            .includes(prev.status) ? prev.status : RecordingStatus.STOPPING;
+          return {
+            ...prev, status,
+            statusMessage: status === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
+            isRecording: false, isPaused: false, isActive: false,
+            recordingDuration: null, activeDuration: null,
+          };
+        });
+      })),
+      subscribe(recordingService.onRecordingPaused(() => {
+        if (!active) return;
+        revision++;
+        setState(prev => ({ ...prev, isPaused: true, isActive: false }));
+      })),
+      subscribe(recordingService.onRecordingResumed(() => {
+        if (!active) return;
+        revision++;
+        setState(prev => ({ ...prev, isPaused: false, isActive: true }));
+      })),
+    ]).then(sync);
+    return () => {
+      active = false;
+      stopPolling();
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+    };
   }, []);
 
   // NEW: Computed helpers from status
