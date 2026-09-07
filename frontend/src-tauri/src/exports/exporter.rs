@@ -141,7 +141,16 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
     request: GraphRequest,
 ) -> (ItemResult, bool) {
     ledger.begin_attempt(&dedupe_key, now_rfc3339());
-    match client.execute(&request, token).await {
+    if ledger.checkpoint().await.is_err() {
+        ledger.record_failure(
+            &dedupe_key,
+            ExportStatus::Failed,
+            Some("export_history_write_failed".into()),
+            now_rfc3339(),
+        );
+        return (from_ledger(dedupe_key, local_id, ledger), true);
+    }
+    let (mut result, stop) = match client.execute(&request, token).await {
         GraphOutcome::Success(resp) => {
             let (id, url) = parse_resource(&resp.body);
             ledger.record_success(&dedupe_key, id.clone(), url.clone(), now_rfc3339());
@@ -160,9 +169,8 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
         }
         GraphOutcome::Failed(kind, detail) => {
             let status = kind.export_status();
-            if let Some(d) = &detail {
-                log::warn!("Graph export failed ({}): {d}", kind.code());
-            }
+            let _ = detail;
+            log::warn!("Graph export failed ({})", kind.code());
             ledger.record_failure(
                 &dedupe_key,
                 status,
@@ -204,7 +212,14 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
                 true,
             )
         }
+    };
+    if ledger.checkpoint().await.is_err() {
+        // The durable pending entry prevents replay even if saving success failed.
+        result.status = ExportStatus::UnknownAfterSubmit;
+        result.code = Some("export_history_write_failed_review_required".into());
+        return (result, true);
     }
+    (result, stop)
 }
 
 /// Build an item result for something resolved from the ledger without a call.
@@ -513,8 +528,12 @@ async fn set_planner_task_details<T: GraphTransport, S: Sleeper>(
         GraphOutcome::Success(resp) => serde_json::from_str::<serde_json::Value>(&resp.body)
             .ok()
             .and_then(|v| v.get("@odata.etag")?.as_str().map(String::from)),
-        other => {
-            log::warn!("Planner task details GET failed: {other:?}");
+        GraphOutcome::Failed(kind, _) => {
+            log::warn!("Planner task details GET failed ({})", kind.code());
+            None
+        }
+        GraphOutcome::Unknown(_) => {
+            log::warn!("Planner task details GET failed (network)");
             None
         }
     };
@@ -531,10 +550,14 @@ async fn set_planner_task_details<T: GraphTransport, S: Sleeper>(
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: vec![("If-Match".to_string(), etag)],
     };
-    if let other @ (GraphOutcome::Failed(..) | GraphOutcome::Unknown(_)) =
-        client.execute(&patch, token).await
-    {
-        log::warn!("Planner task details PATCH failed: {other:?}");
+    match client.execute(&patch, token).await {
+        GraphOutcome::Failed(kind, _) => {
+            log::warn!("Planner task details PATCH failed ({})", kind.code());
+        }
+        GraphOutcome::Unknown(_) => {
+            log::warn!("Planner task details PATCH failed (network)");
+        }
+        GraphOutcome::Success(_) => {}
     }
 }
 
@@ -628,6 +651,53 @@ mod tests {
             assert!(!rec.body_hash.contains(token));
             assert!(!rec.correlation_id.contains(token));
         }
+    }
+
+    #[tokio::test]
+    async fn history_write_failure_stops_before_any_remote_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        let mut ledger = ExportLedger::load_or_new(&blocked, "m").unwrap();
+        std::fs::write(&blocked, "storage is unavailable").unwrap();
+        let client = client(MockGraphTransport::new());
+        let report = export_onenote(
+            &client,
+            &mut ledger,
+            &meeting(),
+            &OneNoteTarget {
+                section_id: "section-1".into(),
+            },
+            &ctx(),
+        )
+        .await;
+        assert_eq!(report.overall, ExportStatus::Failed);
+        assert_eq!(
+            report.items[0].code.as_deref(),
+            Some("export_history_write_failed")
+        );
+        assert!(client.transport().recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_success_is_durable_without_waiting_for_the_end_of_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(dir.path(), "m").unwrap();
+        let transport = MockGraphTransport::new();
+        transport.queue_for_url(
+            &onenote_url(),
+            [GraphResponse::success(201, r#"{"id":"page-1"}"#)],
+        );
+        let client = client(transport);
+        let target = OneNoteTarget {
+            section_id: "section-1".into(),
+        };
+        let report = export_onenote(&client, &mut ledger, &meeting(), &target, &ctx()).await;
+        assert_eq!(report.overall, ExportStatus::Succeeded);
+        let mut restored = ExportLedger::load_or_new(dir.path(), "m").unwrap();
+        let repeated = export_onenote(&client, &mut restored, &meeting(), &target, &ctx()).await;
+        assert_eq!(repeated.items[0].resource_id.as_deref(), Some("page-1"));
+        assert!(!repeated.items[0].graph_called);
+        assert_eq!(client.transport().calls_for(&onenote_url()), 1);
     }
 
     #[tokio::test]
