@@ -76,7 +76,7 @@ impl MeetingsRepository {
         if let Some(meeting) = meeting {
             // Get all transcripts for this meeting
             let transcripts =
-                sqlx::query_as::<_, Transcript>("SELECT * FROM transcripts WHERE meeting_id = ?")
+                sqlx::query_as::<_, Transcript>("SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC, id ASC")
                     .bind(meeting_id)
                     .fetch_all(&mut *transaction)
                     .await?;
@@ -146,10 +146,18 @@ impl MeetingsRepository {
             ));
         }
 
-        // Get total count of transcripts for this meeting
+        if !(1..=1000).contains(&limit) || offset < 0 {
+            return Err(SqlxError::Protocol(
+                "Transcript pages require a limit between 1 and 1000 and a non-negative offset"
+                    .into(),
+            ));
+        }
+
+        // Count and rows must refer to the same snapshot during retranscription.
+        let mut transaction = pool.begin().await?;
         let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
             .bind(meeting_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *transaction)
             .await?;
 
         // Get paginated transcripts ordered by audio_start_time
@@ -162,9 +170,10 @@ impl MeetingsRepository {
         .bind(meeting_id)
         .bind(limit)
         .bind(offset)
-        .fetch_all(pool)
+        .fetch_all(&mut *transaction)
         .await?;
 
+        transaction.commit().await?;
         Ok((transcripts, total.0))
     }
 
@@ -278,4 +287,62 @@ async fn delete_meeting_with_transaction(
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pagination_is_bounded_and_matches_full_transcript_order() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time) VALUES ('c', 'review-test', 'Earlier passage', '00:00', 0)")
+            .execute(&pool).await.unwrap();
+        let all = MeetingsRepository::get_meeting(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut paged = Vec::new();
+        for offset in 0..3 {
+            let (rows, total) = MeetingsRepository::get_meeting_transcripts_paginated(
+                &pool,
+                "review-test",
+                1,
+                offset,
+            )
+            .await
+            .unwrap();
+            assert_eq!(total, 3);
+            paged.extend(rows.into_iter().map(|row| row.id));
+        }
+        assert_eq!(paged, vec!["a", "c", "b"]);
+        assert_eq!(
+            paged,
+            all.transcripts
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        );
+        for (limit, offset) in [(-1, 0), (0, 0), (1001, 0), (1, -1)] {
+            assert!(MeetingsRepository::get_meeting_transcripts_paginated(
+                &pool,
+                "review-test",
+                limit,
+                offset
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn pagination_uses_meeting_index_without_a_temporary_sort() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as("EXPLAIN QUERY PLAN SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC, id ASC LIMIT ? OFFSET ?")
+            .bind("review-test").bind(100).bind(0).fetch_all(&pool).await.unwrap();
+        assert!(plan
+            .iter()
+            .any(|row| row.3.contains("idx_transcripts_meeting_audio_id")));
+        assert!(!plan.iter().any(|row| row.3.contains("TEMP B-TREE")));
+    }
 }
