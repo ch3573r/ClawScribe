@@ -123,6 +123,26 @@ impl SamplingConfig {
     }
 }
 
+/// Previously emitted text cannot contain a stop sequence: each append was
+/// checked before continuing. Scan only the new suffix plus boundary overlap.
+fn newly_completed_stop(output: &str, previous_len: usize, stops: &[String]) -> Option<usize> {
+    let overlap = stops
+        .iter()
+        .filter(|stop| !stop.is_empty())
+        .map(String::len)
+        .max()?
+        - 1;
+    let mut start = previous_len.saturating_sub(overlap);
+    while !output.is_char_boundary(start) {
+        start -= 1;
+    }
+    stops
+        .iter()
+        .filter(|stop| !stop.is_empty())
+        .filter_map(|stop| output[start..].find(stop).map(|offset| start + offset))
+        .min()
+}
+
 // ============================================================================
 // VRAM Detection and GPU Layer Calculation
 // ============================================================================
@@ -480,24 +500,15 @@ impl ModelState {
 
             let mut token_text = String::with_capacity(32);
             let _ = decoder.decode_to_string(&output_bytes, &mut token_text, false);
+            let previous_len = output.len();
             output.push_str(&token_text);
 
-            // Check for model-specific stop tokens
-            let mut should_stop = false;
-            for stop_token in &stop_tokens {
-                if output.contains(stop_token) {
-                    eprintln!(
-                        "✓ Stop token '{}' detected (generated {} chars)",
-                        stop_token,
-                        output.len()
-                    );
-                    // Remove the stop token from output
-                    output = output.replace(stop_token, "").trim_end().to_string();
-                    should_stop = true;
-                    break;
-                }
-            }
-            if should_stop {
+            if let Some(stop_at) = newly_completed_stop(&output, previous_len, &stop_tokens) {
+                // A model can emit the stop marker and unwanted following text
+                // in one token piece; keep only text preceding the first marker.
+                output.truncate(stop_at);
+                output.truncate(output.trim_end().len());
+                eprintln!("Stop sequence reached (generated {} chars)", output.len());
                 break;
             }
 
@@ -628,12 +639,7 @@ fn main() -> Result<()> {
                         }
 
                         // Generate response with sampling parameters
-                        match state.generate(
-                            prompt,
-                            max_tokens,
-                            sampling,
-                            stop_tokens,
-                        ) {
+                        match state.generate(prompt, max_tokens, sampling, stop_tokens) {
                             Ok(text) => {
                                 send_response(&Response::Response { text, error: None })?;
                             }
@@ -679,7 +685,8 @@ mod tests {
 
     #[test]
     fn generate_request_defaults_penalties_when_omitted() {
-        let json = r#"{"type":"generate","prompt":"summarize","temperature":0.5,"top_k":20,"top_p":0.8}"#;
+        let json =
+            r#"{"type":"generate","prompt":"summarize","temperature":0.5,"top_k":20,"top_p":0.8}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         let Request::Generate {
             temperature,
@@ -690,7 +697,8 @@ mod tests {
             repeat_penalty,
             penalty_last_n,
             ..
-        } = request else {
+        } = request
+        else {
             panic!("expected generate request");
         };
 
@@ -724,7 +732,8 @@ mod tests {
             repeat_penalty,
             penalty_last_n,
             ..
-        } = request else {
+        } = request
+        else {
             panic!("expected generate request");
         };
 
@@ -746,5 +755,52 @@ mod tests {
         assert_eq!(sampling.repeat_penalty, 1.05);
         assert_eq!(sampling.penalty_last_n, 256);
         assert!(sampling.uses_penalties());
+    }
+}
+
+#[cfg(test)]
+mod stop_sequence_tests {
+    use super::newly_completed_stop;
+
+    #[test]
+    fn split_stop_markers_and_unicode_boundaries_are_detected() {
+        let stops = vec!["<end>".to_string(), "終了".to_string()];
+        for (before, addition, expected) in [
+            ("Grüße 😀 <en", "d>discard this", "Grüße 😀 ".len()),
+            ("Grüße 😀 終", "了discard this", "Grüße 😀 ".len()),
+            ("😀", "<end>", "😀".len()),
+        ] {
+            let output = format!("{before}{addition}");
+            assert_eq!(
+                newly_completed_stop(&output, before.len(), &stops),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn earliest_stop_wins_and_empty_markers_do_not_end_generation() {
+        let stops = vec!["<later>".into(), "<end>".into(), String::new()];
+        let before = "Answer. ";
+        let output = format!("{before}<end>unwanted<later>");
+        assert_eq!(
+            newly_completed_stop(&output, before.len(), &stops),
+            Some(before.len())
+        );
+        assert_eq!(newly_completed_stop("Grüße 😀", 0, &[String::new()]), None);
+    }
+
+    #[test]
+    fn long_output_scans_only_the_new_suffix_and_boundary_overlap() {
+        let prefix = "Long meeting notes. ".repeat(10000);
+        let stops = vec!["<end>".into()];
+        assert_eq!(
+            newly_completed_stop(&format!("{prefix}more notes"), prefix.len(), &stops),
+            None
+        );
+        assert_eq!(
+            newly_completed_stop(&format!("{prefix}<end>"), prefix.len(), &stops),
+            Some(prefix.len())
+        );
     }
 }

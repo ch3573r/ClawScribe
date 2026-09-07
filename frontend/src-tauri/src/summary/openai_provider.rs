@@ -120,21 +120,6 @@ struct ChatCompletionRequest {
     response_format: Option<Value>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatMessageContent,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatMessageContent {
-    content: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct OpenAICompatibleMeetingProcessRequest {
     pub meeting_id: String,
@@ -397,37 +382,31 @@ impl OpenAICompatibleProcessingProvider {
         };
 
         let request = self.build_request(&body)?;
-        let response = if let Some(token) = cancellation_token {
-            tokio::select! {
-                result = request.send() => result.map_err(|e| request_error_message(e, self.config.timeout_seconds))?,
-                _ = token.cancelled() => return Err("Summary generation was cancelled".to_string()),
-            }
-        } else {
-            request
+        super::llm_client::with_cancellation(cancellation_token, async {
+            let response = request
                 .send()
                 .await
-                .map_err(|e| request_error_message(e, self.config.timeout_seconds))?
-        };
+                .map_err(|error| request_error_message(error, self.config.timeout_seconds))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "OpenAI-compatible API request failed with HTTP {}",
+                    response.status().as_u16()
+                ));
+            }
+            super::llm_client::parse_response(
+                &super::llm_client::LLMProvider::OpenAICompatible,
+                super::llm_client::read_response_json(response).await?,
+            )
+        })
+        .await
+    }
 
-        let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(format!(
-                "OpenAI-compatible API request failed with HTTP {}",
-                status.as_u16()
-            ));
-        }
-
-        let chat_response = serde_json::from_str::<ChatCompletionResponse>(&response_text)
-            .map_err(|e| format!("Failed to parse OpenAI-compatible response JSON: {e}"))?;
-        chat_response
-            .choices
-            .first()
-            .and_then(|choice| choice.message.content.as_deref())
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| "OpenAI-compatible response did not contain message.content".to_string())
+    pub(crate) async fn send_text_prompt(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> Result<String, String> {
+        self.send_chat(system, user, None, None).await
     }
 
     fn build_request(
@@ -643,7 +622,10 @@ fn request_error_message(error: reqwest::Error, timeout_seconds: u64) -> String 
     if error.is_timeout() {
         format!("OpenAI-compatible request timed out after {timeout_seconds} seconds")
     } else {
-        format!("Failed to send OpenAI-compatible request: {error}")
+        format!(
+            "Failed to send OpenAI-compatible request: {}",
+            error.without_url()
+        )
     }
 }
 
@@ -658,12 +640,11 @@ fn write_processing_log_at(
         "provider": "openai-compatible",
         "status": status,
         "duration_seconds": duration.as_secs_f64(),
-        "base_url": &config.base_url,
         "model": &config.model,
         "structured_outputs_requested": config.use_structured_outputs,
         "organization_present": config.organization.is_some(),
         "project_present": config.project.is_some(),
-        "error": error.map(truncate_for_log),
+        "error_present": error.is_some(),
     });
     fs::write(
         path,
@@ -760,6 +741,99 @@ mod tests {
             }]
         })
         .to_string()
+    }
+
+    #[test]
+    fn processing_diagnostics_omit_endpoints_and_provider_error_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("processing-log.json");
+        let config = OpenAICompatibleProviderConfig {
+            base_url: "https://example.com/v1?auth=REDACTME".into(),
+            model: "test-model".into(),
+            ..OpenAICompatibleProviderConfig::default()
+        };
+        write_processing_log_at(
+            &path,
+            &config,
+            Duration::from_secs(1),
+            "failed",
+            Some("SYNTHETIC_PRIVATE_TRANSCRIPT"),
+        )
+        .unwrap();
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(!raw.contains("example.com"));
+        assert!(!raw.contains("REDACTME"));
+        assert!(!raw.contains("SYNTHETIC_PRIVATE_TRANSCRIPT"));
+        let log: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(log["model"], "test-model");
+        assert_eq!(log["error_present"], true);
+        assert_eq!(log["duration_seconds"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn text_prompts_use_configured_headers_and_endpoint_without_schema() {
+        let base_url = fake_openai_server(|request, _| {
+            let headers = request.to_ascii_lowercase();
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+            assert!(headers.contains("openai-organization: example-organization"));
+            assert!(headers.contains("openai-project: example-project"));
+            assert!(!request.contains("response_format"));
+            (200, chat_response("The deadline was not agreed."))
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url: format!("{base_url}/v1/chat/completions"),
+            organization: Some("example-organization".into()),
+            project: Some("example-project".into()),
+            ..OpenAICompatibleProviderConfig::default()
+        })
+        .unwrap();
+        assert_eq!(
+            provider
+                .send_text_prompt("Use meeting facts only.", "When is the deadline?")
+                .await
+                .unwrap(),
+            "The deadline was not agreed."
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_structured_output_is_not_repaired_or_saved_as_complete() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let base_url = fake_openai_server(move |_, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (
+                200,
+                serde_json::json!({"choices":[{
+                    "message":{"content": valid_meeting_json()}, "finish_reason":"length"
+                }]})
+                .to_string(),
+            )
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url,
+            ..OpenAICompatibleProviderConfig::default()
+        })
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let error = provider
+            .process_meeting(
+                OpenAICompatibleMeetingProcessRequest {
+                    meeting_id: "truncated-summary".into(),
+                    meeting_title: None,
+                    transcript: "The deadline was not agreed.".into(),
+                    custom_prompt: None,
+                    output_dir: Some(directory.path().to_path_buf()),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("before finishing"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!directory.path().join("meeting-output.json").exists());
     }
 
     #[tokio::test]
