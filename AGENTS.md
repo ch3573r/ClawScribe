@@ -81,7 +81,7 @@ This is a public repository.
   state
 - `frontend/src-tauri/src/audio/`: capture, mixing, VAD, recording, import,
   transcription orchestration, and retranscription
-- `frontend/src-tauri/src/whisper_engine.rs`: Whisper integration
+- `frontend/src-tauri/src/whisper_engine/`: Whisper integration
 - `frontend/src-tauri/src/parakeet_engine/`: Parakeet ONNX integration
 - `frontend/src-tauri/src/nemotron_engine/`: Nemotron ONNX integration
 - `frontend/src-tauri/src/summary/`: summary providers and orchestration,

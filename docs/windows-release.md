@@ -39,8 +39,9 @@ The default feature set is `windows-gpu`: Whisper Vulkan plus DirectML for the
 supported ONNX/sherpa paths. `-Feature cpu`, `directml`, `vulkan`, `cuda`, and
 `openblas` are explicit alternatives and need their own prerequisite checks.
 
-The validation path runs locked Rust checking, frontend typechecking, and
-frontend tests. Packaging checks the frontend, builds installers, requires both
+The validation path runs locked Rust checking, frontend typechecking, frontend
+tests, and the native release-profile regressions described below. Packaging
+checks the frontend, builds installers, requires both
 current-version formats, and writes build identity and SHA-256 checksums. A
 failed native command must stop the script. These checks do not exercise a real
 microphone, meeting application, or graphical installer interaction.
@@ -94,8 +95,12 @@ From the repository root, after staging the required sidecars:
 
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
-DLLs, zero matched tests, and failing test results. It does not perform live
-capture, GUI interaction, or model-quality benchmarking.
+DLLs, zero matched tests, and failing test results. Required suites cover summary
+providers and sidecar exchanges, audio cancellation and model switching,
+transcript preservation and paging, credentials, Microsoft export persistence,
+and updater selection. It also runs the local summary helper protocol, sampling,
+and stop-sequence tests. Tests run serially where they share native resources.
+It does not perform live capture, GUI interaction, or model-quality benchmarking.
 
 ## GitHub Actions
 
@@ -137,9 +142,9 @@ SDK, and build caches also remain local, with Actions caching disabled.
 Draft builds upload to an explicitly requested draft GitHub Release instead.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
-installers, and then runs the selected summary, chunker, logger, hardware,
-updater, audio-only, transcript correction, source reference, and template
-tests in the native Windows crate before staging release assets.
+installers, and then runs the required native regression suites before staging
+release assets. A check-only run exercises those suites before packaging is
+attempted, so compile or behavioral failures can be resolved first.
 
 **Stage Windows release candidate** runs on `release/**` pushes and can be run
 manually. It validates frontend code, uses the designated local Windows GPU build, and

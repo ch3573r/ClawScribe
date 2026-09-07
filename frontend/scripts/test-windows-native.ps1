@@ -42,6 +42,9 @@ try {
     # Match the DLL set shipped beside the installed application. A bare cargo
     # test executable lives in target/release/deps, outside Tauri's bundle layout.
     $env:PATH = "$runtime;$previousPath"
+    & cargo test -p llama-helper --release --locked --target x86_64-pc-windows-msvc -- --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Local summary helper regression tests failed." }
+
     $metadataText = & cargo metadata --locked --format-version 1 --no-deps --manifest-path $manifest
     if ($LASTEXITCODE -ne 0) { throw "Cargo metadata failed." }
     $metadata = ($metadataText -join "`n") | ConvertFrom-Json
@@ -70,17 +73,24 @@ try {
     }
 
     foreach ($filter in @(
-        "summary::processor::tests",
-        "summary::chunking::tests",
+        "summary::",
         "audio::async_logger::tests",
         "audio::hardware_detector::tests",
         "updates::tests",
         "audio::recording_mode::tests",
         "audio::pipeline::queue_failure_tests",
         "database::transcript_edits::tests",
-        "summary::sources::tests",
-        "summary::templates::storage::tests",
-        "summary::codex_provider::template_report_tests"
+        "database::repositories::meeting::tests",
+        "database::manager::tests",
+        "credentials::tests",
+        "exports::",
+        "transcript_preservation_tests",
+        "model_switch_tests",
+        "audio::batch_audio::tests",
+        "audio::common::tests",
+        "audio::inference::tests",
+        "audio::transcription::nemotron_provider::tests",
+        "audio::transcription::cloud::"
     )) {
         $listing = & $testExecutable $filter --list
         if ($LASTEXITCODE -ne 0) { throw "Native test discovery failed for '$filter'." }

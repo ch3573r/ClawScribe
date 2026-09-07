@@ -113,6 +113,8 @@ if ($CheckOnly) {
     if ($LASTEXITCODE -ne 0) { throw "Frontend typecheck failed." }
     pnpm test
     if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
+    $nativeFeatures = if ($Feature -eq "cpu") { "" } else { $Feature }
+    & (Join-Path $PSScriptRoot "test-windows-native.ps1") -Features $nativeFeatures
     exit 0
 }
 
