@@ -89,6 +89,7 @@ impl CloudTranscriptionProvider for MaiTranscribeProvider {
             let response = self
                 .client
                 .post(self.endpoint())
+                .timeout(Duration::from_secs(30 * 60))
                 .header("Ocp-Apim-Subscription-Key", &self.api_key)
                 .multipart(self.form(audio.clone(), file_name, mime_type, language)?)
                 .send()

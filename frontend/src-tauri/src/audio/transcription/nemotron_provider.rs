@@ -17,6 +17,8 @@ impl NemotronProvider {
     }
 }
 
+// Nemotron uses prompt-conditioned language slots, not language detection.
+// Auto resolves from the OS locale for every engine entry point.
 pub(crate) fn resolve_requested_language(
     language: Option<&str>,
     system_locale: Option<&str>,
@@ -45,12 +47,7 @@ impl TranscriptionProvider for NemotronProvider {
         audio: Vec<f32>,
         language: Option<String>,
     ) -> std::result::Result<TranscriptResult, TranscriptionError> {
-        // Nemotron has prompt-conditioned language slots, not language
-        // detection. Resolve Auto from the OS locale rather than silently using
-        // the English slot for every multilingual meeting.
-        let language =
-            resolve_requested_language(language.as_deref(), sys_locale::get_locale().as_deref())?;
-        match self.engine.transcribe_audio(audio, Some(language)).await {
+        match self.engine.transcribe_audio(audio, language).await {
             Ok(text) => Ok(TranscriptResult {
                 text: text.trim().to_string(),
                 confidence: None,  // RNN-T greedy decode provides no confidence
@@ -96,5 +93,15 @@ mod tests {
             resolve_requested_language(Some("auto-translate"), Some("de-DE")),
             Err(TranscriptionError::UnsupportedLanguage(_))
         ));
+    }
+
+    #[test]
+    fn explicit_language_is_normalized_and_missing_locale_is_reported() {
+        assert_eq!(
+            resolve_requested_language(Some(" DE_at "), None).unwrap(),
+            "de-at"
+        );
+        assert!(resolve_requested_language(Some("auto"), None).is_err());
+        assert!(resolve_requested_language(Some(" "), None).is_err());
     }
 }

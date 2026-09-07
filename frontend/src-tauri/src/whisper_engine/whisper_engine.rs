@@ -258,15 +258,20 @@ impl WhisperEngine {
     }
 
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
-        let models = self.available_models.read().await;
-        let model_info = models
+        let model_info = self
+            .available_models
+            .read()
+            .await
             .get(model_name)
+            .cloned()
             .ok_or_else(|| anyhow!("Model {} not found", model_name))?;
 
         match model_info.status {
             ModelStatus::Available => {
                 // FIX 5: Check if this model is already loaded
-                if let Some(current_model) = self.current_model.read().await.as_ref() {
+                // Drop the read guard before unload_model takes the write lock.
+                let loaded_model = self.get_current_model().await;
+                if let Some(current_model) = loaded_model.as_deref() {
                     if current_model == model_name {
                         log::info!("Model {} is already loaded, skipping reload", model_name);
                         return Ok(());
@@ -292,13 +297,6 @@ impl WhisperEngine {
                     hardware_profile.performance_tier,
                 );
 
-                let context_param = WhisperContextParameters {
-                    use_gpu: acceleration.use_gpu,
-                    gpu_device: acceleration.gpu_device,
-                    flash_attn: acceleration.flash_attn,
-                    ..Default::default()
-                };
-
                 log::info!(
                     "Whisper acceleration decision: compiled_backend={} runtime_detected_gpu={:?} use_gpu={} flash_attn={} gpu_device={}",
                     acceleration.compiled_backend.as_str(),
@@ -308,19 +306,21 @@ impl WhisperEngine {
                     acceleration.gpu_device,
                 );
 
-                // PERFORMANCE: Suppress verbose C library logs during model loading
-                // This hides the excessive Metal/GGML initialization logs in release builds
-                let ctx = {
-                    // let _suppressor = crate::whisper_engine::StderrSuppressor::new();
-
-                    // Load whisper context with hardware-optimized parameters
-                    WhisperContext::new_with_params(
-                        &model_info.path.to_string_lossy(),
-                        context_param,
-                    )
-                    .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?
-                    // Suppressor dropped here, stderr restored
-                };
+                // Native model construction can take seconds. Keep it off the
+                // async executor and retain the native permit if the caller cancels.
+                let path = model_info.path.clone();
+                let ctx = crate::audio::inference::run(move |_cancelled| {
+                    let context_param = WhisperContextParameters {
+                        use_gpu: acceleration.use_gpu,
+                        gpu_device: acceleration.gpu_device,
+                        flash_attn: acceleration.flash_attn,
+                        ..Default::default()
+                    };
+                    WhisperContext::new_with_params(&path.to_string_lossy(), context_param)
+                        .map_err(anyhow::Error::from)
+                })
+                .await
+                .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?;
 
                 // Update current context and model
                 *self.current_context.write().await = Some(ctx);
@@ -367,159 +367,11 @@ impl WhisperEngine {
         self.current_context.read().await.is_some()
     }
 
-    // Enhanced function to clean repetitive text patterns and meaningless outputs
-    fn clean_repetitive_text(text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-
-        // Check for obviously meaningless patterns first
-        if Self::is_meaningless_output(text) {
-            // Performance optimization: reduce meaningless output logging to debug level
-            perf_debug!("Detected non-speech model output");
-            return String::new();
-        }
-
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() < 3 {
-            return text.to_string();
-        }
-
-        // Enhanced repetition detection with sliding window
-        let cleaned_words = Self::remove_word_repetitions(&words);
-
-        // Remove phrase repetitions with more sophisticated detection
-        let cleaned_words = Self::remove_phrase_repetitions(&cleaned_words);
-
-        // Check for overall repetition ratio
-        let final_text = cleaned_words.join(" ");
-        if Self::calculate_repetition_ratio(&final_text) > 0.7 {
-            // Performance optimization: reduce repetition ratio logging to debug level
-            perf_debug!(
-                "High repetition ratio detected, filtering out: '{}'",
-                final_text
-            );
-            return String::new();
-        }
-
-        final_text
-    }
-
-    // Check for obviously meaningless patterns
-    fn is_meaningless_output(text: &str) -> bool {
-        let text_lower = text.to_lowercase();
-
-        // Check for common meaningless patterns
-        let meaningless_patterns = [
-            "thank you for watching",
-            "thanks for watching",
-            "like and subscribe",
-            "music playing",
-            "applause",
-            "laughter",
-            "um um um",
-            "uh uh uh",
-            "ah ah ah",
-        ];
-
-        for pattern in &meaningless_patterns {
-            if text_lower.contains(pattern) {
-                return true;
-            }
-        }
-
-        // Check if text is mostly the same character or very short repetitive patterns
-        let unique_chars: HashSet<char> = text.chars().collect();
-        if unique_chars.len() <= 3 && text.len() > 10 {
-            return true;
-        }
-
-        false
-    }
-
-    // Enhanced word repetition removal
-    fn remove_word_repetitions<'a>(words: &'a [&'a str]) -> Vec<&'a str> {
-        let mut cleaned_words = Vec::new();
-        let mut i = 0;
-
-        while i < words.len() {
-            let current_word = words[i];
-            let mut repeat_count = 1;
-
-            // Count consecutive repetitions of the same word
-            while i + repeat_count < words.len() && words[i + repeat_count] == current_word {
-                repeat_count += 1;
-            }
-
-            // Be more aggressive: if word is repeated 2+ times, only keep one instance
-            if repeat_count >= 2 {
-                cleaned_words.push(current_word);
-                i += repeat_count;
-            } else {
-                cleaned_words.push(current_word);
-                i += 1;
-            }
-        }
-
-        cleaned_words
-    }
-
-    // Enhanced phrase repetition removal with variable length detection
-    fn remove_phrase_repetitions<'a>(words: &'a [&'a str]) -> Vec<&'a str> {
-        if words.len() < 4 {
-            return words.to_vec();
-        }
-
-        let mut final_words = Vec::new();
-        let mut i = 0;
-
-        while i < words.len() {
-            let mut phrase_found = false;
-
-            // Check for 2-word to 5-word phrase repetitions
-            for phrase_len in 2..=std::cmp::min(5, (words.len() - i) / 2) {
-                if i + phrase_len * 2 <= words.len() {
-                    let phrase1 = &words[i..i + phrase_len];
-                    let phrase2 = &words[i + phrase_len..i + phrase_len * 2];
-
-                    if phrase1 == phrase2 {
-                        // Add the phrase once and skip the repetition
-                        final_words.extend_from_slice(phrase1);
-                        i += phrase_len * 2;
-                        phrase_found = true;
-                        break;
-                    }
-                }
-            }
-
-            if !phrase_found {
-                final_words.push(words[i]);
-                i += 1;
-            }
-        }
-
-        final_words
-    }
-
-    // Calculate repetition ratio in text
-    fn calculate_repetition_ratio(text: &str) -> f32 {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() < 4 {
-            return 0.0;
-        }
-
-        let mut word_counts = HashMap::new();
-        for word in &words {
-            *word_counts.entry(word.to_lowercase()).or_insert(0) += 1;
-        }
-
-        let total_words = words.len() as f32;
-        let repeated_words: usize = word_counts
-            .values()
-            .map(|&count| if count > 1 { count - 1 } else { 0 })
-            .sum();
-
-        repeated_words as f32 / total_words
+    /// Preserve the recognized words. A phrase or repetition alone is not
+    /// evidence of a hallucination: deleting it can erase valid meeting speech.
+    /// VAD and the decoder's fallback policy handle non-speech before this step.
+    fn normalize_transcript(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// Transcribe audio with streaming support for partial results and adaptive quality
@@ -648,7 +500,7 @@ impl WhisperEngine {
             }
 
             let final_result = result.trim().to_string();
-            let cleaned_result = Self::clean_repetitive_text(&final_result);
+            let cleaned_result = Self::normalize_transcript(&final_result);
 
             let avg_confidence = mean_token_probability(token_prob_sum, token_count);
 
@@ -1090,5 +942,84 @@ mod confidence_tests {
     fn clamps_out_of_range_sums() {
         assert_eq!(mean_token_probability(9.0, 3), Some(1.0));
         assert_eq!(mean_token_probability(-1.0, 2), Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod transcript_preservation_tests {
+    use super::WhisperEngine;
+
+    #[test]
+    fn ordinary_speech_is_not_removed_by_hallucination_phrase_matching() {
+        for text in [
+            "The applause delayed the next speaker.",
+            "We heard laughter from the other room.",
+            "Please remove the music playing in the background.",
+            "They said thanks for watching at the end.",
+        ] {
+            assert_eq!(WhisperEngine::normalize_transcript(text), text);
+        }
+    }
+
+    #[test]
+    fn repeated_words_and_short_multilingual_answers_are_preserved() {
+        for text in [
+            "I had had enough.",
+            "No no no please keep it.",
+            "It is what it is what it is.",
+            "Ja",
+            "Nein",
+            "Er kommt um acht.",
+            "Übermorgen, übermorgen.",
+            "はい はい はい はい はい",
+        ] {
+            assert_eq!(WhisperEngine::normalize_transcript(text), text);
+        }
+    }
+
+    #[test]
+    fn normalization_only_collapses_whitespace() {
+        assert_eq!(
+            WhisperEngine::normalize_transcript(" \tJa.\n\nNein.  "),
+            "Ja. Nein."
+        );
+        assert!(WhisperEngine::normalize_transcript(" \t\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod model_switch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn switching_model_releases_name_lock_before_unloading() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine =
+            WhisperEngine::new_with_models_dir(Some(directory.path().to_path_buf())).unwrap();
+        *engine.current_model.write().await = Some("previous".to_string());
+        engine.available_models.write().await.insert(
+            "replacement".to_string(),
+            ModelInfo {
+                name: "replacement".to_string(),
+                path: directory.path().join("missing.bin"),
+                size_mb: 0,
+                accuracy: String::new(),
+                speed: String::new(),
+                status: ModelStatus::Available,
+                description: String::new(),
+            },
+        );
+
+        // A missing replacement fails normally after releasing the old model.
+        // Previously this never reached the load: the read guard deadlocked unload.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            engine.load_model("replacement"),
+        )
+        .await
+        .expect("model switching must not deadlock");
+        assert!(result.is_err());
+        assert_eq!(engine.get_current_model().await, None);
+        assert!(!engine.is_model_loaded().await);
     }
 }
