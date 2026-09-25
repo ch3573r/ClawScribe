@@ -6,6 +6,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
+/// Current Claude models think adaptively by default, and thinking counts toward
+/// `max_tokens`; this cap leaves room for it while staying non-streaming.
+const CLAUDE_MAX_OUTPUT_TOKENS: u32 = 16_000;
 
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]
@@ -21,6 +24,8 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -247,6 +252,9 @@ pub async fn generate_summary(
         } else {
             (None, None, None)
         };
+        let output_limit = max_tokens_val.unwrap_or(output_tokens);
+        let completion_tokens_only = provider == &LLMProvider::OpenAI
+            && super::openai_provider::is_openai_reasoning_model(model_name);
 
         serde_json::json!(ChatRequest {
             model: model_name.to_string(),
@@ -260,7 +268,8 @@ pub async fn generate_summary(
                     content: user_prompt.to_string(),
                 }
             ],
-            max_tokens: Some(max_tokens_val.unwrap_or(output_tokens)),
+            max_tokens: (!completion_tokens_only).then_some(output_limit),
+            max_completion_tokens: completion_tokens_only.then_some(output_limit),
             temperature: temperature_val,
             top_p: top_p_val,
         })
@@ -268,7 +277,7 @@ pub async fn generate_summary(
         serde_json::json!(ClaudeRequest {
             system: system_prompt.to_string(),
             model: model_name.to_string(),
-            max_tokens: 2048,
+            max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_prompt.to_string(),
