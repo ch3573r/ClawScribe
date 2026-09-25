@@ -4,12 +4,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$runtimeVersion = "0.144.1"
+$runtimeVersion = "0.157.0"
 $target = "x86_64-pc-windows-msvc"
 $sourcePackage = "@openai/codex@$runtimeVersion-win32-x64"
 $sourceUrl = "https://registry.npmjs.org/@openai/codex/-/codex-$runtimeVersion-win32-x64.tgz"
-$sourceSha256 = "d6d1c36f4c5c921724c28500ba89e1e840fd791ec5cc8aca2de256695e1c1c17"
-$runtimeSha256 = "cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4"
+$sourceSha256 = "fe71b497453d7a5372842f50a8b737668dc0755624713ba8a9093f09419b79b8"
+$runtimeSha256 = "ed1c7b36e44536809c868864c833af8a857f56599a7a7fe23b908a1ba1093b1f"
 
 function Assert-Command {
     param([Parameter(Mandatory=$true)][string]$Name)
@@ -66,6 +66,13 @@ Assert-Sha256 -Path $sourceExe -Expected $runtimeSha256
 Remove-Item -Recurse -Force -LiteralPath $runtimeDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $packageRoot "vendor") -Destination $runtimeDir
+# ClawScribe drives text-only app-server turns. The optional voice host carries
+# separately licensed GStreamer/GLib and Microsoft VC++ runtime DLLs, so it is
+# not redistributed with the installer.
+$voiceDir = Join-Path $runtimeDir "vendor\$target\codex-resources\voice"
+if (Test-Path -LiteralPath $voiceDir) {
+    Remove-Item -Recurse -Force -LiteralPath $voiceDir
+}
 New-Item -ItemType File -Force -Path (Join-Path $runtimeDir ".gitkeep") | Out-Null
 Copy-Item -Force -LiteralPath $sourceExe -Destination $sidecarPath
 

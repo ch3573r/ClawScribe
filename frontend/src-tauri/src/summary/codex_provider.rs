@@ -13,13 +13,13 @@ use tokio::time::{sleep, timeout};
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const LEGACY_DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 600;
-const CODEX_RUNTIME_VERSION: &str = "0.144.1";
+const CODEX_RUNTIME_VERSION: &str = "0.157.0";
 const CODEX_RUNTIME_TARGET: &str = "x86_64-pc-windows-msvc";
-const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.144.1-win32-x64";
+const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.157.0-win32-x64";
 const CODEX_RUNTIME_SOURCE_URL: &str =
-    "https://registry.npmjs.org/@openai/codex/-/codex-0.144.1-win32-x64.tgz";
+    "https://registry.npmjs.org/@openai/codex/-/codex-0.157.0-win32-x64.tgz";
 const CODEX_RUNTIME_SHA256: &str =
-    "cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4";
+    "ed1c7b36e44536809c868864c833af8a857f56599a7a7fe23b908a1ba1093b1f";
 const CODEX_APP_SERVER_MISSING: &str =
     "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
