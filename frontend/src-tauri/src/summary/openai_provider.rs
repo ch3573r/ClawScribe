@@ -113,11 +113,27 @@ struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<Value>,
+}
+
+/// OpenAI reasoning models (GPT-5 and later, o-series) reject `max_tokens` and
+/// non-default sampling values on Chat Completions. Provider prefixes such as
+/// `openai/` used by proxies are ignored.
+pub(crate) fn is_openai_reasoning_model(model: &str) -> bool {
+    let id = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    ["gpt-5", "gpt-6", "o1", "o3", "o4"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +375,11 @@ impl OpenAICompatibleProcessingProvider {
         if user_prompt.len() > budget {
             return Err("The request exceeds this provider's configured context. Increase Context window to the model's supported limit or shorten the notes prompt.".into());
         }
+        let output_tokens = self
+            .config
+            .max_tokens
+            .unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32);
+        let reasoning = is_openai_reasoning_model(&self.config.model);
         let body = ChatCompletionRequest {
             model: self.config.model.clone(),
             messages: vec![
@@ -371,13 +392,10 @@ impl OpenAICompatibleProcessingProvider {
                     content: user_prompt.to_string(),
                 },
             ],
-            max_tokens: Some(
-                self.config
-                    .max_tokens
-                    .unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32),
-            ),
-            temperature: self.config.temperature,
-            top_p: self.config.top_p,
+            max_tokens: (!reasoning).then_some(output_tokens),
+            max_completion_tokens: reasoning.then_some(output_tokens),
+            temperature: self.config.temperature.filter(|_| !reasoning),
+            top_p: self.config.top_p.filter(|_| !reasoning),
             response_format,
         };
 
@@ -795,6 +813,69 @@ mod tests {
                 .unwrap(),
             "The deadline was not agreed."
         );
+    }
+
+    #[test]
+    fn reasoning_model_detection_covers_current_openai_families() {
+        for model in [
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "GPT-5.5",
+            "o3-mini",
+            "openai/gpt-6-sol",
+        ] {
+            assert!(is_openai_reasoning_model(model), "{model}");
+        }
+        for model in [
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "openai/gpt-oss-120b",
+            "llama-3.3-70b",
+        ] {
+            assert!(!is_openai_reasoning_model(model), "{model}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_models_use_max_completion_tokens_without_sampling() {
+        let base_url = fake_openai_server(|request, _| {
+            assert!(request.contains("\"max_completion_tokens\":1234"));
+            assert!(!request.contains("\"max_tokens\""));
+            assert!(!request.contains("temperature"));
+            assert!(!request.contains("top_p"));
+            (200, chat_response("ok"))
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url,
+            model: "gpt-6-luna".into(),
+            max_tokens: Some(1234),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            ..OpenAICompatibleProviderConfig::default()
+        })
+        .unwrap();
+        assert_eq!(provider.send_text_prompt("s", "u").await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn other_models_keep_max_tokens_and_sampling() {
+        let base_url = fake_openai_server(|request, _| {
+            assert!(request.contains("\"max_tokens\":1234"));
+            assert!(!request.contains("max_completion_tokens"));
+            assert!(request.contains("\"temperature\":0.2"));
+            (200, chat_response("ok"))
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url,
+            model: "llama-3.3-70b".into(),
+            max_tokens: Some(1234),
+            temperature: Some(0.2),
+            ..OpenAICompatibleProviderConfig::default()
+        })
+        .unwrap();
+        assert_eq!(provider.send_text_prompt("s", "u").await.unwrap(), "ok");
     }
 
     #[tokio::test]

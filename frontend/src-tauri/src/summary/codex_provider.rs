@@ -13,13 +13,13 @@ use tokio::time::{sleep, timeout};
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const LEGACY_DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 600;
-const CODEX_RUNTIME_VERSION: &str = "0.144.1";
+const CODEX_RUNTIME_VERSION: &str = "0.157.0";
 const CODEX_RUNTIME_TARGET: &str = "x86_64-pc-windows-msvc";
-const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.144.1-win32-x64";
+const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.157.0-win32-x64";
 const CODEX_RUNTIME_SOURCE_URL: &str =
-    "https://registry.npmjs.org/@openai/codex/-/codex-0.144.1-win32-x64.tgz";
+    "https://registry.npmjs.org/@openai/codex/-/codex-0.157.0-win32-x64.tgz";
 const CODEX_RUNTIME_SHA256: &str =
-    "cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4";
+    "ed1c7b36e44536809c868864c833af8a857f56599a7a7fe23b908a1ba1093b1f";
 const CODEX_APP_SERVER_MISSING: &str =
     "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
@@ -393,6 +393,8 @@ for line in sys.stdin:
         send({{"method": "account/updated", "params": {{"account": {{"email": "alex@example.test"}}}}}})
     elif method == "account/logout":
         send({{"id": mid, "result": {{"ok": True}}}})
+    elif method == "model/list" and scenario == "paged" and not msg["params"].get("cursor"):
+        send({{"id": mid, "result": {{"data": [{{"id": "gpt-6-sol", "displayName": "GPT-6-Sol", "hidden": False}}], "nextCursor": "1"}}}})
     elif method == "model/list":
         send({{"id": mid, "result": {{"data": [{{"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol", "hidden": False, "defaultReasoningEffort": "low", "supportedReasoningEfforts": [{{"reasoningEffort": "low", "description": "Lower latency"}}], "inputModalities": ["text", "image"], "isDefault": True}}], "nextCursor": None}}}})
     elif method == "thread/start":
@@ -497,6 +499,22 @@ for line in sys.stdin:
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert!(models[0].is_default);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_app_server_model_list_follows_next_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "paged");
+        let ids: Vec<_> = provider
+            .list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+
+        assert_eq!(ids, vec!["gpt-6-sol", "gpt-5.6-sol"]);
     }
 
     #[cfg(unix)]
@@ -911,16 +929,32 @@ impl CodexAppServerProvider {
     pub async fn list_models(&self) -> Result<Vec<CodexModelInfo>, String> {
         validate_codex_runtime_file(&self.app_server_binary)?;
         let mut session = AppServerSession::start(self).await?;
-        let result = session
-            .request(
-                "model/list",
-                serde_json::json!({
-                    "limit": 100,
-                    "includeHidden": false,
-                }),
-            )
-            .await?;
-        parse_codex_model_list(&result)
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Bounded so a misbehaving runtime cannot page forever.
+        for _ in 0..20 {
+            let result = session
+                .request(
+                    "model/list",
+                    serde_json::json!({
+                        "limit": 100,
+                        "includeHidden": false,
+                        "cursor": cursor,
+                    }),
+                )
+                .await?;
+            models.extend(parse_codex_model_list(&result).unwrap_or_default());
+            cursor = json_string_at(&result, &["nextCursor"]).filter(|c| !c.is_empty());
+            if cursor.is_none() {
+                break;
+            }
+        }
+        if models.is_empty() {
+            return Err(
+                "Codex app-server model/list returned no picker-visible models".to_string(),
+            );
+        }
+        Ok(models)
     }
 
     pub async fn test_processing(

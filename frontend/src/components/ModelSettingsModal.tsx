@@ -165,44 +165,6 @@ interface CodexInstallRepairPlan {
 }
 
 const CODEX_DEFAULT_MODEL = 'gpt-5.6-sol';
-const CODEX_FALLBACK_MODELS: CodexModelInfo[] = [
-  {
-    id: 'gpt-5.6-sol',
-    displayName: 'GPT-5.6-Sol',
-    hidden: false,
-    isDefault: true,
-    defaultReasoningEffort: 'low',
-    supportedReasoningEfforts: [],
-    inputModalities: ['text', 'image'],
-  },
-  {
-    id: 'gpt-5.6-terra',
-    displayName: 'GPT-5.6-Terra',
-    hidden: false,
-    isDefault: false,
-    defaultReasoningEffort: 'medium',
-    supportedReasoningEfforts: [],
-    inputModalities: ['text', 'image'],
-  },
-  {
-    id: 'gpt-5.6-luna',
-    displayName: 'GPT-5.6-Luna',
-    hidden: false,
-    isDefault: false,
-    defaultReasoningEffort: 'medium',
-    supportedReasoningEfforts: [],
-    inputModalities: ['text', 'image'],
-  },
-  {
-    id: 'gpt-5.5',
-    displayName: 'GPT-5.5',
-    hidden: false,
-    isDefault: false,
-    defaultReasoningEffort: 'medium',
-    supportedReasoningEfforts: [],
-    inputModalities: ['text', 'image'],
-  },
-];
 
 interface AnthropicModel {
   id: string;
@@ -216,15 +178,13 @@ interface GroqModel {
 
 // Fallback models for when API fetch fails or no API key provided
 const OPENAI_FALLBACK_MODELS = [
-  'gpt-4o',
+  'gpt-6-sol',
+  'gpt-6-luna',
+  'gpt-6-astra',
+  'gpt-5.6-sol',
+  'gpt-5.6-luna',
+  'gpt-5.5',
   'gpt-4o-mini',
-  'gpt-4-turbo',
-  'gpt-4',
-  'gpt-3.5-turbo',
-  'o1',
-  'o1-mini',
-  'o3',
-  'o3-mini',
 ];
 
 const DEFAULT_OPENAI_COMPATIBLE_ENDPOINT = 'https://api.openai.com/v1';
@@ -232,17 +192,16 @@ const DEFAULT_OPENAI_COMPATIBLE_MODEL = 'gpt-4o-mini';
 const DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS = '300';
 
 const CLAUDE_FALLBACK_MODELS = [
-  'claude-sonnet-4-5-20250929',
-  'claude-haiku-4-5-20251001',
-  'claude-opus-4-5-20251101',
-  'claude-3-5-sonnet-latest',
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-fable-5-1',
 ];
 
 const GROQ_FALLBACK_MODELS = [
   'llama-3.3-70b-versatile',
-  'llama-3.1-70b-versatile',
-  'mixtral-8x7b-32768',
-  'gemma2-9b-it',
+  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
 ];
 
 interface ModelSettingsModalProps {
@@ -335,7 +294,8 @@ export function ModelSettingsModal({
   const [codexStatus, setCodexStatus] = useState<CodexInstallationStatus | null>(null);
   const [codexLastResult, setCodexLastResult] = useState<string>('');
   const [isCodexBusy, setIsCodexBusy] = useState<boolean>(false);
-  const [codexModels, setCodexModels] = useState<CodexModelInfo[]>(CODEX_FALLBACK_MODELS);
+  // Only the live app-server catalog is offered; a stale built-in list would hide new models.
+  const [codexModels, setCodexModels] = useState<CodexModelInfo[]>([]);
   const [codexModelError, setCodexModelError] = useState<string>('');
   const [isLoadingCodexModels, setIsLoadingCodexModels] = useState<boolean>(false);
 
@@ -855,7 +815,7 @@ export function ModelSettingsModal({
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('Failed to load Codex model catalog:', err);
-      setCodexModels(CODEX_FALLBACK_MODELS);
+      setCodexModels([]);
       setCodexModelError(message);
     } finally {
       setIsLoadingCodexModels(false);
@@ -1755,7 +1715,7 @@ export function ModelSettingsModal({
                   {isLoadingCodexModels
                     ? 'Loading the model catalog from Codex app-server...'
                     : codexModelError
-                      ? 'The live catalog is unavailable; showing bundled fallback choices.'
+                      ? `The Codex model catalog is unavailable (${codexModelError}); only the configured model is shown.`
                       : 'Models are loaded from the bundled Codex app-server catalog.'}
                 </p>
               </div>

@@ -15,20 +15,24 @@ API keys and OpenClaw without any Codex runtime.
 | Field | Value |
 | --- | --- |
 | Runtime | Codex app-server |
-| Version | `0.144.1` |
+| Version | `0.157.0` |
 | Target | `x86_64-pc-windows-msvc` |
-| Source package | `@openai/codex@0.144.1-win32-x64` |
-| Source URL | `https://registry.npmjs.org/@openai/codex/-/codex-0.144.1-win32-x64.tgz` |
-| Source SHA256 | `d6d1c36f4c5c921724c28500ba89e1e840fd791ec5cc8aca2de256695e1c1c17` |
-| Runtime SHA256 | `cbacbb9726262ef558b4af0438a1b2a5bba9076132401d947b5b4d2bf92ab0e4` |
+| Source package | `@openai/codex@0.157.0-win32-x64` |
+| Source URL | `https://registry.npmjs.org/@openai/codex/-/codex-0.157.0-win32-x64.tgz` |
+| Source SHA256 | `fe71b497453d7a5372842f50a8b737668dc0755624713ba8a9093f09419b79b8` |
+| Runtime SHA256 | `ed1c7b36e44536809c868864c833af8a857f56599a7a7fe23b908a1ba1093b1f` |
 | License | Apache-2.0 |
-| Build date | 2026-07-10 |
+| Build date | 2026-09-25 |
 | Tauri sidecar path | `frontend/src-tauri/binaries/codex-app-server-x86_64-pc-windows-msvc.exe` |
 
 The Windows release workflow stages this runtime with
 `frontend/scripts/stage-codex-runtime.ps1`, verifies the NPM tarball SHA256,
 verifies the executable SHA256, and writes
 `frontend/src-tauri/binaries/codex-app-server-runtime.json`.
+
+The optional `codex-resources/voice` host from the NPM package is not staged.
+ClawScribe only runs text turns, and the voice host bundles separately licensed
+GStreamer/GLib and Microsoft Visual C++ runtime libraries.
 
 ## Runtime Rules
 
