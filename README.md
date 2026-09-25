@@ -7,11 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.40 Preview**. The [0.5.40 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.40)
-adds audio-only recording, transcript corrections, summary source links, and
-editable summary templates. Enable **Include prereleases** in 0.5.38 or install
-manually; the stable channel remains on 0.5.38.
-Read the [release validation limits](docs/releases/0.5.40.md): real-device capture,
+Source version: **0.5.41 Preview**. The [0.5.41 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.41)
+updates the AI model lists, fixes requests to current OpenAI and Claude models,
+and bundles Codex app-server 0.157.0 with GPT-6 models. Enable **Include
+prereleases** in 0.5.38 or install manually; the stable channel remains on 0.5.38.
+Read the [release validation limits](docs/releases/0.5.41.md): real-device capture,
 install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
@@ -136,26 +136,21 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.40 Preview
+## What Changed In 0.5.41 Preview
 
-- Preserve legitimate Whisper words and repetitions; fix model-switch deadlocks
-  and move speech-model initialization off async workers.
-- Reduce batch audio copies and cancel hosted transcription requests without
-  starting local fallback. Keep Nemotron Auto behavior consistent across paths.
-- Prevent stale meeting/recording responses and incomplete transcript animations.
-  Preserve edits during saves and avoid rewriting notes for title-only changes.
-- Share summary provider configuration, reject explicitly truncated answers,
-  serialize local sidecar exchanges, and scan stop markers incrementally.
-- Index transcript paging. A synthetic 150,000-row count/page query improved from
-  12.813 ms to 0.342 ms; this measures database paging only.
-- Persist Microsoft export attempts and results before proceeding. Stop blind
-  retries when a submission has an unknown outcome.
+- Fix HTTP 400 errors with current OpenAI models (GPT-5 and later, o-series) in
+  the OpenAI-compatible provider, and raise the Claude output cap so thinking
+  models do not cut summaries short.
+- Replace retired Claude, OpenAI and Groq model suggestions with current models.
+- Show the live Codex model catalog and bundle Codex app-server 0.157.0, which
+  adds GPT-6 Astra, Sol and Luna.
 
-The transcript corrections, summary source links, editable templates, and deferred
-transcription introduced in 0.5.39 remain available. See the
-[0.5.40 preview release notes](docs/releases/0.5.40.md),
-[meeting-quality guide](docs/meeting-quality.md), and [changelog](CHANGELOG.md)
-for validation results and remaining device/model acceptance.
+The reliability fixes from 0.5.40 and the transcript corrections, summary source
+links, editable templates, and deferred transcription from 0.5.39 remain
+available. See the [0.5.41 preview release notes](docs/releases/0.5.41.md) for
+validation results and settings to raise before using reasoning models on long
+meetings, the [0.5.40 notes](docs/releases/0.5.40.md), the
+[meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 

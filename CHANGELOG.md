@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.41
+
+- Publish a Windows GPU prerelease with runtime/updater version `0.5.41`, newer than `0.5.40`. Enable **Include prereleases** to discover it; stable remains `0.5.38`.
+- Fix HTTP 400 errors with current OpenAI models: GPT-5+ and o-series requests use `max_completion_tokens` and omit temperature/top-p. Other compatible endpoints keep `max_tokens` and configured sampling.
+- Raise the Claude output cap from 2,048 to 16,000 tokens because current Claude models think by default and thinking counts toward the cap.
+- Replace retired or shut-down model suggestions for Claude, OpenAI and Groq with current models, and skip image, transcription, live-voice and text-to-speech models in live model lists.
+- Show the live Codex model catalog, following every page, instead of a built-in list that hid newer models. Bundle Codex app-server `0.157.0`, which adds GPT-6 Astra, Sol and Luna; the optional Codex voice host is not bundled.
+- Pass 70 frontend tests and 296 Windows native tests in the GPU preflight. Live OpenAI/Anthropic requests, a signed-in Codex turn on the new runtime, and summary quality with the newly listed models remain unverified, along with the real-device capture, install/upgrade, and notebook performance acceptance listed for 0.5.40. This preview does not assert capture-smoke confirmation or stable readiness.
+
 ## 0.5.40
 
 - Publish a Windows GPU prerelease with runtime/updater version `0.5.40`, newer than `0.5.39`. Enable **Include prereleases** to discover it; stable remains `0.5.38`.
