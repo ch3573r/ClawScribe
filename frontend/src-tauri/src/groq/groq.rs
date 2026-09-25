@@ -38,7 +38,11 @@ static MODELS_CACHE: RwLock<Option<CacheEntry>> = RwLock::new(None);
 const CACHE_TTL_SECS: u64 = 300;
 
 /// Fallback models when API fetch fails (matches frontend hardcoded values)
-const FALLBACK_MODELS: &[&str] = &["llama-3.3-70b-versatile"];
+const FALLBACK_MODELS: &[&str] = &[
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+];
 
 /// Get fallback models as GroqModel vec
 fn get_fallback_models() -> Vec<GroqModel> {
@@ -54,8 +58,10 @@ fn get_fallback_models() -> Vec<GroqModel> {
 /// Check if model is a chat-capable model (filter out whisper, etc.)
 fn is_chat_model(model_id: &str) -> bool {
     let id = model_id.to_lowercase();
-    // Exclude whisper, tool-use specific models, and embedding models
+    // Exclude speech, tool-use specific, guard and embedding models
     !id.contains("whisper")
+        && !id.contains("orpheus")
+        && !id.contains("tts")
         && !id.contains("embed")
         && !id.contains("guard")
         && !id.contains("tool-use")
