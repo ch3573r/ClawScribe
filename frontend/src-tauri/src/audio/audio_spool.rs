@@ -164,6 +164,14 @@ pub(super) fn recover(folder: &Path) -> Result<AudioRecoveryStatus, String> {
 }
 
 fn recover_inner(folder: &Path, encoder_available: bool) -> std::io::Result<AudioRecoveryStatus> {
+    recover_with_encoder(folder, encoder_available, encode_capture)
+}
+
+fn recover_with_encoder(
+    folder: &Path,
+    encoder_available: bool,
+    encode: impl FnOnce(&Path, &PathBuf) -> anyhow::Result<(bool, bool)>,
+) -> std::io::Result<AudioRecoveryStatus> {
     let spool = folder.join(".audio-spool");
     let (paths, temporary_gaps, _) = capture_paths(&spool)?;
     let staged = folder.join(format!(".audio-recovered-{}.tmp", uuid::Uuid::new_v4()));
@@ -182,14 +190,15 @@ fn recover_inner(folder: &Path, encoder_available: bool) -> std::io::Result<Audi
                 .map(|metadata| total.saturating_add(metadata.len().saturating_sub(33) / 4))
         })?;
         let mut encoded_gaps = false;
-        let encoded = encode_capture(folder, &staged)
+        let encoded = encode(folder, &staged)
             .map(|(gaps, _)| {
                 encoded_gaps = gaps;
             })
             .map_err(|_| std::io::Error::other("Recording recovery encode failed"));
-        if let Err(error) = encoded {
+        if encoded.is_err() {
             let _ = fs::remove_file(&staged);
-            return Err(error);
+            log::warn!("Recovery encoding failed; trying encoder-free WAV recovery");
+            return recover_inner(folder, false);
         }
         let output = folder.join("audio-recovered.mp4");
         let published = std::fs::OpenOptions::new()
@@ -549,7 +558,21 @@ mod tests {
         receiver.recv().await.unwrap().unwrap();
         drop(receiver);
         drop(sender);
-        let status = recover_inner(folder.path(), false).unwrap();
+        let status = recover_with_encoder(folder.path(), true, |_, staged| {
+            fs::write(staged, b"incomplete encode").unwrap();
+            Err(anyhow::anyhow!("Synthetic encoder failure"))
+        })
+        .unwrap();
+        assert!(status
+            .audio_file_path
+            .as_ref()
+            .unwrap()
+            .ends_with("audio-recovered.wav"));
+        assert!(!fs::read_dir(folder.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "tmp")));
         assert_eq!(status.status, "success");
         assert_eq!(status.chunk_count, 3);
         let bytes = fs::read(status.audio_file_path.unwrap()).unwrap();

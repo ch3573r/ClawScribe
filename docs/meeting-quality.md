@@ -94,7 +94,7 @@ meeting reuses its completed audio; an explicit recovery action can rebuild it.
 Retranscription checks retained chunks and saved warnings for gaps, including
 when reusing a recovered file, and preserves that information in the library.
 Recovery uses compact AAC when FFmpeg is available; WAV remains the fallback
-without the encoder, within its 32-bit size limit. Existing recovered WAV files
+if the encoder is missing or encoding fails, within its 32-bit size limit. Existing recovered WAV files
 remain supported.
 Temporary legacy checkpoints must decode successfully before recovery uses them.
 Playback uses the browser's streaming audio element through scoped local-file

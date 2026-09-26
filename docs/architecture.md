@@ -99,7 +99,7 @@ whose asynchronous registration finishes after the provider unmounts.
 recording spool. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
-it into AAC when the encoder is available, with WAV as the encoder-free fallback. Both paths accept a readable temporary tail at the next sequence
+it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
 unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
 element. Periodic transcript snapshots continue during silence; the library-save
