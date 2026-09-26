@@ -97,8 +97,8 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
   it from the saved transcript panel. Add markers during playback too.
 - **Backup and restore:** save a portable archive of meeting data and recordings.
   Restore adds missing meetings and skips existing IDs without retaining their
-  extracted audio. Backups identify missing recording folders and block when
-  recovery files would be omitted. Archives exclude provider
+  extracted audio. Backups identify missing recording folders and report meetings
+  with excluded recovery files or unavailable audio. Archives exclude provider
   credentials and models and are not encrypted. See [local library tools](docs/local-library.md).
 
 Generate template-based meeting summaries from the transcript and optional

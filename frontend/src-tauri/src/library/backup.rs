@@ -36,6 +36,23 @@ struct Manifest {
     tables: BTreeMap<String, Vec<Map<String, Value>>>,
     // Index into the meetings array -> leaf filenames. Never contains source paths.
     files: BTreeMap<usize, Vec<String>>,
+    // Optional in V1; omissions remain visible when this archive is restored.
+    #[serde(default)]
+    incomplete_audio: BTreeMap<usize, IncompleteAudio>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct IncompleteAudio {
+    recovery_files_excluded: bool,
+    audio_unavailable: bool,
+}
+
+#[derive(Serialize)]
+pub struct IncompleteMeeting {
+    meeting_id: String,
+    title: String,
+    #[serde(flatten)]
+    audio: IncompleteAudio,
 }
 
 #[derive(Serialize)]
@@ -43,6 +60,33 @@ pub struct BackupReport {
     pub meetings: usize,
     pub skipped: usize,
     pub files: usize,
+    pub incomplete_meetings: Vec<IncompleteMeeting>,
+}
+
+fn incomplete_meetings(
+    manifest: &Manifest,
+    selected: Option<&HashSet<String>>,
+) -> Vec<IncompleteMeeting> {
+    manifest
+        .incomplete_audio
+        .iter()
+        .filter_map(|(index, audio)| {
+            let row = &manifest.tables["meetings"][*index];
+            let id = row.get("id")?.as_str()?;
+            if selected.is_some_and(|selected| !selected.contains(id)) {
+                return None;
+            }
+            Some(IncompleteMeeting {
+                meeting_id: id.to_string(),
+                title: row
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled meeting")
+                    .to_string(),
+                audio: audio.clone(),
+            })
+        })
+        .collect()
 }
 
 fn failure(_: impl std::fmt::Display) -> String {
@@ -159,6 +203,7 @@ async fn snapshot(pool: &SqlitePool) -> Result<(Manifest, Vec<Option<PathBuf>>),
             version: 1,
             tables,
             files: BTreeMap::new(),
+            incomplete_audio: BTreeMap::new(),
         },
         folders,
     ))
@@ -198,7 +243,11 @@ fn write_archive(
             .is_some_and(|id| pending_audio.contains(id));
         let Some(folder) = folder else {
             if recovery_pending {
-                return Err(meeting_failure(meeting, "audio recovery is pending but its recording folder is unavailable. Restore access to the recording folder before backing up."));
+                manifest
+                    .incomplete_audio
+                    .entry(index)
+                    .or_default()
+                    .audio_unavailable = true;
             }
             continue;
         };
@@ -210,23 +259,25 @@ fn write_archive(
         {
             return Err("Recording folder links are not supported in backups.".into());
         }
-        // Recovery originals can be the only surviving capture, even if a partial
-        // final file exists. V1 archives cannot represent these directories.
+        // Recovery retains its originals. Exclude them from V1 archives, but
+        // report the omission without preventing backup of the saved library.
+        let mut incomplete = IncompleteAudio::default();
         for recovery_dir in [".audio-spool", ".checkpoints"] {
             match std::fs::symlink_metadata(folder.join(recovery_dir)) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                    let mut entries = std::fs::read_dir(folder.join(recovery_dir))
-                        .map_err(|_| meeting_failure(meeting, "recovery files could not be checked. Restore folder access, then retry."))?;
-                    if entries.next().is_none() {
+                    if std::fs::read_dir(folder.join(recovery_dir))
+                        .is_ok_and(|mut entries| entries.next().is_none())
+                    {
                         continue;
                     }
                 }
                 _ => {}
             }
-            return Err(meeting_failure(meeting, "recording recovery files are still present and cannot be included in this library archive. Preserve a separate copy of the recording folder, including hidden recovery files. Do not delete recovery originals to make backup succeed."));
+            incomplete.recovery_files_excluded = true;
         }
         let mut names = Vec::new();
+        let mut has_audio = false;
         for entry in std::fs::read_dir(folder).map_err(|_| {
             meeting_failure(
                 meeting,
@@ -243,6 +294,10 @@ fn write_archive(
             }
             let mut input = File::open(entry.path()).map_err(failure)?;
             let size = input.metadata().map_err(failure)?.len();
+            has_audio |= size > 0
+                && Path::new(&name)
+                    .extension()
+                    .is_some_and(|ext| ext != "json");
             total = total.checked_add(size).ok_or("Archive is too large.")?;
             files += 1;
             if files > MAX_FILES || total > MAX_BYTES {
@@ -259,12 +314,10 @@ fn write_archive(
             }
             names.push(name);
         }
-        if recovery_pending
-            && !names
-                .iter()
-                .any(|name| Path::new(name).extension().is_some_and(|ext| ext != "json"))
-        {
-            return Err(meeting_failure(meeting, "audio recovery is pending and no saved audio is available. Recover the recording before creating a library backup."));
+        incomplete.audio_unavailable =
+            !has_audio && (recovery_pending || incomplete.recovery_files_excluded);
+        if incomplete.audio_unavailable || incomplete.recovery_files_excluded {
+            manifest.incomplete_audio.insert(index, incomplete);
         }
         manifest.files.insert(index, names);
     }
@@ -281,10 +334,15 @@ fn write_archive(
         meetings: manifest.tables["meetings"].len(),
         skipped: 0,
         files,
+        incomplete_meetings: incomplete_meetings(&manifest, None),
     })
 }
 
-fn unpack(path: &Path, root: &Path) -> Result<(Manifest, tempfile::TempDir), String> {
+fn unpack(
+    path: &Path,
+    root: &Path,
+    existing_ids: &HashSet<String>,
+) -> Result<(Manifest, tempfile::TempDir), String> {
     let mut zip = zip::ZipArchive::new(File::open(path).map_err(failure)?).map_err(failure)?;
     if zip.len() > MAX_FILES + 1 {
         return Err("Too many archive files.".into());
@@ -310,6 +368,23 @@ fn unpack(path: &Path, root: &Path) -> Result<(Manifest, tempfile::TempDir), Str
         return Err("Unsupported meeting archive format.".into());
     }
     let count = manifest.tables["meetings"].len();
+    let mut known = HashSet::new();
+    for row in &manifest.tables["meetings"] {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Invalid meeting identity.")?;
+        if id.is_empty() || !known.insert(id) {
+            return Err("Duplicate meeting identity in archive.".into());
+        }
+    }
+    if manifest
+        .incomplete_audio
+        .keys()
+        .any(|index| *index >= count)
+    {
+        return Err("Invalid archive omission reference.".into());
+    }
     let mut expected = HashSet::from(["manifest.json".to_string()]);
     for (index, names) in &manifest.files {
         if *index >= count {
@@ -350,6 +425,10 @@ fn unpack(path: &Path, root: &Path) -> Result<(Manifest, tempfile::TempDir), Str
         .tempdir_in(root)
         .map_err(failure)?;
     for (index, names) in &manifest.files {
+        let id = manifest.tables["meetings"][*index]["id"].as_str().unwrap();
+        if existing_ids.contains(id) {
+            continue;
+        }
         let folder = stage.path().join(index.to_string());
         std::fs::create_dir(&folder).map_err(failure)?;
         for name in names {
@@ -430,6 +509,15 @@ async fn import_manifest(
             }
             let mut row = source.clone();
             if *table == "meetings" {
+                if manifest.files.contains_key(&index)
+                    && !stage.path().join(index.to_string()).is_dir()
+                {
+                    // A meeting may have been deleted since the pre-extraction
+                    // snapshot. Never import its metadata with missing audio.
+                    return Err(
+                        "The meeting library changed during restore. Retry the restore.".into(),
+                    );
+                }
                 row.insert(
                     "folder_path".into(),
                     if manifest.files.contains_key(&index) {
@@ -506,7 +594,11 @@ async fn import_manifest(
         .collect();
     let stage = tokio::task::spawn_blocking(move || -> Result<_, String> {
         for index in unused {
-            std::fs::remove_dir_all(stage.path().join(index.to_string())).map_err(failure)?;
+            match std::fs::remove_dir_all(stage.path().join(index.to_string())) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(failure(error)),
+            }
         }
         Ok(stage)
     })
@@ -532,6 +624,7 @@ async fn import_manifest(
         meetings: selected.len(),
         skipped,
         files,
+        incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
     })
 }
 
@@ -564,9 +657,16 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
         .app_data_dir()
         .map_err(failure)?
         .join("restored-recordings");
-    let (manifest, stage) = tokio::task::spawn_blocking(move || unpack(Path::new(&path), &root))
+    let existing_ids: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT id FROM meetings")
+        .fetch_all(app.state::<AppState>().db_manager.pool())
         .await
-        .map_err(failure)??;
+        .map_err(failure)?
+        .into_iter()
+        .collect();
+    let (manifest, stage) =
+        tokio::task::spawn_blocking(move || unpack(Path::new(&path), &root, &existing_ids))
+            .await
+            .map_err(failure)??;
     let report =
         import_manifest(app.state::<AppState>().db_manager.pool(), manifest, stage).await?;
     let _ = app.emit("library-changed", ());
@@ -597,7 +697,15 @@ mod tests {
             .await
             .unwrap();
         let target = tempfile::tempdir().unwrap();
-        let (manifest, stage) = unpack(&archive, target.path()).unwrap();
+        let existing_ids = HashSet::from(["review-test".to_string()]);
+        let (manifest, stage) = unpack(&archive, target.path(), &existing_ids).unwrap();
+        // Assert before import/cleanup: existing audio was never extracted.
+        assert_eq!(std::fs::read_dir(stage.path()).unwrap().count(), 1);
+        let existing_index = manifest.tables["meetings"]
+            .iter()
+            .position(|row| row["id"] == "review-test")
+            .unwrap();
+        assert!(!stage.path().join(existing_index.to_string()).exists());
         let stage_path = stage.path().to_path_buf();
         let report = import_manifest(&pool, manifest, stage).await.unwrap();
         assert_eq!((report.meetings, report.skipped, report.files), (1, 1, 1));
@@ -622,7 +730,9 @@ mod tests {
                 .unwrap();
         assert_eq!(existing, source.path().to_string_lossy());
         assert!(source.path().join("audio.wav").exists());
-        let (manifest, stage) = unpack(&archive, target.path()).unwrap();
+        let existing_ids = HashSet::from(["review-test".to_string(), "new".to_string()]);
+        let (manifest, stage) = unpack(&archive, target.path(), &existing_ids).unwrap();
+        assert_eq!(std::fs::read_dir(stage.path()).unwrap().count(), 0);
         let discarded = stage.path().to_path_buf();
         assert_eq!(
             import_manifest(&pool, manifest, stage)
@@ -650,7 +760,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_originals_cannot_be_silently_omitted() {
+    async fn deleting_a_meeting_during_restore_requires_retry_instead_of_importing_without_audio() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("audio.wav"), b"synthetic audio").unwrap();
+        let (manifest, _) = snapshot(&pool).await.unwrap();
+        let archive = source.path().join("backup.zip");
+        write_archive(&archive, manifest, vec![Some(source.path().to_path_buf())]).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let (manifest, stage) = unpack(
+            &archive,
+            target.path(),
+            &HashSet::from(["review-test".to_string()]),
+        )
+        .unwrap();
+        let stage_path = stage.path().to_path_buf();
+        assert_eq!(std::fs::read_dir(&stage_path).unwrap().count(), 0);
+        sqlx::query("DELETE FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = import_manifest(&pool, manifest, stage).await.err().unwrap();
+        assert!(error.contains("changed during restore"));
+        assert!(!stage_path.exists());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM meetings")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_omission_metadata_is_optional_and_references_are_validated() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let (manifest, _) = snapshot(&pool).await.unwrap();
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        json.as_object_mut().unwrap().remove("incomplete_audio");
+        let legacy: Manifest = serde_json::from_value(json).unwrap();
+        assert!(legacy.incomplete_audio.is_empty());
+        let mut manifest = legacy;
+        manifest.incomplete_audio.insert(
+            99,
+            IncompleteAudio {
+                recovery_files_excluded: true,
+                audio_unavailable: true,
+            },
+        );
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("invalid.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        zip.start_file("manifest.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        zip.finish().unwrap();
+        let target = root.path().join("restored");
+        assert!(unpack(&archive, &target, &HashSet::new()).is_err());
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_originals_are_reported_without_blocking_backup_or_being_deleted() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('review-test', 1, 0)").execute(&pool).await.unwrap();
         for directory in [".checkpoints", ".audio-spool"] {
@@ -658,19 +830,63 @@ mod tests {
             let chunks = root.path().join(directory);
             std::fs::create_dir(&chunks).unwrap();
             std::fs::write(chunks.join("synthetic-chunk"), b"only surviving audio").unwrap();
-            // Even a partial/recovered output is not a reason to discard originals.
+            // Backup works before and after recovery, which retains originals.
             for saved_audio in [false, true] {
                 if saved_audio {
-                    std::fs::write(root.path().join("audio.wav"), b"partial audio").unwrap();
+                    std::fs::write(root.path().join("audio-recovered.wav"), b"recovered audio")
+                        .unwrap();
                 }
                 let (manifest, _) = snapshot(&pool).await.unwrap();
                 let archive = root.path().join("backup.zip");
-                let error =
+                let report =
                     write_archive(&archive, manifest, vec![Some(root.path().to_path_buf())])
-                        .err()
                         .unwrap();
-                assert!(error.contains("Synthetic review") && error.contains("recovery files"));
-                assert!(!archive.exists());
+                assert_eq!(report.meetings, 1);
+                assert_eq!(report.files, if saved_audio { 1 } else { 0 });
+                assert_eq!(report.incomplete_meetings.len(), 1);
+                let omitted = &report.incomplete_meetings[0];
+                assert_eq!(omitted.title, "Synthetic review");
+                assert!(omitted.audio.recovery_files_excluded);
+                assert_eq!(omitted.audio.audio_unavailable, !saved_audio);
+                let target = tempfile::tempdir().unwrap();
+                let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
+                assert!(!stage.path().join("0").join(directory).exists());
+                if saved_audio {
+                    assert_eq!(
+                        std::fs::read(stage.path().join("0/audio-recovered.wav")).unwrap(),
+                        b"recovered audio"
+                    );
+                }
+                let restored_pool = crate::database::transcript_edits::tests::fixture().await;
+                sqlx::query("DELETE FROM meetings")
+                    .execute(&restored_pool)
+                    .await
+                    .unwrap();
+                let restored = import_manifest(&restored_pool, manifest, stage)
+                    .await
+                    .unwrap();
+                assert_eq!(restored.incomplete_meetings.len(), 1);
+                assert!(
+                    restored.incomplete_meetings[0]
+                        .audio
+                        .recovery_files_excluded
+                );
+                assert_eq!(
+                    restored.incomplete_meetings[0].audio.audio_unavailable,
+                    !saved_audio
+                );
+                // Skipped meetings do not produce warnings about imported audio.
+                let (manifest, stage) = unpack(
+                    &archive,
+                    target.path(),
+                    &HashSet::from(["review-test".to_string()]),
+                )
+                .unwrap();
+                assert!(import_manifest(&pool, manifest, stage)
+                    .await
+                    .unwrap()
+                    .incomplete_meetings
+                    .is_empty());
                 assert_eq!(
                     std::fs::read(chunks.join("synthetic-chunk")).unwrap(),
                     b"only surviving audio"
@@ -680,12 +896,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         for folder in [None, Some(root.path().to_path_buf())] {
             let (manifest, _) = snapshot(&pool).await.unwrap();
-            assert!(
-                write_archive(&root.path().join("backup.zip"), manifest, vec![folder])
-                    .err()
-                    .unwrap()
-                    .contains("audio recovery is pending")
-            );
+            let report =
+                write_archive(&root.path().join("backup.zip"), manifest, vec![folder]).unwrap();
+            assert_eq!(report.incomplete_meetings.len(), 1);
+            assert!(report.incomplete_meetings[0].audio.audio_unavailable);
+            assert!(!report.incomplete_meetings[0].audio.recovery_files_excluded);
         }
     }
 
@@ -698,7 +913,7 @@ mod tests {
         manifest.tables.remove("meeting_tags");
         manifest.tables.remove("meeting_bookmarks");
         write_archive(&archive, manifest, folders).unwrap();
-        let (manifest, stage) = unpack(&archive, root.path()).unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
         sqlx::query("DELETE FROM meetings")
             .execute(&pool)
             .await
@@ -737,7 +952,7 @@ mod tests {
             zip.write_all(&serde_json::to_vec(&manifest).unwrap())
                 .unwrap();
             zip.finish().unwrap();
-            assert!(unpack(&archive, root.path()).is_err());
+            assert!(unpack(&archive, root.path(), &HashSet::new()).is_err());
         }
     }
 
@@ -755,7 +970,8 @@ mod tests {
         manifest.files.insert(0, vec!["audio.wav".into()]);
         let stage = tempfile::tempdir().unwrap();
         let stage_path = stage.path().to_path_buf();
-        // The missing stage directory simulates a filesystem cleanup failure.
+        // A file in place of the stage directory simulates a cleanup failure.
+        std::fs::write(stage.path().join("0"), b"not a directory").unwrap();
         assert!(import_manifest(&pool, manifest, stage).await.is_err());
         assert!(!stage_path.exists());
         assert_eq!(
@@ -803,14 +1019,14 @@ mod tests {
         let archive = folder.path().join("backup.zip");
         assert_eq!(write_archive(&archive, manifest, folders).unwrap().files, 1);
         let target = tempfile::tempdir().unwrap();
-        let (manifest, stage) = unpack(&archive, target.path()).unwrap();
+        let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
         let report = import_manifest(&pool, manifest, stage).await.unwrap();
         assert_eq!(report.skipped, 1);
         sqlx::query("DELETE FROM meetings")
             .execute(&pool)
             .await
             .unwrap();
-        let (manifest, stage) = unpack(&archive, target.path()).unwrap();
+        let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
         let report = import_manifest(&pool, manifest, stage).await.unwrap();
         assert_eq!(report.meetings, 1);
         let restored: String = sqlx::query_scalar("SELECT folder_path FROM meetings")
@@ -884,7 +1100,12 @@ mod tests {
         zip.write_all(b"invalid").unwrap();
         zip.finish().unwrap();
         let destination = root.path().join("restored");
-        assert!(unpack(&path, &destination).is_err());
+        assert!(unpack(
+            &path,
+            &destination,
+            &HashSet::from(["review-test".to_string()])
+        )
+        .is_err());
         assert!(!destination.exists());
     }
 }

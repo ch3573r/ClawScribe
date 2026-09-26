@@ -1,6 +1,18 @@
 export interface MeetingTag { meeting_id: string; tag: string }
 export interface MeetingBookmark { id: string; seconds: number; label: string }
 
+export interface LibraryArchiveReport {
+  meetings: number;
+  skipped: number;
+  files: number;
+  incomplete_meetings?: {
+    meeting_id: string;
+    title: string;
+    recovery_files_excluded: boolean;
+    audio_unavailable: boolean;
+  }[];
+}
+
 export function parseProjectTags(text: string): string[] {
   return [...new Map(text.split(',').map(tag => tag.trim().replace(/\s+/g, ' ')).filter(Boolean).map(tag => [tag.toLowerCase(), tag])).values()];
 }

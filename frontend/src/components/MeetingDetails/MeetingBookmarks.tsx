@@ -29,18 +29,26 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId
   const [editLabel, setEditLabel] = useState('');
   const pending = useRef(false);
   useEffect(() => { setBookmarks([]); setError(''); setEditing(null); }, [meetingId]);
+  const refreshWithoutEvents = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
     let active = true; let request = 0;
-    const load = async () => { const version = ++request; try { const rows = await invoke<MeetingBookmark[]>('list_meeting_bookmarks', { meetingId }); if (active && version === request) { setBookmarks(rows); setError(''); } } catch { if (active && version === request) setError('Could not load bookmarks.'); } };
+    let subscriptionError = '';
+    const load = async () => { const version = ++request; try { const rows = await invoke<MeetingBookmark[]>('list_meeting_bookmarks', { meetingId }); if (active && version === request) { setBookmarks(rows); setError(subscriptionError); } } catch { if (active && version === request) setError('Could not load bookmarks.'); } };
     const subscription = listen('library-changed', () => { void load(); });
     // Subscribe before the initial read so a saved change cannot fall between them.
-    void subscription.then(() => { if (active) void load(); }).catch(() => { if (active) setError('Could not watch bookmark changes. Retry loading bookmarks.'); });
-    return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+    void subscription.then(() => { if (active) void load(); }).catch(() => {
+      if (!active) return;
+      subscriptionError = 'Automatic bookmark refresh is unavailable. Retry to reconnect.';
+      refreshWithoutEvents.current = load;
+      setError(subscriptionError);
+      void load();
+    });
+    return () => { active = false; refreshWithoutEvents.current = null; void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [meetingId, revision]);
   const change = async (command: string, args: Record<string, unknown>) => {
     if (pending.current) return;
     pending.current = true; setBusy(true);
-    try { await invoke(command, args); setEditing(null); }
+    try { await invoke(command, args); setEditing(null); await refreshWithoutEvents.current?.(); }
     catch (error) { toast.error('Could not update bookmark', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
   };

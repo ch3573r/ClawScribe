@@ -77,13 +77,14 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [projectTagsError, setProjectTagsError] = useState<string | null>(null);
   const [projectTagsLoading, setProjectTagsLoading] = useState(true);
   const tagsVersion = React.useRef(0);
+  const tagsLoaded = React.useRef(false);
   const refreshProjectTags = React.useCallback(async () => {
     const version = ++tagsVersion.current;
-    setProjectTagsLoading(true);
+    setProjectTagsLoading(!tagsLoaded.current);
     setProjectTagsError(null);
     try {
       const tags = await invoke<MeetingTag[]>('list_meeting_tags');
-      if (version === tagsVersion.current) { setProjectTags(tags); setProjectTagsError(null); }
+      if (version === tagsVersion.current) { tagsLoaded.current = true; setProjectTags(tags); setProjectTagsError(null); }
     } catch { if (version === tagsVersion.current) setProjectTagsError('Could not load project tags.'); }
     finally { if (version === tagsVersion.current) setProjectTagsLoading(false); }
   }, []);

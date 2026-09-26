@@ -77,5 +77,70 @@ test('project tags distinguish initial loading, failure, retry, and success', as
   reads.at(-1).resolve([{ meeting_id: 'meeting', tag: 'Project' }]); await retry;
   state = render();
   assert.equal(state.projectTagsLoading, false); assert.equal(state.projectTagsError, null);
-  assert.equal(state.projectTags[0].tag, 'Project'); hooks.unmount();
+  assert.equal(state.projectTags[0].tag, 'Project');
+  const background = state.refreshProjectTags(); state = render();
+  assert.equal(state.projectTagsLoading, false);
+  assert.equal(state.projectTags[0].tag, 'Project');
+  reads.at(-1).resolve([]); await background;
+  const emptyRefresh = render().refreshProjectTags();
+  assert.equal(render().projectTagsLoading, false, 'an empty successful result is still loaded');
+  reads.at(-1).reject(new Error('Synthetic refresh failure')); await emptyRefresh;
+  state = render(); assert.match(state.projectTagsError, /Could not load/);
+  const backgroundRetry = state.refreshProjectTags();
+  assert.equal(render().projectTagsLoading, false, 'background retries preserve the loaded state');
+  reads.at(-1).resolve([]); await backgroundRetry;
+  hooks.unmount();
+});
+
+test('bookmarks load, retry, and refresh after writes when event registration fails', async () => {
+  const hooks = createHookHarness();
+  let registrations = 0;
+  let reads = 0;
+  let failSubscription = true;
+  const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'button' }, sonner: { toast: { error() {} } },
+    '@tauri-apps/api/core': { invoke: async command => {
+      if (command === 'list_meeting_bookmarks') {
+        reads++;
+        return [{ id: 'mark', seconds: 10, label: `Read ${reads}` }];
+      }
+    } },
+    '@tauri-apps/api/event': { listen: async () => {
+      registrations++;
+      if (failSubscription) throw new Error('Synthetic subscription failure');
+      return () => {};
+    } },
+  });
+  const render = () => hooks.render(() => MeetingBookmarks({ meetingId: 'meeting' }));
+  const button = name => flatten(render()).find(node => node.type === 'button' && text(node) === name);
+  render(); await flush();
+  assert.equal(reads, 1); assert.match(text(render()), /Bookmarks \(1\)/);
+  assert.match(text(render()), /Automatic bookmark refresh is unavailable/);
+  await button('Add bookmark').props.onClick(); await flush();
+  assert.equal(reads, 2); assert.equal(registrations, 1);
+  assert.match(text(render()), /Read 2/);
+  button('Retry').props.onClick(); render(); await flush();
+  assert.equal(reads, 3); assert.equal(registrations, 2);
+  assert.match(text(render()), /Bookmarks \(1\)/);
+  failSubscription = false;
+  button('Retry').props.onClick(); render(); await flush();
+  assert.equal(reads, 4);
+  assert.doesNotMatch(text(render()), /Automatic bookmark refresh is unavailable/);
+  hooks.unmount();
+});
+
+test('a subscription failure after navigation does not load the previous meeting', async () => {
+  const hooks = createHookHarness();
+  const subscription = deferred();
+  let reads = 0;
+  const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'button' }, sonner: { toast: { error() {} } },
+    '@tauri-apps/api/core': { invoke: async () => { reads++; return []; } },
+    '@tauri-apps/api/event': { listen: () => subscription.promise },
+  });
+  hooks.render(() => MeetingBookmarks({ meetingId: 'meeting' }));
+  hooks.unmount(); subscription.reject(new Error('Synthetic subscription failure')); await flush();
+  assert.equal(reads, 0);
 });

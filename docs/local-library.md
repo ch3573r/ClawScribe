@@ -68,18 +68,24 @@ Microsoft export history (`exports.json`) is retained with the recording folder.
 Provider settings, credentials, model downloads, UI preferences, browser-stored
 meeting context, and unfinished recording recovery spools are excluded. Missing
 recording folders cause backup to fail with the affected meeting's title and
-reconnection guidance. Nonempty `.audio-spool` or `.checkpoints` directories also
-block backup, even when a partial final recording exists: this archive format
-cannot retain recovery originals. Preserve a separate copy of that recording
-folder, including hidden files; do not delete recovery originals to make backup
-succeed. A pending audio-save failure with no saved audio also blocks backup.
+reconnection guidance. Nonempty `.audio-spool` and `.checkpoints` directories
+remain on the source computer. They do not block backup: available saved audio,
+including `audio-recovered.wav`, is included, and the result lists each meeting
+whose recovery files were excluded or whose pending recovery has no saved audio.
+The warning list stays visible in **Backup and restore** and is stored in the
+archive. Preserve a separate copy of those source recording folders, including
+hidden files, if you need the recovery originals. Backup never removes them.
 Archives are not encrypted; keep them in trusted storage.
 
 Restore adds meetings whose IDs are absent from the library and skips existing
-IDs without overwriting them. Audio is staged in a new app-owned directory and
-database inserts commit together. Extracted files belonging to skipped meetings
-are removed before the database commits and the staged folder is retained; cleanup
-failure rolls back the import. Invalid archives leave existing meetings alone.
+IDs without overwriting them. Restore validates the archive structure and checks
+existing IDs before extracting audio, so disk space is needed only for new
+meetings' recordings. Audio is staged in a new app-owned directory and database
+inserts commit together. If another operation adds a meeting during extraction,
+its staged files are removed before commit; cleanup failure rolls back the import.
+If a previously skipped meeting is deleted during restore, retry is required so
+its audio can be extracted. Invalid archives leave existing meetings alone.
+Restore displays saved audio-omission warnings for imported meetings.
 Folder references are rewritten for the destination computer. Interrupted summary
 jobs are marked cancelled; their saved output is retained.
 
@@ -87,6 +93,8 @@ Version 1 archives have a JSON manifest and explicitly listed recording files.
 Only meeting-related database tables and known media/metadata files are included.
 The meetings table is required; missing known child tables are treated as empty
 so adding optional tables does not invalidate older version-1 backups.
+The optional `incomplete_audio` manifest field records omissions by meeting index;
+older archives without it remain readable.
 Restore rejects unknown tables/columns, unsafe paths, duplicate files, links,
 unsupported versions, and missing or extra archive entries. Limits are 128 MiB of
 manifest data, 100 GiB of file data, and 100,000 recording files. File copying runs
