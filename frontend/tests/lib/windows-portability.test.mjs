@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { verifyCache, verifyProfile } from '../../scripts/verify-windows-portability.mjs';
+import { removeStaleCaches, verifyCache, verifyProfile } from '../../scripts/verify-windows-portability.mjs';
 
 const flags = ['GGML_NATIVE', 'GGML_AVX512', 'GGML_AVX512_VBMI', 'GGML_AVX512_VNNI', 'GGML_AVX512_BF16'];
 const cache = flags.map(flag => `${flag}:BOOL=OFF`).join('\n');
@@ -28,7 +28,25 @@ test('bundling fails closed for missing or incompatible cached builds', () => {
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, 'CMakeCache.txt'), name === 'good' ? cache : cache.replace('GGML_NATIVE:BOOL=OFF', 'GGML_NATIVE:BOOL=ON'));
     }
-    assert.throws(() => verifyProfile(root), /GGML_NATIVE/);
+    assert.throws(() => verifyProfile(root), /whisper-rs-sys-stale: GGML_NATIVE/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('stale host-tuned caches are removed with their fingerprints and portable ones kept', () => {
+  const root = mkdtempSync(join(tmpdir(), 'clawscribe-portability-'));
+  try {
+    for (const name of ['good', 'stale']) {
+      const directory = join(root, 'build', `whisper-rs-sys-${name}`, 'out', 'build');
+      mkdirSync(directory, { recursive: true });
+      mkdirSync(join(root, '.fingerprint', `whisper-rs-sys-${name}`), { recursive: true });
+      writeFileSync(join(directory, 'CMakeCache.txt'), name === 'good' ? cache : cache.replace('GGML_NATIVE:BOOL=OFF', 'GGML_NATIVE:BOOL=ON'));
+    }
+    assert.deepEqual(removeStaleCaches(root), ['whisper-rs-sys-stale']);
+    assert.ok(!existsSync(join(root, 'build', 'whisper-rs-sys-stale')));
+    assert.ok(!existsSync(join(root, '.fingerprint', 'whisper-rs-sys-stale')));
+    assert.ok(existsSync(join(root, '.fingerprint', 'whisper-rs-sys-good')));
+    assert.equal(verifyProfile(root), 1);
+    assert.deepEqual(removeStaleCaches(root), []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -325,6 +325,16 @@ jobs:
         shell: pwsh
         run: ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
 
+      # clean:false keeps target/ between runs. Whisper caches configured before
+      # the portable CPU profile fail the bundle gate; remove only those so the
+      # build script reruns. The gate still verifies every cache before bundling.
+      - name: Remove host-tuned Whisper build caches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          node frontend/scripts/verify-windows-portability.mjs --remove-stale
+
       - name: Build llama-helper sidecar
         shell: pwsh
         run: |

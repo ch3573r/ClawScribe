@@ -17,10 +17,14 @@ acceleration paths under `windows-gpu`.
 
 The Windows Tauri `beforeBundleCommand` and native-test helper inspect Whisper
 CMake caches with `verify-windows-portability.mjs`. Missing caches or any stale
-incompatible cache fail the gate. On the designated runner, rebuild in a fresh
-Cargo target directory when changing portability settings; do not bypass the
-check to reuse a host-tuned cache. This gate verifies build configuration and
-does not replace testing on supported CPUs or the dual-source recording smoke.
+incompatible cache fail the gate. Because the designated runner keeps its target
+directory, the release workflow first runs the script with `--remove-stale`,
+which deletes only Whisper build outputs whose cache fails the gate, together
+with their Cargo fingerprints, so those build scripts rerun. Locally, run the
+same command from the repository root or use a fresh Cargo target directory; do
+not bypass the check to reuse a host-tuned cache. This gate verifies build
+configuration and does not replace testing on supported CPUs or the
+dual-source recording smoke.
 
 ### Toolchain
 

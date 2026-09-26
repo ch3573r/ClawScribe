@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -15,26 +15,55 @@ export function verifyCache(contents) {
   }
 }
 
-export function verifyProfile(profileDirectory) {
+function whisperCaches(profileDirectory) {
   const build = join(profileDirectory, 'build');
-  const caches = existsSync(build) ? readdirSync(build, { withFileTypes: true })
+  return existsSync(build) ? readdirSync(build, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && entry.name.startsWith('whisper-rs-sys-'))
-    .map(entry => join(build, entry.name, 'out', 'build', 'CMakeCache.txt')).filter(existsSync) : [];
+    .map(entry => ({ name: entry.name, cache: join(build, entry.name, 'out', 'build', 'CMakeCache.txt') }))
+    .filter(({ cache }) => existsSync(cache)) : [];
+}
+
+export function verifyProfile(profileDirectory) {
+  const caches = whisperCaches(profileDirectory);
   if (!caches.length) throw new Error('No Whisper CMake cache found; refusing to bundle unverified native code.');
-  for (const cache of caches) verifyCache(readFileSync(cache, 'utf8'));
+  for (const { name, cache } of caches) {
+    try { verifyCache(readFileSync(cache, 'utf8')); } catch (error) { throw new Error(`${name}: ${error.message}`); }
+  }
   return caches.length;
+}
+
+// A persistent runner keeps caches configured before the portable profile.
+// Removing the build output and its fingerprint makes Cargo rerun the build
+// script if that unit is needed again; nothing incompatible is reused.
+export function removeStaleCaches(profileDirectory) {
+  const removed = [];
+  for (const { name, cache } of whisperCaches(profileDirectory)) {
+    try { verifyCache(readFileSync(cache, 'utf8')); } catch {
+      for (const directory of ['build', '.fingerprint']) {
+        rmSync(join(profileDirectory, directory, name), { recursive: true, force: true });
+      }
+      removed.push(name);
+    }
+  }
+  return removed;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    let profile = process.argv[2];
+    const removeStale = process.argv.includes('--remove-stale');
+    let profile = process.argv.slice(2).find(argument => argument !== '--remove-stale');
     if (!profile) {
       const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '..');
       const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1',
         '--manifest-path', join(frontend, 'src-tauri', 'Cargo.toml')], { encoding: 'utf8' }));
       profile = join(metadata.target_directory, 'release');
     }
-    console.log(`Verified ${verifyProfile(profile)} Whisper build cache(s) for Windows CPU portability.`);
+    if (removeStale) {
+      const removed = removeStaleCaches(profile);
+      console.log(removed.length ? `Removed incompatible Whisper build cache(s): ${removed.join(', ')}` : 'No incompatible Whisper build caches found.');
+    } else {
+      console.log(`Verified ${verifyProfile(profile)} Whisper build cache(s) for Windows CPU portability.`);
+    }
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
