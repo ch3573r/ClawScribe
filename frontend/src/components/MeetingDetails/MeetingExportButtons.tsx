@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
-import { Loader2, Upload, ChevronDown } from "lucide-react";
+import { Loader2, Upload, ChevronDown, FileText } from "lucide-react";
 import {
   ConfluenceIcon,
   OneNoteIcon,
@@ -49,6 +51,9 @@ import {
 import { confluenceExportService } from "@/services/confluenceExportService";
 import { PlannerExportPreview } from "./PlannerExportPreview";
 import { ToDoExportPreview } from "./ToDoExportPreview";
+import { ExportContentOptions } from "./ExportContentOptions";
+import { defaultExportOptions, prepareMeetingExport, readExportSummary } from "@/lib/meetingExportContent";
+import { safeDocumentName } from "@/lib/library";
 
 interface MeetingExportButtonsProps {
   meetingId: string;
@@ -56,11 +61,17 @@ interface MeetingExportButtonsProps {
   meetingCreatedAt?: string;
   /** Resolves the current summary as markdown. */
   getMarkdown: () => Promise<string>;
-  /** Resolves the current transcript as plain text for file exports. */
-  getTranscript?: () => string;
+  disabled?: boolean;
 }
 
-type Busy = "onenote" | "onedrive" | "planner" | "todo" | "confluence" | null;
+type DocumentDestination = "word" | "onedrive" | "confluence";
+type Busy = DocumentDestination | "onenote" | null;
+
+const documentLabels: Record<DocumentDestination, { title: string; description: string; submit: string }> = {
+  word: { title: "Export Word document", description: "Save an editable .docx on this computer. Microsoft sign-in is not required.", submit: "Save as Word document" },
+  onedrive: { title: "Export to OneDrive", description: "Upload the selected content as DOCX and, if enabled in Settings, PDF to your saved OneDrive destination.", submit: "Upload to OneDrive" },
+  confluence: { title: "Export to Confluence", description: "Copy the selected content as a browser draft or publish it using your configured Confluence connection.", submit: "Export to Confluence" },
+};
 
 const ONENOTE_NOTEBOOK_MAX = 128;
 function sanitizeNotebookName(raw: string): string {
@@ -110,21 +121,27 @@ function errorText(error: unknown): string {
 }
 
 /**
- * Per-meeting export actions shown in the summary view. OneNote is always
- * available once Microsoft is connected; exporting opens a dialog to choose the
- * notebook and section where a new page will be created. Planner appears only
- * when the summary has action items.
+ * Document exports share content options and stay available without a summary.
+ * Microsoft destinations require a connection; task exports retain their review.
  */
 export function MeetingExportButtons({
   meetingId,
   meetingTitle,
   meetingCreatedAt,
   getMarkdown,
-  getTranscript,
+  disabled = false,
 }: MeetingExportButtonsProps) {
   const [connected, setConnected] = useState(false);
   const [hasActionItems, setHasActionItems] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
+  const pending = useRef(false);
+  const [documentDestination, setDocumentDestination] = useState<DocumentDestination | null>(null);
+  const [exportOptions, setExportOptions] = useState(() => defaultExportOptions());
+
+  const openDocumentExport = (destination: DocumentDestination) => {
+    setExportOptions(defaultExportOptions(destination === "word" ? "both" : "summary"));
+    setDocumentDestination(destination);
+  };
 
   const [oneNoteOpen, setOneNoteOpen] = useState(false);
   const [plannerOpen, setPlannerOpen] = useState(false);
@@ -244,6 +261,7 @@ export function MeetingExportButtons({
   // Opening the OneNote dialog: load the saved destination if present, then let
   // the user override it or create a notebook/section inline.
   const openOneNote = useCallback(() => {
+    setExportOptions(defaultExportOptions());
     const saved = getExportDestinations();
     const generatedTitle = defaultDatedTitle(meetingTitle, meetingCreatedAt);
     setOneNoteNotebookId(saved.notebookId ?? "");
@@ -257,6 +275,7 @@ export function MeetingExportButtons({
   }, [meetingCreatedAt, meetingTitle]);
 
   const confirmOneNote = useCallback(async () => {
+    if (pending.current) return;
     const pageTitle = oneNotePageTitle.trim() || defaultDatedTitle(meetingTitle, meetingCreatedAt);
     const sectionName = sanitizeSectionName(oneNoteSectionName).trim();
     if (!oneNoteNotebookId) {
@@ -267,13 +286,10 @@ export function MeetingExportButtons({
       toast.info("Enter a OneNote section name.");
       return;
     }
+    pending.current = true;
     setBusy("onenote");
     try {
-      const md = await getMarkdown();
-      if (!md.trim()) {
-        toast.info("Nothing to export yet — generate a summary first.");
-        return;
-      }
+      const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, exportOptions);
       const notebookName =
         oneNoteNotebooks.find((n) => n.id === oneNoteNotebookId)?.displayName ??
         oneNoteSavedNotebookName ??
@@ -298,10 +314,12 @@ export function MeetingExportButtons({
         description: e instanceof Error ? e.message : String(e),
       });
     } finally {
+      pending.current = false;
       setBusy(null);
     }
   }, [
     getMarkdown,
+    exportOptions,
     meetingCreatedAt,
     meetingId,
     meetingTitle,
@@ -339,13 +357,11 @@ export function MeetingExportButtons({
   }, []);
 
   const exportConfluence = useCallback(async () => {
+    if (pending.current) return;
+    pending.current = true;
     setBusy("confluence");
     try {
-      const md = await getMarkdown();
-      if (!md.trim()) {
-        toast.info("Nothing to export yet — generate a summary first.");
-        return;
-      }
+      const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, exportOptions);
 
       const draft = buildConfluenceDraftMarkdown({
         meetingId,
@@ -383,6 +399,7 @@ export function MeetingExportButtons({
             bodyStorage: markdownToConfluenceHtml(draft),
           });
 
+          setDocumentDestination(null);
           toast.success("Confluence export complete", {
             description: report.webUrl ? "Page created in Confluence." : report.title,
             action: report.webUrl
@@ -395,6 +412,7 @@ export function MeetingExportButtons({
           if (url && confluenceOpenAfterCopy) {
             window.open(url, "_blank");
           }
+          setDocumentDestination(null);
           toast.error("Confluence REST export failed", {
             description:
               copyMode === "rich"
@@ -410,6 +428,7 @@ export function MeetingExportButtons({
         window.open(url, "_blank");
       }
 
+      setDocumentDestination(null);
       toast.success("Confluence draft copied", {
         description:
           mode === "rich"
@@ -421,25 +440,24 @@ export function MeetingExportButtons({
         description: errorText(e),
       });
     } finally {
+      pending.current = false;
       setBusy(null);
     }
-  }, [getMarkdown, meetingCreatedAt, meetingId, meetingTitle]);
+  }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle]);
 
   const exportOneDrive = useCallback(async () => {
+    if (pending.current) return;
+    pending.current = true;
     setBusy("onedrive");
     try {
-      const md = await getMarkdown();
-      if (!md.trim()) {
-        toast.info("Nothing to export yet — generate a summary first.");
-        return;
-      }
+      const { summary, transcript } = await prepareMeetingExport(meetingId, getMarkdown, exportOptions);
 
       const destinations = getExportDestinations();
       const response = await microsoftExportService.exportMeetingToOneDriveFiles({
         meetingId,
         meetingTitle: defaultDatedTitle(meetingTitle, meetingCreatedAt),
-        markdown: md,
-        transcript: getTranscript?.() ?? null,
+        markdown: summary,
+        transcript,
         destination: destinations.oneDriveDestination ?? null,
         includePdf: destinations.oneDriveIncludePdf ?? true,
         createOrganizationLink: destinations.oneDriveCreateOrganizationLink ?? false,
@@ -450,6 +468,7 @@ export function MeetingExportButtons({
         response.files.find((file) => file.webUrl)?.webUrl ??
         null;
       const kinds = response.files.map((file) => file.kind.toUpperCase()).join(" + ");
+      setDocumentDestination(null);
       toast.success("OneDrive export complete", {
         description: `${kinds || "Files"} uploaded to ${response.destination.name}.`,
         action: openUrl
@@ -461,15 +480,40 @@ export function MeetingExportButtons({
         description: errorText(e),
       });
     } finally {
+      pending.current = false;
       setBusy(null);
     }
-  }, [getMarkdown, getTranscript, meetingCreatedAt, meetingId, meetingTitle]);
+  }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle]);
+
+  const exportWord = async () => {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy("word");
+    try {
+      const markdown = await readExportSummary(getMarkdown, exportOptions);
+      const path = await save({ defaultPath: safeDocumentName(meetingTitle), filters: [{ name: "Word document", extensions: ["docx"] }] });
+      if (!path) return;
+      await invoke("export_local_word", {
+        meetingId, title: meetingTitle, markdown, path,
+        includeTranscript: exportOptions.content !== "summary",
+        includeSpeakers: exportOptions.speakers,
+        includeTimestamps: exportOptions.timestamps,
+      });
+      toast.success("Word document saved");
+      setDocumentDestination(null);
+    } catch (error) {
+      toast.error("Word export failed", { description: errorText(error) });
+    } finally {
+      pending.current = false;
+      setBusy(null);
+    }
+  };
 
   return (
     <div className="flex items-center gap-2">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="outline" size="sm" disabled={busy !== null}>
+          <Button type="button" variant="outline" size="sm" aria-label="Export meeting" disabled={disabled || busy !== null}>
             {busy !== null ? (
               <Loader2 className="h-4 w-4 animate-spin 2xl:mr-2" />
             ) : (
@@ -480,7 +524,11 @@ export function MeetingExportButtons({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-52">
-          <DropdownMenuLabel>Export summary to</DropdownMenuLabel>
+          <DropdownMenuLabel>Export meeting to</DropdownMenuLabel>
+          <DropdownMenuItem onClick={() => openDocumentExport("word")}>
+            <FileText className="mr-2 h-4 w-4" />
+            Word document (.docx)
+          </DropdownMenuItem>
           {connected && (
             <DropdownMenuItem onClick={openOneNote}>
               <OneNoteIcon className="mr-2 h-4 w-4" />
@@ -488,7 +536,7 @@ export function MeetingExportButtons({
             </DropdownMenuItem>
           )}
           {connected && (
-            <DropdownMenuItem onClick={exportOneDrive}>
+            <DropdownMenuItem onClick={() => openDocumentExport("onedrive")}>
               <OneDriveIcon className="mr-2 h-4 w-4" />
               OneDrive DOCX/PDF
             </DropdownMenuItem>
@@ -505,15 +553,31 @@ export function MeetingExportButtons({
               Microsoft To Do tasks
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onClick={exportConfluence}>
+          <DropdownMenuItem onClick={() => openDocumentExport("confluence")}>
             <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
+      <Dialog open={documentDestination !== null} onOpenChange={open => { if (!open && !pending.current) setDocumentDestination(null); }}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{documentDestination && documentLabels[documentDestination].title}</DialogTitle>
+            <DialogDescription>{documentDestination && documentLabels[documentDestination].description}</DialogDescription>
+          </DialogHeader>
+          <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
+          <DialogFooter>
+            <Button variant="outline" disabled={busy !== null} onClick={() => setDocumentDestination(null)}>Cancel</Button>
+            <Button disabled={busy !== null} onClick={documentDestination === "word" ? exportWord : documentDestination === "onedrive" ? exportOneDrive : exportConfluence}>
+              {busy !== null ? "Exporting…" : documentDestination && documentLabels[documentDestination].submit}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={oneNoteOpen} onOpenChange={(o) => !busy && setOneNoteOpen(o)}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Export to OneNote</DialogTitle>
             <DialogDescription>
@@ -522,6 +586,7 @@ export function MeetingExportButtons({
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="onenote-notebook">Notebook</Label>

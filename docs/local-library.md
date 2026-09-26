@@ -2,7 +2,7 @@
 
 ## Word documents
 
-Open a saved meeting and select **Export Word**. Choose the summary, the full
+Open a saved meeting and select **Export → Word document (.docx)**. Choose the summary, the full
 transcript, or both, then save a `.docx` file. Speaker labels and timestamps are
 optional. Export runs locally without Word, Microsoft sign-in, or a network
 connection. The summary uses the current editor contents; transcripts use the
@@ -14,6 +14,25 @@ export and backup destinations, and `dialog:allow-open` for restore archives.
 These permissions are required in the packaged app even though the dialog plugin
 is registered in Rust. The frontend regression suite checks the shipped capability;
 browser tests with mocked native calls cannot verify dialog access.
+
+## Shared document export options
+
+The **Export** menu groups local Word, Confluence, OneNote, and OneDrive DOCX/PDF.
+Each destination lets you choose **Summary only**, **Transcript only**, or
+**Summary and transcript**, with optional speaker labels and transcript timestamps.
+Formatting switches are disabled for summary-only exports. The menu remains
+available without a summary so saved transcripts can be exported on their own.
+
+Local Word starts with both summary and transcript selected. Remote document
+destinations start with summary only; select a transcript explicitly before
+copying or uploading it. Confluence and OneDrive show the options before export;
+OneNote includes them alongside the notebook and section fields. Planner and
+Microsoft To Do keep their action-item selection and editing previews.
+
+Exports use current editor notes and the full saved transcript, independent of
+the visible transcript page. A transcript read failure stops the export instead
+of silently sending incomplete content. Confluence browser drafts, REST pages,
+and clipboard fallback all use the same selected content.
 
 ## Project tags
 

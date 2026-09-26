@@ -7,7 +7,6 @@ import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
 import { MeetingExportButtons } from './MeetingExportButtons';
-import { LocalWordExport } from './LocalWordExport';
 import { ProjectTags } from './ProjectTags';
 import Analytics from '@/lib/analytics';
 import { TextReplaceDialog } from './TextReplaceDialog';
@@ -73,35 +72,6 @@ type SummaryTextMatch = {
   start: number;
   end: number;
 };
-
-function formatTranscriptTime(seconds: number): string {
-  const safeSeconds = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(safeSeconds / 3600);
-  const minutes = Math.floor((safeSeconds % 3600) / 60);
-  const secs = safeSeconds % 60;
-  if (hours > 0) {
-    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  }
-  return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-}
-
-function transcriptToPlainText(transcripts: Transcript[]): string {
-  return transcripts
-    .filter((segment) => !segment.is_partial && segment.text.trim())
-    .map((segment) => {
-      const timestamp =
-        typeof segment.audio_start_time === 'number'
-          ? formatTranscriptTime(segment.audio_start_time)
-          : segment.timestamp;
-      const speaker = segment.speaker?.trim();
-      return [
-        `[${timestamp}]`,
-        speaker ? speaker : null,
-        segment.text.trim(),
-      ].filter(Boolean).join('\n');
-    })
-    .join('\n\n');
-}
 
 export function SummaryPanel({
   onRevealSource,
@@ -437,7 +407,10 @@ export function SummaryPanel({
 
           <div className="flex max-w-full flex-wrap gap-2">
             <ProjectTags key={`tags-${meeting.id}`} meetingId={meeting.id} />
-            <LocalWordExport key={`word-${meeting.id}`} meetingId={meeting.id} title={meetingTitle}
+            <MeetingExportButtons key={meeting.id}
+              meetingId={meeting.id}
+              meetingTitle={meetingTitle}
+              meetingCreatedAt={meeting.created_at}
               disabled={isSummaryLoading}
               getMarkdown={async () => (await summaryRef.current?.getMarkdown()) ?? ''} />
           </div>
@@ -473,15 +446,6 @@ export function SummaryPanel({
               />
 
               <Button variant="outline" size="sm" onClick={() => setReplaceOpen(true)}>Replace text</Button>
-              <MeetingExportButtons
-                meetingId={meeting.id}
-                meetingTitle={meetingTitle}
-                meetingCreatedAt={meeting.created_at}
-                getMarkdown={async () =>
-                  (await summaryRef.current?.getMarkdown()) ?? ''
-                }
-                getTranscript={() => transcriptToPlainText(transcripts)}
-              />
             </div>
           )}
         </div>

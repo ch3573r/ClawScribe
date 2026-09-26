@@ -1400,7 +1400,7 @@ function ConfluencePanel() {
       state={mode === "draft" ? "prompt" : restReady ? "ready" : "advanced"}
       badgeLabel={badgeLabel}
       badgeClasses={badgeClasses}
-      detail="Export meeting summaries as a browser draft, or create pages directly on self-hosted Confluence with a PAT."
+      detail="Export meeting notes, transcripts, or both as a browser draft, or create pages directly on self-hosted Confluence with a PAT."
     >
       <div className="space-y-3">
         <div className="grid gap-2 sm:grid-cols-2">
@@ -1618,8 +1618,8 @@ function ConfluencePanel() {
           <p className="font-medium text-foreground">Export flow</p>
           <p className="mt-1">
             {mode === "draft"
-              ? "Meeting summary -> Confluence button -> clipboard -> browser create page. Paste into the editor and save under the space/page you want."
-              : "Meeting summary -> Confluence button -> REST API page create. If the API call fails, ClawScribe copies the browser draft instead."}
+              ? "Meeting -> Export -> Confluence -> choose content -> clipboard and browser. Paste into the editor and save under the space/page you want."
+              : "Meeting -> Export -> Confluence -> choose content -> create page. If the API call fails, ClawScribe copies the selected content as a browser draft instead."}
           </p>
         </div>
       </div>

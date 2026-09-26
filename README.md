@@ -160,6 +160,8 @@ retain Tauri signature verification and remain subject to Windows security polic
 The meeting library tools introduced in 0.5.43 remain available:
 
 - Export a local Word document with notes, the complete transcript, or both.
+- Use one **Export** menu for Word, Confluence, OneNote, and OneDrive DOCX/PDF,
+  with summary/transcript selection and optional speaker labels and timestamps.
 - Organize meetings with project tags and filter the archive and transcript search.
 - Back up saved meeting data and recordings; restore missing meetings without
   overwriting existing IDs.
