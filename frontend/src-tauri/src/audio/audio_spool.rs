@@ -296,6 +296,66 @@ fn recover_inner(folder: &Path, encoder_available: bool) -> std::io::Result<Audi
     result
 }
 
+// Packet presentation timestamps exclude AAC encoder priming; packet durations
+// also exclude final frame padding. Decoded sample counts alone can hide lost audio.
+fn recovered_covers_samples(path: &Path, samples: u64, sample_rate: u32) -> bool {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let Some(ffmpeg) = super::ffmpeg::find_ffmpeg_path() else {
+        return false;
+    };
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-c:a", "copy", "-f", "framecrc", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let output = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || -> Option<bool> {
+        let mut time_base = None;
+        let mut end = 0i64;
+        for line in BufReader::new(output).lines() {
+            let line = line.ok()?;
+            if let Some(base) = line.strip_prefix("#tb 0: ") {
+                let (num, den) = base.trim().split_once('/')?;
+                time_base = Some((num.parse::<u64>().ok()?, den.parse::<u64>().ok()?));
+            } else if !line.starts_with('#') && !line.is_empty() {
+                let mut fields = line.split(',').map(str::trim);
+                if fields.next()? != "0" {
+                    return None;
+                }
+                fields.next()?; // Decode timestamp; presentation timestamp follows.
+                let pts = fields.next()?.parse::<i64>().ok()?;
+                let duration = fields.next()?.parse::<i64>().ok()?;
+                if duration <= 0 {
+                    return None;
+                }
+                end = end.max(pts.checked_add(duration)?);
+            }
+        }
+        let (num, den) = time_base?;
+        Some(
+            num > 0
+                && den > 0
+                && end > 0
+                && end as u128 * num as u128 * sample_rate as u128 >= samples as u128 * den as u128,
+        )
+    });
+    let valid = super::encode::wait_for_encoder(&mut child).is_ok();
+    let covers_capture = reader.join().ok().flatten() == Some(true);
+    valid && covers_capture
+}
+
 /// Release only a completely recovered spool, after the caller has saved the meeting.
 pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), String> {
     if super::recording_commands::is_recording().await {
@@ -313,6 +373,7 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
             return Ok(());
         }
         let mut rate = None;
+        let mut samples = 0u64;
         for (index, path) in paths.iter().enumerate() {
             if path
                 .file_stem()
@@ -330,6 +391,9 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
                 return Ok(());
             }
             rate = Some(chunk.sample_rate);
+            samples = samples
+                .checked_add(chunk.data.len() as u64)
+                .ok_or("Capture length is invalid")?;
         }
         // A full decode verifies the published recovery before originals are removed.
         if !["audio-recovered.mp4", "audio-recovered.wav"]
@@ -337,6 +401,7 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
             .any(|name| {
                 super::incremental_saver::validate_recoverable_temp_audio_file(&folder.join(name))
                     .is_ok()
+                    && recovered_covers_samples(&folder.join(name), samples, rate.unwrap())
             })
         {
             return Ok(());
@@ -382,6 +447,7 @@ mod tests {
         }
         drop(sender);
         let damaged = root.path().join(".audio-spool/00000000000000000001.chunk");
+        let original = fs::read(&damaged).unwrap();
         fs::write(&damaged, b"interrupted chunk").unwrap();
         let output = root.path().join("audio.mp4");
         let (gaps, all_encoded) = encode_capture(root.path(), &output).unwrap();
@@ -391,7 +457,39 @@ mod tests {
         assert_eq!(recover(root.path()).unwrap().status, "partial");
         release_recovered_capture(root.path()).await.unwrap();
         assert!(damaged.exists());
+        // The skipped chunk becomes readable after recovery. The older recovered
+        // file still decodes, but must not authorize deleting the newly readable audio.
+        for compressed in [true, false] {
+            fs::write(&damaged, b"interrupted chunk").unwrap();
+            let status = recover_inner(root.path(), compressed).unwrap();
+            fs::write(&damaged, &original).unwrap();
+            release_recovered_capture(root.path()).await.unwrap();
+            assert!(damaged.exists());
+            assert!(!recovered_covers_samples(
+                Path::new(&status.audio_file_path.unwrap()),
+                14400,
+                48000
+            ));
+        }
+        recover(root.path()).unwrap();
+        release_recovered_capture(root.path()).await.unwrap();
+        assert!(!damaged.exists());
     }
+    #[test]
+    fn aac_padding_does_not_cover_missing_capture_samples() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audio-recovered.mp4");
+        super::super::encode::encode_single_audio(
+            bytemuck::cast_slice(&vec![0.05f32; 4800]),
+            48000,
+            1,
+            &path,
+        )
+        .unwrap();
+        assert!(recovered_covers_samples(&path, 4800, 48000));
+        assert!(!recovered_covers_samples(&path, 4832, 48000));
+    }
+
     #[tokio::test]
     async fn recovery_includes_readable_temporary_tail_and_reports_torn_writes() {
         for (published, torn) in [(0, false), (2, false), (2, true)] {
