@@ -121,6 +121,10 @@ fn wait_for_redirect(
             }
             Err(_) => return Err(MsAuthError::Network("Loopback listener failed".into())),
         };
+        // Windows may inherit the listener's nonblocking mode on accepted sockets.
+        stream
+            .set_nonblocking(false)
+            .map_err(|_| MsAuthError::Network("Could not configure sign-in connection".into()))?;
         stream
             .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|_| MsAuthError::Network("Could not configure sign-in listener".into()))?;
@@ -336,6 +340,27 @@ async fn run_interactive_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_accepts_callback_after_client_connects() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            wait_for_redirect(
+                listener,
+                CancellationToken::new(),
+                Instant::now() + Duration::from_secs(2),
+            )
+        });
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        client
+            .write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let result = worker.join().unwrap().unwrap();
+        assert_eq!(result.code.as_deref(), Some("test-code"));
+        assert_eq!(result.state.as_deref(), Some("test-state"));
+    }
 
     #[test]
     fn listener_exits_and_releases_port_after_timeout_or_cancel() {
