@@ -9,6 +9,12 @@ connection. The summary uses the current editor contents; transcripts use the
 complete saved database snapshot rather than the visible page. Basic headings,
 bullets, and paragraphs are supported; advanced editor formatting is not retained.
 
+The local main window's Tauri capability grants `dialog:allow-save` for Word
+export and backup destinations, and `dialog:allow-open` for restore archives.
+These permissions are required in the packaged app even though the dialog plugin
+is registered in Rust. The frontend regression suite checks the shipped capability;
+browser tests with mocked native calls cannot verify dialog access.
+
 ## Project tags
 
 Use **Project tags** in a saved meeting to assign comma-separated labels. The

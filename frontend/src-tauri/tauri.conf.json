@@ -60,6 +60,7 @@
                         "notification:default",
                         "notification:allow-is-permission-granted",
                         "dialog:allow-open",
+                        "dialog:allow-save",
                         "updater:default",
                         "process:default"
                     ]
