@@ -53,7 +53,9 @@ exporting tasks. Obtain the recording permissions required for your meeting.
   transcription, and leaves a **Transcribe** action on the saved meeting.
 - Recording continues after temporary queue pressure or spool-write failures,
   with incomplete audio reported visibly. Playback streams saved recordings.
-  Recovery originals use about 700 MB per hour while recording; choose a local
+  Stop saves available audio even if transcript backup writes fail, and capture
+  gaps are reported separately from save failures. Repeated Stop actions reuse
+  the same library meeting. Recovery originals use about 700 MB per hour while recording; choose a local
   folder with enough space. See [recording and recovery](docs/meeting-quality.md).
 - Correct transcript passages or preview literal find-and-replace across the
   entire meeting. Original recognition and segment timing are retained; undo

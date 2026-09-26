@@ -1240,6 +1240,96 @@ pub async fn api_save_meeting_title<R: Runtime>(
     }
 }
 
+fn parse_recording_transcripts(
+    values: Vec<serde_json::Value>,
+) -> Result<Vec<TranscriptSegment>, String> {
+    values
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|_| "Invalid transcript segment data".into())
+}
+
+fn read_recording_snapshot(
+    folder: Option<&std::path::Path>,
+) -> Result<Vec<TranscriptSegment>, String> {
+    let path = folder
+        .ok_or("Recording folder unavailable")?
+        .join("transcripts.json");
+    let file = std::fs::File::open(path).map_err(|_| "Saved transcript could not be opened")?;
+    let snapshot: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file))
+        .map_err(|_| "Saved transcript could not be read")?;
+    let mut segments = snapshot
+        .get("segments")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .ok_or("Saved transcript has no segment list")?;
+    for segment in &mut segments {
+        if let Some(object) = segment.as_object_mut() {
+            let timestamp = object
+                .get("display_time")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(""));
+            object.insert("timestamp".into(), timestamp);
+        }
+    }
+    parse_recording_transcripts(segments)
+}
+
+fn select_recording_transcripts(
+    saved: Result<Vec<TranscriptSegment>, String>,
+    fallback: Vec<serde_json::Value>,
+) -> Result<(Vec<TranscriptSegment>, bool), String> {
+    match saved {
+        Ok(segments) => Ok((segments, false)),
+        Err(_) => Ok((parse_recording_transcripts(fallback)?, true)),
+    }
+}
+
+#[cfg(test)]
+mod recording_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn missing_and_invalid_snapshots_fall_back_to_valid_ui_segments() {
+        let root = tempfile::tempdir().unwrap();
+        for contents in [
+            None,
+            Some("not json"),
+            Some(r#"{"segments":[{"invalid":true}]}"#),
+        ] {
+            if let Some(contents) = contents {
+                std::fs::write(root.path().join("transcripts.json"), contents).unwrap();
+            }
+            let fallback = vec![
+                serde_json::json!({"id":"ui", "text":"Synthetic fallback", "timestamp":"00:01"}),
+            ];
+            let (segments, used_fallback) =
+                select_recording_transcripts(read_recording_snapshot(Some(root.path())), fallback)
+                    .unwrap();
+            assert!(used_fallback);
+            assert_eq!(segments[0].id, "ui");
+        }
+        assert!(select_recording_transcripts(
+            Err("unavailable".into()),
+            vec![serde_json::json!({})]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn valid_backend_snapshot_remains_authoritative() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("transcripts.json"), r#"{"segments":[{"id":"backend","text":"Synthetic saved sentence","display_time":"00:02"}]}"#).unwrap();
+        let (segments, used_fallback) =
+            select_recording_transcripts(read_recording_snapshot(Some(root.path())), vec![])
+                .unwrap();
+        assert!(!used_fallback);
+        assert_eq!(segments[0].id, "backend");
+        assert_eq!(segments[0].timestamp, "00:02");
+    }
+}
+
 #[tauri::command]
 pub async fn api_save_transcript<R: Runtime>(
     _app: AppHandle<R>,
@@ -1254,64 +1344,42 @@ pub async fn api_save_transcript<R: Runtime>(
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Saving meeting transcript");
 
-    let transcripts = if use_saved_recording.unwrap_or(false) {
-        let folder = folder_path
-            .as_ref()
-            .ok_or("Recording folder unavailable. Keep the recovery files and retry saving.")?;
-        let path = std::path::PathBuf::from(folder).join("transcripts.json");
-        tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
-            let file = std::fs::File::open(path).map_err(|_| {
-                "Saved transcript could not be opened. Keep the recovery files and retry."
-            })?;
-            let snapshot: serde_json::Value =
-                serde_json::from_reader(std::io::BufReader::new(file)).map_err(|_| {
-                    "Saved transcript could not be read. Keep the recovery files and retry."
-                })?;
-            let mut segments = snapshot
-                .get("segments")
-                .and_then(|value| value.as_array())
-                .cloned()
-                .ok_or("Saved transcript has no segment list.")?;
-            for segment in &mut segments {
-                if let Some(object) = segment.as_object_mut() {
-                    let timestamp = object
-                        .get("display_time")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!(""));
-                    object.insert("timestamp".into(), timestamp);
-                }
-            }
-            Ok(segments)
+    let (transcripts_to_save, used_fallback) = if use_saved_recording.unwrap_or(false) {
+        let folder = folder_path.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            read_recording_snapshot(folder.as_deref().map(std::path::Path::new))
         })
         .await
-        .map_err(|_| "Saved transcript reader failed")??
+        .unwrap_or_else(|_| Err("Saved transcript reader failed".into()));
+        select_recording_transcripts(saved, transcripts)?
     } else {
-        transcripts
+        (parse_recording_transcripts(transcripts)?, false)
     };
 
-    // Convert serde_json::Value to TranscriptSegment
-    let transcripts_to_save: Vec<TranscriptSegment> = transcripts
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            log_error!("Failed to parse transcript segments");
-            format!(
-                "Invalid transcript data format: {}. Please check the data structure.",
-                e
-            )
-        })?;
-
+    let mut save_warnings = Vec::new();
     let mut recording_outcome = recording_outcome.unwrap_or_default();
+    if used_fallback {
+        recording_outcome.transcription_incomplete = true;
+        save_warnings.push("The final transcript snapshot was unavailable. Saved the transcript visible in the app; review it for missing lines.");
+        log_warn!("Library save used the UI transcript because the final snapshot was unavailable");
+    }
     if let Some(folder) = folder_path.as_ref().map(std::path::PathBuf::from) {
         let saved = tokio::task::spawn_blocking(move || {
             crate::audio::outcome::RecordingOutcome::read(&folder)
         })
-        .await
-        .map_err(|_| "Recording status reader failed")??;
-        if let Some(saved) = saved {
-            recording_outcome.audio_save_failed |= saved.audio_save_failed;
-            recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
+        .await;
+        match saved {
+            Ok(Ok(Some(saved))) => {
+                recording_outcome.audio_save_failed |= saved.audio_save_failed;
+                recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
+                recording_outcome.capture_incomplete |= saved.capture_incomplete;
+                recording_outcome.recording_files_incomplete |= saved.recording_files_incomplete;
+            }
+            Ok(Ok(None)) => {}
+            _ => {
+                recording_outcome.recording_files_incomplete = true;
+                save_warnings.push("The recording warning file could not be read. Review the saved meeting and keep its folder.");
+            }
         }
     }
     let pool = state.db_manager.pool();
@@ -1331,7 +1399,9 @@ pub async fn api_save_transcript<R: Runtime>(
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",
-                "meeting_id": meeting_id
+                "meeting_id": meeting_id,
+                "warning": if save_warnings.is_empty() { None } else { Some(save_warnings.join(" ")) },
+                "recording_outcome": recording_outcome
             }))
         }
         Err(e) => {

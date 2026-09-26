@@ -38,6 +38,8 @@ struct AudioData {
 /// Incremental audio saver that writes checkpoints every few seconds
 /// to minimize memory usage and enable crash recovery
 pub struct IncrementalAudioSaver {
+    pub(super) capture_incomplete: bool,
+    pub(super) raw_fully_encoded: bool,
     checkpoint_buffer: Vec<AudioData>,
     checkpoint_interval_samples: usize,
     checkpoint_count: u32,
@@ -64,6 +66,8 @@ impl IncrementalAudioSaver {
         }
 
         Ok(Self {
+            capture_incomplete: false,
+            raw_fully_encoded: false,
             checkpoint_buffer: Vec::new(),
             checkpoint_interval_samples: sample_rate as usize * CHECKPOINT_INTERVAL_SECONDS,
             checkpoint_count: 0,
@@ -152,31 +156,35 @@ impl IncrementalAudioSaver {
     pub async fn finalize(&mut self) -> Result<PathBuf> {
         info!("Finalizing incremental recording...");
 
-        // Save final buffer if not empty
-        if !self.checkpoint_buffer.is_empty() {
-            info!(
-                "Saving final checkpoint with remaining {} chunks",
-                self.checkpoint_buffer.len()
-            );
-            self.save_checkpoint()?;
-            self.checkpoint_buffer.clear();
-        }
-
-        if self.checkpoint_count == 0 {
-            return Err(anyhow!(
-                "No audio checkpoints to merge - recording may have failed"
-            ));
-        }
-
-        // Merge all checkpoints using FFmpeg concat
         let final_audio_path = self.meeting_folder.join(FINAL_AUDIO_FILE);
         let staged = self.meeting_folder.join(".audio-finalizing.mp4");
         if self.meeting_folder.join(".audio-spool").is_dir() {
-            super::audio_spool::encode_capture(&self.meeting_folder, &staged)?;
+            match super::audio_spool::encode_capture(&self.meeting_folder, &staged) {
+                Ok((gaps, all_encoded)) => {
+                    self.capture_incomplete = gaps;
+                    self.raw_fully_encoded = all_encoded;
+                }
+                Err(error) => {
+                    // Old/interrupted sessions can still have usable checkpoints.
+                    // New recordings use only the raw spool, so retain it on failure.
+                    if list_checkpoint_files(&self.checkpoints_dir)?.is_empty() {
+                        return Err(error);
+                    }
+                    warn!("Raw capture encoding failed; trying retained legacy checkpoints");
+                    self.capture_incomplete = true;
+                    self.merge_checkpoints(&staged).await?;
+                }
+            }
         } else {
+            if !self.checkpoint_buffer.is_empty() {
+                self.save_checkpoint()?;
+                self.checkpoint_buffer.clear();
+            }
             self.merge_checkpoints(&staged).await?;
         }
-        validate_recoverable_audio_file(&staged)?;
+        if std::fs::metadata(&staged)?.len() == 0 {
+            return Err(anyhow!("Final audio is empty"));
+        }
         std::fs::OpenOptions::new()
             .write(true)
             .open(&staged)?
@@ -185,11 +193,12 @@ impl IncrementalAudioSaver {
 
         // Clean up checkpoints directory
         info!("Cleaning up {} checkpoint files", self.checkpoint_count);
-        if let Err(_e) = std::fs::remove_dir_all(&self.checkpoints_dir) {
-            warn!("Failed to clean up checkpoints directory");
-            // Non-fatal - user can manually delete
+        if self.raw_fully_encoded || !self.meeting_folder.join(".audio-spool").is_dir() {
+            if let Err(_e) = std::fs::remove_dir_all(&self.checkpoints_dir) {
+                warn!("Failed to clean up checkpoints directory");
+                // Non-fatal - user can manually delete
+            }
         }
-
         info!("Finalized recording");
 
         Ok(final_audio_path)
@@ -358,7 +367,7 @@ fn validate_recoverable_audio_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_recoverable_temp_audio_file(path: &Path) -> Result<()> {
+pub(super) fn validate_recoverable_temp_audio_file(path: &Path) -> Result<()> {
     validate_recoverable_audio_file(path)?;
     // A container signature survives a torn write. Require a complete decode
     // before admitting an unpublished checkpoint to the recovery concatenation.
@@ -776,6 +785,34 @@ mod tests {
     use super::super::recording_state::DeviceType;
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn failed_raw_encode_can_use_retained_legacy_checkpoints() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".checkpoints")).unwrap();
+        std::fs::create_dir(root.path().join(".audio-spool")).unwrap();
+        std::fs::write(
+            root.path().join(".audio-spool/00000000000000000000.chunk"),
+            b"damaged",
+        )
+        .unwrap();
+        let mut saver = IncrementalAudioSaver::new(root.path().to_path_buf(), 48000).unwrap();
+        saver.checkpoint_interval_samples = 4800;
+        saver
+            .add_chunk(AudioChunk {
+                data: vec![0.05; 4800],
+                sample_rate: 48000,
+                timestamp: 0.0,
+                chunk_id: 0,
+                device_type: DeviceType::System,
+            })
+            .unwrap();
+        let output = saver.finalize().await.unwrap();
+        validate_recoverable_temp_audio_file(&output).unwrap();
+        assert!(saver.capture_incomplete && !saver.raw_fully_encoded);
+        assert!(root.path().join(".audio-spool").exists());
+        assert!(root.path().join(".checkpoints").exists());
+    }
 
     #[tokio::test]
     async fn final_encode_has_only_one_aac_padding_boundary() {

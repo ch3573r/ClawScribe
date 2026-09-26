@@ -48,15 +48,13 @@ test('missing jobs and completed jobs without data terminate with visible errors
   const updates = [];
   render().startSummaryPolling('a', 'a', result => updates.push(result));
   await timers.get(1)();
-  assert.equal(updates[0].status, 'idle');
-  await timers.get(1)();
-  assert.equal(updates[1].status, 'error');
-  assert.match(updates[1].error, /no longer active/);
+  assert.equal(updates[0].status, 'error');
+  assert.match(updates[0].error, /no longer active/);
   assert.equal(timers.size, 0);
   status = 'completed';
   render().startSummaryPolling('a', 'a', result => updates.push(result));
   await timers.get(2)();
-  assert.equal(updates[2].status, 'error');
+  assert.equal(updates[1].status, 'error');
   assert.equal(timers.size, 0);
 });
 

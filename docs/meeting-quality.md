@@ -52,19 +52,27 @@ choose the spoken language explicitly when it differs from the system setting.
 Parakeet Auto does not record English as the source language without evidence.
 
 With audio saving enabled, captured mixed audio is staged in one-second batches
-under the meeting's `.audio-spool` folder while AAC checkpoints are encoded
-separately. Independent disk workers have bounded memory queues: up to 60 capture
+under the meeting's `.audio-spool` folder. New recordings do not launch periodic
+checkpoint encoders. Independent disk workers have bounded memory queues: up to 60 capture
 batches and eight speech segments. Temporary queue pressure or spool-write
 failures mark the meeting incomplete and keep capture running. Publication
 retries transient file locks five times. Samples that never reach disk cannot
 be recovered, and a crash can lose pending in-memory buffers.
 
-The raw spool uses approximately 700 MB per hour in addition to compressed
-checkpoints and final audio. Prefer a local recording folder with enough free
+The raw spool uses approximately 700 MB per hour in addition to final audio. Prefer a local recording folder with enough free
 space; syncing that folder with OneDrive can add disk contention. Originals
-remain until final audio and metadata succeed. Final audio is encoded once from
-the raw spool, avoiding repeated AAC priming at checkpoint joins. Older meetings
-without a raw spool still use their existing checkpoint recovery path.
+remain until all readable raw chunks, transcript snapshots, metadata and warning
+status are saved. Capture gaps have their own persistent warning and do not keep
+an otherwise fully encoded spool forever. Unreadable/unpublished originals and
+originals needed after a failed save are retained.
+
+Final audio is encoded once from available raw chunks, avoiding repeated AAC
+priming at checkpoint joins. Missing or unreadable chunks do not prevent saving
+the rest. The encode deadline scales with recording duration (one fifth of the
+duration plus one minute, bounded between four minutes and one hour); the outer
+save deadline allows two additional minutes for publication and fallback work.
+If raw encoding fails, existing legacy checkpoints are tried and originals are
+retained. New sessions rely on their raw spool for recovery.
 
 Recovery retains originals and includes an unconsumed tail. Opening a recovered
 meeting reuses its completed audio; an explicit recovery action can rebuild it.
@@ -77,7 +85,12 @@ Stop has one shared owner across the app, tray and shortcut. Recording duration
 is frozen before transcription drain, and device-error limits apply to a recent
 30-second window. Transcript snapshots flush every 15 seconds even during silence
 and once more before audio finalization. Library saving uses that backend snapshot
-and continues if the optional transcription status refresh fails. Failed starts
+and continues if the optional transcription status refresh fails. An unavailable
+or invalid snapshot falls back to the UI transcript with a visible review warning.
+Transcript, audio and metadata writes each get an independent attempt; failures
+are reported together. The app-wide post-processing guard and transactional folder
+lookup prevent concurrent or delayed stop callbacks from creating duplicate
+library entries. Failed starts
 stop their background workers; empty owned folders are removed, while possible
 recovery data is retained with an error status.
 
@@ -89,7 +102,8 @@ its native abort callback; Nemotron checks between streaming windows. A Parakeet
 native call may finish after cancellation, retaining its model/permit and
 blocking another job until it returns.
 
-Audio-save failures and incomplete transcription are saved with the meeting and
+Audio-save failures, capture gaps, incomplete recording files and incomplete
+transcription are saved with the meeting and
 in its recording folder. Automatic notes are withheld for these meetings. Empty
 retranscription is rejected before replacement, and a successful replacement
 retains the prior transcript as a database revision. Capture-loss warnings remain

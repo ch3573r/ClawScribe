@@ -52,9 +52,15 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
     }
 }
 pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
+    if crate::audio::recording_commands::is_stopping() {
+        return;
+    }
     focus_main_window(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
+        if crate::audio::recording_commands::is_stopping() {
+            return;
+        }
         if crate::is_recording().await {
             // Immediately show stopping state
             set_tray_state(&app_clone, RecordingState::Stopping);
@@ -85,7 +91,8 @@ pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
 
             // Handle result
             match stop_result {
-                Ok(_) => {
+                Ok(false) => {}
+                Ok(true) => {
                     log::info!("Tray toggle: Recording stopped successfully");
 
                     // Trigger frontend post-processing via event (works from any page)
@@ -152,6 +159,9 @@ pub(crate) fn resume_recording_handler<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
+    if crate::audio::recording_commands::is_stopping() {
+        return;
+    }
     // Immediately show stopping state
     set_tray_state(app, RecordingState::Stopping);
 
@@ -184,7 +194,8 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
 
         // Handle result
         match stop_result {
-            Ok(_) => {
+            Ok(false) => {}
+            Ok(true) => {
                 log::info!("Tray: Recording stopped successfully");
 
                 // Trigger frontend post-processing via event (works from any page)

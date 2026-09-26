@@ -49,7 +49,7 @@ export function useSummaryPolling() {
       }
       // A response from a stopped/replaced poll must not update its successor.
       if (!isCurrent()) return;
-      if (result.status === 'idle' && pollCount > 1) {
+      if (result.status === 'idle') {
         result = { status: 'error', error: 'Summary generation is no longer active. Please generate the summary again.' };
       } else if (result.status === 'completed' && !result.data) {
         result = { status: 'error', error: 'Summary generation completed without saved content. Please try again.' };

@@ -61,6 +61,14 @@ pub struct DeviceInfo {
     pub system_audio: Option<String>,
 }
 
+#[derive(Default)]
+pub struct RecordingSaveReport {
+    pub outcome: super::outcome::RecordingOutcome,
+    pub audio_path: Option<String>,
+    raw_fully_encoded: bool,
+    warnings: Vec<&'static str>,
+}
+
 /// New recording saver using incremental saving strategy
 pub struct RecordingSaver {
     mode: super::recording_mode::RecordingMode,
@@ -76,7 +84,6 @@ pub struct RecordingSaver {
     transcript_updates_since_flush: AtomicUsize,
     transcript_snapshot_written: AtomicBool,
     last_transcript_flush: Mutex<Instant>,
-    accumulation_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     transcription_provider: Option<String>,
     transcription_model: Option<String>,
     transcription_source_language: Option<String>,
@@ -98,7 +105,6 @@ impl RecordingSaver {
             transcript_updates_since_flush: AtomicUsize::new(0),
             transcript_snapshot_written: AtomicBool::new(false),
             last_transcript_flush: Mutex::new(Instant::now()),
-            accumulation_task: None,
             transcription_provider: None,
             transcription_model: None,
             transcription_source_language: None,
@@ -231,7 +237,7 @@ impl RecordingSaver {
     pub fn start_accumulation(
         &mut self,
         auto_save: bool,
-        state: Arc<super::recording_state::RecordingState>,
+        _state: Arc<super::recording_state::RecordingState>,
     ) -> Result<Option<super::transcription::queue::TranscriptionQueueSender>> {
         let name = self
             .meeting_name
@@ -246,40 +252,10 @@ impl RecordingSaver {
             .meeting_folder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Recording folder unavailable"))?;
-        let (sender, mut receiver, metrics) =
+        // The pipeline drains its bounded disk writer before finalization.
+        // Raw chunks already provide recovery; no periodic encoder is needed.
+        let (sender, _receiver, _metrics) =
             super::transcription::queue::recording_audio_queue(folder)?;
-        let saver = self
-            .incremental_saver
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Audio saver unavailable"))?;
-        self.accumulation_task = Some(tokio::spawn(async move {
-            let result: Result<(), String> = async {
-                while let Some(item) = receiver
-                    .recv()
-                    .await
-                    .map_err(|_| "Recorded audio spool could not be read".to_string())?
-                {
-                    let saver = saver.clone();
-                    tokio::task::spawn_blocking(move || {
-                        saver.blocking_lock().add_chunk(item.chunk)
-                    })
-                    .await
-                    .map_err(|_| "Audio encoder task failed".to_string())?
-                    .map_err(|_| "Audio checkpoint could not be saved".to_string())?;
-                }
-                if metrics.snapshot().failed_chunks > 0 {
-                    return Err(
-                        "Some captured audio could not be written; recovery files preserved".into(),
-                    );
-                }
-                Ok(())
-            }
-            .await;
-            if result.is_err() {
-                state.report_warning("Audio encoding failed. Capture is being preserved in the meeting recovery files. Check disk space and recover the audio after stopping.");
-            }
-            result
-        }));
         Ok(Some(sender))
     }
 
@@ -327,18 +303,8 @@ impl RecordingSaver {
             task.abort();
             let _ = task.await;
         }
-        let mut drained = true;
-        if let Some(mut task) = self.accumulation_task.take() {
-            if tokio::time::timeout(Duration::from_secs(35), &mut task)
-                .await
-                .is_err()
-            {
-                drained = false;
-                task.abort();
-                let _ = task.await;
-            }
-        }
-        if drained && self.transcript_segments.lock().unwrap().is_empty() {
+        // The recording manager has already stopped and drained the pipeline.
+        if self.transcript_segments.lock().unwrap().is_empty() {
             if let Some(folder) = &self.meeting_folder {
                 // Only remove a newly owned folder containing metadata and empty
                 // capture directories. Unknown or possibly recoverable files stay.
@@ -492,17 +458,45 @@ impl RecordingSaver {
         app: &AppHandle<R>,
         recording_duration: Option<f64>,
         capture_incomplete: bool,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<RecordingSaveReport, String> {
+        let report = self
+            .finalize_files(recording_duration, capture_incomplete)
+            .await?;
+        if report.audio_path.is_some() {
+            let _ = app.emit("recording-saved", serde_json::json!({
+                "audio_file": report.audio_path,
+                "transcript_file": self.meeting_folder.as_ref().map(|f| f.join("transcripts.json")),
+                "meeting_name": self.meeting_name,
+                "meeting_folder": self.meeting_folder,
+            }));
+        }
+        if !report.warnings.is_empty() {
+            let _ = app.emit("recording-warning", report.warnings.join(" "));
+        }
+        Ok(report)
+    }
+
+    async fn finalize_files(
+        &mut self,
+        recording_duration: Option<f64>,
+        capture_incomplete: bool,
+    ) -> Result<RecordingSaveReport, String> {
         info!("Stopping recording saver");
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
             let _ = task.await;
         }
-        // Flush transcripts before any encoder error or timeout can exit save.
+        let mut report = RecordingSaveReport::default();
+        report.outcome.capture_incomplete = capture_incomplete;
+        // Attempt every artifact independently, then report all failures.
         if let Some(folder) = &self.meeting_folder {
-            self.write_transcripts_json(folder)
-                .map_err(|_| "Final transcript snapshot could not be saved")?;
-            if let Some(mut metadata) = self.metadata.clone() {
+            if self.write_transcripts_json(folder).is_err() {
+                report.outcome.recording_files_incomplete = true;
+                report
+                    .warnings
+                    .push("The final transcript snapshot could not be saved.");
+            }
+            if let Some(metadata) = &mut self.metadata {
                 metadata.duration_seconds = recording_duration.or_else(|| {
                     self.transcript_segments
                         .lock()
@@ -510,142 +504,72 @@ impl RecordingSaver {
                         .and_then(|segments| segments.last().map(|segment| segment.audio_end_time))
                 });
                 metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
-                // A failed encoder must leave accurate stopped metadata. Audio
-                // finalization promotes this status to completed below.
-                metadata.status = if self.incremental_saver.is_some() {
-                    "error"
-                } else {
-                    "completed"
-                }
-                .into();
-                self.write_metadata(folder, &metadata)
-                    .map_err(|_| "Stopped recording metadata could not be saved")?;
-                self.metadata = Some(metadata);
+                metadata.status = "error".into();
             }
             if capture_incomplete {
                 let _ = std::fs::write(
-                    folder.join(".audio-spool").join(".incomplete"),
+                    folder.join(".audio-spool/.incomplete"),
                     b"capture incomplete",
                 );
             }
         }
 
-        // The stopped pipeline drops the producer. Join the consumer after it
-        // drains every accepted chunk; never drop a tail based on a sleep/flag.
-        if let Some(mut task) = self.accumulation_task.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(60), &mut task).await {
-                Ok(result) => result.map_err(|_| {
-                    "Audio saver task failed; recovery files preserved".to_string()
-                })??,
-                Err(_) => {
-                    task.abort();
-                    return Err("Audio saving timed out; recovery files were preserved. Recover the recording after stopping.".into());
-                }
-            }
-        }
-
-        // Check if incremental saver exists (indicates auto_save was enabled)
-        let should_save_audio = self.incremental_saver.is_some();
-
-        if !should_save_audio {
-            info!("⚠️  No audio saver initialized (auto-save was disabled) - skipping audio finalization");
-            info!("✅ Transcripts and metadata already saved incrementally");
-            return Ok(None);
-        }
-
-        // Finalize incremental saver (merge checkpoints into final audio.mp4)
-        let final_audio_path = if let Some(saver_arc) = &self.incremental_saver {
+        if let Some(saver_arc) = &self.incremental_saver {
             let saver_arc = saver_arc.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let finalized = tokio::task::spawn_blocking(move || {
                 let mut saver = saver_arc.blocking_lock();
-                tokio::runtime::Handle::current().block_on(saver.finalize())
+                let result = tokio::runtime::Handle::current().block_on(saver.finalize());
+                (result, saver.capture_incomplete, saver.raw_fully_encoded)
             })
-            .await
-            .map_err(|_| "Audio finalization task failed; recovery files preserved".to_string())?;
-            match result {
-                Ok(path) => {
-                    info!("✅ Successfully finalized audio");
-                    path
+            .await;
+            match finalized {
+                Ok((Ok(path), gaps, raw_fully_encoded)) => {
+                    report.outcome.capture_incomplete |= gaps;
+                    report.audio_path = Some(path.to_string_lossy().into_owned());
+                    report.raw_fully_encoded = raw_fully_encoded;
                 }
-                Err(e) => {
-                    error!("❌ Failed to finalize incremental saver");
-                    return Err(format!("Failed to finalize audio: {}", e));
+                Ok((Err(error), _, _)) => {
+                    report.outcome.audio_save_failed = true;
+                    report
+                        .warnings
+                        .push(final_audio_failure_message(&error.to_string()));
+                }
+                Err(_) => {
+                    report.outcome.audio_save_failed = true;
+                    report.warnings.push("The audio finalization worker failed. Keep the meeting recovery files and retry recovery.");
                 }
             }
-        } else {
-            error!("No incremental saver initialized - cannot save recording");
-            return Err("No incremental saver initialized".to_string());
-        };
-
-        // Save final transcripts.json with validation
-        if let Some(folder) = &self.meeting_folder {
-            if let Err(e) = self.write_transcripts_json(folder) {
-                error!("❌ Failed to write final transcripts");
-                return Err(format!("Failed to save transcripts: {}", e));
-            }
-
-            // Verify transcripts were written correctly
-            let transcript_path = folder.join("transcripts.json");
-            if !transcript_path.exists() {
-                error!("Transcript file was not created");
-                return Err("Transcript file verification failed".to_string());
-            }
-            info!("Transcripts saved and verified");
         }
 
-        // Update metadata to completed status with actual recording duration
         if let (Some(folder), Some(mut metadata)) = (&self.meeting_folder, self.metadata.clone()) {
-            metadata.status = "completed".to_string();
-            metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
-
-            // Use actual recording duration from RecordingState (more accurate than transcript segments)
-            // Falls back to last transcript segment if duration not provided
-            metadata.duration_seconds = recording_duration.or_else(|| {
-                if let Ok(segments) = self.transcript_segments.lock() {
-                    segments.last().map(|seg| seg.audio_end_time)
-                } else {
-                    None
-                }
-            });
-
-            if let Err(e) = self.write_metadata(folder, &metadata) {
-                error!("❌ Failed to update metadata to completed");
-                return Err(format!("Failed to update metadata: {}", e));
+            metadata.status = if report.outcome.audio_save_failed {
+                "error"
+            } else {
+                "completed"
             }
-
-            info!(
-                "✅ Metadata updated with duration: {:?}s",
-                metadata.duration_seconds
-            );
+            .into();
+            if self.write_metadata(folder, &metadata).is_err() {
+                report.outcome.recording_files_incomplete = true;
+                report
+                    .warnings
+                    .push("The recording details could not be saved.");
+            }
+            self.metadata = Some(metadata);
         }
-
-        // Emit save event with audio and transcript paths
-        let save_event = serde_json::json!({
-            "audio_file": final_audio_path.to_string_lossy(),
-            "transcript_file": self.meeting_folder.as_ref()
-                .map(|f| f.join("transcripts.json").to_string_lossy().to_string()),
-            "meeting_name": self.meeting_name,
-            "meeting_folder": self.meeting_folder.as_ref()
-                .map(|f| f.to_string_lossy().to_string())
-        });
-
-        if let Err(_e) = app.emit("recording-saved", &save_event) {
-            warn!("Failed to emit recording-saved event");
-        }
-
-        // The durable spool is redundant only after audio and metadata succeed.
-        if !capture_incomplete {
-            if let Some(folder) = &self.meeting_folder {
+        // Persist gaps before discarding redundant originals. Missing samples
+        // cannot be reconstructed by retaining an otherwise encoded raw spool.
+        if let Some(folder) = &self.meeting_folder {
+            if report.outcome.write(folder).is_err() {
+                report.outcome.recording_files_incomplete = true;
+                report
+                    .warnings
+                    .push("The recording warning status could not be saved.");
+            }
+            if report.raw_fully_encoded && !report.outcome.recording_files_incomplete {
                 let _ = std::fs::remove_dir_all(folder.join(".audio-spool"));
             }
         }
-
-        // Clean up transcript segments
-        if let Ok(mut segments) = self.transcript_segments.lock() {
-            segments.clear();
-        }
-
-        Ok(Some(final_audio_path.to_string_lossy().to_string()))
+        Ok(report)
     }
 
     /// Get the meeting folder path (for passing to backend)
@@ -671,6 +595,20 @@ impl RecordingSaver {
 const TRANSCRIPT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(15);
 const TRANSCRIPT_SNAPSHOT_MAX_UPDATES: usize = 32;
 
+fn final_audio_failure_message(error: &str) -> &'static str {
+    if error.contains("insufficient disk space") {
+        "Audio could not be saved because disk space ran out. Keep the meeting recovery files."
+    } else if error.contains("output access denied") {
+        "Audio could not be saved because file access was denied. Check folder permissions and keep the meeting recovery files."
+    } else if error.contains("timed out") {
+        "Audio encoding exceeded its time limit. Keep the meeting recovery files and retry recovery."
+    } else if error.contains("FFmpeg not found") || error.contains("required encoder unavailable") {
+        "The audio encoder is unavailable. Repair the app installation and keep the meeting recovery files."
+    } else {
+        "Audio could not be finalized. Check disk space and keep the meeting recovery files."
+    }
+}
+
 fn write_transcript_snapshot(
     folder: &std::path::Path,
     segments: &[TranscriptSegment],
@@ -695,9 +633,6 @@ impl Drop for RecordingSaver {
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
         }
-        if let Some(task) = self.accumulation_task.take() {
-            task.abort();
-        }
     }
 }
 
@@ -714,6 +649,104 @@ fn transcript_snapshot_due(
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_and_metadata_failures_do_not_block_available_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let sender = saver
+            .start_accumulation(true, super::super::recording_state::RecordingState::new())
+            .unwrap()
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        sender
+            .send(super::super::recording_state::AudioChunk {
+                data: vec![0.05; 4800],
+                sample_rate: 48000,
+                timestamp: 0.0,
+                chunk_id: 0,
+                device_type: super::super::recording_state::DeviceType::System,
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        // Deterministic publication failures without changing process permissions.
+        std::fs::create_dir(folder.join("transcripts.json")).unwrap();
+        std::fs::remove_file(folder.join("metadata.json")).unwrap();
+        std::fs::create_dir(folder.join("metadata.json")).unwrap();
+        assert_eq!(
+            std::fs::read_dir(folder.join(".checkpoints"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let report = saver.finalize_files(Some(0.1), true).await.unwrap();
+        assert!(report.audio_path.is_some());
+        assert!(!report.outcome.audio_save_failed);
+        assert!(report.outcome.capture_incomplete);
+        assert!(report.outcome.recording_files_incomplete);
+        assert_eq!(report.warnings.len(), 2);
+        assert!(
+            folder.join(".audio-spool").exists(),
+            "failed artifacts retain originals"
+        );
+        super::super::incremental_saver::validate_recoverable_temp_audio_file(
+            &folder.join("audio.mp4"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn successfully_encoded_gapped_capture_releases_redundant_spool() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let sender = saver
+            .start_accumulation(true, super::super::recording_state::RecordingState::new())
+            .unwrap()
+            .unwrap();
+        sender
+            .send(super::super::recording_state::AudioChunk {
+                data: vec![0.05; 4800],
+                sample_rate: 48000,
+                timestamp: 1.0,
+                chunk_id: 1,
+                device_type: super::super::recording_state::DeviceType::System,
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        let report = saver.finalize_files(Some(1.1), true).await.unwrap();
+        let folder = saver.meeting_folder.as_ref().unwrap();
+        assert!(report.audio_path.is_some() && !report.outcome.audio_save_failed);
+        assert!(!folder.join(".audio-spool").exists());
+        assert!(
+            super::super::outcome::RecordingOutcome::read(folder)
+                .unwrap()
+                .unwrap()
+                .capture_incomplete
+        );
+    }
+
+    #[tokio::test]
+    async fn all_artifact_failures_are_collected_together() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let sender = saver
+            .start_accumulation(true, super::super::recording_state::RecordingState::new())
+            .unwrap();
+        drop(sender);
+        let folder = saver.meeting_folder.clone().unwrap();
+        std::fs::create_dir(folder.join("transcripts.json")).unwrap();
+        std::fs::remove_file(folder.join("metadata.json")).unwrap();
+        std::fs::create_dir(folder.join("metadata.json")).unwrap();
+        let report = saver.finalize_files(Some(1.0), false).await.unwrap();
+        assert!(report.outcome.audio_save_failed && report.outcome.recording_files_incomplete);
+        assert_eq!(report.warnings.len(), 3);
+        assert!(folder.join(".audio-spool").exists());
+    }
 
     #[tokio::test]
     async fn silence_still_flushes_pending_transcript_updates() {
@@ -769,7 +802,7 @@ mod snapshot_tests {
         drop(sender);
         saver.failed_start().await;
         assert!(!folder.exists());
-        assert!(saver.snapshot_task.is_none() && saver.accumulation_task.is_none());
+        assert!(saver.snapshot_task.is_none());
     }
 
     #[test]

@@ -688,8 +688,11 @@ async fn save_retranscription_transcripts<R: Runtime>(
         meeting_id
     );
 
-    let outcome: Option<super::outcome::RecordingOutcome> = sqlx::query_as("SELECT audio_save_failed, transcription_incomplete FROM recording_outcomes WHERE meeting_id = ?")
-        .bind(meeting_id).fetch_optional(pool).await?;
+    let outcome: Option<super::outcome::RecordingOutcome> =
+        sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await?;
     if let Some(outcome) = outcome {
         let folder = folder_path.to_path_buf();
         tokio::task::spawn_blocking(move || outcome.write(&folder))

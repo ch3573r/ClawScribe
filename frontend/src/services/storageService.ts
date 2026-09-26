@@ -17,6 +17,8 @@ export interface SaveMeetingRequest {
 
 export interface SaveMeetingResponse {
   meeting_id: string;
+  warning?: string;
+  recording_outcome?: RecordingOutcome;
 }
 
 export interface Meeting {

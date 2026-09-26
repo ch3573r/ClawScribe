@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHookHarness } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
-for (const failure of ['status', 'subscription']) {
+for (const failure of ['status', 'subscription', 'duplicate', 'fallback']) {
   test(`library save uses the backend snapshot after a ${failure} failure`, async () => {
     const previousWindow = globalThis.window;
     const previousTimer = globalThis.setTimeout;
@@ -45,7 +45,7 @@ for (const failure of ['status', 'subscription']) {
           RecordingStatus: Object.fromEntries(['STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'COMPLETED', 'IDLE', 'ERROR'].map(value => [value, value])),
         },
         '@/services/storageService': { storageService: {
-          saveMeeting: async (...args) => { saves.push(args); return { meeting_id: 'saved' }; },
+          saveMeeting: async (...args) => { saves.push(args); return { meeting_id: 'saved', warning: failure === 'fallback' ? 'Saved the transcript visible in the app.' : undefined }; },
           getMeeting: async () => ({ title: 'Synthetic meeting' }),
         } },
         '@/services/transcriptService': { transcriptService: { getTranscriptionStatus: async () => {
@@ -57,8 +57,15 @@ for (const failure of ['status', 'subscription']) {
         '@/lib/summary-language-preferences': { applyPinnedSummaryLanguageToMeeting: async () => true, detectAndCacheSummaryLanguage: asyncNoop },
         '@tauri-apps/plugin-store': { Store: { load: async () => ({ get: async () => 0 }) } },
       });
-      const hook = hooks.render(() => useRecordingStop(noop, noop));
-      await hook.handleRecordingStop(true);
+      const [hook, second] = hooks.render(() => [useRecordingStop(noop, noop), useRecordingStop(noop, noop)]);
+      if (failure === 'duplicate') {
+        // Two hook instances mounted under different owners share one save guard.
+        await Promise.all([hook.handleRecordingStop(true), second.handleRecordingStop(true)]);
+        await second.handleRecordingStop(true); // a delayed completion must also be ignored
+      } else {
+        await hook.handleRecordingStop(true);
+      }
+      if (failure === 'fallback') assert.ok(notices.some(notice => notice.title.includes('warning')));
       assert.equal(saves.length, 1);
       assert.equal(saves[0][2], 'synthetic-meeting');
       assert.equal(saves[0][4], true, 'request backend transcript snapshot even if UI has no lines');

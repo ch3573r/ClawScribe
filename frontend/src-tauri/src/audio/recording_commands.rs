@@ -679,11 +679,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // All entry points share one owner through drain, save and completion.
     // Concurrent callers wait for that owner rather than taking its manager.
     let Some(_owner) = acquire_stop_owner(&STOP_OWNER).await else {
-        return Ok(());
+        return Ok(false);
     };
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
@@ -692,7 +692,7 @@ pub async fn stop_recording<R: Runtime>(
     // Check if recording is active
     if !IS_RECORDING.load(Ordering::SeqCst) {
         info!("Recording was not active");
-        return Ok(());
+        return Ok(false);
     }
     IS_STOPPING.store(true, Ordering::Release);
     let _stop_state = StopState;
@@ -722,6 +722,8 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     let mut audio_save_failed = false;
+    let mut capture_incomplete = false;
+    let mut recording_files_incomplete = false;
     // Step 1: Stop audio capture immediately (no more new chunks) with proper error handling
     let manager_for_cleanup = {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
@@ -732,7 +734,7 @@ pub async fn stop_recording<R: Runtime>(
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
         info!("🚀 Using FORCE FLUSH to eliminate pipeline accumulation delays");
         let result = manager.stop_streams_and_force_flush().await;
-        audio_save_failed |= manager.get_state().capture_incomplete();
+        capture_incomplete |= manager.get_state().capture_incomplete();
         // Store manager back for later cleanup
         let manager_for_cleanup = Some(manager);
         (result, manager_for_cleanup)
@@ -748,7 +750,7 @@ pub async fn stop_recording<R: Runtime>(
             info!("✅ Audio streams stopped successfully - no more chunks will be created");
         }
         Err(_) => {
-            audio_save_failed = true;
+            capture_incomplete = true;
             warn!("Audio pipeline did not finish cleanly; preserving recovery data");
         }
     }
@@ -1157,13 +1159,21 @@ pub async fn stop_recording<R: Runtime>(
         let meeting_name = manager.get_meeting_name();
 
         match tokio::time::timeout(
-            tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
+            super::audio_spool::encode_timeout(
+                manager
+                    .get_state()
+                    .get_active_recording_duration()
+                    .unwrap_or(0.0),
+            ) + tokio::time::Duration::from_secs(120), // encoding plus bounded publication/fallback time
             manager.save_recording_only(&app),
         )
         .await
         {
-            Ok(Ok(_)) => {
-                info!("✅ Recording data saved successfully during cleanup");
+            Ok(Ok(report)) => {
+                audio_save_failed |= report.outcome.audio_save_failed;
+                capture_incomplete |= report.outcome.capture_incomplete;
+                recording_files_incomplete |= report.outcome.recording_files_incomplete;
+                info!("Recording file save attempts completed");
             }
             Ok(Err(_e)) => {
                 audio_save_failed = true;
@@ -1172,7 +1182,7 @@ pub async fn stop_recording<R: Runtime>(
             }
             Err(_) => {
                 audio_save_failed = true;
-                warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
+                warn!("Recording finalization deadline reached; originals retained");
                 // Don't fail shutdown - transcripts are already preserved
             }
         }
@@ -1196,12 +1206,14 @@ pub async fn stop_recording<R: Runtime>(
         let outcome = super::outcome::RecordingOutcome {
             audio_save_failed,
             transcription_incomplete,
+            capture_incomplete,
+            recording_files_incomplete,
         };
         if !matches!(
             tokio::task::spawn_blocking(move || outcome.write(&folder)).await,
             Ok(Ok(()))
         ) {
-            audio_save_failed = true;
+            recording_files_incomplete = true;
         }
     }
 
@@ -1216,7 +1228,7 @@ pub async fn stop_recording<R: Runtime>(
         "recording-shutdown-progress",
         serde_json::json!({
             "stage": "complete",
-            "message": if audio_save_failed || transcription_incomplete { "Recording stopped; recovery needed" } else { "Recording stopped" },
+            "message": if audio_save_failed || transcription_incomplete || capture_incomplete || recording_files_incomplete { "Recording stopped; review needed" } else { "Recording stopped" },
             "progress": 100
         }),
     );
@@ -1227,6 +1239,8 @@ pub async fn stop_recording<R: Runtime>(
         serde_json::json!({
             "message": if audio_save_failed {
                 "Recording stopped; audio recovery is needed"
+            } else if capture_incomplete {
+                "Recording stopped; available audio was saved with capture gaps"
             } else if transcription_incomplete {
                 "Recording stopped; some queued audio still needs retranscription"
             } else {
@@ -1236,12 +1250,19 @@ pub async fn stop_recording<R: Runtime>(
             "meeting_name": meeting_name_str,
             "recording_mode": if transcribes { "live" } else { "audio_only" },
             "transcription_incomplete": transcription_incomplete,
-            "audio_save_failed": audio_save_failed
+            "audio_save_failed": audio_save_failed,
+            "capture_incomplete": capture_incomplete,
+            "recording_files_incomplete": recording_files_incomplete
         }),
     )
     .map_err(|e| e.to_string())?;
 
-    if transcribes && !transcription_incomplete && !audio_save_failed {
+    if transcribes
+        && !transcription_incomplete
+        && !audio_save_failed
+        && !capture_incomplete
+        && !recording_files_incomplete
+    {
         crate::openclaw::submit_completed_recording(
             app.clone(),
             folder_path_str.clone(),
@@ -1257,7 +1278,7 @@ pub async fn stop_recording<R: Runtime>(
     } else {
         info!("🎉 Recording stopped successfully with all transcript chunks processed");
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Check if recording is active
