@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-const { recordingOutcome, recordingRecoveryMessage } = loadTsModule('src/lib/recording-outcome.ts');
+const { recordingOutcome, recordingRecoveryMessage, recordingBlocksAutoSummary } = loadTsModule('src/lib/recording-outcome.ts');
 
 test('completed and legacy recordings do not invent a failure', () => {
   assert.equal(recordingRecoveryMessage(recordingOutcome()), null);
@@ -19,4 +19,16 @@ test('failed audio and incomplete transcription remain distinct actionable state
   assert.match(recordingRecoveryMessage(recordingOutcome({audio_save_failed: true})), /Audio could not/);
   assert.match(recordingRecoveryMessage(recordingOutcome({transcription_incomplete: true})), /transcript is incomplete/);
   assert.match(recordingRecoveryMessage(recordingOutcome({audio_save_failed: true, transcription_incomplete: true})), /recovery files/);
+});
+
+test('auto-summary blocks only failed audio or incomplete transcription', () => {
+  for (const flag of ['capture_incomplete', 'recording_files_incomplete']) {
+    const outcome = recordingOutcome({ [flag]: true });
+    assert.equal(recordingBlocksAutoSummary(outcome), false);
+    assert.ok(recordingRecoveryMessage(outcome));
+  }
+  for (const flag of ['audio_save_failed', 'transcription_incomplete']) {
+    assert.equal(recordingBlocksAutoSummary(recordingOutcome({ [flag]: true })), true);
+  }
+  assert.equal(recordingBlocksAutoSummary(null), false);
 });

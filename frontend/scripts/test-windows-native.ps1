@@ -92,6 +92,7 @@ try {
         "audio::recording_commands::stop_tests",
         "audio::transcription::queue::tests",
         "audio::outcome::tests",
+        "audio::retranscription::tests",
         "api::api::recording_snapshot_tests",
         "database::repositories::transcript::recording_save_tests",
         "whisper_engine::acceleration::tests",

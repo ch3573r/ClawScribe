@@ -104,7 +104,12 @@ blocking another job until it returns.
 
 Audio-save failures, capture gaps, incomplete recording files and incomplete
 transcription are saved with the meeting and
-in its recording folder. Automatic notes are withheld for these meetings. Empty
+in its recording folder. Automatic notes wait only for failed audio saves or an
+incomplete transcript. Capture gaps and recording-file warnings remain visible
+without blocking notes. Successful retranscription clears audio-save and
+transcript failure flags; recording-file warnings clear only after both transcript
+and metadata files are rewritten successfully. Permanent capture gaps remain.
+Empty
 retranscription is rejected before replacement, and a successful replacement
 retains the prior transcript as a database revision. Capture-loss warnings remain
 conservative: retranscribing available audio cannot restore missing samples.

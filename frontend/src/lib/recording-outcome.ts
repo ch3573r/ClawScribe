@@ -14,6 +14,10 @@ export function recordingOutcome(value?: Partial<RecordingOutcome> | null): Reco
   };
 }
 
+export function recordingBlocksAutoSummary(value?: Partial<RecordingOutcome> | null): boolean {
+  return value?.audio_save_failed === true || value?.transcription_incomplete === true;
+}
+
 export function recordingRecoveryMessage(value: RecordingOutcome): string | null {
   const messages: string[] = [];
   if (value.audio_save_failed) {

@@ -106,7 +106,9 @@ command reads the backend snapshot when saving a finished recording, falling
 back to the UI transcript with a warning if that snapshot is unavailable. New
 capture does not encode periodic AAC checkpoints. Final transcript, audio and
 metadata writes are independent; capture gaps and artifact-save failures have
-separate persistent flags. Shared stop ownership suppresses duplicate completion
+separate persistent flags. Retranscription updates repaired flags in the transcript
+transaction and mirrors the outcome afterwards; capture gaps remain informational.
+Shared stop ownership suppresses duplicate completion
 events, and a SQLite write reservation protects the folder lookup and insert
 against concurrent saves.
 `audio/outcome.rs` persists recording failures before the completion event;
