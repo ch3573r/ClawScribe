@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { parseProjectTags } from '@/lib/library';
 
 export function ProjectTags({ meetingId }: { meetingId: string }) {
-  const { projectTags, projectTagsError, refreshProjectTags } = useSidebar();
+  const { projectTags, projectTagsError, projectTagsLoading, refreshProjectTags } = useSidebar();
   const tags = projectTags.filter(tag => tag.meeting_id === meetingId).map(tag => tag.tag);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState('');
@@ -24,8 +24,8 @@ export function ProjectTags({ meetingId }: { meetingId: string }) {
     finally { pending.current = false; setBusy(false); }
   };
   return <>
-    <Button variant="outline" size="sm" className="max-w-64" title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags.join(', ')); setOpen(true); }}>
-      <span className="truncate">{projectTagsError ? 'Retry loading tags' : tags.length ? `Tags: ${tags.join(', ')}` : 'Project tags'}</span>
+    <Button variant="outline" size="sm" className="max-w-64" disabled={projectTagsLoading} title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags.join(', ')); setOpen(true); }}>
+      <span className="truncate">{projectTagsLoading ? 'Loading project tags…' : projectTagsError ? 'Retry loading tags' : tags.length ? `Tags: ${tags.join(', ')}` : 'Project tags'}</span>
     </Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent>
       <DialogHeader><DialogTitle>Project tags</DialogTitle><DialogDescription>Separate tags with commas. Use up to 20 tags, each up to 60 characters. Clear the field to remove all tags.</DialogDescription></DialogHeader>

@@ -4,7 +4,9 @@
 
 Open a saved meeting and select **Export → Word document (.docx)**. Choose the summary, the full
 transcript, or both, then save a `.docx` file. Speaker labels and timestamps are
-optional. Export runs locally without Word, Microsoft sign-in, or a network
+optional. Transcript timestamps use elapsed recording time (including hours),
+with the legacy timestamp as a fallback when an audio offset is unavailable.
+Export runs locally without Word, Microsoft sign-in, or a network
 connection. The summary uses the current editor contents; transcripts use the
 complete saved database snapshot rather than the visible page. Basic headings,
 bullets, and paragraphs are supported; advanced editor formatting is not retained.
@@ -29,6 +31,8 @@ copying or uploading it. Confluence and OneDrive show the options before export;
 OneNote includes them alongside the notebook and section fields. Planner and
 Microsoft To Do keep their action-item selection and editing previews.
 
+All document destinations use recording-relative transcript timestamps when
+available. The Word document date uses local date and time.
 Exports use current editor notes and the full saved transcript, independent of
 the visible transcript page. A transcript read failure stops the export instead
 of silently sending incomplete content. Confluence browser drafts, REST pages,
@@ -63,17 +67,26 @@ summaries, meeting chat, project tags, bookmarks, and supported recording files.
 Microsoft export history (`exports.json`) is retained with the recording folder.
 Provider settings, credentials, model downloads, UI preferences, browser-stored
 meeting context, and unfinished recording recovery spools are excluded. Missing
-recording folders cause backup to fail instead of silently omitting their contents.
+recording folders cause backup to fail with the affected meeting's title and
+reconnection guidance. Nonempty `.audio-spool` or `.checkpoints` directories also
+block backup, even when a partial final recording exists: this archive format
+cannot retain recovery originals. Preserve a separate copy of that recording
+folder, including hidden files; do not delete recovery originals to make backup
+succeed. A pending audio-save failure with no saved audio also blocks backup.
 Archives are not encrypted; keep them in trusted storage.
 
 Restore adds meetings whose IDs are absent from the library and skips existing
 IDs without overwriting them. Audio is staged in a new app-owned directory and
-database inserts commit together. Invalid archives leave existing meetings alone.
+database inserts commit together. Extracted files belonging to skipped meetings
+are removed before the database commits and the staged folder is retained; cleanup
+failure rolls back the import. Invalid archives leave existing meetings alone.
 Folder references are rewritten for the destination computer. Interrupted summary
 jobs are marked cancelled; their saved output is retained.
 
 Version 1 archives have a JSON manifest and explicitly listed recording files.
 Only meeting-related database tables and known media/metadata files are included.
+The meetings table is required; missing known child tables are treated as empty
+so adding optional tables does not invalidate older version-1 backups.
 Restore rejects unknown tables/columns, unsafe paths, duplicate files, links,
 unsupported versions, and missing or extra archive entries. Limits are 128 MiB of
 manifest data, 100 GiB of file data, and 100,000 recording files. File copying runs

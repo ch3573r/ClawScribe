@@ -40,6 +40,23 @@ test('speaker and timestamp options are independent and do not alter spoken word
   }
 });
 
+test('timestamps use audio offsets for live and imported recordings, including zero and hours', () => {
+  const { formatExportTranscript, defaultExportOptions } = contentModule();
+  for (const timestamp of ['09:10:11', '2026-09-26T08:15:30+00:00']) {
+    for (const [audio_start_time, expected] of [[0, '00:00:00'], [65.9, '00:01:05'], [3661.1, '01:01:01'], [360000, '100:00:00']]) {
+      assert.equal(formatExportTranscript([{ ...row, timestamp, audio_start_time }], defaultExportOptions('transcript')), `[${expected}] Speaker A: Saved words.`);
+    }
+  }
+});
+
+test('missing or invalid audio offsets retain legacy timestamps and the timestamp switch still applies', () => {
+  const { formatExportTranscript, defaultExportOptions } = contentModule();
+  for (const audio_start_time of [undefined, null, NaN, Infinity, -1]) {
+    assert.equal(formatExportTranscript([{ ...row, audio_start_time }], defaultExportOptions('transcript')), '[09:10:11] Speaker A: Saved words.');
+  }
+  assert.equal(formatExportTranscript([{ ...row, audio_start_time: 123 }], { content: 'both', timestamps: false, speakers: true }), 'Speaker A: Saved words.');
+});
+
 test('both includes edited notes and saved words; failures and empty selections reject', async () => {
   const { prepareMeetingExport, defaultExportOptions } = contentModule(async () => ({ transcripts: [row] }));
   const result = await prepareMeetingExport('meeting', async () => 'Current editor contents', defaultExportOptions('both'));

@@ -196,28 +196,14 @@ pub async fn export_local_word(
         .map_err(|_| "Meeting no longer exists.")?;
     // Fetch the full saved transcript, independently of the UI's current page.
     let transcript = if include_transcript {
-        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as("SELECT timestamp, speaker, transcript FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id")
-            .bind(&meeting_id).fetch_all(state.db_manager.pool()).await.map_err(|_| "Could not read transcript.")?;
         Some(
-            rows.into_iter()
-                .map(|(time, speaker, text)| {
-                    format!(
-                        "{}{}{}",
-                        if include_timestamps {
-                            format!("[{time}] ")
-                        } else {
-                            String::new()
-                        },
-                        if include_speakers {
-                            speaker.map(|s| format!("{s}: ")).unwrap_or_default()
-                        } else {
-                            String::new()
-                        },
-                        text
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n"),
+            read_word_transcript(
+                state.db_manager.pool(),
+                &meeting_id,
+                include_speakers,
+                include_timestamps,
+            )
+            .await?,
         )
     } else {
         None
@@ -228,7 +214,7 @@ pub async fn export_local_word(
     tokio::task::spawn_blocking(move || {
         let bytes = crate::exports::document::build_meeting_docx(
             &title,
-            &format!("Date: {created}\n\n{markdown}"),
+            &format!("Date: {}\n\n{markdown}", export_meeting_date(&created)),
             transcript.as_deref(),
         )?;
         atomic_write(Path::new(&path), &bytes)
@@ -237,9 +223,148 @@ pub async fn export_local_word(
     .map_err(|_| "Word export was interrupted.")?
 }
 
+fn export_timestamp(timestamp: &str, audio_start_time: Option<f64>) -> String {
+    match audio_start_time.filter(|time| time.is_finite() && *time >= 0.0) {
+        Some(time) => {
+            let seconds = time.floor() as u64;
+            format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            )
+        }
+        None => timestamp.trim().to_string(),
+    }
+}
+
+fn export_meeting_date(created: &str) -> String {
+    let date = chrono::DateTime::parse_from_rfc3339(created)
+        .map(|date| date.with_timezone(&chrono::Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(created, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|date| date.and_utc())
+        });
+    date.map(|date| {
+        date.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    })
+    .unwrap_or_else(|| created.to_string())
+}
+
+async fn read_word_transcript(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    speakers: bool,
+    timestamps: bool,
+) -> Result<String, String> {
+    let rows: Vec<(String, Option<f64>, Option<String>, String)> = sqlx::query_as(
+        "SELECT timestamp, audio_start_time, speaker, transcript FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id"
+    ).bind(meeting_id).fetch_all(pool).await.map_err(|_| "Could not read transcript.")?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, _, text)| !text.trim().is_empty())
+        .map(|(time, start, speaker, text)| {
+            let time = if timestamps {
+                export_timestamp(&time, start)
+            } else {
+                String::new()
+            };
+            let speaker = if speakers {
+                speaker.unwrap_or_default().trim().to_string()
+            } else {
+                String::new()
+            };
+            format!(
+                "{}{}{}",
+                if time.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{time}] ")
+                },
+                if speaker.is_empty() {
+                    String::new()
+                } else {
+                    format!("{speaker}: ")
+                },
+                text.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_times_prefer_recording_offsets_and_keep_legacy_fallback() {
+        for (start, expected) in [
+            (0.0, "00:00:00"),
+            (65.9, "00:01:05"),
+            (3661.1, "01:01:01"),
+            (360000.0, "100:00:00"),
+        ] {
+            assert_eq!(
+                export_timestamp("2026-09-26T08:15:30+00:00", Some(start)),
+                expected
+            );
+        }
+        for start in [None, Some(f64::NAN), Some(f64::INFINITY), Some(-1.0)] {
+            assert_eq!(export_timestamp(" 09:10:11 ", start), "09:10:11");
+        }
+        assert_eq!(
+            export_meeting_date("2026-09-26 08:15:30"),
+            export_meeting_date("2026-09-26T08:15:30+00:00")
+        );
+        assert!(!export_meeting_date("2026-09-26T08:15:30+00:00").contains('T'));
+    }
+
+    #[tokio::test]
+    async fn word_export_reads_audio_offsets_and_honors_formatting_options() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query(
+            "UPDATE transcripts SET timestamp = '2026-09-26T08:15:30+00:00', speaker = 'Speaker A'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            read_word_transcript(&pool, "review-test", true, true)
+                .await
+                .unwrap(),
+            "[00:00:00] Speaker A: Äpfel project\n\n[00:15:00] Speaker A: Project confirmed"
+        );
+        assert_eq!(
+            read_word_transcript(&pool, "review-test", false, false)
+                .await
+                .unwrap(),
+            "Äpfel project\n\nProject confirmed"
+        );
+        assert_eq!(
+            read_word_transcript(&pool, "review-test", false, true)
+                .await
+                .unwrap(),
+            "[00:00:00] Äpfel project\n\n[00:15:00] Project confirmed"
+        );
+        assert_eq!(
+            read_word_transcript(&pool, "review-test", true, false)
+                .await
+                .unwrap(),
+            "Speaker A: Äpfel project\n\nSpeaker A: Project confirmed"
+        );
+        sqlx::query("UPDATE transcripts SET audio_start_time = NULL WHERE id = 'a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(read_word_transcript(&pool, "review-test", false, true)
+            .await
+            .unwrap()
+            .starts_with("[2026-09-26T08:15:30+00:00]"));
+    }
     #[test]
     fn labels_are_bounded_and_normalized() {
         assert_eq!(clean_label("  Project   Ä  ", 60).unwrap(), "Project Ä");

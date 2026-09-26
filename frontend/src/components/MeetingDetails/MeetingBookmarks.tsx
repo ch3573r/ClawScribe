@@ -28,18 +28,19 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId
   const [editing, setEditing] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
   const pending = useRef(false);
+  useEffect(() => { setBookmarks([]); setError(''); setEditing(null); }, [meetingId]);
   useEffect(() => {
     let active = true; let request = 0;
     const load = async () => { const version = ++request; try { const rows = await invoke<MeetingBookmark[]>('list_meeting_bookmarks', { meetingId }); if (active && version === request) { setBookmarks(rows); setError(''); } } catch { if (active && version === request) setError('Could not load bookmarks.'); } };
-    setBookmarks([]); void load();
     const subscription = listen('library-changed', () => { void load(); });
-    void subscription.catch(() => { if (active) setError('Could not watch bookmark changes. Reopen this meeting.'); });
+    // Subscribe before the initial read so a saved change cannot fall between them.
+    void subscription.then(() => { if (active) void load(); }).catch(() => { if (active) setError('Could not watch bookmark changes. Retry loading bookmarks.'); });
     return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [meetingId, revision]);
   const change = async (command: string, args: Record<string, unknown>) => {
     if (pending.current) return;
     pending.current = true; setBusy(true);
-    try { await invoke(command, args); setEditing(null); setRevision(r => r + 1); }
+    try { await invoke(command, args); setEditing(null); }
     catch (error) { toast.error('Could not update bookmark', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
   };

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { Transcript } from '@/types';
+import { bookmarkTime } from '@/lib/library';
 
 export interface MeetingExportOptions {
   content: 'summary' | 'transcript' | 'both';
@@ -22,7 +23,9 @@ export async function readExportSummary(getMarkdown: () => Promise<string>, opti
 export function formatExportTranscript(transcripts: Transcript[], options: MeetingExportOptions): string {
   return transcripts.filter(segment => !segment.is_partial && segment.text.trim()).map(segment => {
     const speaker = options.speakers ? segment.speaker?.trim() : '';
-    const timestamp = options.timestamps ? segment.timestamp?.trim() : '';
+    const start = segment.audio_start_time;
+    const timestamp = !options.timestamps ? '' : typeof start === 'number' && Number.isFinite(start) && start >= 0
+      ? bookmarkTime(start) : segment.timestamp?.trim();
     return `${timestamp ? `[${timestamp}] ` : ''}${speaker ? `${speaker}: ` : ''}${segment.text.trim()}`;
   }).join('\n\n');
 }

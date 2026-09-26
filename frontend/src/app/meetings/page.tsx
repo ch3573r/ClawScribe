@@ -61,6 +61,7 @@ export default function MeetingsPage() {
     refetchMeetings,
     projectTags,
     projectTagsError,
+    projectTagsLoading,
     refreshProjectTags,
   } = useSidebar();
   const [query, setQuery] = useState("");
@@ -188,11 +189,12 @@ export default function MeetingsPage() {
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
               <label className="flex items-center gap-2">Project
-                <select aria-label="Project" className="h-9 max-w-48 rounded-md border border-input bg-background px-2 text-foreground" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} disabled={!!projectTagsError}>
+                <select aria-label="Project" className="h-9 max-w-48 rounded-md border border-input bg-background px-2 text-foreground" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} disabled={projectTagsLoading || !!projectTagsError}>
                   <option value="">All projects</option><option value="__untagged">Untagged</option>
                   {tagOptions.map(tag => <option key={tag.toLowerCase()} value={`tag:${tag}`}>{tag}</option>)}
                 </select>
               </label>
+              {projectTagsLoading && <span role="status">Loading project tags…</span>}
               {projectTagsError && <button className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</button>}
               <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
                 <SelectTrigger className="h-9 w-36 bg-background">

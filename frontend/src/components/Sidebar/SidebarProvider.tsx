@@ -34,6 +34,7 @@ interface TranscriptSearchResult {
 interface SidebarContextType {
   projectTags: MeetingTag[];
   projectTagsError: string | null;
+  projectTagsLoading: boolean;
   refreshProjectTags: () => Promise<void>;
   currentMeeting: CurrentMeeting | null;
   setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
@@ -73,14 +74,18 @@ export const useSidebar = () => {
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [projectTags, setProjectTags] = useState<MeetingTag[]>([]);
-  const [projectTagsError, setProjectTagsError] = useState<string | null>('Loading project tags…');
+  const [projectTagsError, setProjectTagsError] = useState<string | null>(null);
+  const [projectTagsLoading, setProjectTagsLoading] = useState(true);
   const tagsVersion = React.useRef(0);
   const refreshProjectTags = React.useCallback(async () => {
     const version = ++tagsVersion.current;
+    setProjectTagsLoading(true);
+    setProjectTagsError(null);
     try {
       const tags = await invoke<MeetingTag[]>('list_meeting_tags');
       if (version === tagsVersion.current) { setProjectTags(tags); setProjectTagsError(null); }
     } catch { if (version === tagsVersion.current) setProjectTagsError('Could not load project tags.'); }
+    finally { if (version === tagsVersion.current) setProjectTagsLoading(false); }
   }, []);
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -341,6 +346,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     <SidebarContext.Provider value={{
       projectTags,
       projectTagsError,
+      projectTagsLoading,
       refreshProjectTags,
       currentMeeting,
       setCurrentMeeting,
