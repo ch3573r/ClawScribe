@@ -123,19 +123,10 @@ Status: compatibility metadata only, not request-ready by itself.
 
 Public OpenAI OAuth PKCE metadata is intentionally distinct from both standalone
 OpenAI API-key auth and managed OpenAI-compatible endpoints. The backend may
-still validate legacy PKCE metadata and prepare a short-lived browser
-authorization URL for compatibility, but that metadata alone does not
-authenticate ClawScribe requests.
-
-Compatibility commands:
-
-- `api_prepare_openai_oauth_pkce_authorization`
-- `api_exchange_openai_oauth_pkce_code`
-
-`api_exchange_openai_oauth_pkce_code` returns an error. No OAuth client secret,
-access token, refresh token, ChatGPT token, Codex token, or fake token is stored
-in source code or settings. For OAuth-backed processing in the distributable app,
-use a standalone OpenAI-compatible managed endpoint.
+still validate legacy PKCE metadata for compatibility, but it cannot launch a
+browser flow or exchange codes. That metadata alone does not authenticate
+ClawScribe requests. For OAuth-backed processing, use a standalone
+OpenAI-compatible managed endpoint.
 
 ## Disabled Or Not Configured
 
@@ -154,7 +145,7 @@ Important fields:
 - `openclawCodexManagedConfigured`: whether managed endpoint metadata exists.
 - `openclawCodexEndpointPresent`: whether the managed request endpoint exists.
 - `oauthPkceConfigured`: whether legacy public OAuth PKCE metadata exists.
-- `oauthBrowserLaunchReady`: whether a legacy authorization URL can be prepared.
+- `oauthBrowserLaunchReady`: false; legacy OAuth browser commands are not supported.
 - `oauthDeviceFlowConfigured`: whether a legacy device endpoint was configured.
 - `canAuthenticateRequests`: true for API-key auth with a stored key, or for
   `openclaw_codex_managed` with an endpoint configured. Custom OpenAI-compatible

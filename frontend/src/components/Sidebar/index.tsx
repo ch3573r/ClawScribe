@@ -478,9 +478,7 @@ const Sidebar: React.FC = () => {
           setCurrentMeeting({ id: item.id, title: item.title });
           const basePath = item.id.startsWith("intro-call")
             ? "/"
-            : item.id.includes("-")
-              ? `/meeting-details?id=${item.id}`
-              : `/notes/${item.id}`;
+            : `/meeting-details?id=${item.id}`;
           router.push(basePath);
         }}
         className={`group cursor-pointer rounded-md border px-2.5 py-2.5 transition ${
