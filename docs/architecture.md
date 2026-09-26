@@ -109,7 +109,9 @@ back to the UI transcript with a warning if that snapshot is unavailable. New
 capture creates no checkpoint folder or periodic AAC encodes. The legacy
 checkpoint reader and merge fallback remain available for older meetings. The
 recovery dialog probes raw chunks (including a readable temporary tail), recovered
-files, and legacy checkpoints without encoding the spool. Final transcript, audio and
+files, and legacy checkpoints without encoding the spool. Recovery attempts audio
+before checking for recoverable content, so zero transcript rows do not block
+audio-only meetings; unsuccessful attempts retain the recovery entry and originals. Final transcript, audio and
 metadata writes are independent. Stopped duration and completion time are
 persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have

@@ -81,6 +81,9 @@ save deadline allows two additional minutes for publication and fallback work.
 If raw encoding fails, existing legacy checkpoints are tried and originals are
 retained. New sessions rely on their raw spool for recovery.
 
+Recovery accepts recordings without a transcript: recover the saved audio first,
+then use Transcribe in the saved meeting. If audio recovery fails and there is no
+transcript, the recovery entry and originals remain available for retry.
 Recovery retains originals and includes an unconsumed tail. Opening a recovered
 meeting reuses its completed audio; an explicit recovery action can rebuild it.
 Retranscription checks retained chunks and saved warnings for gaps, including

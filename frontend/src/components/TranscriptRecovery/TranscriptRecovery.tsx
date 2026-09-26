@@ -250,7 +250,7 @@ export function TranscriptRecovery({
                       </div>
                     ) : (
                       <div className="flex items-center justify-center h-full text-muted-foreground">
-                        No transcripts to preview
+                        No transcript yet. A transcript is not required to recover recorded audio.
                       </div>
                     )}
                   </ScrollArea>

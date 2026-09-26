@@ -452,16 +452,22 @@ fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatu
     let checkpoints_dir = folder_path.join(".checkpoints");
     let output_path = folder_path.join(FINAL_AUDIO_FILE);
 
-    if validate_recoverable_audio_file(&output_path).is_ok() {
-        let output_path_str = output_path.to_string_lossy().to_string();
-        info!("Meeting already has playable final audio");
-        return Ok(AudioRecoveryStatus {
-            status: "success".to_string(),
-            chunk_count: 0,
-            estimated_duration_seconds: 0.0,
-            audio_file_path: Some(output_path_str),
-            message: "Final audio file already exists".to_string(),
-        });
+    for name in [
+        FINAL_AUDIO_FILE,
+        "audio-recovered.mp4",
+        "audio-recovered.wav",
+    ] {
+        let saved_audio = folder_path.join(name);
+        if validate_recoverable_audio_file(&saved_audio).is_ok() {
+            info!("Meeting already has saved audio");
+            return Ok(AudioRecoveryStatus {
+                status: "success".to_string(),
+                chunk_count: 0,
+                estimated_duration_seconds: 0.0,
+                audio_file_path: Some(saved_audio.to_string_lossy().into_owned()),
+                message: "Saved audio file already exists".to_string(),
+            });
+        }
     }
 
     // Check if checkpoints directory exists
@@ -717,6 +723,22 @@ mod tests {
             assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_only_recovery_reuses_saved_audio_without_checkpoints() {
+        for name in ["audio.mp4", "audio-recovered.wav", "audio-recovered.mp4"] {
+            let root = tempdir().unwrap();
+            let file = root.path().join(name);
+            std::fs::write(&file, b"synthetic nonempty saved audio").unwrap();
+            let status = recover_audio_from_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap();
+            assert_eq!(status.status, "success");
+            assert_eq!(status.audio_file_path.as_deref(), file.to_str());
+            assert!(!root.path().join(".checkpoints").exists());
+            assert!(!root.path().join("transcripts.json").exists());
         }
     }
 
