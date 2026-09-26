@@ -599,6 +599,30 @@ fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatu
     }
 }
 
+/// Frontend cleanup accepts only a canonical folder already saved in the library.
+#[tauri::command]
+pub async fn release_recovered_capture(
+    state: tauri::State<'_, crate::state::AppState>,
+    meeting_folder: String,
+) -> Result<(), String> {
+    release_registered_capture(state.db_manager.pool(), &meeting_folder).await
+}
+
+pub(crate) async fn release_registered_capture(
+    pool: &sqlx::SqlitePool,
+    meeting_folder: &str,
+) -> Result<(), String> {
+    let folder = crate::canonicalize_existing_dir(meeting_folder)?
+        .ok_or("Recovery folder is unavailable")?;
+    let folders = sqlx::query_scalar::<_, String>(
+        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> ''")
+        .fetch_all(pool).await.map_err(|_| "Could not verify saved meeting folder")?;
+    if !crate::canonical_folder_is_registered(&folder, folders.iter().map(String::as_str)) {
+        return Err("Recovery folder is not registered in the library".into());
+    }
+    super::audio_spool::release_recovered_capture(&folder).await
+}
+
 /// Clean up checkpoint files after successful recording or recovery
 /// This command is called by the frontend after successful save to clean up checkpoint files
 #[tauri::command]

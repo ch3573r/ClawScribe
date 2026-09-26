@@ -99,8 +99,7 @@ whose asynchronous registration finishes after the provider unmounts.
 recording spool. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
-it into WAV, or AAC above WAV's
-size limit. Both paths accept a readable temporary tail at the next sequence
+it into AAC when the encoder is available, with WAV as the encoder-free fallback. Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
 unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
 element. Periodic transcript snapshots continue during silence; the library-save
@@ -121,7 +120,10 @@ transcript/metadata failures do not retain redundant audio. Retranscription upda
 transaction and mirrors the outcome afterwards; capture gaps remain informational.
 Its audio resolver checks retained raw chunks and the saved outcome on a blocking
 worker, even when reusing recovered audio, so older partial recoveries also set
-the permanent capture-gap flag.
+the permanent capture-gap flag. After library save or committed retranscription,
+fully readable recovered spools are released only after audio validation and saved
+outcome status. Frontend release requests require a canonical registered meeting
+folder; incomplete chunks retain their originals.
 Shared stop ownership suppresses duplicate completion
 events, and a SQLite write reservation protects the folder lookup and insert
 against concurrent saves.

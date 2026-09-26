@@ -928,6 +928,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_recovery_releases_registered_spool_and_clears_backup_exclusion() {
+        use crate::audio::incremental_saver::{
+            recover_audio_from_checkpoints, release_registered_capture,
+        };
+        use crate::audio::recording_state::{AudioChunk, DeviceType};
+        for gap_marker in [false, true] {
+            let pool = crate::database::transcript_edits::tests::fixture().await;
+            let root = tempfile::tempdir().unwrap();
+            let (sender, _, _) =
+                crate::audio::transcription::queue::recording_audio_queue(root.path()).unwrap();
+            sender
+                .send(AudioChunk {
+                    data: vec![0.05; 4800],
+                    sample_rate: 48000,
+                    timestamp: 0.0,
+                    chunk_id: 0,
+                    device_type: DeviceType::System,
+                })
+                .await
+                .unwrap();
+            drop(sender);
+            let spool = root.path().join(".audio-spool");
+            if gap_marker {
+                std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap();
+            }
+            let folder = root.path().to_string_lossy().into_owned();
+            let recovered = recover_audio_from_checkpoints(folder.clone())
+                .await
+                .unwrap();
+            assert!(recovered
+                .audio_file_path
+                .unwrap()
+                .ends_with("audio-recovered.mp4"));
+            assert!(release_registered_capture(&pool, &folder)
+                .await
+                .unwrap_err()
+                .contains("not registered"));
+            assert!(spool.exists());
+            sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'review-test'")
+                .bind(&folder)
+                .execute(&pool)
+                .await
+                .unwrap();
+            // A failed outcome write must keep the originals.
+            std::fs::create_dir(root.path().join("recording-outcome.json")).unwrap();
+            assert!(release_registered_capture(&pool, &folder).await.is_err());
+            assert!(spool.exists());
+            std::fs::remove_dir(root.path().join("recording-outcome.json")).unwrap();
+            release_registered_capture(&pool, &folder).await.unwrap();
+            assert!(!spool.exists());
+            assert_eq!(
+                crate::audio::outcome::RecordingOutcome::read(root.path())
+                    .unwrap()
+                    .unwrap()
+                    .capture_incomplete,
+                gap_marker
+            );
+            let (manifest, folders) = snapshot(&pool).await.unwrap();
+            let archive = tempfile::tempdir().unwrap();
+            let report =
+                write_archive(&archive.path().join("backup.zip"), manifest, folders).unwrap();
+            assert!(report.incomplete_meetings.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn recovery_originals_are_reported_without_blocking_backup_or_being_deleted() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('review-test', 1, 0)").execute(&pool).await.unwrap();

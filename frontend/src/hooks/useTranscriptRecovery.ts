@@ -211,6 +211,14 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       await indexedDBService.markMeetingSaved(meetingId);
 
 
+      if (folderPath && audioRecovered) {
+        try {
+          await invoke('release_recovered_capture', { meetingFolder: folderPath });
+        } catch {
+          console.warn('Meeting saved; recovery originals retained because cleanup could not finish');
+        }
+      }
+
       // 8. Only remove legacy checkpoints once all their audio was recovered.
       // Failed/partial recovery must retain originals for another attempt.
       if (folderPath && audioRecovered && audioRecoveryStatus?.status === 'success') {

@@ -19,7 +19,7 @@ function recoveryHarness({ status = 'success', transcripts = [], failSave = fals
         return { status, chunk_count: 1, estimated_duration_seconds: 1,
           audio_file_path: ['success', 'partial'].includes(status) ? 'synthetic-recording/audio-recovered.wav' : undefined };
       }
-      if (command === 'cleanup_checkpoints') return;
+      if (command === 'cleanup_checkpoints' || command === 'release_recovered_capture') return;
       throw new Error('Unexpected command: ' + command);
     } },
     '@/services/indexedDBService': { indexedDBService: {
@@ -54,6 +54,7 @@ for (const status of ['success', 'partial']) {
     assert.equal(h.saves[0][3].capture_incomplete, status === 'partial');
     assert.ok(h.calls.indexOf('recover_audio_from_checkpoints') < h.calls.indexOf('save'));
     assert.ok(h.calls.indexOf('save') < h.calls.indexOf('markSaved'));
+    assert.ok(h.calls.indexOf('save') < h.calls.indexOf('release_recovered_capture'));
     assert.equal(h.calls.includes('cleanup_checkpoints'), status === 'success');
     assert.equal(h.render().recoverableMeetings.length, 0);
     h.hooks.unmount();
@@ -68,6 +69,7 @@ for (const status of ['none', 'failed', 'throw']) {
     assert.equal(h.saves.length, 0);
     assert.ok(!h.calls.includes('markSaved'));
     assert.ok(!h.calls.includes('cleanup_checkpoints'));
+    assert.ok(!h.calls.includes('release_recovered_capture'));
     assert.equal(h.render().recoverableMeetings.length, 1);
     assert.equal(h.render().isRecovering, false);
     h.hooks.unmount();
@@ -82,6 +84,7 @@ for (const status of ['none', 'failed']) {
     assert.equal(h.saves[0][1][0].text, 'Synthetic saved words');
     assert.equal(h.saves[0][3].audio_save_failed, status === 'failed');
     assert.ok(!h.calls.includes('cleanup_checkpoints'));
+    assert.ok(!h.calls.includes('release_recovered_capture'));
     h.hooks.unmount();
   });
 }
@@ -93,6 +96,7 @@ for (const failure of ['failSave', 'failRead']) {
     await assert.rejects(h.render().recoverMeeting('interrupted'), /Synthetic/);
     assert.ok(!h.calls.includes('markSaved'));
     assert.ok(!h.calls.includes('cleanup_checkpoints'));
+    assert.ok(!h.calls.includes('release_recovered_capture'));
     assert.equal(h.render().recoverableMeetings.length, 1);
     h.hooks.unmount();
   });

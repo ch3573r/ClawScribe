@@ -730,6 +730,18 @@ async fn save_retranscription_transcripts<R: Runtime>(
             .map_err(anyhow::Error::msg)?;
     }
 
+    if audio_path
+        .file_name()
+        .is_some_and(|name| name == "audio-recovered.mp4" || name == "audio-recovered.wav")
+    {
+        if super::audio_spool::release_recovered_capture(folder_path)
+            .await
+            .is_err()
+        {
+            warn!("Transcript saved; recovery originals retained because cleanup could not finish");
+        }
+    }
+
     emit_progress(app, meeting_id, "complete", 100, "Retranscription complete");
 
     Ok(RetranscriptionResult {

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Include the post-0.5.45 recovery fixes: detect raw capture audio in the recovery dialog, allow audio-only recovery, preserve capture-gap warnings, and report final save outcomes accurately. Recover to compact AAC when available and release fully recovered raw audio after library save or retranscription; preserve originals when recovery is incomplete.
+
 ## 0.5.45
 
 - Preserve recording continuity when live transcription, disk queueing, or device delivery degrades. Keep bounded capture buffers and recoverable raw audio, freeze duration at Stop, and prevent duplicate stop/save operations and duplicate saved meetings.

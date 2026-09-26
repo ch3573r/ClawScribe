@@ -157,27 +157,26 @@ pub(super) fn encode_capture(
 }
 
 pub(super) fn recover(folder: &Path) -> Result<AudioRecoveryStatus, String> {
-    recover_inner(folder).map_err(|_| {
+    recover_inner(folder, super::ffmpeg::find_ffmpeg_path().is_some()).map_err(|_| {
         "Audio recovery could not finish. Check disk space and keep the meeting recovery files."
             .into()
     })
 }
 
-fn recover_inner(folder: &Path) -> std::io::Result<AudioRecoveryStatus> {
+fn recover_inner(folder: &Path, encoder_available: bool) -> std::io::Result<AudioRecoveryStatus> {
     let spool = folder.join(".audio-spool");
     let (paths, temporary_gaps, _) = capture_paths(&spool)?;
     let staged = folder.join(format!(".audio-recovered-{}.tmp", uuid::Uuid::new_v4()));
-    // Keep encoder-free WAV recovery for normal recordings. Above RIFF's
-    // 32-bit limit, stream into one AAC encode instead of rejecting the meeting.
-    let bytes = paths.iter().try_fold(0u64, |total, path| {
-        fs::metadata(path).map(|metadata| total.saturating_add(metadata.len()))
-    })?;
-    if bytes > u32::MAX as u64 - 36 {
-        let first = read_chunk(
-            paths
-                .first()
-                .ok_or_else(|| std::io::Error::other("No captured audio"))?,
-        )?;
+    // Prefer compact AAC; retain encoder-free WAV recovery as the fallback.
+    if encoder_available {
+        let first = paths
+            .iter()
+            .find_map(|path| {
+                read_chunk(path)
+                    .ok()
+                    .filter(|chunk| chunk.sample_rate > 0 && !chunk.data.is_empty())
+            })
+            .ok_or_else(|| std::io::Error::other("No readable captured audio"))?;
         let samples = paths.iter().try_fold(0u64, |total, path| {
             fs::metadata(path)
                 .map(|metadata| total.saturating_add(metadata.len().saturating_sub(33) / 4))
@@ -187,7 +186,7 @@ fn recover_inner(folder: &Path) -> std::io::Result<AudioRecoveryStatus> {
             .map(|(gaps, _)| {
                 encoded_gaps = gaps;
             })
-            .map_err(|_| std::io::Error::other("Long recording recovery failed"));
+            .map_err(|_| std::io::Error::other("Recording recovery encode failed"));
         if let Err(error) = encoded {
             let _ = fs::remove_file(&staged);
             return Err(error);
@@ -297,6 +296,60 @@ fn recover_inner(folder: &Path) -> std::io::Result<AudioRecoveryStatus> {
     result
 }
 
+/// Release only a completely recovered spool, after the caller has saved the meeting.
+pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), String> {
+    if super::recording_commands::is_recording().await {
+        return Err("Stop recording before releasing recovery files".into());
+    }
+    let folder = folder.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let spool = folder.join(".audio-spool");
+        if !spool.is_dir() {
+            return Ok(());
+        }
+        let (paths, temporary_gaps, all_available) =
+            capture_paths(&spool).map_err(|_| "Could not inspect recovery files")?;
+        if paths.is_empty() || temporary_gaps || !all_available {
+            return Ok(());
+        }
+        let mut rate = None;
+        for (index, path) in paths.iter().enumerate() {
+            if path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<usize>().ok())
+                != Some(index)
+            {
+                return Ok(());
+            }
+            let chunk = match read_chunk(path) {
+                Ok(chunk) if chunk.sample_rate > 0 && !chunk.data.is_empty() => chunk,
+                _ => return Ok(()),
+            };
+            if rate.is_some_and(|rate| rate != chunk.sample_rate) {
+                return Ok(());
+            }
+            rate = Some(chunk.sample_rate);
+        }
+        // A full decode verifies the published recovery before originals are removed.
+        if !["audio-recovered.mp4", "audio-recovered.wav"]
+            .iter()
+            .any(|name| {
+                super::incremental_saver::validate_recoverable_temp_audio_file(&folder.join(name))
+                    .is_ok()
+            })
+        {
+            return Ok(());
+        }
+        let mut outcome = super::outcome::RecordingOutcome::read(&folder)?.unwrap_or_default();
+        outcome.capture_incomplete |= spool.join(".incomplete").exists();
+        outcome.write(&folder)?;
+        fs::remove_dir_all(&spool).map_err(|_| "Could not release recovered capture files".into())
+    })
+    .await
+    .map_err(|_| "Could not finish recovery cleanup")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +388,9 @@ mod tests {
         assert!(gaps && !all_encoded);
         assert!(damaged.exists());
         super::super::incremental_saver::validate_recoverable_temp_audio_file(&output).unwrap();
+        assert_eq!(recover(root.path()).unwrap().status, "partial");
+        release_recovered_capture(root.path()).await.unwrap();
+        assert!(damaged.exists());
     }
     #[tokio::test]
     async fn recovery_includes_readable_temporary_tail_and_reports_torn_writes() {
@@ -363,7 +419,7 @@ mod tests {
             if torn {
                 fs::write(temp, b"torn write").unwrap();
             }
-            let status = recover(root.path()).unwrap();
+            let status = recover_inner(root.path(), false).unwrap();
             let expected = if torn { published } else { published + 1 };
             assert_eq!(status.status, if torn { "partial" } else { "success" });
             assert_eq!(status.chunk_count, expected as u32);
@@ -395,7 +451,7 @@ mod tests {
         receiver.recv().await.unwrap().unwrap();
         drop(receiver);
         drop(sender);
-        let status = recover(folder.path()).unwrap();
+        let status = recover_inner(folder.path(), false).unwrap();
         assert_eq!(status.status, "success");
         assert_eq!(status.chunk_count, 3);
         let bytes = fs::read(status.audio_file_path.unwrap()).unwrap();

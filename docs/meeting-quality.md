@@ -84,11 +84,15 @@ retained. New sessions rely on their raw spool for recovery.
 Recovery accepts recordings without a transcript: recover the saved audio first,
 then use Transcribe in the saved meeting. If audio recovery fails and there is no
 transcript, the recovery entry and originals remain available for retry.
-Recovery retains originals and includes an unconsumed tail. Opening a recovered
+Recovery includes an unconsumed tail. After library save or successful retranscription,
+fully recovered raw audio is released once the recovered file is validated and
+capture warnings are saved. Unreadable or missing chunks keep their originals. Opening a recovered
 meeting reuses its completed audio; an explicit recovery action can rebuild it.
 Retranscription checks retained chunks and saved warnings for gaps, including
 when reusing a recovered file, and preserves that information in the library.
-Long captures beyond WAV's 32-bit length limit use a streamed AAC recovery encode.
+Recovery uses compact AAC when FFmpeg is available; WAV remains the fallback
+without the encoder, within its 32-bit size limit. Existing recovered WAV files
+remain supported.
 Temporary legacy checkpoints must decode successfully before recovery uses them.
 Playback uses the browser's streaming audio element through scoped local-file
 access rather than decoding the whole recording into webview memory.
