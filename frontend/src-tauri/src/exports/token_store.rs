@@ -274,23 +274,42 @@ pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
         }
         Err(e) => {
             log::warn!("Keychain token write failed ({e}); using file fallback");
-            save_to_file(&json)
+            save_fallback(&json, save_to_file, || {
+                keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)?.delete_credential()
+            })
         }
+    }
+}
+
+fn save_fallback(
+    json: &str,
+    save: impl FnOnce(&str) -> Result<(), TokenStoreError>,
+    delete_stale: impl FnOnce() -> Result<(), keyring::Error>,
+) -> Result<(), TokenStoreError> {
+    save(json)?;
+    match delete_stale() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err(TokenStoreError::KeyringError(
+            "Could not remove stale Microsoft token after fallback save".into(),
+        )),
     }
 }
 
 pub fn load_token() -> Result<Option<StoredToken>, TokenStoreError> {
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
         .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
-    match entry.get_password() {
-        Ok(json) => {
-            let persisted: PersistedToken = serde_json::from_str(&json)
-                .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
-            Ok(Some(persisted.into_stored()))
-        }
-        // Nothing in the keychain — check the file fallback before giving up.
-        Err(keyring::Error::NoEntry) => Ok(load_from_file().map(PersistedToken::into_stored)),
-        Err(_) => Ok(load_from_file().map(PersistedToken::into_stored)),
+    load_token_from_sources(entry.get_password(), load_from_file)
+}
+
+fn load_token_from_sources(
+    keychain: Result<String, keyring::Error>,
+    fallback: impl FnOnce() -> Option<PersistedToken>,
+) -> Result<Option<StoredToken>, TokenStoreError> {
+    match keychain {
+        Ok(json) => serde_json::from_str::<PersistedToken>(&json)
+            .map(|token| Some(token.into_stored()))
+            .map_err(|e| TokenStoreError::SerializationError(e.to_string())),
+        Err(_) => Ok(fallback().map(PersistedToken::into_stored)),
     }
 }
 
@@ -355,6 +374,46 @@ pub async fn ensure_valid_token(
     };
 
     Ok(updated)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn fallback_replaces_stale_keychain_token() {
+        use std::cell::RefCell;
+        let keychain = RefCell::new(Some("old token".to_string()));
+        let fallback = RefCell::new(None);
+        let fresh = PersistedToken {
+            refresh_token: Some("test-fresh".into()),
+            user_id: "test-user".into(),
+            user_display_name: "Test User".into(),
+            user_email: None,
+            tenant_id: "organizations".into(),
+            granted_scopes: "User.Read".into(),
+        };
+        save_fallback(
+            &serde_json::to_string(&fresh).unwrap(),
+            |json| {
+                *fallback.borrow_mut() =
+                    Some(serde_json::from_str::<PersistedToken>(json).unwrap());
+                Ok(())
+            },
+            || {
+                *keychain.borrow_mut() = None;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let loaded =
+            load_token_from_sources(keychain.into_inner().ok_or(keyring::Error::NoEntry), || {
+                fallback.into_inner()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.refresh_token, fresh.refresh_token);
+        assert!(save_fallback("test", |_| Ok(()), || Err(keyring::Error::NoEntry)).is_ok());
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

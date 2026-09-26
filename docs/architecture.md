@@ -246,3 +246,6 @@ the same lock, so an in-flight refresh cannot restore a signed-out account.
 Microsoft authentication HTTP calls time out after 30 seconds. OpenClaw handoffs
 time out after 60 seconds and retain at most 64 KiB of response text in submission
 markers.
+
+A Microsoft token fallback save removes the older keychain entry so the next
+load cannot prefer stale credentials over the encrypted fallback.
