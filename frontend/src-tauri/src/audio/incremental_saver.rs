@@ -383,7 +383,12 @@ pub(super) async fn find_or_recover_audio_file_with_status(
     let path = find_or_recover_audio_file(folder).await?;
     let folder = folder.to_path_buf();
     let gaps = tokio::task::spawn_blocking(move || -> Result<bool> {
-        let saved = super::outcome::RecordingOutcome::read(&folder).map_err(anyhow::Error::msg)?;
+        let saved = super::outcome::RecordingOutcome::read(&folder).unwrap_or_else(|_| {
+            log::warn!(
+                "Recording status could not be read; checking retained capture and library status"
+            );
+            None
+        });
         Ok(saved.is_some_and(|outcome| outcome.capture_incomplete)
             || super::audio_spool::capture_has_gaps(&folder)?)
     })

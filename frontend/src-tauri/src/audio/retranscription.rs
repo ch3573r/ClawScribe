@@ -1236,6 +1236,22 @@ mod tests {
             sqlx::migrate!("./migrations").run(&pool).await.unwrap();
             sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('synthetic', 'Synthetic meeting', '2026-01-01', '2026-01-01')").execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete) VALUES ('synthetic', 1, 1, 1, 1)").execute(&pool).await.unwrap();
+            std::fs::write(
+                folder.path().join("recording-outcome.json"),
+                b"damaged status",
+            )
+            .unwrap();
+            std::fs::write(folder.path().join("audio-recovered.wav"), b"saved audio").unwrap();
+            let spool = folder.path().join(".audio-spool");
+            std::fs::create_dir(&spool).unwrap();
+            std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap();
+            let (_, capture_gaps) =
+                crate::audio::incremental_saver::find_or_recover_audio_file_with_status(
+                    folder.path(),
+                )
+                .await
+                .unwrap();
+            assert!(capture_gaps);
             let segments =
                 create_transcript_segments(&[("Synthetic recovered sentence".into(), 0.0, 2000.0)]);
             let files_saved = rewrite_retranscription_files(
@@ -1250,7 +1266,7 @@ mod tests {
             );
             assert_eq!(files_saved, failed_file.is_none());
             let mut tx = pool.begin().await.unwrap();
-            update_retranscription_outcome(&mut tx, "synthetic", files_saved, false)
+            update_retranscription_outcome(&mut tx, "synthetic", files_saved, capture_gaps)
                 .await
                 .unwrap();
             tx.commit().await.unwrap();

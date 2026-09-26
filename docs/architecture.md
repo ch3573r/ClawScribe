@@ -120,7 +120,9 @@ transcript/metadata failures do not retain redundant audio. Retranscription upda
 transaction and mirrors the outcome afterwards; capture gaps remain informational.
 Its audio resolver checks retained raw chunks and the saved outcome on a blocking
 worker, even when reusing recovered audio, so older partial recoveries also set
-the permanent capture-gap flag. After library save or committed retranscription,
+the permanent capture-gap flag. Unreadable saved status is treated as unknown;
+retained capture and database warnings still preserve gaps, and committed
+retranscription rewrites the status file. After library save or committed retranscription,
 fully readable recovered spools are released only after audio validation and saved
 outcome status. Frontend release requests require a canonical registered meeting
 folder; incomplete chunks retain their originals.
