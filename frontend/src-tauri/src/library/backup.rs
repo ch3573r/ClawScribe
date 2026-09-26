@@ -200,7 +200,9 @@ fn write_archive(
             }
             zip.start_file(format!("recordings/{index}/{name}"), options)
                 .map_err(failure)?;
-            if std::io::copy(&mut input, &mut zip).map_err(failure)? != size {
+            if std::io::copy(&mut Read::take(&mut input, size + 1), &mut zip).map_err(failure)?
+                != size
+            {
                 return Err(
                     "A recording changed during backup. Retry when processing finishes.".into(),
                 );
@@ -296,7 +298,8 @@ fn unpack(path: &Path, root: &Path) -> Result<(Manifest, tempfile::TempDir), Str
                 .map_err(failure)?;
             let size = source.size();
             let mut destination = File::create(folder.join(name)).map_err(failure)?;
-            let copied = std::io::copy(&mut source, &mut destination).map_err(failure)?;
+            let copied = std::io::copy(&mut Read::take(&mut source, size + 1), &mut destination)
+                .map_err(failure)?;
             if copied != size {
                 return Err("Archive file is truncated.".into());
             }

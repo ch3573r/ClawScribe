@@ -313,4 +313,27 @@ mod tests {
             2
         );
     }
+
+    #[tokio::test]
+    async fn deleting_unopened_meeting_removes_live_bookmarks() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("UPDATE meetings SET folder_path = 'synthetic-folder'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meeting_bookmarks VALUES ('mark', NULL, 'synthetic-folder', 12.5, 'Review')").execute(&pool).await.unwrap();
+        crate::database::repositories::meeting::MeetingsRepository::delete_meeting(
+            &pool,
+            "review-test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM meeting_bookmarks")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }

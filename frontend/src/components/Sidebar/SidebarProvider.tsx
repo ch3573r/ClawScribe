@@ -73,7 +73,7 @@ export const useSidebar = () => {
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [projectTags, setProjectTags] = useState<MeetingTag[]>([]);
-  const [projectTagsError, setProjectTagsError] = useState<string | null>(null);
+  const [projectTagsError, setProjectTagsError] = useState<string | null>('Loading project tags…');
   const tagsVersion = React.useRef(0);
   const refreshProjectTags = React.useCallback(async () => {
     const version = ++tagsVersion.current;

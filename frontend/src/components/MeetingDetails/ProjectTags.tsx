@@ -24,8 +24,8 @@ export function ProjectTags({ meetingId }: { meetingId: string }) {
     finally { pending.current = false; setBusy(false); }
   };
   return <>
-    <Button variant="outline" size="sm" onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags.join(', ')); setOpen(true); }}>
-      {projectTagsError ? 'Retry loading tags' : tags.length ? `Tags: ${tags.join(', ')}` : 'Project tags'}
+    <Button variant="outline" size="sm" className="max-w-64" title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags.join(', ')); setOpen(true); }}>
+      <span className="truncate">{projectTagsError ? 'Retry loading tags' : tags.length ? `Tags: ${tags.join(', ')}` : 'Project tags'}</span>
     </Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent>
       <DialogHeader><DialogTitle>Project tags</DialogTitle><DialogDescription>Separate tags with commas. Use up to 20 tags, each up to 60 characters. Clear the field to remove all tags.</DialogDescription></DialogHeader>

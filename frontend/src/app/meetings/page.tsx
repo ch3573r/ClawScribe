@@ -188,7 +188,7 @@ export default function MeetingsPage() {
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
               <label className="flex items-center gap-2">Project
-                <select className="h-9 max-w-48 rounded-md border border-input bg-background px-2 text-foreground" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} disabled={!!projectTagsError}>
+                <select aria-label="Project" className="h-9 max-w-48 rounded-md border border-input bg-background px-2 text-foreground" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} disabled={!!projectTagsError}>
                   <option value="">All projects</option><option value="__untagged">Untagged</option>
                   {tagOptions.map(tag => <option key={tag.toLowerCase()} value={`tag:${tag}`}>{tag}</option>)}
                 </select>

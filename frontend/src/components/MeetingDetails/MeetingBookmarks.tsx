@@ -52,13 +52,13 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId
       {currentTime !== undefined && <Button size="sm" variant="outline" onClick={() => setSeconds(currentTime.toFixed(1))}>Use playback time</Button>}
       <Button size="sm" disabled={busy || !label.trim() || !seconds.trim() || !Number.isFinite(Number(seconds)) || Number(seconds) < 0} onClick={() => change('add_meeting_bookmark', { meetingId, seconds: Number(seconds), label })}>Add bookmark</Button>
     </div>
-    <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto">{bookmarks.map(mark => <li key={mark.id} className="flex items-center gap-2">
+    <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto">{bookmarks.map(mark => <li key={mark.id} className="flex flex-wrap items-center gap-1">
       {editing === mark.id ? <>
         <input aria-label="Bookmark label" maxLength={160} className="min-w-0 flex-1 rounded border border-input bg-background p-1" value={editLabel} onChange={e => setEditLabel(e.target.value)} />
         <Button size="sm" disabled={busy || !editLabel.trim()} onClick={() => change('rename_meeting_bookmark', { id: mark.id, label: editLabel })}>Save</Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel</Button>
       </> : <>
-      <button className="min-w-0 flex-1 truncate text-left text-primary underline disabled:text-muted-foreground" disabled={!onSeek} onClick={() => onSeek?.(mark.seconds)} title={mark.label}>{bookmarkTime(mark.seconds)} · {mark.label}</button>
+      <button className="w-full truncate text-left text-primary underline disabled:text-muted-foreground" disabled={!onSeek} onClick={() => onSeek?.(mark.seconds)} title={`${bookmarkTime(mark.seconds)} · ${mark.label}`}>{bookmarkTime(mark.seconds)} · {mark.label}</button>
       <Button size="sm" variant="ghost" disabled={busy} aria-label={`Rename bookmark ${mark.label}`} onClick={() => { setEditing(mark.id); setEditLabel(mark.label); }}>Rename</Button>
       <Button size="sm" variant="ghost" disabled={busy} aria-label={`Remove bookmark ${mark.label}`} onClick={() => change('delete_meeting_bookmark', { id: mark.id })}>Remove</Button>
       </>}

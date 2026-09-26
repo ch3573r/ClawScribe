@@ -36,8 +36,8 @@ export function LocalWordExport({ meetingId, title, getMarkdown, disabled }: { m
             <option value="both">Summary and transcript</option><option value="summary">Summary only</option><option value="transcript">Transcript only</option>
           </select>
         </label>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={speakers} disabled={busy || content === 'summary'} onChange={e => setSpeakers(e.target.checked)} />Speaker labels</label>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={timestamps} disabled={busy || content === 'summary'} onChange={e => setTimestamps(e.target.checked)} />Transcript timestamps</label>
+        <label className="flex items-center gap-2 text-sm"><input className="accent-[hsl(var(--primary))]" type="checkbox" checked={speakers} disabled={busy || content === 'summary'} onChange={e => setSpeakers(e.target.checked)} />Speaker labels</label>
+        <label className="flex items-center gap-2 text-sm"><input className="accent-[hsl(var(--primary))]" type="checkbox" checked={timestamps} disabled={busy || content === 'summary'} onChange={e => setTimestamps(e.target.checked)} />Transcript timestamps</label>
         <DialogFooter><Button disabled={busy} onClick={exportDocument}>{busy ? 'Saving…' : 'Save as Word document'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
