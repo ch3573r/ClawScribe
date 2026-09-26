@@ -169,7 +169,7 @@ export function useSummaryGeneration({
 
       // Start global polling via context
       startSummaryPolling(meeting.id, process_id, async (pollingResult) => {
-        console.log('Summary status:', pollingResult);
+        console.log('Summary status:', pollingResult.status);
 
         // Handle cancellation
         if (pollingResult.status === 'cancelled') {
@@ -268,7 +268,7 @@ export function useSummaryGeneration({
 
         // Handle successful completion
         if (pollingResult.status === 'completed' && pollingResult.data) {
-          console.log('Summary generation completed:', pollingResult.data);
+          console.log('Summary generation completed');
 
           // Update meeting title if available
           const meetingName = pollingResult.data.MeetingName || pollingResult.meetingName;

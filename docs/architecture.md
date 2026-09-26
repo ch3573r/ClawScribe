@@ -163,6 +163,12 @@ configuration. API summary response readers enforce an 8 MiB limit, reject
 reported output truncation, and keep cancellation active while reading the body.
 Chat and reviewed task polishing share provider configuration resolution.
 
+Summary status polling has one shared timer owner across meetings. Starting or
+finishing one poll keeps other meetings' polls alive; stopped or replaced requests
+cannot publish late responses. Missing jobs and completed jobs without saved
+content surface retry errors. Status checks do not overlap, and the polling limit
+reports an unconfirmed status without claiming that provider work was cancelled.
+
 ## Microsoft Export Persistence
 
 `exports/commands.rs` serializes export owners so separate dialogs cannot race
