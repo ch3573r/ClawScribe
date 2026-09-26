@@ -6,6 +6,8 @@
 
 - Allow retranscription when recording status is damaged, preserving capture gaps from retained audio and the library while rewriting the status file.
 
+- Mark recovered live transcripts incomplete so the meeting offers Retranscribe; audio-only recoveries retain the normal Transcribe flow.
+
 ## 0.5.45
 
 - Preserve recording continuity when live transcription, disk queueing, or device delivery degrades. Keep bounded capture buffers and recoverable raw audio, freeze duration at Stop, and prevent duplicate stop/save operations and duplicate saved meetings.

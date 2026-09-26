@@ -52,6 +52,7 @@ for (const status of ['success', 'partial']) {
     assert.equal(h.saves[0][1].length, 0);
     assert.equal(h.saves[0][2], 'synthetic-recording');
     assert.equal(h.saves[0][3].capture_incomplete, status === 'partial');
+    assert.equal(h.saves[0][3].transcription_incomplete, false);
     assert.ok(h.calls.indexOf('recover_audio_from_checkpoints') < h.calls.indexOf('save'));
     assert.ok(h.calls.indexOf('save') < h.calls.indexOf('markSaved'));
     assert.ok(h.calls.indexOf('save') < h.calls.indexOf('release_recovered_capture'));
@@ -76,15 +77,16 @@ for (const status of ['none', 'failed', 'throw']) {
   });
 }
 
-for (const status of ['none', 'failed']) {
-  test(`transcript-only recovery still succeeds when audio is ${status}, without deleting originals`, async () => {
+for (const status of ['success', 'partial', 'none', 'failed']) {
+  test(`recovered live transcript is incomplete when audio recovery is ${status}`, async () => {
     const h = recoveryHarness({ status, transcripts: [{ text: 'Synthetic saved words', timestamp: '00:00', sequenceId: 0 }] });
     const result = await h.render().recoverMeeting('interrupted');
     assert.equal(result.transcriptCount, 1);
     assert.equal(h.saves[0][1][0].text, 'Synthetic saved words');
     assert.equal(h.saves[0][3].audio_save_failed, status === 'failed');
-    assert.ok(!h.calls.includes('cleanup_checkpoints'));
-    assert.ok(!h.calls.includes('release_recovered_capture'));
+    assert.equal(h.saves[0][3].transcription_incomplete, true);
+    assert.equal(h.calls.includes('cleanup_checkpoints'), status === 'success');
+    assert.equal(h.calls.includes('release_recovered_capture'), ['success', 'partial'].includes(status));
     h.hooks.unmount();
   });
 }

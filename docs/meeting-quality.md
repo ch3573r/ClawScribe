@@ -83,7 +83,10 @@ retained. New sessions rely on their raw spool for recovery.
 
 Recovery accepts recordings without a transcript: recover the saved audio first,
 then use Transcribe in the saved meeting. If audio recovery fails and there is no
-transcript, the recovery entry and originals remain available for retry.
+transcript, the recovery entry and originals remain available for retry. Recovered
+live transcripts are marked incomplete and offer Retranscribe, since queued speech
+may not have been transcribed before the crash. Audio-only recoveries keep the
+normal Transcribe flow.
 Recovery includes an unconsumed tail. After library save or successful retranscription,
 fully recovered raw audio is released once the recovered file is validated and
 capture warnings are saved. Unreadable or missing chunks keep their originals. Opening a recovered

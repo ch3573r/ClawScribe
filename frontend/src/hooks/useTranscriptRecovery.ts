@@ -191,7 +191,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         folderPath ?? null,
         {
           audio_save_failed: audioRecoveryStatus?.status === 'failed',
-          transcription_incomplete: false,
+          transcription_incomplete: transcripts.length > 0,
           capture_incomplete: audioRecoveryStatus?.status === 'partial',
         },
       );
