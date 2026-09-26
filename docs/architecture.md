@@ -113,7 +113,9 @@ files, and legacy checkpoints without encoding the spool. Final transcript, audi
 metadata writes are independent. Stopped duration and completion time are
 persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have
-separate persistent flags. Retranscription updates repaired flags in the transcript
+separate persistent flags. File warnings reflect final write results. Spool cleanup
+requires published audio, complete raw encoding, and a saved outcome; independent
+transcript/metadata failures do not retain redundant audio. Retranscription updates repaired flags in the transcript
 transaction and mirrors the outcome afterwards; capture gaps remain informational.
 Its audio resolver checks retained raw chunks and the saved outcome on a blocking
 worker, even when reusing recovered audio, so older partial recoveries also set

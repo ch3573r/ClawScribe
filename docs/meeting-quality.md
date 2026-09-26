@@ -62,8 +62,10 @@ be recovered, and a crash can lose pending in-memory buffers.
 
 The raw spool uses approximately 700 MB per hour in addition to final audio. Prefer a local recording folder with enough free
 space; syncing that folder with OneDrive can add disk contention. Originals
-remain until all readable raw chunks, transcript snapshots, metadata and warning
-status are saved. Capture gaps have their own persistent warning and do not keep
+remain until all readable raw chunks are encoded, final audio is published, and
+warning status is saved. Transcript or metadata failures remain visible but do not
+retain raw audio that cannot repair those files. A transient stopped-metadata
+write failure leaves no file warning if the final write repairs it. Capture gaps have their own persistent warning and do not keep
 an otherwise fully encoded spool forever. A readable temporary chunk at the next sequence position is included in final
 audio and recovery. A torn temporary tail records a gap without retaining the
 spool; unreadable published chunks and originals needed after a failed save
