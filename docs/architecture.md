@@ -107,7 +107,9 @@ element. Periodic transcript snapshots continue during silence; the library-save
 command reads the backend snapshot when saving a finished recording, falling
 back to the UI transcript with a warning if that snapshot is unavailable. New
 capture creates no checkpoint folder or periodic AAC encodes. The legacy
-checkpoint reader and merge fallback remain available for older meetings. Final transcript, audio and
+checkpoint reader and merge fallback remain available for older meetings. The
+recovery dialog probes raw chunks (including a readable temporary tail), recovered
+files, and legacy checkpoints without encoding the spool. Final transcript, audio and
 metadata writes are independent. Stopped duration and completion time are
 persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have

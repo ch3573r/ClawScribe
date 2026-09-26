@@ -52,6 +52,18 @@ fn capture_paths(spool: &Path) -> std::io::Result<(Vec<PathBuf>, bool, bool)> {
     Ok((paths, gaps, all_available))
 }
 
+/// Cheap recovery-dialog probe: inspect chunks only until readable audio is found.
+pub(super) fn has_capture_audio(folder: &Path) -> std::io::Result<bool> {
+    let spool = folder.join(".audio-spool");
+    if !spool.is_dir() {
+        return Ok(false);
+    }
+    let (paths, _, _) = capture_paths(&spool)?;
+    Ok(paths.iter().any(|path| {
+        read_chunk(path).is_ok_and(|chunk| chunk.sample_rate > 0 && !chunk.data.is_empty())
+    }))
+}
+
 /// Returns (has gaps, all recoverable chunks encoded). Unreadable published
 /// chunks are retained; a torn final temporary write only records a capture gap.
 pub(super) fn encode_capture(

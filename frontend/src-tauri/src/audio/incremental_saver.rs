@@ -595,14 +595,25 @@ pub async fn cleanup_checkpoints(meeting_folder: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Check if a meeting folder has audio checkpoint files
-/// Returns true if .checkpoints/ directory exists and contains .mp4 files
+/// Check for saved/recovered audio or readable raw/legacy recovery data.
+/// The command name is retained for existing recovery-dialog callers.
 #[tauri::command]
 pub async fn has_audio_checkpoints(meeting_folder: String) -> Result<bool, String> {
     let folder_path = PathBuf::from(&meeting_folder);
     let checkpoints_dir = folder_path.join(".checkpoints");
 
-    if validate_recoverable_audio_file(&folder_path.join(FINAL_AUDIO_FILE)).is_ok() {
+    for name in [
+        FINAL_AUDIO_FILE,
+        "audio-recovered.mp4",
+        "audio-recovered.wav",
+    ] {
+        if validate_recoverable_audio_file(&folder_path.join(name)).is_ok() {
+            return Ok(true);
+        }
+    }
+    if super::audio_spool::has_capture_audio(&folder_path)
+        .map_err(|_| "Failed to inspect captured audio".to_string())?
+    {
         return Ok(true);
     }
 
@@ -626,6 +637,70 @@ mod tests {
     use super::super::recording_state::{AudioChunk, DeviceType};
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn recovery_dialog_recognizes_spool_and_temporary_tail() {
+        for temporary in [false, true] {
+            let root = tempdir().unwrap();
+            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap());
+            let (sender, _, _) =
+                super::super::transcription::queue::recording_audio_queue(root.path()).unwrap();
+            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap());
+            sender
+                .send(AudioChunk {
+                    data: vec![0.05; 160],
+                    sample_rate: 16000,
+                    timestamp: 0.0,
+                    chunk_id: 0,
+                    device_type: DeviceType::System,
+                })
+                .await
+                .unwrap();
+            drop(sender);
+            let chunk = root.path().join(".audio-spool/00000000000000000000.chunk");
+            let path = if temporary {
+                let temp = chunk.with_extension("tmp");
+                std::fs::rename(chunk, &temp).unwrap();
+                temp
+            } else {
+                chunk
+            };
+            assert!(has_audio_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap());
+            std::fs::write(path, b"torn capture").unwrap();
+            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_dialog_recognizes_recovered_and_legacy_audio() {
+        for name in [
+            "audio-recovered.wav",
+            "audio-recovered.mp4",
+            "audio.mp4",
+            ".checkpoints/audio_chunk_000.mp4",
+        ] {
+            let root = tempdir().unwrap();
+            let file = root.path().join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            // The existing saved-file validator checks that it is a nonempty file.
+            std::fs::write(&file, b"synthetic saved audio").unwrap();
+            assert!(has_audio_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap());
+            std::fs::write(file, b"").unwrap();
+            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+                .await
+                .unwrap());
+        }
+    }
 
     #[tokio::test]
     async fn failed_raw_encode_can_use_retained_legacy_checkpoints() {
