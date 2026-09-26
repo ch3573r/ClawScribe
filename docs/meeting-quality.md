@@ -53,7 +53,8 @@ Parakeet Auto does not record English as the source language without evidence.
 
 With audio saving enabled, captured mixed audio is staged in one-second batches
 under the meeting's `.audio-spool` folder. New recordings do not launch periodic
-checkpoint encoders. Independent disk workers have bounded memory queues: up to 60 capture
+checkpoint encoders or create `.checkpoints` folders. Older checkpoint recordings
+can still be recovered. Independent disk workers have bounded memory queues: up to 60 capture
 batches and eight speech segments. Temporary queue pressure or spool-write
 failures mark the meeting incomplete and keep capture running. Publication
 retries transient file locks five times. Samples that never reach disk cannot

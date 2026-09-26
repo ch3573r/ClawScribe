@@ -331,7 +331,7 @@ async fn run_import<R: Runtime>(
             get_default_recordings_folder()
         }
     };
-    let meeting_folder = create_meeting_folder(&base_folder, &title, false)?;
+    let meeting_folder = create_meeting_folder(&base_folder, &title)?;
 
     // Copy audio file to meeting folder
     emit_progress(&app, "copying", 10, "Copying audio file...");

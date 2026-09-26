@@ -104,7 +104,8 @@ size limit. Playback uses scoped asset-protocol byte ranges and an HTML audio
 element. Periodic transcript snapshots continue during silence; the library-save
 command reads the backend snapshot when saving a finished recording, falling
 back to the UI transcript with a warning if that snapshot is unavailable. New
-capture does not encode periodic AAC checkpoints. Final transcript, audio and
+capture creates no checkpoint folder or periodic AAC encodes. The legacy
+checkpoint reader and merge fallback remain available for older meetings. Final transcript, audio and
 metadata writes are independent; capture gaps and artifact-save failures have
 separate persistent flags. Retranscription updates repaired flags in the transcript
 transaction and mirrors the outcome afterwards; capture gaps remain informational.

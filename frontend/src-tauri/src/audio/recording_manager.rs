@@ -67,7 +67,7 @@ impl RecordingManager {
     /// # Arguments
     /// * `microphone_device` - Optional microphone device to use
     /// * `system_device` - Optional system audio device to use
-    /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `auto_save` - Whether to save raw audio (true) or just transcripts/metadata (false)
     pub async fn start_recording(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
@@ -101,7 +101,7 @@ impl RecordingManager {
 
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
-        // Pass auto_save to control whether audio checkpoints are created
+        // Pass auto_save to control whether raw audio is saved
         let recording_sender = self
             .recording_saver
             .start_accumulation(auto_save, self.state.clone())?;
@@ -187,7 +187,7 @@ impl RecordingManager {
     /// Start recording with default devices and auto_save setting
     ///
     /// # Arguments
-    /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `auto_save` - Whether to save raw audio (true) or just transcripts/metadata (false)
     ///
     /// # Platform-Specific Behavior
     ///
@@ -392,11 +392,6 @@ impl RecordingManager {
 
         info!("Recording manager stopped");
         Ok(())
-    }
-
-    /// Get recording stats from the saver
-    pub fn get_recording_stats(&self) -> (usize, u32) {
-        self.recording_saver.get_stats()
     }
 
     /// Check if currently recording

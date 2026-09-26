@@ -233,7 +233,7 @@ impl RecordingSaver {
     /// Start accumulation with optional incremental saving
     ///
     /// # Arguments
-    /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
+    /// * `auto_save` - If true, enables raw audio saving. If false, audio chunks are discarded.
     pub fn start_accumulation(
         &mut self,
         auto_save: bool,
@@ -344,24 +344,20 @@ impl RecordingSaver {
     ///
     /// # Arguments
     /// * `meeting_name` - Name of the meeting
-    /// * `create_checkpoints` - Whether to create .checkpoints/ directory and IncrementalAudioSaver
-    fn initialize_meeting_folder(
-        &mut self,
-        meeting_name: &str,
-        create_checkpoints: bool,
-    ) -> Result<()> {
+    /// * `save_audio` - Whether to enable final audio encoding
+    fn initialize_meeting_folder(&mut self, meeting_name: &str, save_audio: bool) -> Result<()> {
         let base_folder = self
             .base_recordings_folder
             .clone()
             .unwrap_or_else(super::recording_preferences::get_default_recordings_folder);
 
-        // Create meeting folder structure (with or without .checkpoints/ subdirectory)
-        let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;
+        // Create a new folder owned by this recording
+        let meeting_folder = create_meeting_folder(&base_folder, meeting_name)?;
         self.meeting_folder = Some(meeting_folder.clone());
 
-        // Only initialize incremental saver if checkpoints are needed (auto_save is true)
-        if create_checkpoints {
-            let incremental_saver = IncrementalAudioSaver::new(meeting_folder.clone(), 48000)?;
+        // Initialize final audio encoding when auto_save is true
+        if save_audio {
+            let incremental_saver = IncrementalAudioSaver::new(meeting_folder.clone());
             self.incremental_saver = Some(Arc::new(AsyncMutex::new(incremental_saver)));
             info!("✅ Incremental audio saver initialized for meeting");
         } else {
@@ -381,7 +377,7 @@ impl RecordingSaver {
                 microphone: None, // Could be enhanced to store actual device names
                 system_audio: None,
             },
-            audio_file: if create_checkpoints {
+            audio_file: if save_audio {
                 "audio.mp4".to_string()
             } else {
                 "".to_string()
@@ -433,19 +429,6 @@ impl RecordingSaver {
             self.snapshot_dirty.store(true, Ordering::Release);
         }
         result
-    }
-
-    // in frontend/src-tauri/src/audio/recording_saver.rs
-    pub fn get_stats(&self) -> (usize, u32) {
-        if let Some(ref saver) = self.incremental_saver {
-            if let Ok(guard) = saver.try_lock() {
-                (guard.get_checkpoint_count() as usize, 48000)
-            } else {
-                (0, 48000)
-            }
-        } else {
-            (0, 48000)
-        }
     }
 
     /// Stop and save using incremental saving approach
@@ -675,12 +658,7 @@ mod snapshot_tests {
         std::fs::create_dir(folder.join("transcripts.json")).unwrap();
         std::fs::remove_file(folder.join("metadata.json")).unwrap();
         std::fs::create_dir(folder.join("metadata.json")).unwrap();
-        assert_eq!(
-            std::fs::read_dir(folder.join(".checkpoints"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert!(!folder.join(".checkpoints").exists());
         let report = saver.finalize_files(Some(0.1), true).await.unwrap();
         assert!(report.audio_path.is_some());
         assert!(!report.outcome.audio_save_failed);

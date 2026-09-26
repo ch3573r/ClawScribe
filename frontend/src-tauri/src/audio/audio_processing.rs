@@ -26,17 +26,11 @@ pub fn sanitize_filename(name: &str) -> String {
 
 /// Create a meeting folder with timestamp and return the path
 /// Creates structure: base_path/MeetingName_YYYY-MM-DD_HH-MM/
-///                    ├── .checkpoints/  (for incremental saves, optional)
 ///
 /// # Arguments
 /// * `base_path` - Base directory for meetings
 /// * `meeting_name` - Name of the meeting
-/// * `create_checkpoints_dir` - Whether to create .checkpoints/ subdirectory (only needed when auto_save is true)
-pub fn create_meeting_folder(
-    base_path: &PathBuf,
-    meeting_name: &str,
-    create_checkpoints_dir: bool,
-) -> Result<PathBuf> {
+pub fn create_meeting_folder(base_path: &PathBuf, meeting_name: &str) -> Result<PathBuf> {
     let timestamp = Utc::now().format("%Y-%m-%d_%H-%M").to_string();
     let sanitized_name = sanitize_filename(meeting_name);
     let folder_name = format!("{}_{}", sanitized_name, timestamp);
@@ -53,23 +47,7 @@ pub fn create_meeting_folder(
         Err(error) => return Err(error.into()),
     }
 
-    // Only create .checkpoints subdirectory if requested (when auto_save is true)
-    if create_checkpoints_dir {
-        let checkpoints_dir = meeting_folder.join(".checkpoints");
-        if let Err(error) = std::fs::create_dir(&checkpoints_dir) {
-            let _ = std::fs::remove_dir(&meeting_folder);
-            return Err(error.into());
-        }
-        log::info!(
-            "Created meeting folder with checkpoints: {}",
-            meeting_folder.display()
-        );
-    } else {
-        log::info!(
-            "Created meeting folder without checkpoints: {}",
-            meeting_folder.display()
-        );
-    }
+    log::info!("Created meeting folder");
 
     Ok(meeting_folder)
 }
@@ -81,12 +59,13 @@ mod folder_tests {
     #[test]
     fn consecutive_starts_own_distinct_folders() {
         let root = tempfile::tempdir().unwrap();
-        let first =
-            create_meeting_folder(&root.path().to_path_buf(), "Synthetic meeting", true).unwrap();
+        let first = create_meeting_folder(&root.path().to_path_buf(), "Synthetic meeting").unwrap();
         std::fs::write(first.join("audio.wav"), b"previous recording").unwrap();
         let second =
-            create_meeting_folder(&root.path().to_path_buf(), "Synthetic meeting", true).unwrap();
+            create_meeting_folder(&root.path().to_path_buf(), "Synthetic meeting").unwrap();
         assert_ne!(first, second);
+        assert!(!first.join(".checkpoints").exists());
+        assert!(!second.join(".checkpoints").exists());
         assert_eq!(
             std::fs::read(first.join("audio.wav")).unwrap(),
             b"previous recording"

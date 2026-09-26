@@ -88,6 +88,7 @@ try {
         "audio::recording_saver::snapshot_tests",
         "audio::audio_spool::tests",
         "audio::incremental_saver::tests",
+        "audio::audio_processing::folder_tests",
         "audio::recording_state::tests",
         "audio::recording_commands::stop_tests",
         "audio::transcription::queue::tests",
