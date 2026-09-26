@@ -10,6 +10,7 @@ export interface LibraryArchiveReport {
     title: string;
     recovery_files_excluded: boolean;
     audio_unavailable: boolean;
+    recording_folder_missing: boolean;
   }[];
 }
 

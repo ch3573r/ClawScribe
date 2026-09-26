@@ -45,6 +45,8 @@ struct Manifest {
 struct IncompleteAudio {
     recovery_files_excluded: bool,
     audio_unavailable: bool,
+    #[serde(default)]
+    recording_folder_missing: bool,
 }
 
 #[derive(Serialize)]
@@ -251,14 +253,54 @@ fn write_archive(
             }
             continue;
         };
-        // Missing recording folders must not silently produce an incomplete backup.
-        if std::fs::symlink_metadata(folder)
-            .map_err(|_| meeting_failure(meeting, "the recording folder is missing or unreadable. Reconnect its drive or restore the folder, then retry."))?
-            .file_type()
-            .is_symlink()
-        {
-            return Err("Recording folder links are not supported in backups.".into());
+        let metadata = match std::fs::symlink_metadata(folder) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                manifest.incomplete_audio.insert(
+                    index,
+                    IncompleteAudio {
+                        recording_folder_missing: true,
+                        audio_unavailable: true,
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            Err(_) => {
+                return Err(meeting_failure(
+                    meeting,
+                    "the recording folder is unreadable. Restore folder access, then retry.",
+                ))
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(meeting_failure(
+                meeting,
+                "recording folder links are not supported in backups.",
+            ));
         }
+        let entries = match std::fs::read_dir(folder) {
+            Ok(entries) => entries,
+            // The folder may disappear after the metadata check. No files have
+            // been added yet, so this meeting can still be saved without audio.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                manifest.incomplete_audio.insert(
+                    index,
+                    IncompleteAudio {
+                        recording_folder_missing: true,
+                        audio_unavailable: true,
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            Err(_) => {
+                return Err(meeting_failure(
+                    meeting,
+                    "the recording folder cannot be read. Restore folder access, then retry.",
+                ))
+            }
+        };
         // Recovery retains its originals. Exclude them from V1 archives, but
         // report the omission without preventing backup of the saved library.
         let mut incomplete = IncompleteAudio::default();
@@ -278,12 +320,7 @@ fn write_archive(
         }
         let mut names = Vec::new();
         let mut has_audio = false;
-        for entry in std::fs::read_dir(folder).map_err(|_| {
-            meeting_failure(
-                meeting,
-                "the recording folder cannot be read. Restore folder access, then retry.",
-            )
-        })? {
+        for entry in entries {
             let entry = entry.map_err(failure)?;
             let name = entry.file_name().to_string_lossy().to_string();
             if !allowed_file(&name) {
@@ -745,16 +782,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_folder_names_meeting_and_preserves_previous_backup() {
+    async fn missing_folder_does_not_block_other_audio_and_restores_without_a_folder() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let available = root.path().join("available");
+        std::fs::create_dir(&available).unwrap();
+        std::fs::write(available.join("audio.wav"), b"synthetic audio").unwrap();
+        sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'review-test'")
+            .bind(missing.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('available', 'Available audio', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(available.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        let (manifest, folders) = snapshot(&pool).await.unwrap();
+        let missing_index = manifest.tables["meetings"]
+            .iter()
+            .position(|row| row["id"] == "review-test")
+            .unwrap();
+        let archive = root.path().join("backup.zip");
+        let report = write_archive(&archive, manifest, folders).unwrap();
+        assert_eq!((report.meetings, report.files), (2, 1));
+        assert_eq!(report.incomplete_meetings.len(), 1);
+        let warning = &report.incomplete_meetings[0];
+        assert_eq!(warning.meeting_id, "review-test");
+        assert!(warning.audio.recording_folder_missing && warning.audio.audio_unavailable);
+        assert!(!warning.audio.recovery_files_excluded);
+        let target = tempfile::tempdir().unwrap();
+        let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
+        assert!(!manifest.files.contains_key(&missing_index));
+        assert!(!stage.path().join(missing_index.to_string()).exists());
+        sqlx::query("DELETE FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let restored = import_manifest(&pool, manifest, stage).await.unwrap();
+        assert_eq!((restored.meetings, restored.files), (2, 1));
+        assert_eq!(restored.incomplete_meetings.len(), 1);
+        let warning = &restored.incomplete_meetings[0];
+        assert_eq!(warning.meeting_id, "review-test");
+        assert!(warning.audio.recording_folder_missing && warning.audio.audio_unavailable);
+        let missing_folder: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(missing_folder, None);
+        let audio_folder: String =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'available'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::fs::read(Path::new(&audio_folder).join("audio.wav")).unwrap(),
+            b"synthetic audio"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_folder_names_meeting_and_preserves_previous_backup() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let not_a_folder = root.path().join("not-a-folder");
+        std::fs::write(&not_a_folder, b"not a directory").unwrap();
         let (manifest, _) = snapshot(&pool).await.unwrap();
         let archive = root.path().join("backup.zip");
         std::fs::write(&archive, b"previous backup").unwrap();
-        let error = write_archive(&archive, manifest, vec![Some(root.path().join("missing"))])
+        let error = write_archive(&archive, manifest, vec![Some(not_a_folder)])
             .err()
             .unwrap();
-        assert!(error.contains("Synthetic review") && error.contains("missing or unreadable"));
+        assert!(error.contains("Synthetic review") && error.contains("cannot be read"));
         assert!(!error.contains(root.path().to_string_lossy().as_ref()));
         assert_eq!(std::fs::read(archive).unwrap(), b"previous backup");
     }
@@ -800,12 +898,20 @@ mod tests {
         json.as_object_mut().unwrap().remove("incomplete_audio");
         let legacy: Manifest = serde_json::from_value(json).unwrap();
         assert!(legacy.incomplete_audio.is_empty());
+        let legacy_warning: IncompleteAudio = serde_json::from_value(serde_json::json!({
+            "recovery_files_excluded": true,
+            "audio_unavailable": false
+        }))
+        .unwrap();
+        assert!(!legacy_warning.recording_folder_missing);
+        assert!(legacy_warning.recovery_files_excluded);
         let mut manifest = legacy;
         manifest.incomplete_audio.insert(
             99,
             IncompleteAudio {
                 recovery_files_excluded: true,
                 audio_unavailable: true,
+                ..Default::default()
             },
         );
         let root = tempfile::tempdir().unwrap();

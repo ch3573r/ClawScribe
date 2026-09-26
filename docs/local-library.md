@@ -67,14 +67,18 @@ summaries, meeting chat, project tags, bookmarks, and supported recording files.
 Microsoft export history (`exports.json`) is retained with the recording folder.
 Provider settings, credentials, model downloads, UI preferences, browser-stored
 meeting context, and unfinished recording recovery spools are excluded. Missing
-recording folders cause backup to fail with the affected meeting's title and
-reconnection guidance. Nonempty `.audio-spool` and `.checkpoints` directories
+recording folders are reported by meeting title without blocking the backup;
+their meeting data is included, and restore leaves their recording folder unset.
+Unreadable folders and folder links still stop backup with a named error.
+Nonempty `.audio-spool` and `.checkpoints` directories
 remain on the source computer. They do not block backup: available saved audio,
 including `audio-recovered.wav`, is included, and the result lists each meeting
 whose recovery files were excluded or whose pending recovery has no saved audio.
 The warning list stays visible in **Backup and restore** and is stored in the
-archive. Preserve a separate copy of those source recording folders, including
-hidden files, if you need the recovery originals. Backup never removes them.
+archive. Choosing a file for another operation clears the previous report;
+cancelling the file picker keeps it. Preserve a separate copy of source recording
+folders, including hidden files, if you need the recovery originals. Backup never
+removes them.
 Archives are not encrypted; keep them in trusted storage.
 
 Restore adds meetings whose IDs are absent from the library and skips existing

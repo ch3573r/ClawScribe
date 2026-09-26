@@ -24,6 +24,7 @@ export function LibraryBackup() {
       const filters = [{ name: 'ClawScribe meeting archive', extensions: ['zip'] }];
       const path = restore ? await open({ filters, multiple: false, directory: false }) : await save({ filters, defaultPath: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
       if (!path) return;
+      setResult(null);
       const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path });
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;
@@ -45,10 +46,11 @@ export function LibraryBackup() {
       <p className="text-sm text-muted-foreground">Restore adds missing meetings. Meetings with an existing ID are skipped, so your current library is preserved. Stop recording and transcription jobs first.</p>
       {result && !!result.report.incomplete_meetings?.length && <div role="alert" className="space-y-2 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
         <p className="font-medium">{result.restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio'}</p>
-        <p>Meeting data and available saved audio are included. Recovery originals remain in the source recording folders; keep a separate copy of those folders, including hidden files.</p>
+        <p>Meeting data and available saved audio are included. If recovery files were excluded, keep a separate copy of the source recording folders, including hidden files.</p>
         <ul className="max-h-48 list-disc space-y-1 overflow-y-auto pl-5">{result.report.incomplete_meetings.map(meeting => <li key={meeting.meeting_id}>
           <span className="font-medium">{meeting.title || 'Untitled meeting'}</span>: {[
             meeting.recovery_files_excluded && 'recovery files excluded',
+            meeting.recording_folder_missing && 'recording folder missing',
             meeting.audio_unavailable && 'saved audio unavailable',
           ].filter(Boolean).join('; ')}.
         </li>)}</ul>
