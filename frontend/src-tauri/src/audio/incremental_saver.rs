@@ -929,7 +929,8 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("No audio checkpoints"));
+            .contains("No complete audio checkpoints"));
+        assert!(!meeting_folder.join(FINAL_AUDIO_FILE).exists());
     }
 
     #[test]

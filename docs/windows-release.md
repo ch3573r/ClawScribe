@@ -120,7 +120,10 @@ DLLs, zero matched tests, and failing test results. Required suites cover summar
 providers and sidecar exchanges, audio cancellation and model switching,
 transcript preservation and paging, credentials, Microsoft export persistence,
 and updater selection. It also runs the local summary helper protocol, sampling,
-and stop-sequence tests. Tests run serially where they share native resources.
+and stop-sequence tests. Recording suites cover partial audio finalization,
+checkpoint fallback, capture gaps, transcript snapshot failures, duplicate saves,
+outcome migrations and acceleration selection. Tests run serially where they
+share native resources.
 It does not perform live capture, GUI interaction, or model-quality benchmarking.
 
 ## GitHub Actions
