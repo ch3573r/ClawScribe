@@ -39,6 +39,24 @@ static RECORDING_JOB: Mutex<Option<tokio::sync::OwnedSemaphorePermit>> = Mutex::
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
+
+/// Snapshot the active recording's folder and pause-adjusted time without disk work.
+pub(crate) fn bookmark_position() -> Result<(String, f64), String> {
+    let guard = RECORDING_MANAGER
+        .lock()
+        .map_err(|_| "Recording state unavailable.")?;
+    let manager = guard
+        .as_ref()
+        .filter(|m| m.is_recording())
+        .ok_or("No active recording.")?;
+    let folder = manager
+        .get_meeting_folder()
+        .ok_or("Recording folder is not ready.")?;
+    let seconds = manager
+        .get_active_recording_duration()
+        .ok_or("Recording time is unavailable.")?;
+    Ok((folder.to_string_lossy().into_owned(), seconds))
+}
 static TRANSCRIPTION_TASK: Mutex<Option<transcription::TranscriptionTask>> = Mutex::new(None);
 static PENDING_TRANSCRIPT_SEGMENTS: Mutex<Vec<crate::audio::recording_saver::TranscriptSegment>> =
     Mutex::new(Vec::new());

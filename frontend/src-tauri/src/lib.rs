@@ -49,6 +49,7 @@ pub mod database;
 pub mod diagnostics;
 pub mod exports;
 pub mod groq;
+pub mod library;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
 pub mod notifications;
@@ -708,6 +709,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            library::list_meeting_tags,
+            library::set_meeting_tags,
+            library::list_meeting_bookmarks,
+            library::add_meeting_bookmark,
+            library::delete_meeting_bookmark,
+            library::rename_meeting_bookmark,
+            library::export_local_word,
+            library::backup::backup_library,
+            library::backup::restore_library,
             updates::get_update_channel,
             updates::set_update_channel,
             updates::check_app_update,

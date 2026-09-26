@@ -7,6 +7,8 @@ import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
 import { MeetingExportButtons } from './MeetingExportButtons';
+import { LocalWordExport } from './LocalWordExport';
+import { ProjectTags } from './ProjectTags';
 import Analytics from '@/lib/analytics';
 import { TextReplaceDialog } from './TextReplaceDialog';
 import { SummarySources, ResolvedSummarySource } from './SummarySources';
@@ -433,6 +435,12 @@ export function SummaryPanel({
             </p>
           </div>
 
+          <div className="flex max-w-full flex-wrap gap-2">
+            <ProjectTags key={`tags-${meeting.id}`} meetingId={meeting.id} />
+            <LocalWordExport key={`word-${meeting.id}`} meetingId={meeting.id} title={meetingTitle}
+              disabled={isSummaryLoading}
+              getMarkdown={async () => (await summaryRef.current?.getMarkdown()) ?? ''} />
+          </div>
           {/* Button groups - only show when summary exists */}
           {aiSummary && !isSummaryLoading && (
             <div className="flex min-w-0 max-w-full flex-1 basis-[28rem] flex-wrap items-center justify-end gap-2">

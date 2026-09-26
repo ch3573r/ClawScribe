@@ -4,6 +4,8 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { MeetingTag } from '@/lib/library';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 
 
@@ -30,6 +32,9 @@ interface TranscriptSearchResult {
 };
 
 interface SidebarContextType {
+  projectTags: MeetingTag[];
+  projectTagsError: string | null;
+  refreshProjectTags: () => Promise<void>;
   currentMeeting: CurrentMeeting | null;
   setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
   sidebarItems: SidebarItem[];
@@ -67,6 +72,16 @@ export const useSidebar = () => {
 };
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
+  const [projectTags, setProjectTags] = useState<MeetingTag[]>([]);
+  const [projectTagsError, setProjectTagsError] = useState<string | null>(null);
+  const tagsVersion = React.useRef(0);
+  const refreshProjectTags = React.useCallback(async () => {
+    const version = ++tagsVersion.current;
+    try {
+      const tags = await invoke<MeetingTag[]>('list_meeting_tags');
+      if (version === tagsVersion.current) { setProjectTags(tags); setProjectTagsError(null); }
+    } catch { if (version === tagsVersion.current) setProjectTagsError('Could not load project tags.'); }
+  }, []);
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
   const [isCollapsed, setIsCollapsed] = useState(false);
   useEffect(() => {
@@ -120,6 +135,13 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetchMeetings();
   }, [serverAddress, fetchMeetings]);
+
+  useEffect(() => {
+    void refreshProjectTags();
+    const subscription = listen('library-changed', () => { void refreshProjectTags(); void fetchMeetings(); });
+    void subscription.catch(() => setProjectTagsError('Could not watch project tags. Reopen ClawScribe to retry.'));
+    return () => { tagsVersion.current++; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+  }, [refreshProjectTags, fetchMeetings]);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -317,6 +339,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SidebarContext.Provider value={{
+      projectTags,
+      projectTagsError,
+      refreshProjectTags,
       currentMeeting,
       setCurrentMeeting,
       sidebarItems,

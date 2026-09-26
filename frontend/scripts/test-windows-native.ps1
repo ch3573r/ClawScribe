@@ -86,6 +86,7 @@ try {
         "audio::recording_mode::tests",
         "audio::pipeline::queue_failure_tests",
         "database::transcript_edits::tests",
+        "library::",
         "database::repositories::meeting::tests",
         "database::manager::tests",
         "credentials::tests",

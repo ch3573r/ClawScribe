@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
+import { LibraryBackup } from "@/components/LibraryBackup";
+import { matchesProjectTag } from "@/lib/library";
 import {
   Select,
   SelectContent,
@@ -57,15 +59,20 @@ export default function MeetingsPage() {
     searchResults,
     isSearching,
     refetchMeetings,
+    projectTags,
+    projectTagsError,
+    refreshProjectTags,
   } = useSidebar();
   const [query, setQuery] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("newest");
+  const [projectFilter, setProjectFilter] = useState('');
+  const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
 
   const normalizedQuery = query.trim().toLowerCase();
 
   const sortedMeetings = useMemo(() => {
-    const next = [...meetings];
+    const next = meetings.filter(meeting => matchesProjectTag(meeting.id, projectFilter, projectTags));
     next.sort((a, b) => {
       if (sortMode === "title") {
         return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
@@ -78,7 +85,7 @@ export default function MeetingsPage() {
       return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
     });
     return next;
-  }, [meetings, sortMode]);
+  }, [meetings, sortMode, projectFilter, projectTags]);
 
   const titleMatches = useMemo(() => {
     if (!normalizedQuery) return sortedMeetings;
@@ -87,8 +94,9 @@ export default function MeetingsPage() {
     );
   }, [normalizedQuery, sortedMeetings]);
 
-  const hasTranscriptMatches = normalizedQuery.length > 0 && searchResults.length > 0;
-  const visibleMeetings = normalizedQuery ? titleMatches : meetings;
+  const filteredSearchResults = searchResults.filter(result => matchesProjectTag(result.id, projectFilter, projectTags));
+  const hasTranscriptMatches = normalizedQuery.length > 0 && filteredSearchResults.length > 0;
+  const visibleMeetings = normalizedQuery ? titleMatches : sortedMeetings;
 
   const handleQueryChange = useCallback(
     (value: string) => {
@@ -128,7 +136,7 @@ export default function MeetingsPage() {
   );
 
   const shownCount = hasTranscriptMatches
-    ? searchResults.length
+    ? filteredSearchResults.length
     : visibleMeetings.length;
 
   return (
@@ -144,7 +152,7 @@ export default function MeetingsPage() {
             </p>
           </div>
 
-          <button
+          <div className="flex flex-wrap items-center gap-2"><LibraryBackup /><button
             onClick={handleRefresh}
             className="inline-flex w-fit items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition hover:bg-muted"
           >
@@ -153,6 +161,7 @@ export default function MeetingsPage() {
             />
             Refresh
           </button>
+          </div>
         </header>
 
         <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
@@ -178,6 +187,13 @@ export default function MeetingsPage() {
             </InputGroup>
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
+              <label className="flex items-center gap-2">Project
+                <select className="h-9 max-w-48 rounded-md border border-input bg-background px-2 text-foreground" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} disabled={!!projectTagsError}>
+                  <option value="">All projects</option><option value="__untagged">Untagged</option>
+                  {tagOptions.map(tag => <option key={tag.toLowerCase()} value={`tag:${tag}`}>{tag}</option>)}
+                </select>
+              </label>
+              {projectTagsError && <button className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</button>}
               <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
                 <SelectTrigger className="h-9 w-36 bg-background">
                   <SelectValue />
@@ -219,7 +235,7 @@ export default function MeetingsPage() {
 
             {hasTranscriptMatches ? (
               <div className="divide-y divide-border">
-                {searchResults.map((result, index) => {
+                {filteredSearchResults.map((result, index) => {
                   const title = titleFor(result.id, result.title);
                   return (
                     <button
@@ -276,6 +292,7 @@ export default function MeetingsPage() {
                         <h3 className="truncate text-sm font-semibold text-foreground">
                           {meeting.title}
                         </h3>
+                        <p className="mt-1 truncate text-xs text-primary">{projectTags.filter(tag => tag.meeting_id === meeting.id).map(tag => tag.tag).join(' · ')}</p>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <Clock3 className="h-3.5 w-3.5" />
                           <span>{formatMeetingDate(meeting.created_at)}</span>
@@ -325,7 +342,7 @@ export default function MeetingsPage() {
                 <div className="flex items-center justify-between py-3">
                   <span className="text-muted-foreground">Transcript hits</span>
                   <span className="font-semibold text-foreground">
-                    {normalizedQuery ? searchResults.length : 0}
+                    {normalizedQuery ? filteredSearchResults.length : 0}
                   </span>
                 </div>
               </div>

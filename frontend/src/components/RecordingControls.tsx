@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
+import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -494,6 +495,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   ) : (
                     // Recording controls (pause/resume + stop)
                     <>
+                      <LiveBookmarkButton disabled={isStopping || isPausing || isResuming} />
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <button

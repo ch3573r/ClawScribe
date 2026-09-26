@@ -88,6 +88,17 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 
 ## Meeting Notes And Exports
 
+- **Local Word export:** save a summary, full transcript, or both as `.docx`,
+  with optional speaker labels and timestamps. Works offline without Microsoft
+  sign-in or Word installed.
+- **Project tags:** label saved meetings and filter the archive and transcript
+  search by project, including an untagged view.
+- **Meeting bookmarks:** mark a moment while recording, then label and revisit
+  it from the saved transcript panel. Add markers during playback too.
+- **Backup and restore:** save a portable archive of meeting data and recordings.
+  Restore adds missing meetings and skips existing IDs. Archives exclude provider
+  credentials and models and are not encrypted. See [local library tools](docs/local-library.md).
+
 Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,

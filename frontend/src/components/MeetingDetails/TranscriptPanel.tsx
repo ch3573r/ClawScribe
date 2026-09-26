@@ -5,6 +5,7 @@ import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptVie
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useMemo, useState, useEffect } from 'react';
 import { TranscriptCorrections } from './TranscriptCorrections';
+import { MeetingBookmarks } from './MeetingBookmarks';
 
 interface TranscriptPanelProps {
   focusedSource?: { id: string; request: number };
@@ -85,6 +86,7 @@ export function TranscriptPanel({
     <div data-transcript-panel tabIndex={0} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') { event.preventDefault(); event.stopPropagation(); setReplaceOpen(true); }
     }} className="flex h-[26rem] min-h-[18rem] min-w-0 md:h-auto shrink-0 flex-col border-r border-border bg-card md:w-[32%] xl:w-[30rem] 2xl:w-[32rem]">
+      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} currentTime={activeTime} onSeek={onSeekToTime} />}
       {/* Title area */}
       <div className="border-b border-border px-3 py-2">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
