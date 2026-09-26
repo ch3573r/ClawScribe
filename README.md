@@ -7,14 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.44 Preview**. The [0.5.44 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.44)
-fixes the Save As dialog for Word export and backups, plus duplicate title-bar
-window gestures. It retains project tags, portable backups, and meeting bookmarks.
-Once published, enable **Include prereleases** or install manually; the
-[latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest)
-remains 0.5.41.
-Read the [release validation limits](docs/releases/0.5.44.md): real-device capture,
-install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
+Source version: **0.5.45**. This release improves recording saves and recovery,
+fixes backup and export problems, and includes project tags, portable backups,
+and meeting bookmarks. See the [0.5.45 release notes](docs/releases/0.5.45.md)
+and the [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
+Draft candidates are excluded from updates; Stable publication follows real-device
+acceptance and makes the release available without opting into previews.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -161,24 +159,22 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.44 Preview
+## What Changed In 0.5.45
 
-- Fix the missing desktop permission that blocked Word and backup Save As dialogs.
-- Dispatch each title-bar drag or maximize gesture once.
+- Save available audio even when live transcription or recording-file writes fail,
+  recover readable temporary tails, and release redundant raw audio after saving.
+- Persist stopped metadata before encoding; prevent duplicate Stop and Save actions.
+- Clear repaired warnings after retranscription while retaining capture-gap information.
+  Informational warnings allow automatic notes, and summary polling stays active.
+- Report incomplete backups, skip existing restore audio before extraction, and
+  use recording offsets in exported transcripts.
+- Export Word, Confluence, OneNote, or OneDrive DOCX/PDF from one menu with
+  summary/transcript selection, optional speaker labels, and timestamps.
+- Organize meetings with project tags, bookmark recording moments, and restore
+  portable library backups without overwriting existing meeting IDs.
+- Fix native Save As permissions and duplicate title-bar gestures.
 
-The meeting library tools introduced in 0.5.43 remain available:
-
-- Export a local Word document with notes, the complete transcript, or both.
-- Use one **Export** menu for Word, Confluence, OneNote, and OneDrive DOCX/PDF,
-  with summary/transcript selection and optional speaker labels and timestamps.
-- Organize meetings with project tags and filter the archive and transcript search.
-- Back up saved meeting data and recordings; restore missing meetings without
-  overwriting existing IDs.
-- Bookmark moments while recording and add, rename, remove, or seek to markers
-  while reviewing a saved meeting.
-
-The 0.5.42 download, audio-timing, and CPU-portability fixes remain available.
-See the [0.5.44 preview release notes](docs/releases/0.5.44.md), the
+See the [release notes](docs/releases/0.5.45.md), the
 [local library guide](docs/local-library.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 

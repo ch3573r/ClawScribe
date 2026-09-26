@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.45
+
+- Preserve recording continuity when live transcription, disk queueing, or device delivery degrades. Keep bounded capture buffers and recoverable raw audio, freeze duration at Stop, and prevent duplicate stop/save operations and duplicate saved meetings.
+- Encode final audio once with a duration-scaled deadline, avoiding repeated AAC padding between chunks. Save transcript, metadata, and warning status independently; write stopped metadata before encoding so a crash cannot leave the folder marked as recording.
+- Recover readable temporary audio tails. A torn temporary tail records a capture gap without retaining the entire successfully encoded raw spool; unreadable published chunks and failed-save originals remain available. Keep legacy checkpoint recovery while removing the unused checkpoint writer and empty checkpoint folders.
+- Allow automatic notes when only capture-gap or recording-file warnings remain. Successful retranscription clears repaired audio/transcription warnings, clears file warnings only after both file rewrites succeed, and preserves permanent capture-gap information. Keep summary status polling active across meeting updates, and surface failed automatic generation.
+- Back up libraries containing missing recording folders or unfinished recovery files with explicit incomplete-meeting reports. Skip existing meetings before extracting restore audio, preserve older version-1 archives with missing optional tables, and avoid orphaned restored recordings.
+- Use recording offsets for transcript export timestamps, with a legacy timestamp fallback. Unify Word, OneDrive, OneNote, and Confluence export content options; fix local Word dates and native Save As permissions. Stabilize tag loading and bookmark refresh/retry behavior, and dispatch title-bar gestures once.
+- Include the project tags, live/saved bookmarks, local Word export, and additive portable backups introduced after stable 0.5.41, plus resumable model downloads, HE-AAC timing fixes, reasoning-tag filtering, and portable Windows CPU build settings.
+- Advance installer/runtime/updater version to 0.5.45 with Whisper Vulkan and ONNX/sherpa DirectML. Stage installers as a draft for real-device acceptance; drafts do not change the stable updater. Stable publication makes this version available to older installations without opting into previews.
+- Automated validation covers 114 frontend tests and 401 native tests (two ignored), including partial saves, legacy recovery, temporary tails, and stopped metadata. Real-device acceptance and installed-app update discovery must be completed separately; see `docs/releases/0.5.45.md`. Tauri updater signatures do not provide Windows publisher signing, and a Vulkan loader remains required.
+
 ## 0.5.44
 
 - Fix the missing Tauri Save As permission that caused local Word export and backup creation to fail with an ACL error. File-picker permissions remain limited to the local main window; restore retains its existing Open permission.
