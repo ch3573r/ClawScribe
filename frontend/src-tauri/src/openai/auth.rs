@@ -123,15 +123,11 @@ fn parse_openai_auth_config(json: Option<String>) -> Result<Option<OpenAIAuthCon
     .map(|parsed| parsed.flatten())
 }
 
-fn validate_url_field(label: &str, value: &str) -> Result<(), String> {
+pub(crate) fn validate_url_field(label: &str, value: &str) -> Result<(), String> {
     let parsed = Url::parse(value).map_err(|e| format!("{} must be a valid URL: {}", label, e))?;
     match parsed.scheme() {
         "https" => Ok(()),
-        "http"
-            if parsed.host_str() == Some("localhost") || parsed.host_str() == Some("127.0.0.1") =>
-        {
-            Ok(())
-        }
+        "http" if matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) => Ok(()),
         "http" => Err(format!(
             "{} must use https unless it targets localhost",
             label
@@ -615,6 +611,25 @@ pub async fn api_exchange_openai_oauth_pkce_code<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_destinations_require_tls_except_loopback() {
+        for url in [
+            "https://example.com/api",
+            "http://localhost/api",
+            "http://127.0.0.1/api",
+            "http://[::1]/api",
+        ] {
+            assert!(super::validate_url_field("Endpoint", url).is_ok());
+        }
+        for url in [
+            "http://example.com/api",
+            "http://localhost.example.com/api",
+            "ftp://example.com",
+        ] {
+            assert!(super::validate_url_field("Endpoint", url).is_err());
+        }
+    }
+
     use super::*;
 
     fn oauth_config() -> OpenAIOAuthPkceConfig {

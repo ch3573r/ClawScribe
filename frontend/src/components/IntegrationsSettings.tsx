@@ -1325,7 +1325,7 @@ function ConfluencePanel() {
 
     setBusy("save");
     try {
-      await confluenceExportService.savePat(pat);
+      await confluenceExportService.savePat(pat, baseUrl);
       setPatInput("");
       if (trimmedBaseUrl) {
         setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));

@@ -229,3 +229,7 @@ focuses on Windows installers and GPU paths.
 Microsoft sign-in reuses existing consent by default. Only a token missing required
 permissions triggers one consent retry; any remaining missing permissions are
 reported for administrator review.
+
+Credential-bearing integration endpoints require HTTPS, except loopback HTTP.
+Confluence credentials include their saved origin and cannot be reused against a
+different origin; older unbound PATs must be saved again before use.

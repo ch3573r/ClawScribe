@@ -1591,11 +1591,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     organization: Option<String>,
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_custom_openai_config called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    log_info!("api_save_custom_openai_config called");
 
     // Validate required fields
     if endpoint.trim().is_empty() {
@@ -1605,10 +1601,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
         return Err("Model name is required".to_string());
     }
 
-    // Validate endpoint URL format
-    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        return Err("Endpoint must start with http:// or https://".to_string());
-    }
+    crate::openai::auth::validate_url_field("Custom OpenAI endpoint", endpoint.trim())?;
 
     // Validate optional numeric parameters
     if let Some(temp) = temperature {
@@ -1649,10 +1642,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!(
-                "✅ Successfully saved custom OpenAI config for endpoint: {}",
-                config.endpoint
-            );
+            log_info!("Saved custom OpenAI configuration");
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1677,12 +1667,8 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
-            if let Some(ref c) = config {
-                log_info!(
-                    "✅ Found custom OpenAI config: endpoint='{}', model='{}'",
-                    c.endpoint,
-                    c.model
-                );
+            if config.is_some() {
+                log_info!("Found custom OpenAI configuration");
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1711,11 +1697,9 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     organization: Option<String>,
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_test_custom_openai_connection called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    log_info!("api_test_custom_openai_connection called");
+
+    crate::openai::auth::validate_url_field("Custom OpenAI endpoint", endpoint.trim())?;
 
     let config = CustomOpenAIConfig {
         endpoint,

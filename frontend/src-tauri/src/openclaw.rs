@@ -131,6 +131,7 @@ pub async fn save_openclaw_config<R: Runtime>(
     }
 
     let mut config = normalize_config(config);
+    validate_endpoints(&config)?;
     if config.bearer_token.is_empty() {
         config.bearer_token = load_config_unlocked(&app)?.bearer_token;
     }
@@ -277,6 +278,7 @@ async fn submit_folder_with_config(
         });
     }
 
+    validate_endpoints(&config)?;
     if config.endpoint.trim().is_empty() || config.bearer_token.trim().is_empty() {
         let status = submission_status(
             "not_configured",
@@ -366,7 +368,10 @@ async fn submit_folder_with_config(
         });
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not build OpenClaw client")?;
     let response = match client
         .post(config.endpoint.trim())
         .bearer_auth(config.bearer_token.trim())
@@ -532,6 +537,15 @@ fn write_config_atomically(path: &Path, config: &OpenClawConfig) -> Result<(), S
         let _ = fs::remove_file(temp);
     }
     result.map_err(|_| "Could not save protected provider settings".into())
+}
+
+fn validate_endpoints(config: &OpenClawConfig) -> Result<(), String> {
+    for endpoint in [&config.endpoint, &config.model_endpoint] {
+        if !endpoint.trim().is_empty() {
+            crate::openai::auth::validate_url_field("OpenClaw endpoint", endpoint)?;
+        }
+    }
+    Ok(())
 }
 
 fn normalize_config(mut config: OpenClawConfig) -> OpenClawConfig {
