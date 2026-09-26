@@ -237,3 +237,8 @@ different origin; older unbound PATs must be saved again before use.
 Microsoft sign-in has one active flow. Cancel stops its loopback listener and
 prevents late completion from restoring a session. Listener polling and bounded
 connection reads release the port after cancellation or timeout.
+
+Microsoft refresh results are committed under the session lock only when the
+sign-in generation is unchanged and the connection is still active. Sign-out
+invalidates that generation and clears memory and persisted credentials under
+the same lock, so an in-flight refresh cannot restore a signed-out account.

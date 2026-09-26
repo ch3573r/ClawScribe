@@ -89,11 +89,13 @@ pub async fn microsoft_sign_in<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<(), String> {
-    let (config, http, cancel);
+    let (config, http, cancel, generation);
     {
         let mut inner = state.inner.write().await;
         cancel = super::ms_auth_state::begin_sign_in(&mut inner.connection_state)?;
         inner.sign_in_cancel = Some(cancel.clone());
+        inner.generation = inner.generation.wrapping_add(1);
+        generation = inner.generation;
         config = inner.config.clone();
         http = inner.http.clone();
     }
@@ -133,6 +135,7 @@ pub async fn microsoft_sign_in<R: Runtime>(
                 {
                     let mut inner = state.inner.write().await;
                     if cancel.is_cancelled()
+                        || inner.generation != generation
                         || inner.connection_state != MicrosoftConnectionState::Connecting
                     {
                         return;
@@ -201,18 +204,11 @@ pub async fn microsoft_cancel_sign_in<R: Runtime>(
 
 #[tauri::command]
 pub async fn microsoft_sign_out(state: tauri::State<'_, MicrosoftAuthState>) -> Result<(), String> {
-    let _ = token_store::delete_token();
-    let mut inner = state.inner.write().await;
-    if let Some(cancel) = inner.sign_in_cancel.take() {
-        cancel.cancel();
-    }
-    inner.connection_state = MicrosoftConnectionState::NotConnected;
-    inner.pending_device_code = None;
-    inner.user_display_name = None;
-    inner.user_email = None;
-    inner.user_id = None;
-    inner.current_token = None;
-    Ok(())
+    state
+        .inner
+        .write()
+        .await
+        .end_session(token_store::delete_token)
 }
 
 #[tauri::command]
@@ -281,9 +277,13 @@ async fn load_ledger<R: Runtime>(
 async fn get_token_and_context(
     state: &MicrosoftAuthState,
 ) -> Result<(String, String, String), String> {
-    let (config, http, current);
+    let (config, http, current, generation);
     {
         let inner = state.inner.read().await;
+        if inner.connection_state != MicrosoftConnectionState::Connected {
+            return Err("Microsoft is not connected".into());
+        }
+        generation = inner.generation;
         config = inner.config.clone();
         http = inner.http.clone();
         current = inner.current_token.clone();
@@ -296,7 +296,7 @@ async fn get_token_and_context(
     // Cache any refreshed token for the rest of the session.
     {
         let mut inner = state.inner.write().await;
-        inner.current_token = Some(stored.clone());
+        inner.accept_refreshed_token(generation, stored.clone(), token_store::save_token)?;
     }
 
     Ok((stored.access_token, stored.tenant_id, stored.user_id))

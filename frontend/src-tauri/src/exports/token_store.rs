@@ -316,10 +316,8 @@ pub async fn get_valid_access_token(
 
 /// Get a valid access token, refreshing if expired.
 ///
-/// `current` is the session's in-memory token (the source of truth). When it is
-/// `None` we fall back to the keychain. A refreshed token is written back to the
-/// keychain on a best-effort basis: persistence failure does not fail the call,
-/// because the caller keeps the returned token in memory for the session.
+/// `current` is the session token. This function never persists refresh results;
+/// the caller must check the session generation under its lock before persisting.
 pub async fn ensure_valid_token(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
@@ -356,11 +354,6 @@ pub async fn ensure_valid_token(
         ..stored
     };
 
-    // Best-effort: a keychain write failure must not invalidate a token we
-    // already hold and can use for this session.
-    if let Err(e) = save_token(&updated) {
-        log::warn!("Failed to persist refreshed Microsoft token: {e}");
-    }
     Ok(updated)
 }
 

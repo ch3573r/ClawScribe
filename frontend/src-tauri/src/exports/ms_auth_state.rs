@@ -12,6 +12,7 @@ pub struct MicrosoftAuthState {
 
 pub(crate) struct MicrosoftAuthInner {
     pub config: MicrosoftAuthConfig,
+    pub generation: u64,
     pub http: reqwest::Client,
     pub connection_state: MicrosoftConnectionState,
     pub pending_device_code: Option<String>,
@@ -56,6 +57,7 @@ impl MicrosoftAuthState {
         MicrosoftAuthState {
             inner: RwLock::new(MicrosoftAuthInner {
                 config,
+                generation: 0,
                 http,
                 connection_state,
                 pending_device_code: None,
@@ -66,6 +68,47 @@ impl MicrosoftAuthState {
                 current_token,
             }),
         }
+    }
+}
+
+impl MicrosoftAuthInner {
+    // Call under the write lock: sign-out cannot interleave persistence and memory.
+    pub fn accept_refreshed_token(
+        &mut self,
+        generation: u64,
+        token: token_store::StoredToken,
+        persist: impl FnOnce(&token_store::StoredToken) -> Result<(), token_store::TokenStoreError>,
+    ) -> Result<(), String> {
+        if self.generation != generation
+            || self.connection_state != MicrosoftConnectionState::Connected
+        {
+            return Err("Microsoft session changed; sign in before exporting".into());
+        }
+        if persist(&token).is_err() {
+            log::warn!("Could not persist refreshed Microsoft session");
+        }
+        self.current_token = Some(token);
+        Ok(())
+    }
+
+    pub fn end_session(
+        &mut self,
+        delete: impl FnOnce() -> Result<(), token_store::TokenStoreError>,
+    ) -> Result<(), String> {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(cancel) = self.sign_in_cancel.take() {
+            cancel.cancel();
+        }
+        self.connection_state = MicrosoftConnectionState::NotConnected;
+        self.pending_device_code = None;
+        self.user_display_name = None;
+        self.user_email = None;
+        self.user_id = None;
+        self.current_token = None;
+        delete().map_err(|_| {
+            "Signed out, but stored Microsoft credentials could not be removed. Retry sign-out."
+                .into()
+        })
     }
 }
 
@@ -82,6 +125,63 @@ pub(crate) fn begin_sign_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn sign_out_during_refresh_cannot_restore_memory_or_credentials() {
+        use std::sync::{Arc, Mutex};
+        let token = token_store::StoredToken::from_token_response(
+            &crate::exports::auth::TokenResponse {
+                access_token: "test-access".into(),
+                refresh_token: Some("test-refresh".into()),
+                expires_in: 3600,
+                token_type: "Bearer".into(),
+                scope: "User.Read".into(),
+            },
+            "test-user".into(),
+            "Test User".into(),
+            None,
+            "organizations".into(),
+        );
+        let credentials = Arc::new(Mutex::new(Some(token.clone())));
+        let state = Arc::new(RwLock::new(MicrosoftAuthInner {
+            config: MicrosoftAuthConfig::default(),
+            generation: 0,
+            http: reqwest::Client::new(),
+            connection_state: MicrosoftConnectionState::Connected,
+            pending_device_code: None,
+            sign_in_cancel: None,
+            user_display_name: None,
+            user_email: None,
+            user_id: None,
+            current_token: Some(token.clone()),
+        }));
+        let generation = state.read().await.generation;
+        let (complete, response) = tokio::sync::oneshot::channel();
+        let refresh_state = state.clone();
+        let refresh_credentials = credentials.clone();
+        let refresh = tokio::spawn(async move {
+            let updated = response.await.unwrap();
+            refresh_state
+                .write()
+                .await
+                .accept_refreshed_token(generation, updated, |token| {
+                    *refresh_credentials.lock().unwrap() = Some(token.clone());
+                    Ok(())
+                })
+        });
+        state
+            .write()
+            .await
+            .end_session(|| {
+                *credentials.lock().unwrap() = None;
+                Ok(())
+            })
+            .unwrap();
+        complete.send(token).unwrap();
+        assert!(refresh.await.unwrap().is_err());
+        assert!(state.read().await.current_token.is_none());
+        assert!(credentials.lock().unwrap().is_none());
+    }
+
     #[test]
     fn concurrent_sign_in_is_rejected() {
         let mut state = MicrosoftConnectionState::NotConnected;
