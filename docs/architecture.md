@@ -100,7 +100,9 @@ recording spool. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
 it into WAV, or AAC above WAV's
-size limit. Playback uses scoped asset-protocol byte ranges and an HTML audio
+size limit. Both paths accept a readable temporary tail at the next sequence
+position. Torn temporary writes record a gap without preventing spool cleanup;
+unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
 element. Periodic transcript snapshots continue during silence; the library-save
 command reads the backend snapshot when saving a finished recording, falling
 back to the UI transcript with a warning if that snapshot is unavailable. New

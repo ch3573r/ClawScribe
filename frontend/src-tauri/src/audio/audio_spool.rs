@@ -3,7 +3,7 @@ use super::incremental_saver::AudioRecoveryStatus;
 use super::transcription::queue::read_chunk;
 use std::fs::{self, File};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Bounded encode budget shared by final saving and long-recording recovery.
 pub(super) fn encode_timeout(duration_seconds: f64) -> std::time::Duration {
@@ -15,21 +15,51 @@ pub(super) fn encode_timeout(duration_seconds: f64) -> std::time::Duration {
     std::time::Duration::from_secs_f64((seconds / 5.0 + 60.0).clamp(240.0, 3600.0))
 }
 
-/// Returns (has gaps, all original chunks encoded). Unreadable originals remain
-/// available for an explicit recovery attempt even when other audio is playable.
+/// Include the last unpublished chunk only at the next sequence position.
+/// Unexpected readable temporary data is retained instead of silently discarded.
+fn capture_paths(spool: &Path) -> std::io::Result<(Vec<PathBuf>, bool, bool)> {
+    let entries = fs::read_dir(spool)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut paths: Vec<_> = entries
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "chunk"))
+        .cloned()
+        .collect();
+    paths.sort();
+    let next = paths
+        .iter()
+        .filter_map(|path| path.file_stem()?.to_str()?.parse::<u64>().ok())
+        .max()
+        .map_or(Some(0), |index| index.checked_add(1));
+    let mut gaps = false;
+    let mut all_available = true;
+    for path in entries
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "tmp"))
+    {
+        let index = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<u64>().ok());
+        if next.is_some() && index == next {
+            paths.push(path.clone());
+        } else {
+            gaps = true;
+            all_available &= read_chunk(path).is_err();
+        }
+    }
+    Ok((paths, gaps, all_available))
+}
+
+/// Returns (has gaps, all recoverable chunks encoded). Unreadable published
+/// chunks are retained; a torn final temporary write only records a capture gap.
 pub(super) fn encode_capture(
     folder: &Path,
     output: &std::path::PathBuf,
 ) -> anyhow::Result<(bool, bool)> {
     let spool = folder.join(".audio-spool");
-    let mut paths = fs::read_dir(&spool)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let unpublished = paths
-        .iter()
-        .any(|path| path.extension().is_some_and(|ext| ext == "tmp"));
-    paths.retain(|path| path.extension().is_some_and(|ext| ext == "chunk"));
-    paths.sort();
+    let (paths, temporary_gaps, mut all_encoded) = capture_paths(&spool)?;
     let first = paths
         .iter()
         .find_map(|path| {
@@ -46,8 +76,7 @@ pub(super) fn encode_capture(
         .map(|metadata| metadata.len().saturating_sub(33) / 4)
         .sum();
     let timeout = encode_timeout(samples as f64 / sample_rate as f64);
-    let mut gaps = unpublished || spool.join(".incomplete").exists();
-    let mut all_encoded = !unpublished;
+    let mut gaps = temporary_gaps || spool.join(".incomplete").exists();
     super::encode::encode_pcm_stream(sample_rate, 1, output, timeout, |writer| {
         let mut written = false;
         for (index, path) in paths.iter().enumerate() {
@@ -58,6 +87,10 @@ pub(super) fn encode_capture(
                 != Some(index);
             let chunk = match read_chunk(path) {
                 Ok(chunk) if chunk.sample_rate == sample_rate && !chunk.data.is_empty() => chunk,
+                Err(_) if path.extension().is_some_and(|ext| ext == "tmp") => {
+                    gaps = true;
+                    continue;
+                }
                 _ => {
                     gaps = true;
                     all_encoded = false;
@@ -84,11 +117,7 @@ pub(super) fn recover(folder: &Path) -> Result<AudioRecoveryStatus, String> {
 
 fn recover_inner(folder: &Path) -> std::io::Result<AudioRecoveryStatus> {
     let spool = folder.join(".audio-spool");
-    let mut paths = fs::read_dir(&spool)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    paths.retain(|path| path.extension().is_some_and(|ext| ext == "chunk"));
-    paths.sort();
+    let (paths, temporary_gaps, _) = capture_paths(&spool)?;
     let staged = folder.join(format!(".audio-recovered-{}.tmp", uuid::Uuid::new_v4()));
     // Keep encoder-free WAV recovery for normal recordings. Above RIFF's
     // 32-bit limit, stream into one AAC encode instead of rejecting the meeting.
@@ -148,7 +177,7 @@ fn recover_inner(folder: &Path) -> std::io::Result<AudioRecoveryStatus> {
         let mut sample_rate = 0;
         let mut samples = 0u64;
         let mut count = 0u32;
-        let mut partial = spool.join(".incomplete").exists();
+        let mut partial = temporary_gaps || spool.join(".incomplete").exists();
         for (index, path) in paths.iter().enumerate() {
             if path
                 .file_stem()
@@ -259,6 +288,45 @@ mod tests {
         assert!(damaged.exists());
         super::super::incremental_saver::validate_recoverable_temp_audio_file(&output).unwrap();
     }
+    #[tokio::test]
+    async fn recovery_includes_readable_temporary_tail_and_reports_torn_writes() {
+        for (published, torn) in [(0, false), (2, false), (2, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let (sender, _, _) =
+                super::super::transcription::queue::recording_audio_queue(root.path()).unwrap();
+            for id in 0..=published {
+                sender
+                    .send(AudioChunk {
+                        data: vec![0.05; 160],
+                        sample_rate: 16000,
+                        timestamp: id as f64 / 100.0,
+                        chunk_id: id,
+                        device_type: DeviceType::System,
+                    })
+                    .await
+                    .unwrap();
+            }
+            drop(sender);
+            let chunk = root
+                .path()
+                .join(format!(".audio-spool/{published:020}.chunk"));
+            let temp = chunk.with_extension("tmp");
+            fs::rename(chunk, &temp).unwrap();
+            if torn {
+                fs::write(temp, b"torn write").unwrap();
+            }
+            let status = recover(root.path()).unwrap();
+            let expected = if torn { published } else { published + 1 };
+            assert_eq!(status.status, if torn { "partial" } else { "success" });
+            assert_eq!(status.chunk_count, expected as u32);
+            assert_eq!(
+                fs::metadata(status.audio_file_path.unwrap()).unwrap().len(),
+                44 + expected * 160 * 4
+            );
+            assert!(root.path().join(".audio-spool").exists());
+        }
+    }
+
     #[tokio::test]
     async fn recovery_includes_unconsumed_tail_and_retains_originals() {
         let folder = tempfile::tempdir().unwrap();

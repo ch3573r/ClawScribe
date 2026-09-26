@@ -762,6 +762,85 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn temporary_capture_tail_is_encoded_or_reported_without_retaining_spool() {
+        use super::super::recording_state::{AudioChunk, DeviceType};
+        for (torn_temp, damaged_middle) in [(false, false), (true, false), (false, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut saver = RecordingSaver::new();
+            saver.set_recordings_folder(root.path().to_path_buf());
+            let sender = saver
+                .start_accumulation(true, super::super::recording_state::RecordingState::new())
+                .unwrap()
+                .unwrap();
+            for id in 0..3 {
+                sender
+                    .send(AudioChunk {
+                        data: vec![0.05; 4800],
+                        sample_rate: 48000,
+                        timestamp: id as f64 / 10.0,
+                        chunk_id: id,
+                        device_type: DeviceType::System,
+                    })
+                    .await
+                    .unwrap();
+            }
+            drop(sender);
+            let folder = saver.meeting_folder.clone().unwrap();
+            let last = folder.join(".audio-spool/00000000000000000002.chunk");
+            let temp = last.with_extension("tmp");
+            std::fs::rename(last, &temp).unwrap();
+            if torn_temp {
+                std::fs::write(&temp, b"torn write").unwrap();
+            }
+            if damaged_middle {
+                std::fs::write(
+                    folder.join(".audio-spool/00000000000000000001.chunk"),
+                    b"damaged",
+                )
+                .unwrap();
+            }
+            let report = saver.finalize_files(Some(0.3), false).await.unwrap();
+            assert!(!report.outcome.audio_save_failed);
+            assert!(!report.outcome.recording_files_incomplete);
+            assert_eq!(
+                report.outcome.capture_incomplete,
+                torn_temp || damaged_middle
+            );
+            assert_eq!(report.raw_fully_encoded, !damaged_middle);
+            assert_eq!(folder.join(".audio-spool").exists(), damaged_middle);
+            let outcome = super::super::outcome::RecordingOutcome::read(&folder)
+                .unwrap()
+                .unwrap();
+            assert_eq!(outcome.capture_incomplete, torn_temp || damaged_middle);
+            let mut command =
+                std::process::Command::new(super::super::ffmpeg::find_ffmpeg_path().unwrap());
+            command
+                .args(["-v", "error", "-i"])
+                .arg(folder.join("audio.mp4"))
+                .args(["-f", "f32le", "-ac", "1", "pipe:1"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            let decoded = command.output().unwrap();
+            assert!(decoded.status.success());
+            let expected = if torn_temp || damaged_middle {
+                9600
+            } else {
+                14400
+            };
+            let samples = decoded.stdout.len() / 4;
+            assert!(
+                samples >= expected && samples - expected < 1024,
+                "Unexpected decoded sample count: {samples}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn all_artifact_failures_are_collected_together() {
         let root = tempfile::tempdir().unwrap();
         let mut saver = RecordingSaver::new();

@@ -64,8 +64,10 @@ The raw spool uses approximately 700 MB per hour in addition to final audio. Pre
 space; syncing that folder with OneDrive can add disk contention. Originals
 remain until all readable raw chunks, transcript snapshots, metadata and warning
 status are saved. Capture gaps have their own persistent warning and do not keep
-an otherwise fully encoded spool forever. Unreadable/unpublished originals and
-originals needed after a failed save are retained.
+an otherwise fully encoded spool forever. A readable temporary chunk at the next sequence position is included in final
+audio and recovery. A torn temporary tail records a gap without retaining the
+spool; unreadable published chunks and originals needed after a failed save
+are retained.
 
 Stopped duration and completion time are saved before the final encode; a crash
 during encoding leaves a stopped, unfinished meeting rather than an active recording.
