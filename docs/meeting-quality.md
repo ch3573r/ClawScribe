@@ -7,6 +7,12 @@ improvement to every model or provider.
 
 ## Capture First
 
+HE-AAC imports use the first decoded buffer's sample rate, which can differ
+from the container's rate. Duration and conversion to 16 kHz use that rate.
+The VAD's final padded frame is trimmed to the actual input endpoint, including
+when a long segment splits during flush. Padding does not add audio or extend
+the last transcript segment beyond the source.
+
 Select the microphone and the output device actually used by the meeting app.
 Verify both sources in a short saved recording before relying on a long session.
 Teams detection is optional and distinct from audio capture; Webex and other
@@ -101,6 +107,13 @@ path. Long-recording diarization on an 8 GiB notebook needs separate measurement
 and a future bounded analysis path before it can be treated as low-memory work.
 
 ## Summary Reliability
+
+Completed `<think>` and `<thinking>` blocks are removed from model output,
+including case and attribute variants. Unfinished or orphaned tags fail with
+an actionable retry error. Generated structured notes receive the same checks.
+Saving edited summaries rejects reasoning markup, and loading older affected
+summaries hides them with a regeneration message without deleting their stored
+copy. Source evidence remains unchanged.
 
 Automatic notes use an already-configured provider and wait for the saved
 summary lookup before deciding whether generation is needed. Switching meetings

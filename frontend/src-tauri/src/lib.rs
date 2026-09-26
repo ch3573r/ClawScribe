@@ -49,6 +49,7 @@ pub mod database;
 pub mod diagnostics;
 pub mod exports;
 pub mod groq;
+pub(crate) mod model_download;
 pub mod nemotron_engine;
 pub mod notifications;
 pub mod ollama;

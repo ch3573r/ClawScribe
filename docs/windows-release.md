@@ -7,6 +7,23 @@ Installer targets are NSIS setup and MSI.
 
 ## Build Prerequisites
 
+### CPU Portability Gate
+
+The release and native-test scripts source `configure-windows-portability.ps1`.
+Rust uses `x86-64-v2`; Whisper's native build keeps AVX2 but disables host-native
+tuning and every AVX-512 variant through `portable-ggml.cmake`. Conflicting Rust
+CPU overrides fail before compilation. Vulkan and DirectML remain separate
+acceleration paths under `windows-gpu`.
+
+The Windows Tauri `beforeBundleCommand` and native-test helper inspect Whisper
+CMake caches with `verify-windows-portability.mjs`. Missing caches or any stale
+incompatible cache fail the gate. On the designated runner, rebuild in a fresh
+Cargo target directory when changing portability settings; do not bypass the
+check to reuse a host-tuned cache. This gate verifies build configuration and
+does not replace testing on supported CPUs or the dual-source recording smoke.
+
+### Toolchain
+
 Use Windows with Visual Studio Build Tools 2022 (Desktop development with C++),
 a Windows SDK, WebView2, Rust stable/MSVC, Node.js 24, pnpm 10, PowerShell 7, and
 CMake. The workflow pins LLVM 20.1.8 for bindgen compatibility and Vulkan SDK

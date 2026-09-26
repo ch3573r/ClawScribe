@@ -3,13 +3,11 @@
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
 use crate::config::WHISPER_MODEL_CATALOG;
 use anyhow::{anyhow, Result};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -44,10 +42,7 @@ pub struct WhisperEngine {
     current_model: Arc<RwLock<Option<String>>>,
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
     // State tracking for smart logging
-    // Download cancellation tracking
-    cancel_download_flag: Arc<RwLock<Option<String>>>, // Model name being cancelled
-    // Active downloads tracking to prevent concurrent downloads
-    active_downloads: Arc<RwLock<HashSet<String>>>, // Set of models currently being downloaded
+    downloads: crate::model_download::Downloads,
 }
 
 impl WhisperEngine {
@@ -154,62 +149,38 @@ impl WhisperEngine {
             current_context: Arc::new(RwLock::new(None)),
             current_model: Arc::new(RwLock::new(None)),
             available_models: Arc::new(RwLock::new(HashMap::new())),
-            // Initialize state tracking
-            // Initialize cancellation tracking
-            cancel_download_flag: Arc::new(RwLock::new(None)),
-            // Initialize active downloads tracking
-            active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            downloads: crate::model_download::Downloads::default(),
         };
 
         Ok(engine)
     }
 
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
-        let models_dir = &self.models_dir;
-        let mut models = Vec::new();
-        // Use centralized model catalog from config.rs
-        let model_configs = WHISPER_MODEL_CATALOG;
+        loop {
+            let generation = self.downloads.generation();
+            let models_dir = &self.models_dir;
+            let mut models = Vec::new();
+            // Use centralized model catalog from config.rs
+            let model_configs = WHISPER_MODEL_CATALOG;
 
-        for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
-            let model_path = models_dir.join(filename);
-            let status = if model_path.exists() {
-                // Check if file size is reasonable (at least 1MB for a valid model)
-                match std::fs::metadata(&model_path) {
-                    Ok(metadata) => {
-                        let file_size_bytes = metadata.len();
-                        let file_size_mb = file_size_bytes / (1024 * 1024);
-                        let expected_min_size_mb = (size_mb as f64 * 0.9) as u64; // Allow 90% of expected size as minimum for more accurate corruption detection
+            for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
+                let model_path = models_dir.join(filename);
+                let status = if self.downloads.is_active(name) {
+                    ModelStatus::Downloading { progress: 0 }
+                } else if model_path.exists() {
+                    // Check if file size is reasonable (at least 1MB for a valid model)
+                    match std::fs::metadata(&model_path) {
+                        Ok(metadata) => {
+                            let file_size_bytes = metadata.len();
+                            let file_size_mb = file_size_bytes / (1024 * 1024);
+                            let expected_min_size_mb = (size_mb as f64 * 0.9) as u64; // Allow 90% of expected size as minimum for more accurate corruption detection
 
-                        if file_size_mb >= expected_min_size_mb && file_size_mb > 1 {
-                            // File size looks good, but let's also check if it's a valid GGML file
-                            match self.validate_model_file(&model_path).await {
-                                Ok(_) => ModelStatus::Available,
-                                Err(_) => {
-                                    log::warn!("Model file has correct size but appears corrupted (failed validation)");
-                                    ModelStatus::Corrupted {
-                                        file_size: file_size_bytes,
-                                        expected_min_size: (expected_min_size_mb * 1024 * 1024)
-                                            as u64,
-                                    }
-                                }
-                            }
-                        } else if file_size_mb > 0 {
-                            // File exists but is smaller than expected
-                            // Check if this model is currently being downloaded
-                            let models_guard = self.available_models.read().await;
-                            if let Some(existing_model) = models_guard.get(name) {
-                                match &existing_model.status {
-                                    ModelStatus::Downloading { progress } => {
-                                        log::debug!("Model {} appears to be downloading ({} MB so far, {}% complete)",
-                                                  filename, file_size_mb, progress);
-                                        ModelStatus::Downloading {
-                                            progress: *progress,
-                                        }
-                                    }
-                                    _ => {
-                                        log::warn!(
-                                            "Model file failed size and integrity validation"
-                                        );
+                            if file_size_mb >= expected_min_size_mb && file_size_mb > 1 {
+                                // File size looks good, but let's also check if it's a valid GGML file
+                                match self.validate_model_file(&model_path).await {
+                                    Ok(_) => ModelStatus::Available,
+                                    Err(_) => {
+                                        log::warn!("Model file has correct size but appears corrupted (failed validation)");
                                         ModelStatus::Corrupted {
                                             file_size: file_size_bytes,
                                             expected_min_size: (expected_min_size_mb * 1024 * 1024)
@@ -217,44 +188,75 @@ impl WhisperEngine {
                                         }
                                     }
                                 }
-                            } else {
-                                log::warn!("Model file failed size and integrity validation");
-                                ModelStatus::Corrupted {
-                                    file_size: file_size_bytes,
-                                    expected_min_size: (expected_min_size_mb * 1024 * 1024) as u64,
+                            } else if file_size_mb > 0 {
+                                // File exists but is smaller than expected
+                                // Check if this model is currently being downloaded
+                                let models_guard = self.available_models.read().await;
+                                if let Some(existing_model) = models_guard.get(name) {
+                                    match &existing_model.status {
+                                        ModelStatus::Downloading { progress } => {
+                                            log::debug!("Model {} appears to be downloading ({} MB so far, {}% complete)",
+                                                  filename, file_size_mb, progress);
+                                            ModelStatus::Downloading {
+                                                progress: *progress,
+                                            }
+                                        }
+                                        _ => {
+                                            log::warn!(
+                                                "Model file failed size and integrity validation"
+                                            );
+                                            ModelStatus::Corrupted {
+                                                file_size: file_size_bytes,
+                                                expected_min_size: (expected_min_size_mb
+                                                    * 1024
+                                                    * 1024)
+                                                    as u64,
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    log::warn!("Model file failed size and integrity validation");
+                                    ModelStatus::Corrupted {
+                                        file_size: file_size_bytes,
+                                        expected_min_size: (expected_min_size_mb * 1024 * 1024)
+                                            as u64,
+                                    }
                                 }
+                            } else {
+                                ModelStatus::Missing
                             }
-                        } else {
-                            ModelStatus::Missing
                         }
+                        Err(_) => ModelStatus::Missing,
                     }
-                    Err(_) => ModelStatus::Missing,
-                }
-            } else {
-                ModelStatus::Missing
-            };
+                } else {
+                    ModelStatus::Missing
+                };
 
-            let model_info = ModelInfo {
-                name: name.to_string(),
-                path: model_path,
-                size_mb: size_mb as u32,
-                accuracy: accuracy.to_string(),
-                speed: speed.to_string(),
-                status,
-                description: description.to_string(),
-            };
+                let model_info = ModelInfo {
+                    name: name.to_string(),
+                    path: model_path,
+                    size_mb: size_mb as u32,
+                    accuracy: accuracy.to_string(),
+                    speed: speed.to_string(),
+                    status,
+                    description: description.to_string(),
+                };
 
-            models.push(model_info);
+                models.push(model_info);
+            }
+
+            // Update internal cache
+            let mut available_models = self.available_models.write().await;
+            if generation != self.downloads.generation() {
+                continue;
+            }
+            available_models.clear();
+            for model in &models {
+                available_models.insert(model.name.clone(), model.clone());
+            }
+
+            return Ok(models);
         }
-
-        // Update internal cache
-        let mut available_models = self.available_models.write().await;
-        available_models.clear();
-        for model in &models {
-            available_models.insert(model.name.clone(), model.clone());
-        }
-
-        Ok(models)
     }
 
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
@@ -556,6 +558,7 @@ impl WhisperEngine {
     }
 
     pub async fn delete_model(&self, model_name: &str) -> Result<String> {
+        let _reservation = self.downloads.start(model_name)?;
         log::info!("Attempting to delete model: {}", model_name);
 
         // Get model info to find the file path
@@ -645,34 +648,9 @@ impl WhisperEngine {
     pub async fn download_model(
         &self,
         model_name: &str,
-        progress_callback: Option<Box<dyn Fn(u8) + Send>>,
+        mut progress_callback: Option<Box<dyn Fn(u8) + Send>>,
     ) -> Result<()> {
-        log::info!("Starting download for model: {}", model_name);
-
-        // Check if download is already in progress for this model
-        {
-            let active = self.active_downloads.read().await;
-            if active.contains(model_name) {
-                log::warn!("Download already in progress for model");
-                return Err(anyhow!(
-                    "Download already in progress for model: {}",
-                    model_name
-                ));
-            }
-        }
-
-        // Add to active downloads
-        {
-            let mut active = self.active_downloads.write().await;
-            active.insert(model_name.to_string());
-        }
-
-        // Clear any previous cancellation flag for this model
-        {
-            let mut cancel_flag = self.cancel_download_flag.write().await;
-            *cancel_flag = None;
-        }
-
+        let reservation = self.downloads.start(model_name)?;
         // Official ggerganov/whisper.cpp model URLs from Hugging Face
         let model_url = match model_name {
             // Standard f16 models
@@ -696,219 +674,56 @@ impl WhisperEngine {
             _ => return Err(anyhow!("Unsupported model: {}", model_name))
         };
 
-        log::info!("Model URL for {}: {}", model_name, model_url);
-
-        // Generate correct filename - all models follow ggml-{model_name}.bin pattern
-        let filename = format!("ggml-{}.bin", model_name);
-        let file_path = self.models_dir.join(&filename);
-
-        log::info!("Starting model file download");
-
-        // Create models directory if it doesn't exist
-        if !self.models_dir.exists() {
-            fs::create_dir_all(&self.models_dir)
-                .await
-                .map_err(|e| anyhow!("Failed to create models directory: {}", e))?;
+        if let Some(model) = self.available_models.write().await.get_mut(model_name) {
+            model.status = ModelStatus::Downloading { progress: 0 };
         }
-
-        // Update model status to downloading
-        {
-            let mut models = self.available_models.write().await;
-            if let Some(model_info) = models.get_mut(model_name) {
-                model_info.status = ModelStatus::Downloading { progress: 0 };
+        let file_path = self.models_dir.join(format!("ggml-{model_name}.bin"));
+        let operation = async {
+            fs::create_dir_all(&self.models_dir).await?;
+            let client = crate::model_download::client()?;
+            // Resume a valid legacy GGML prefix; a completed corrupt header
+            // cannot be repaired by appending bytes or accepting a HEAD size.
+            if file_path.exists() && self.validate_model_file(&file_path).await.is_err() {
+                fs::remove_file(&file_path).await?;
             }
-        }
-
-        log::info!("Creating HTTP client and starting request...");
-        let client = Client::new();
-
-        log::info!("Sending GET request to: {}", model_url);
-        let response = client
-            .get(model_url)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to start download: {}", e))?;
-
-        log::info!("Received response with status: {}", response.status());
-        if !response.status().is_success() {
-            // Remove from active downloads on error
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
-            return Err(anyhow!(
-                "Download failed with status: {}",
-                response.status()
-            ));
-        }
-
-        let total_size = response.content_length().unwrap_or(0);
-        log::info!(
-            "Response successful, content length: {} bytes ({:.1} MB)",
-            total_size,
-            total_size as f64 / (1024.0 * 1024.0)
-        );
-
-        if total_size == 0 {
-            log::warn!("Content length is 0 or unknown - download may not show accurate progress");
-        }
-
-        let mut file = fs::File::create(&file_path)
-            .await
-            .map_err(|e| anyhow!("Failed to create file: {}", e))?;
-
-        log::info!("Model download file created");
-
-        // Stream download with real progress reporting
-        log::info!("Starting streaming download...");
-        log::info!(
-            "Expected size: {:.1} MB",
-            total_size as f64 / (1024.0 * 1024.0)
-        );
-
-        use futures_util::StreamExt;
-        let mut stream = response.bytes_stream();
-        let mut downloaded = 0u64;
-        let mut last_progress_report = 0u8;
-        let mut last_report_time = std::time::Instant::now();
-
-        // Emit initial 0% progress immediately
-        if let Some(ref callback) = progress_callback {
-            callback(0);
-        }
-
-        while let Some(chunk_result) = stream.next().await {
-            // Check for cancellation before processing chunk
-            {
-                let cancel_flag = self.cancel_download_flag.read().await;
-                if cancel_flag.as_ref() == Some(&model_name.to_string()) {
-                    log::info!("Download cancelled for {}", model_name);
-                    // Remove from active downloads on cancellation
-                    let mut active = self.active_downloads.write().await;
-                    active.remove(model_name);
-                    return Err(anyhow!("Download cancelled by user"));
-                }
-            }
-
-            let chunk = chunk_result.map_err(|e| anyhow!("Failed to read chunk: {}", e))?;
-
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| anyhow!("Failed to write chunk to file: {}", e))?;
-
-            downloaded += chunk.len() as u64;
-
-            // Calculate progress
-            let progress = if total_size > 0 {
-                ((downloaded as f64 / total_size as f64) * 100.0) as u8
-            } else {
-                0
-            };
-
-            // Report progress every 1% or every 2 seconds for better UI responsiveness
-            let time_since_last_report = last_report_time.elapsed().as_secs();
-            if progress >= last_progress_report + 1
-                || progress == 100
-                || time_since_last_report >= 2
-            {
-                log::info!(
-                    "Download progress: {}% ({:.1} MB / {:.1} MB)",
-                    progress,
-                    downloaded as f64 / (1024.0 * 1024.0),
-                    total_size as f64 / (1024.0 * 1024.0)
-                );
-
-                // Update progress in model info
-                {
-                    let mut models = self.available_models.write().await;
-                    if let Some(model_info) = models.get_mut(model_name) {
-                        model_info.status = ModelStatus::Downloading { progress };
+            crate::model_download::download_file(
+                &client,
+                model_url,
+                &file_path,
+                reservation.token(),
+                |bytes, total| {
+                    if let Some(callback) = progress_callback.as_mut() {
+                        callback((bytes.saturating_mul(100) / total.max(1)).min(99) as u8);
                     }
-                }
-
-                // Call progress callback
-                if let Some(ref callback) = progress_callback {
-                    callback(progress);
-                }
-
-                last_progress_report = progress;
-                last_report_time = std::time::Instant::now();
+                },
+            )
+            .await?;
+            if let Err(error) = self.validate_model_file(&file_path).await {
+                fs::remove_file(&file_path).await?;
+                return Err(error);
+            }
+            Ok(())
+        };
+        let result = operation.await;
+        let mut models = self.available_models.write().await;
+        if let Some(model) = models.get_mut(model_name) {
+            model.status = if result.is_ok() {
+                ModelStatus::Available
+            } else {
+                ModelStatus::Missing
+            };
+        }
+        if result.is_ok() {
+            if let Some(callback) = progress_callback.as_mut() {
+                callback(100);
             }
         }
-
-        log::info!("Streaming download completed: {} bytes", downloaded);
-
-        // Ensure 100% progress is always reported
-        {
-            let mut models = self.available_models.write().await;
-            if let Some(model_info) = models.get_mut(model_name) {
-                model_info.status = ModelStatus::Downloading { progress: 100 };
-            }
-        }
-
-        if let Some(ref callback) = progress_callback {
-            callback(100);
-        }
-
-        file.flush()
-            .await
-            .map_err(|e| anyhow!("Failed to flush file: {}", e))?;
-
-        log::info!("Download completed for model: {}", model_name);
-
-        // Update model status to available
-        {
-            let mut models = self.available_models.write().await;
-            if let Some(model_info) = models.get_mut(model_name) {
-                model_info.status = ModelStatus::Available;
-                model_info.path = file_path.clone();
-            }
-        }
-
-        // Remove from active downloads on completion
-        {
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
-        }
-
-        Ok(())
+        drop(reservation);
+        result
     }
 
     pub async fn cancel_download(&self, model_name: &str) -> Result<()> {
-        log::info!("Cancelling download for model: {}", model_name);
-
-        // Set cancellation flag to interrupt the download loop
-        {
-            let mut cancel_flag = self.cancel_download_flag.write().await;
-            *cancel_flag = Some(model_name.to_string());
-        }
-
-        // Remove from active downloads
-        {
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
-        }
-
-        // Update model status to Missing (so it can be retried)
-        {
-            let mut models = self.available_models.write().await;
-            if let Some(model_info) = models.get_mut(model_name) {
-                model_info.status = ModelStatus::Missing;
-            }
-        }
-
-        // Clean up partially downloaded files
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // Brief delay to let download loop detect cancellation
-
-        let filename = format!("ggml-{}.bin", model_name);
-        let file_path = self.models_dir.join(&filename);
-        if file_path.exists() {
-            if let Err(_e) = fs::remove_file(&file_path).await {
-                log::warn!("Failed to clean up cancelled download file");
-            } else {
-                log::info!("Cleaned up cancelled download file");
-            }
-        }
-
-        Ok(())
+        self.downloads.cancel(model_name).await
     }
 }
 

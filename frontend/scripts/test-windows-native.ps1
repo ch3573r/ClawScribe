@@ -10,6 +10,7 @@ $runtime = Join-Path $repoRoot "frontend/src-tauri/binaries/sherpa-onnx"
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
 )) { throw "Native Windows tests must run on Windows." }
+. (Join-Path $PSScriptRoot "configure-windows-portability.ps1")
 
 $featureList = @($Features.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $allowedFeatures = @("windows-gpu", "vulkan", "directml", "cuda", "openblas")
@@ -68,12 +69,17 @@ try {
     }
 
     $testDirectory = Split-Path -Parent $testExecutable
+    node (Join-Path $PSScriptRoot "verify-windows-portability.mjs") (Split-Path -Parent $testDirectory)
+    if ($LASTEXITCODE -ne 0) { throw "Windows CPU portability validation failed." }
     Get-ChildItem -LiteralPath $runtime -Filter '*.dll' -File | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $testDirectory $_.Name) -Force
     }
 
     foreach ($filter in @(
         "summary::",
+        "model_download::tests",
+        "audio::decoder::tests",
+        "audio::vad::tests::flush_",
         "audio::async_logger::tests",
         "audio::hardware_detector::tests",
         "updates::tests",

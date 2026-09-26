@@ -469,7 +469,7 @@ pub fn decode_audio_file_with_progress(
     let track_id = track.id;
 
     // Get audio parameters
-    let sample_rate = track
+    let mut sample_rate = track
         .codec_params
         .sample_rate
         .ok_or_else(|| anyhow!("Unknown sample rate"))?;
@@ -540,6 +540,12 @@ pub fn decode_audio_file_with_progress(
                 if sample_buf.is_none() {
                     let spec = *decoded.spec();
                     let duration = decoded.capacity() as u64;
+                    // HE-AAC metadata can describe the SBR rate while Symphonia
+                    // decodes the AAC-LC core. Resample and time the actual PCM.
+                    if spec.rate == 0 {
+                        return Err(anyhow!("Decoder returned an invalid sample rate"));
+                    }
+                    sample_rate = spec.rate;
                     // Detect actual channel count from decoded audio (metadata may be wrong/missing)
                     let actual_channels = spec.channels.count() as u16;
                     if actual_channels != channels {
@@ -609,6 +615,16 @@ pub fn decode_audio_file_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn he_aac_uses_decoder_rate_and_preserves_duration() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/he_aac_48k_5s.m4a");
+        let decoded = decode_audio_file(&path).unwrap();
+        assert_eq!(decoded.sample_rate, 24_000);
+        assert!((decoded.duration_seconds - 5.16).abs() < 0.5);
+        let mono = decoded.to_whisper_format();
+        assert!((mono.len() as f64 / 16_000.0 - 5.16).abs() < 0.5);
+    }
 
     #[test]
     fn test_to_whisper_format_mono_16k() {

@@ -514,6 +514,8 @@ pub async fn whisper_download_model(
                 }
                 Ok(())
             }
+            // The cancellation caller updates the UI after cleanup completes.
+            Err(e) if e.is::<crate::model_download::Cancelled>() => Ok(()),
             Err(e) => {
                 // Emit error event
                 if let Err(emit_e) = app_handle.emit(

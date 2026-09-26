@@ -1,4 +1,4 @@
-use crate::parakeet_engine::{DownloadProgress, ModelInfo, ModelStatus, ParakeetEngine};
+use crate::parakeet_engine::{DownloadProgress, ModelInfo, ParakeetEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -449,6 +449,9 @@ pub async fn parakeet_download_model<R: Runtime>(
 
                 Ok(())
             }
+            // The cancellation command owns the UI event. An old cancelled
+            // invocation must not overwrite the state of its replacement.
+            Err(e) if e.is::<crate::model_download::Cancelled>() => Ok(()),
             Err(e) => {
                 // Emit error event
                 if let Err(emit_e) = app_handle.emit(
@@ -514,34 +517,13 @@ pub async fn parakeet_retry_download<R: Runtime>(
     };
 
     if let Some(engine) = engine {
-        // DEFENSIVE: Ensure clean state before retry
-        // This handles any edge cases where error handler didn't complete
-        {
-            let mut active = engine.active_downloads.write().await;
-            if active.contains(&model_name) {
-                log::warn!(
-                    "Retry: Model {} was still in active downloads, removing",
-                    model_name
-                );
-                active.remove(&model_name);
-            }
-        }
-
-        // DEFENSIVE: Force model status to Missing to allow fresh download
-        {
-            let mut models = engine.available_models.write().await;
-            if let Some(model) = models.get_mut(&model_name) {
-                log::info!(
-                    "Retry: Resetting model {} status from {:?} to Missing",
-                    model_name,
-                    model.status
-                );
-                model.status = ModelStatus::Missing;
-            }
-        }
-
-        // Rediscover models to refresh state based on disk files
-        let _ = engine.discover_models().await;
+        // Cancellation waits for the previous worker to close its files before
+        // the next worker may reserve this model. Completed artifacts survive.
+        engine
+            .cancel_download(&model_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        engine.discover_models().await.map_err(|e| e.to_string())?;
 
         // Call regular download (emits events)
         parakeet_download_model(app_handle, model_name).await

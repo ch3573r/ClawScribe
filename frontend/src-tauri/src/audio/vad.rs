@@ -263,6 +263,8 @@ impl ContinuousVadProcessor {
               self.in_speech, self.current_speech.len(), self.buffer.len(), self.speech_segments.len());
 
         let mut completed_segments = Vec::new();
+        // Bound every segment emitted by the padded terminal frame to real PCM.
+        let real_end_sample = self.processed_samples + self.buffer.len();
 
         // Process any remaining buffered audio
         if !self.buffer.is_empty() {
@@ -316,7 +318,15 @@ impl ContinuousVadProcessor {
 
         // Extract all remaining segments
         while let Some(segment) = self.speech_segments.pop_front() {
-            completed_segments.push(segment);
+            let mut segment = segment;
+            let start_sample =
+                (segment.start_timestamp_ms * VAD_SAMPLE_RATE as f64 / 1000.0).round() as usize;
+            let real_len = real_end_sample.saturating_sub(start_sample);
+            segment.samples.truncate(real_len);
+            if !segment.samples.is_empty() {
+                segment.end_timestamp_ms = samples_to_ms(start_sample + segment.samples.len());
+                completed_segments.push(segment);
+            }
         }
 
         Ok(completed_segments)
@@ -748,6 +758,34 @@ mod tests {
         assert_eq!(segment.start_timestamp_ms, 1500.0);
         assert_eq!(segment.end_timestamp_ms, 1750.0);
         assert_eq!(segment.confidence, 0.85);
+    }
+
+    #[test]
+    fn flush_trims_padding_after_late_speech_with_and_without_forced_segments() {
+        for max_ms in [None, Some(500)] {
+            let mut audio = vec![0.0; 20 * 16_000];
+            audio.extend(generate_test_audio_with_speech(3.0, 16_000));
+            assert_eq!(audio.len() % 480, 320);
+            let mut processor =
+                ContinuousVadProcessor::new_with_max_segment_duration(16_000, 2000, max_ms)
+                    .unwrap();
+            let mut segments = processor.process_audio(&audio).unwrap();
+            assert!(processor.in_speech, "fixture must exercise the forced tail");
+            segments.extend(processor.flush().unwrap());
+            assert!(!segments.is_empty());
+            let mut last_end = 0;
+            for segment in &segments {
+                let start = (segment.start_timestamp_ms * 16.0).round() as usize;
+                let end = (segment.end_timestamp_ms * 16.0).round() as usize;
+                assert!(start >= last_end, "segments must not duplicate audio");
+                assert!(end <= audio.len(), "padding must not become speech");
+                assert_eq!(end - start, segment.samples.len());
+                assert_eq!(segment.samples.as_slice(), &audio[start..end]);
+                last_end = end;
+            }
+            assert_eq!(last_end, audio.len());
+            assert!(processor.flush().unwrap().is_empty());
+        }
     }
 
     #[test]

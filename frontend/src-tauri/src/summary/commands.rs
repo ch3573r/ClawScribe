@@ -85,6 +85,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     );
     let pool = state.db_manager.pool();
 
+    super::processor::validate_saved_summary(&summary)?;
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
             log_info!("Summary saved successfully for meeting_id: {}", meeting_id);
@@ -245,14 +246,24 @@ pub async fn api_get_summary<R: Runtime>(
 
     match SummaryProcessesRepository::get_summary_data_for_meeting(pool, &meeting_id).await {
         Ok(Some(process)) => {
-            let status = process.status.to_lowercase();
-            let error = process.error;
+            let mut status = process.status.to_lowercase();
+            let mut error = process.error;
 
             // Parse result data if it exists (regardless of status)
             // This allows displaying restored summaries after cancellation or failure
             let data = if let Some(result_str) = process.result {
                 match serde_json::from_str::<serde_json::Value>(&result_str) {
-                    Ok(parsed) => Some(parsed),
+                    Ok(parsed) => match super::processor::validate_saved_summary(&parsed) {
+                        Ok(()) => Some(parsed),
+                        Err(reason) => {
+                            // Hide unsafe legacy output without altering its stored copy.
+                            if status == "completed" {
+                                status = "failed".into();
+                            }
+                            error = Some(reason);
+                            None
+                        }
+                    },
                     Err(e) => {
                         log_error!("Failed to parse summary result JSON: {}", e);
                         None

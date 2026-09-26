@@ -67,6 +67,7 @@ Assert-Command "pnpm"
 Assert-Command "cargo"
 Assert-Command "git"
 Assert-VulkanSdk
+. (Join-Path $PSScriptRoot "configure-windows-portability.ps1")
 
 $repoRoot = Resolve-Path (Join-Path $frontendRoot "..")
 node (Join-Path $repoRoot "scripts\verify-public-repo-safety.mjs")

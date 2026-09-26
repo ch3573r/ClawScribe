@@ -2,6 +2,12 @@
 
 ClawScribe is based on Meetily Community Edition `0.4.0`.
 
+Selected reliability improvements from Meetily `0.4.1` are adapted to this
+fork: recoverable model downloads, HE-AAC decoded sample-rate handling,
+reasoning-tag isolation, Windows CPU portability checks, and exact VAD flush
+endpoints. This is not a wholesale merge of the upstream release; ClawScribe
+retains its Windows GPU profile, recording lifecycle, and local engine choices.
+
 Upstream sources:
 
 - https://github.com/Zackriya-Solutions/meeting-minutes

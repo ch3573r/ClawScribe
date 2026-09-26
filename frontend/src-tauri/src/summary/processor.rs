@@ -11,7 +11,52 @@ use tracing::{error, info};
 
 // Compile regex once and reuse (significant performance improvement for repeated calls)
 static THINKING_TAG_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)<think(?:ing)?>.*?</think(?:ing)?>").unwrap());
+    Lazy::new(|| Regex::new(r"(?is)<think(?:ing)?(?:\s+[^>]*)?>.*?</think(?:ing)?\s*>").unwrap());
+static THINKING_MARKER_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?is)</?think(?:ing)?(?:\s+[^>]*)?(?:>|$)").unwrap());
+
+/// Reject reasoning in stored display content, including BlockNote text split
+/// across inline nodes. Source evidence is user data and must stay untouched.
+pub(crate) fn validate_saved_summary(value: &serde_json::Value) -> Result<(), String> {
+    fn collect(value: &serde_json::Value, text: &mut String) -> bool {
+        match value {
+            serde_json::Value::String(value) => {
+                text.push_str(value);
+                if THINKING_MARKER_REGEX.is_match(value) {
+                    return true;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    if collect(value, text) {
+                        return true;
+                    }
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    // Formatting and IDs must not interrupt tags split across
+                    // styled BlockNote text spans or links.
+                    if !matches!(
+                        key.as_str(),
+                        "summary_sources" | "id" | "type" | "styles" | "props" | "href"
+                    ) && collect(value, text)
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+    let mut text = String::new();
+    if collect(value, &mut text) || THINKING_MARKER_REGEX.is_match(&text) {
+        Err("Summary contains model reasoning markup. Regenerate the summary or remove the reasoning text before saving.".into())
+    } else {
+        Ok(())
+    }
+}
 
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
     "**Write the summary/report in English regardless of transcript language; non-English prose is invalid.**";
@@ -24,8 +69,11 @@ const SUMMARY_GROUNDING_INSTRUCTION: &str =
      when explicitly stated; otherwise mark them as not specified. A mentioned person is \
      not necessarily an attendee. Be concise, remove repetition, and do not invent details.";
 
-fn require_summary_markdown(raw: &str, stage: &str) -> Result<String, String> {
+pub(crate) fn require_summary_markdown(raw: &str, stage: &str) -> Result<String, String> {
     let markdown = clean_llm_markdown_output(raw);
+    if THINKING_MARKER_REGEX.is_match(&markdown) {
+        return Err(format!("{stage} contains incomplete reasoning markup. Retry generation; no complete notes were produced."));
+    }
     if markdown.is_empty() {
         return Err(format!(
             "{stage} returned no usable content. Please retry summary generation."
@@ -230,7 +278,7 @@ pub fn clean_llm_markdown_output(markdown: &str) -> String {
     let trimmed = without_thinking.trim();
 
     // List of possible language identifiers for code blocks
-    const PREFIXES: &[&str] = &["```markdown\n", "```\n"];
+    const PREFIXES: &[&str] = &["```markdown\n", "```\n", "```markdown\r\n", "```\r\n"];
     const SUFFIX: &str = "```";
 
     for prefix in PREFIXES {
@@ -660,6 +708,9 @@ mod tests {
             "",
             "   \n",
             "<think>internal reasoning</think>",
+            "<THINKING mode=\"internal\">hidden</THINKING>",
+            "<think>unfinished reasoning",
+            "Visible text</thinking>",
             "```markdown\n\n```",
         ] {
             assert!(checked_chunk_summary(Ok(text.into()), 1, 2).is_err());
@@ -669,6 +720,33 @@ mod tests {
             checked_chunk_summary(Ok("# Decisions".into()), 1, 1).unwrap(),
             "# Decisions"
         );
+    }
+
+    #[test]
+    fn reasoning_markup_variants_are_removed_before_saving() {
+        assert_eq!(
+            require_summary_markdown(
+                "<THINK mode=\"internal\">hidden</THINK>\r\n```markdown\r\n# Notes\r\n```",
+                "Final summary"
+            )
+            .unwrap(),
+            "# Notes"
+        );
+    }
+
+    #[test]
+    fn stored_summary_checks_markdown_blocks_and_structured_output_but_not_sources() {
+        for value in [
+            serde_json::json!({"markdown": "<THINK>hidden</THINK># Notes"}),
+            serde_json::json!({"summary_json": [{"id": "block", "type": "paragraph", "content": [{"text": "<thi", "type": "text", "styles": {"bold": true}}, {"text": "nk>hidden", "type": "text"}]}]}),
+            serde_json::json!({"structured_output": {"follow_up_email": {"body_markdown": "<thinking"}}}),
+        ] {
+            assert!(validate_saved_summary(&value).is_err());
+        }
+        assert!(validate_saved_summary(&serde_json::json!({
+            "markdown": "# Notes", "summary_sources": [{"text": "User said <think>"}]
+        }))
+        .is_ok());
     }
 
     #[test]

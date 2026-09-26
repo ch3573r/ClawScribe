@@ -403,10 +403,11 @@ pub(crate) fn parse_response(
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     };
-    content
+    let text = content
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| "The model returned no usable text response.".into())
+        .ok_or_else(|| "The model returned no usable text response.".to_string())?;
+    super::processor::require_summary_markdown(&text, "Model response")
 }
 
 /// Helper function to get provider name for logging

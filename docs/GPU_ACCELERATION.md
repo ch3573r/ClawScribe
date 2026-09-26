@@ -9,6 +9,21 @@ ClawScribe has two separate acceleration families:
 The app should always remain correct on CPU-capable models. GPU paths are
 performance paths and must be validated per engine/model variant.
 
+## Model Downloads
+
+Whisper and Parakeet transfers use `.partial` files and validate server byte
+ranges before appending. Retry retains completed Parakeet artifacts and resumes
+the incomplete file; servers ignoring Range restart that file only. Catalog
+sizes remain estimates, while HTTP lengths establish transfer completeness.
+Model validation must pass before progress reaches 100% or the model becomes
+available. Cancellation is per model and waits for its worker to finish; a
+timeout keeps the model reserved instead of allowing overlapping writers.
+
+Windows release and native-test scripts set a portable Rust CPU baseline and
+disable ggml host tuning and AVX-512. AVX2 remains supported by the existing
+Whisper build. See [Windows release checks](windows-release.md) for the cache
+verification gate; GPU acceleration still requires separate runtime validation.
+
 ## Windows DirectML
 
 DirectML is the main Windows GPU path for ONNX transcription engines.

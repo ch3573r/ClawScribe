@@ -56,6 +56,9 @@ exporting tasks. Obtain the recording permissions required for your meeting.
   entire meeting. Original recognition and segment timing are retained; undo
   restores previous corrections. Regenerate notes after correcting a transcript.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
+- HE-AAC imports use the decoder's actual sample rate to preserve timing.
+- Interrupted Whisper and Parakeet downloads retain partial files for retry;
+  cancellation finishes the active transfer before another attempt can start.
 - Disk-backed live recognition queue and interrupted-recording recovery paths.
 - Timestamp playback controls, speaker-label editing, and a **Jump to live
   transcript** control when reading earlier text during a recording.

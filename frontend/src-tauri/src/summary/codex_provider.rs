@@ -565,6 +565,19 @@ for line in sys.stdin:
         let parsed = parse_meeting_output(&raw).expect("leading prose should be tolerated");
         assert_eq!(parsed.follow_up_email.subject, "Codex runtime");
     }
+
+    #[test]
+    fn meeting_output_isolates_reasoning_and_rejects_escaped_or_unclosed_tags() {
+        let raw = format!("<THINKING>private</THINKING>{}", valid_meeting_json());
+        assert!(parse_meeting_output(&raw).is_ok());
+        let raw = format!("<think>private {}", valid_meeting_json());
+        assert!(parse_meeting_output(&raw).is_err());
+        let raw = valid_meeting_json().replace(
+            "The app-server processed the meeting.",
+            r"\u003cthink\u003eprivate\u003c/think\u003e",
+        );
+        assert!(parse_meeting_output(&raw).is_err());
+    }
 }
 
 impl Default for CodexHomeMode {
@@ -2575,7 +2588,8 @@ pub fn output_schema_json() -> String {
 }
 
 pub(crate) fn parse_meeting_output(raw: &str) -> Result<MeetingNotesOutput, String> {
-    let cleaned = strip_json_fence(raw);
+    let cleaned = super::processor::require_summary_markdown(raw, "Meeting output")?;
+    let cleaned = strip_json_fence(&cleaned);
     // Skip any leading prose before the JSON object so we deserialize from the
     // first `{`. Some providers wrap the structured output in explanatory text.
     let json_start = cleaned
@@ -2588,7 +2602,7 @@ pub(crate) fn parse_meeting_output(raw: &str) -> Result<MeetingNotesOutput, Stri
     // Read only the first JSON value via the streaming deserializer so trailing
     // characters after the object (extra prose, a second value, etc.) don't fail
     // parsing the way `serde_json::from_str` would.
-    serde_json::Deserializer::from_str(json_start)
+    let output = serde_json::Deserializer::from_str(json_start)
         .into_iter::<MeetingNotesOutput>()
         .next()
         .unwrap_or_else(|| {
@@ -2596,7 +2610,12 @@ pub(crate) fn parse_meeting_output(raw: &str) -> Result<MeetingNotesOutput, Stri
                 "Provider returned no meeting JSON",
             ))
         })
-        .map_err(|e| format!("Provider returned invalid meeting JSON: {e}"))
+        .map_err(|e| format!("Provider returned invalid meeting JSON: {e}"))?;
+    // JSON escapes can conceal tags until deserialization. Guard every exported
+    // field as well as the primary Markdown report.
+    let value = serde_json::to_value(&output).map_err(|e| e.to_string())?;
+    super::processor::validate_saved_summary(&value)?;
+    Ok(output)
 }
 
 pub(crate) fn strip_json_fence(raw: &str) -> String {
