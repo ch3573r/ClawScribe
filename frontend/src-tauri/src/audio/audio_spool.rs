@@ -64,6 +64,42 @@ pub(super) fn has_capture_audio(folder: &Path) -> std::io::Result<bool> {
     }))
 }
 
+/// Inspect retained capture one chunk at a time, stopping at the first gap.
+/// This also covers recovered files created before gap status was propagated.
+pub(super) fn capture_has_gaps(folder: &Path) -> std::io::Result<bool> {
+    let spool = folder.join(".audio-spool");
+    if spool.join(".incomplete").exists() {
+        return Ok(true);
+    }
+    if !spool.is_dir() {
+        return Ok(false);
+    }
+    let (paths, temporary_gaps, _) = capture_paths(&spool)?;
+    if temporary_gaps {
+        return Ok(true);
+    }
+    let mut sample_rate = None;
+    for (index, path) in paths.iter().enumerate() {
+        if path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<usize>().ok())
+            != Some(index)
+        {
+            return Ok(true);
+        }
+        let chunk = match read_chunk(path) {
+            Ok(chunk) if chunk.sample_rate > 0 && !chunk.data.is_empty() => chunk,
+            _ => return Ok(true),
+        };
+        if sample_rate.is_some_and(|rate| rate != chunk.sample_rate) {
+            return Ok(true);
+        }
+        sample_rate = Some(chunk.sample_rate);
+    }
+    Ok(false)
+}
+
 /// Returns (has gaps, all recoverable chunks encoded). Unreadable published
 /// chunks are retained; a torn final temporary write only records a capture gap.
 pub(super) fn encode_capture(

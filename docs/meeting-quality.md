@@ -81,6 +81,8 @@ retained. New sessions rely on their raw spool for recovery.
 
 Recovery retains originals and includes an unconsumed tail. Opening a recovered
 meeting reuses its completed audio; an explicit recovery action can rebuild it.
+Retranscription checks retained chunks and saved warnings for gaps, including
+when reusing a recovered file, and preserves that information in the library.
 Long captures beyond WAV's 32-bit length limit use a streamed AAC recovery encode.
 Temporary legacy checkpoints must decode successfully before recovery uses them.
 Playback uses the browser's streaming audio element through scoped local-file

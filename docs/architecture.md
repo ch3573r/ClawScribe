@@ -115,6 +115,9 @@ persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have
 separate persistent flags. Retranscription updates repaired flags in the transcript
 transaction and mirrors the outcome afterwards; capture gaps remain informational.
+Its audio resolver checks retained raw chunks and the saved outcome on a blocking
+worker, even when reusing recovered audio, so older partial recoveries also set
+the permanent capture-gap flag.
 Shared stop ownership suppresses duplicate completion
 events, and a SQLite write reservation protects the folder lookup and insert
 against concurrent saves.

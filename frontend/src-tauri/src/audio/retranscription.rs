@@ -158,8 +158,9 @@ async fn run_retranscription<R: Runtime>(
     mut provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
     let folder_path = PathBuf::from(&meeting_folder_path);
-    let audio_path =
-        crate::audio::incremental_saver::find_or_recover_audio_file(&folder_path).await?;
+    let (audio_path, capture_gaps) =
+        crate::audio::incremental_saver::find_or_recover_audio_file_with_status(&folder_path)
+            .await?;
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -230,6 +231,7 @@ async fn run_retranscription<R: Runtime>(
                         &outcome.provider,
                         &outcome.model,
                         source_language.as_deref(),
+                        capture_gaps,
                     )
                     .await;
                 }
@@ -543,6 +545,7 @@ async fn run_retranscription<R: Runtime>(
         used_provider,
         &used_model,
         source_language.as_deref(),
+        capture_gaps,
     )
     .await
 }
@@ -600,6 +603,7 @@ async fn save_retranscription_transcripts<R: Runtime>(
     used_provider: &str,
     used_model: &str,
     source_language: Option<&str>,
+    capture_gaps: bool,
 ) -> Result<RetranscriptionResult> {
     emit_progress(app, meeting_id, "saving", 80, "Saving transcripts...");
 
@@ -703,7 +707,7 @@ async fn save_retranscription_transcripts<R: Runtime>(
     .unwrap_or(false);
     // Reaching this point means the input audio decoded and produced a valid
     // transcript. Preserve permanent capture gaps while clearing repaired states.
-    update_retranscription_outcome(&mut tx, meeting_id, files_saved).await?;
+    update_retranscription_outcome(&mut tx, meeting_id, files_saved, capture_gaps).await?;
     tx.commit()
         .await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
@@ -767,11 +771,14 @@ async fn update_retranscription_outcome(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     meeting_id: &str,
     files_saved: bool,
+    capture_gaps: bool,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, recording_files_incomplete)
-        VALUES (?, 0, 0, ?) ON CONFLICT(meeting_id) DO UPDATE SET
-        audio_save_failed = 0, transcription_incomplete = 0, recording_files_incomplete = excluded.recording_files_incomplete")
-        .bind(meeting_id).bind(!files_saved).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, recording_files_incomplete, capture_incomplete)
+        VALUES (?, 0, 0, ?, ?) ON CONFLICT(meeting_id) DO UPDATE SET
+        audio_save_failed = 0, transcription_incomplete = 0,
+        recording_files_incomplete = excluded.recording_files_incomplete,
+        capture_incomplete = recording_outcomes.capture_incomplete OR excluded.capture_incomplete")
+        .bind(meeting_id).bind(!files_saved).bind(capture_gaps).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -1231,7 +1238,7 @@ mod tests {
             );
             assert_eq!(files_saved, failed_file.is_none());
             let mut tx = pool.begin().await.unwrap();
-            update_retranscription_outcome(&mut tx, "synthetic", files_saved)
+            update_retranscription_outcome(&mut tx, "synthetic", files_saved, false)
                 .await
                 .unwrap();
             tx.commit().await.unwrap();
@@ -1251,6 +1258,45 @@ mod tests {
                     .recording_files_incomplete,
                 failed_file.is_some()
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_retranscription_sets_permanent_gap_and_repairs_other_flags() {
+        for existing in [false, true] {
+            for files_saved in [false, true] {
+                let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await
+                    .unwrap();
+                sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+                sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('synthetic', 'Synthetic meeting', '2026-01-01', '2026-01-01')").execute(&pool).await.unwrap();
+                if existing {
+                    sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('synthetic', 1, 1)").execute(&pool).await.unwrap();
+                }
+                let mut tx = pool.begin().await.unwrap();
+                update_retranscription_outcome(&mut tx, "synthetic", files_saved, true)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                let outcome: super::super::outcome::RecordingOutcome = sqlx::query_as(
+                    "SELECT * FROM recording_outcomes WHERE meeting_id = 'synthetic'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(outcome.capture_incomplete);
+                assert!(!outcome.audio_save_failed && !outcome.transcription_incomplete);
+                assert_eq!(outcome.recording_files_incomplete, !files_saved);
+                let mut tx = pool.begin().await.unwrap();
+                update_retranscription_outcome(&mut tx, "synthetic", true, false)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                let gap: bool = sqlx::query_scalar("SELECT capture_incomplete FROM recording_outcomes WHERE meeting_id = 'synthetic'").fetch_one(&pool).await.unwrap();
+                assert!(gap, "Later repairs must never clear a capture gap");
+            }
         }
     }
 

@@ -374,6 +374,24 @@ pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Resolve audio and retain gap evidence for the retranscription outcome.
+/// Reinspect retained chunks on a blocking worker, including when a previous
+/// recovery is reused; a saved capture warning remains permanent.
+pub(super) async fn find_or_recover_audio_file_with_status(
+    folder: &Path,
+) -> Result<(PathBuf, bool)> {
+    let path = find_or_recover_audio_file(folder).await?;
+    let folder = folder.to_path_buf();
+    let gaps = tokio::task::spawn_blocking(move || -> Result<bool> {
+        let saved = super::outcome::RecordingOutcome::read(&folder).map_err(anyhow::Error::msg)?;
+        Ok(saved.is_some_and(|outcome| outcome.capture_incomplete)
+            || super::audio_spool::capture_has_gaps(&folder)?)
+    })
+    .await
+    .map_err(|_| anyhow!("Could not inspect recording recovery status"))??;
+    Ok((path, gaps))
+}
+
 /// Resolve a meeting audio file for UI gating. Missing audio/checkpoints are not an error here.
 pub async fn resolve_audio_file_or_recover(folder: &Path) -> Result<Option<PathBuf>, String> {
     if folder.join(".audio-spool").is_dir() {
@@ -764,6 +782,51 @@ mod tests {
             samples >= 192000 && samples - 192000 < 1024,
             "Only final AAC frame padding is permitted; got {samples} samples"
         );
+    }
+
+    #[tokio::test]
+    async fn partial_recovered_audio_keeps_gap_status_when_reused() {
+        for damage in ["none", "marker", "missing", "torn", "unreadable"] {
+            let root = tempdir().unwrap();
+            let (sender, _, _) =
+                super::super::transcription::queue::recording_audio_queue(root.path()).unwrap();
+            for id in 0..3 {
+                sender
+                    .send(AudioChunk {
+                        data: vec![0.05; 160],
+                        sample_rate: 16000,
+                        timestamp: id as f64 / 100.0,
+                        chunk_id: id,
+                        device_type: DeviceType::System,
+                    })
+                    .await
+                    .unwrap();
+            }
+            drop(sender);
+            let spool = root.path().join(".audio-spool");
+            match damage {
+                "marker" => std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap(),
+                "missing" => {
+                    std::fs::remove_file(spool.join("00000000000000000001.chunk")).unwrap()
+                }
+                "torn" => std::fs::write(spool.join("00000000000000000003.tmp"), b"torn").unwrap(),
+                "unreadable" => {
+                    std::fs::write(spool.join("00000000000000000001.chunk"), b"torn").unwrap()
+                }
+                _ => (),
+            }
+            let (path, gaps) = find_or_recover_audio_file_with_status(root.path())
+                .await
+                .unwrap();
+            assert_eq!(gaps, damage != "none");
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let (reused, reused_gaps) = find_or_recover_audio_file_with_status(root.path())
+                .await
+                .unwrap();
+            assert_eq!(reused, path);
+            assert_eq!(reused_gaps, gaps);
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), before);
+        }
     }
 
     #[tokio::test]
