@@ -151,6 +151,10 @@ export const microsoftExportService = {
     return invoke<void>("microsoft_sign_in");
   },
 
+  async cancelSignIn(): Promise<void> {
+    return invoke<void>("microsoft_cancel_sign_in");
+  },
+
   async signOut(): Promise<void> {
     return invoke<void>("microsoft_sign_out");
   },

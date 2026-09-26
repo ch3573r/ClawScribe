@@ -1024,6 +1024,7 @@ pub fn run() {
             audio::import::is_import_in_progress_command,
             // Microsoft Graph export commands
             exports::commands::microsoft_sign_in,
+            exports::commands::microsoft_cancel_sign_in,
             exports::commands::microsoft_sign_out,
             exports::commands::microsoft_connection_status,
             exports::commands::export_to_onenote,

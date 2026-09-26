@@ -329,6 +329,7 @@ function MicrosoftSignInPanel() {
               <span>
                 Complete sign-in in your browser, then return to ClawScribe.
               </span>
+              <Button type="button" variant="outline" onClick={ms.cancelSignIn}>Cancel sign-in</Button>
             </div>
           </div>
         )}

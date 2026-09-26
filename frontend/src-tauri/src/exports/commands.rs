@@ -89,21 +89,26 @@ pub async fn microsoft_sign_in<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<(), String> {
-    let (config, http);
+    let (config, http, cancel);
     {
         let mut inner = state.inner.write().await;
-        inner.connection_state = MicrosoftConnectionState::Connecting;
+        cancel = super::ms_auth_state::begin_sign_in(&mut inner.connection_state)?;
+        inner.sign_in_cancel = Some(cancel.clone());
         config = inner.config.clone();
         http = inner.http.clone();
     }
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result =
-            crate::exports::interactive_auth::run_interactive_sign_in(&http, &config, |url| {
+        let result = crate::exports::interactive_auth::run_interactive_sign_in(
+            &http,
+            &config,
+            |url| {
                 let _ = open_url_in_default_browser(url);
-            })
-            .await;
+            },
+            cancel.clone(),
+        )
+        .await;
 
         let state = app_handle.state::<MicrosoftAuthState>();
         match result {
@@ -125,16 +130,18 @@ pub async fn microsoft_sign_in<R: Runtime>(
                     email.clone(),
                     config.tenant_id.clone(),
                 );
-                // Persist for future sessions, but don't gate sign-in on it —
-                // the token is held in memory below so exports work this session
-                // even when the platform credential store is unavailable.
-                if let Err(e) = token_store::save_token(&stored) {
-                    log::warn!("Failed to persist Microsoft token to keychain: {e}");
-                }
-
                 {
                     let mut inner = state.inner.write().await;
+                    if cancel.is_cancelled()
+                        || inner.connection_state != MicrosoftConnectionState::Connecting
+                    {
+                        return;
+                    }
+                    if token_store::save_token(&stored).is_err() {
+                        log::warn!("Could not persist Microsoft session");
+                    }
                     inner.connection_state = MicrosoftConnectionState::Connected;
+                    inner.sign_in_cancel = None;
                     inner.pending_device_code = None;
                     inner.user_display_name = Some(display_name.clone());
                     inner.user_email = email.clone();
@@ -154,7 +161,11 @@ pub async fn microsoft_sign_in<R: Runtime>(
             Err(e) => {
                 {
                     let mut inner = state.inner.write().await;
+                    if cancel.is_cancelled() {
+                        return;
+                    }
                     inner.connection_state = MicrosoftConnectionState::NotConnected;
+                    inner.sign_in_cancel = None;
                     inner.pending_device_code = None;
                 }
                 let _ = app_handle.emit(
@@ -169,9 +180,32 @@ pub async fn microsoft_sign_in<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn microsoft_cancel_sign_in<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
+) -> Result<(), String> {
+    let mut inner = state.inner.write().await;
+    if inner.connection_state == MicrosoftConnectionState::Connecting {
+        if let Some(cancel) = inner.sign_in_cancel.take() {
+            cancel.cancel();
+        }
+        inner.connection_state = MicrosoftConnectionState::NotConnected;
+        inner.pending_device_code = None;
+        let _ = app.emit(
+            "microsoft-auth-complete",
+            serde_json::json!({"state": "not_connected"}),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn microsoft_sign_out(state: tauri::State<'_, MicrosoftAuthState>) -> Result<(), String> {
     let _ = token_store::delete_token();
     let mut inner = state.inner.write().await;
+    if let Some(cancel) = inner.sign_in_cancel.take() {
+        cancel.cancel();
+    }
     inner.connection_state = MicrosoftConnectionState::NotConnected;
     inner.pending_device_code = None;
     inner.user_display_name = None;

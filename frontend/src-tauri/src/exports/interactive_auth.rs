@@ -18,9 +18,10 @@
 //! its "Mobile and desktop applications" (public client) platform; Entra
 //! ignores the loopback port at match time.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
@@ -95,25 +96,55 @@ struct Redirect {
 /// Block on the loopback listener until Entra redirects back, then return the
 /// parsed query parameters. Responds to the browser with a small "you can close
 /// this window" page.
-fn wait_for_redirect(listener: TcpListener) -> Result<Redirect, MsAuthError> {
+fn wait_for_redirect(
+    listener: TcpListener,
+    cancel: CancellationToken,
+    deadline: Instant,
+) -> Result<Redirect, MsAuthError> {
     listener
-        .set_nonblocking(false)
+        .set_nonblocking(true)
         .map_err(|e| MsAuthError::Network(e.to_string()))?;
 
-    // Loop so we can ignore stray requests (e.g. favicon) that carry no params.
-    loop {
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|e| MsAuthError::Network(format!("loopback accept failed: {e}")))?;
-
-        let request_line = {
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .map_err(|e| MsAuthError::Network(e.to_string()))?;
-            line
+    // Polling and per-read deadlines also cover local clients that never finish a request.
+    'accept: loop {
+        if cancel.is_cancelled() {
+            return Err(MsAuthError::AuthorizationDeclined);
+        }
+        if Instant::now() >= deadline {
+            return Err(MsAuthError::Unexpected("Sign-in timed out".into()));
+        }
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(_) => return Err(MsAuthError::Network("Loopback listener failed".into())),
         };
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .map_err(|_| MsAuthError::Network("Could not configure sign-in listener".into()))?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .map_err(|_| MsAuthError::Network("Could not configure sign-in listener".into()))?;
+        let mut request = Vec::new();
+        while !request.contains(&b'\n') {
+            if cancel.is_cancelled() {
+                return Err(MsAuthError::AuthorizationDeclined);
+            }
+            if Instant::now() >= deadline {
+                return Err(MsAuthError::Unexpected("Sign-in timed out".into()));
+            }
+            let mut buffer = [0u8; 256];
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => continue 'accept,
+                Ok(count) => request.extend_from_slice(&buffer[..count]),
+            }
+            if request.len() > 8192 {
+                continue 'accept;
+            }
+        }
+        let request_line = String::from_utf8_lossy(&request);
 
         // Request line looks like: `GET /?code=...&state=... HTTP/1.1`
         let path = request_line.split_whitespace().nth(1).unwrap_or("");
@@ -206,11 +237,12 @@ pub async fn run_interactive_sign_in(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
     open_browser: impl Fn(&str),
+    cancel: CancellationToken,
 ) -> Result<TokenResponse, MsAuthError> {
-    sign_in_with_scopes(config, |consent| {
-        run_interactive_attempt(http, config, &open_browser, consent)
-    })
-    .await
+    tokio::select! {
+        _ = cancel.cancelled() => Err(MsAuthError::AuthorizationDeclined),
+        result = sign_in_with_scopes(config, |consent| run_interactive_attempt(http, config, &open_browser, consent, cancel.clone())) => result,
+    }
 }
 
 async fn sign_in_with_scopes<F, Fut>(
@@ -257,6 +289,7 @@ async fn run_interactive_attempt(
     config: &MicrosoftAuthConfig,
     open_browser: impl Fn(&str),
     consent: bool,
+    cancel: CancellationToken,
 ) -> Result<TokenResponse, MsAuthError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| MsAuthError::Network(format!("could not bind loopback listener: {e}")))?;
@@ -272,14 +305,11 @@ async fn run_interactive_attempt(
 
     open_browser(&auth_url);
 
-    // Capture the redirect on a blocking thread, bounded by a timeout.
-    let redirect = tokio::time::timeout(
-        SIGN_IN_TIMEOUT,
-        tokio::task::spawn_blocking(move || wait_for_redirect(listener)),
-    )
-    .await
-    .map_err(|_| MsAuthError::Unexpected("Sign-in timed out".to_string()))?
-    .map_err(|e| MsAuthError::Unexpected(format!("loopback task failed: {e}")))??;
+    let deadline = Instant::now() + SIGN_IN_TIMEOUT;
+    let redirect =
+        tokio::task::spawn_blocking(move || wait_for_redirect(listener, cancel, deadline))
+            .await
+            .map_err(|_| MsAuthError::Unexpected("Sign-in listener failed".into()))??;
 
     if let Some(err) = redirect.error {
         let desc = redirect.error_description.unwrap_or_default();
@@ -306,6 +336,31 @@ async fn run_interactive_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_exits_and_releases_port_after_timeout_or_cancel() {
+        for cancelled in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let cancel = CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let worker = std::thread::spawn(move || {
+                wait_for_redirect(
+                    listener,
+                    worker_cancel,
+                    Instant::now() + Duration::from_millis(150),
+                )
+                .map(|_| ())
+            });
+            let stalled = std::net::TcpStream::connect(address).unwrap();
+            if cancelled {
+                cancel.cancel();
+            }
+            assert!(worker.join().unwrap().is_err());
+            drop(stalled);
+            assert!(TcpListener::bind(address).is_ok());
+        }
+    }
 
     #[test]
     fn pkce_challenge_is_sha256_of_verifier() {

@@ -233,3 +233,7 @@ reported for administrator review.
 Credential-bearing integration endpoints require HTTPS, except loopback HTTP.
 Confluence credentials include their saved origin and cannot be reused against a
 different origin; older unbound PATs must be saved again before use.
+
+Microsoft sign-in has one active flow. Cancel stops its loopback listener and
+prevents late completion from restoring a session. Listener polling and bounded
+connection reads release the port after cancellation or timeout.

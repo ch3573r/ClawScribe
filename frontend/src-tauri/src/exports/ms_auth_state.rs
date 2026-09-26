@@ -15,6 +15,7 @@ pub(crate) struct MicrosoftAuthInner {
     pub http: reqwest::Client,
     pub connection_state: MicrosoftConnectionState,
     pub pending_device_code: Option<String>,
+    pub sign_in_cancel: Option<tokio_util::sync::CancellationToken>,
     pub user_display_name: Option<String>,
     pub user_email: Option<String>,
     pub user_id: Option<String>,
@@ -58,11 +59,33 @@ impl MicrosoftAuthState {
                 http,
                 connection_state,
                 pending_device_code: None,
+                sign_in_cancel: None,
                 user_display_name,
                 user_email,
                 user_id,
                 current_token,
             }),
         }
+    }
+}
+
+pub(crate) fn begin_sign_in(
+    connection: &mut MicrosoftConnectionState,
+) -> Result<tokio_util::sync::CancellationToken, String> {
+    if *connection == MicrosoftConnectionState::Connecting {
+        return Err("Microsoft sign-in is already in progress".into());
+    }
+    *connection = MicrosoftConnectionState::Connecting;
+    Ok(tokio_util::sync::CancellationToken::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn concurrent_sign_in_is_rejected() {
+        let mut state = MicrosoftConnectionState::NotConnected;
+        assert!(begin_sign_in(&mut state).is_ok());
+        assert!(begin_sign_in(&mut state).is_err());
     }
 }

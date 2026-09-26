@@ -96,6 +96,15 @@ export function useMicrosoftExport() {
     }
   }, []);
 
+  const cancelSignIn = useCallback(async () => {
+    try {
+      await microsoftExportService.cancelSignIn();
+      setSigningIn(false);
+      setError(null);
+      await refreshStatus();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+  }, [refreshStatus]);
+
   const signOut = useCallback(async () => {
     setError(null);
     try {
@@ -256,6 +265,7 @@ export function useMicrosoftExport() {
     signingIn,
     error,
     signIn,
+    cancelSignIn,
     signOut,
     notebooks,
     plans,
