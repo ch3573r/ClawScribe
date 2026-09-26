@@ -489,6 +489,16 @@ impl RecordingSaver {
                 metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
                 metadata.status = "error".into();
             }
+            // Persist the stopped duration before potentially lengthy encoding.
+            // Reuse the existing error status until final audio is published.
+            if let Some(metadata) = &self.metadata {
+                if self.write_metadata(folder, metadata).is_err() {
+                    report.outcome.recording_files_incomplete = true;
+                    report
+                        .warnings
+                        .push("The recording details could not be saved.");
+                }
+            }
             if capture_incomplete {
                 let _ = std::fs::write(
                     folder.join(".audio-spool/.incomplete"),
@@ -533,9 +543,14 @@ impl RecordingSaver {
             .into();
             if self.write_metadata(folder, &metadata).is_err() {
                 report.outcome.recording_files_incomplete = true;
-                report
+                if !report
                     .warnings
-                    .push("The recording details could not be saved.");
+                    .contains(&"The recording details could not be saved.")
+                {
+                    report
+                        .warnings
+                        .push("The recording details could not be saved.");
+                }
             }
             self.metadata = Some(metadata);
         }
@@ -705,6 +720,45 @@ mod snapshot_tests {
                 .unwrap()
                 .capture_incomplete
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_is_stopped_before_audio_encoding_and_after_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let sender = saver
+            .start_accumulation(true, super::super::recording_state::RecordingState::new())
+            .unwrap();
+        drop(sender); // Empty capture makes encoding fail.
+        let folder = saver.meeting_folder.clone().unwrap();
+        // Hold the encoder lock so we can inspect metadata while finalization waits.
+        let encoder = saver.incremental_saver.as_ref().unwrap().clone();
+        let guard = encoder.lock().await;
+        let task = tokio::spawn(async move { saver.finalize_files(Some(1.25), false).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let metadata: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(folder.join("metadata.json")).unwrap())
+                        .unwrap();
+                if metadata["status"] == "error" {
+                    assert_eq!(metadata["duration_seconds"], 1.25);
+                    assert!(metadata["completed_at"].is_string());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!task.is_finished());
+        drop(guard);
+        let report = task.await.unwrap().unwrap();
+        assert!(report.outcome.audio_save_failed);
+        assert!(!report.outcome.recording_files_incomplete);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(folder.join("metadata.json")).unwrap()).unwrap();
+        assert_eq!(metadata["status"], "error");
     }
 
     #[tokio::test]

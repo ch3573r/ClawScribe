@@ -67,6 +67,8 @@ status are saved. Capture gaps have their own persistent warning and do not keep
 an otherwise fully encoded spool forever. Unreadable/unpublished originals and
 originals needed after a failed save are retained.
 
+Stopped duration and completion time are saved before the final encode; a crash
+during encoding leaves a stopped, unfinished meeting rather than an active recording.
 Final audio is encoded once from available raw chunks, avoiding repeated AAC
 priming at checkpoint joins. Missing or unreadable chunks do not prevent saving
 the rest. The encode deadline scales with recording duration (one fifth of the
