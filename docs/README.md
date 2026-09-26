@@ -11,7 +11,7 @@ from the source version.
 - [Architecture](architecture.md)
 - [Building from source](BUILDING.md)
 - [Windows release, signing, and acceptance checks](windows-release.md)
-- [0.5.41 preview release notes](releases/0.5.41.md)
+- [0.5.41 stable release notes](releases/0.5.41.md)
 - [0.5.40 preview release notes](releases/0.5.40.md)
 - [0.5.38 stable release notes](releases/0.5.38.md)
 - [0.5.37 preview release notes](releases/0.5.37.md)

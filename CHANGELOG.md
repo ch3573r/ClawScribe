@@ -3,6 +3,7 @@
 ## 0.5.41
 
 - Publish a Windows GPU prerelease with runtime/updater version `0.5.41`, newer than `0.5.40`. Enable **Include prereleases** to discover it; stable remains `0.5.38`.
+- Promote the unchanged, verified 0.5.41 installers to the stable channel at the repository owner's request. This is not a claim that real-device acceptance passed.
 - Fix HTTP 400 errors with current OpenAI models: GPT-5+ and o-series requests use `max_completion_tokens` and omit temperature/top-p. Other compatible endpoints keep `max_tokens` and configured sampling.
 - Raise the Claude output cap from 2,048 to 16,000 tokens because current Claude models think by default and thinking counts toward the cap.
 - Replace retired or shut-down model suggestions for Claude, OpenAI and Groq with current models, and skip image, transcription, live-voice and text-to-speech models in live model lists.
