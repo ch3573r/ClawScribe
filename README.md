@@ -7,12 +7,13 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.43 Preview**. The [0.5.43 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.43)
-adds offline Word documents, project tags and filters, portable meeting backups,
-and recording/playback bookmarks. Enable **Include prereleases** or install manually; the
+Source version: **0.5.44 Preview**. The [0.5.44 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.44)
+fixes the Save As dialog for Word export and backups, plus duplicate title-bar
+window gestures. It retains project tags, portable backups, and meeting bookmarks.
+Once published, enable **Include prereleases** or install manually; the
 [latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest)
 remains 0.5.41.
-Read the [release validation limits](docs/releases/0.5.43.md): real-device capture,
+Read the [release validation limits](docs/releases/0.5.44.md): real-device capture,
 install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
@@ -151,7 +152,12 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.43 Preview
+## What Changed In 0.5.44 Preview
+
+- Fix the missing desktop permission that blocked Word and backup Save As dialogs.
+- Dispatch each title-bar drag or maximize gesture once.
+
+The meeting library tools introduced in 0.5.43 remain available:
 
 - Export a local Word document with notes, the complete transcript, or both.
 - Organize meetings with project tags and filter the archive and transcript search.
@@ -161,7 +167,7 @@ retain Tauri signature verification and remain subject to Windows security polic
   while reviewing a saved meeting.
 
 The 0.5.42 download, audio-timing, and CPU-portability fixes remain available.
-See the [0.5.43 preview release notes](docs/releases/0.5.43.md), the
+See the [0.5.44 preview release notes](docs/releases/0.5.44.md), the
 [local library guide](docs/local-library.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 

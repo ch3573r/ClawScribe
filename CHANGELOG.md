@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.44
+
+- Fix the missing Tauri Save As permission that caused local Word export and backup creation to fail with an ACL error. File-picker permissions remain limited to the local main window; restore retains its existing Open permission.
+- Add a regression check against the shipped desktop capability so mocked browser dialogs cannot hide a missing file-picker permission.
+- Fix duplicate title-bar drag and double-click maximize actions. Window controls keep their dedicated actions.
+- Advance runtime/updater version to `0.5.44` for a Windows GPU preview. Draft builds are excluded from update discovery; once published, enable **Include prereleases** or install manually. Stable remains `0.5.41`.
+- Real-device recording, graphical install/upgrade and file-picker acceptance, Word desktop rendering, and installed-app update discovery remain unverified. See `docs/releases/0.5.44.md`.
+
 ## 0.5.43
 
 - Add local Word document export for summaries, full saved transcripts, or both. Optional speaker labels and timestamps, a Save As dialog, and offline DOCX generation require neither Microsoft sign-in nor Word installed. Basic headings, bullets, and paragraphs are preserved; advanced editor formatting is not.
