@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.43
+
+- Add local Word document export for summaries, full saved transcripts, or both. Optional speaker labels and timestamps, a Save As dialog, and offline DOCX generation require neither Microsoft sign-in nor Word installed. Basic headings, bullets, and paragraphs are preserved; advanced editor formatting is not.
+- Add project tags to saved meetings and project/untagged filters to the Meetings archive and transcript search. Tags persist locally and refresh across views.
+- Add portable ZIP backup and additive restore for saved meeting data, recordings, notes, summaries, chat, correction history, tags, bookmarks, and recording-folder export history. Existing meeting IDs are skipped. Restore validates archive entries and commits database inserts together. Provider credentials, models, UI preferences, browser-stored meeting context, and unfinished recovery spools are excluded. Archives are not encrypted.
+- Add live recording bookmarks and a saved-meeting bookmark panel with labels, playback seeking, renaming, and removal. Live timestamps exclude pauses; markers persist in SQLite and attach to the saved recording folder.
+- Add regression coverage for archive round-tripping, duplicate skipping, unsafe paths, rollback, migration preservation, tag filtering, and bookmark cleanup. Frontend and Windows GPU preflight gates run before preview packaging.
+- Publish runtime/updater version `0.5.43` as a preview, newer than `0.5.42`. Enable **Include prereleases** or install manually; the stable channel stays on `0.5.41`.
+- Real-device dual-source capture, installed-app bookmark timing, Word desktop rendering, large-library restore, graphical install/upgrade, and installed-app update discovery remain unverified. This preview does not assert capture-smoke confirmation or stable readiness. See `docs/releases/0.5.43.md`.
+
 ## 0.5.42
 
 - Publish a Windows GPU prerelease with runtime/updater version `0.5.42`, newer than `0.5.41`. Enable **Include prereleases** to discover it; stable remains `0.5.41`.

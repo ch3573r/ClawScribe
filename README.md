@@ -7,13 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.42 Preview**. The [0.5.42 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.42)
-adapts selected Meetily 0.4.1 reliability fixes: resumable speech-model downloads,
-correct HE-AAC import timing, stricter reasoning-text checks in notes, and a
-portable CPU baseline. Enable **Include prereleases** or install manually; the
+Source version: **0.5.43 Preview**. The [0.5.43 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.43)
+adds offline Word documents, project tags and filters, portable meeting backups,
+and recording/playback bookmarks. Enable **Include prereleases** or install manually; the
 [latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest)
 remains 0.5.41.
-Read the [release validation limits](docs/releases/0.5.42.md): real-device capture,
+Read the [release validation limits](docs/releases/0.5.43.md): real-device capture,
 install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
@@ -152,19 +151,18 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.42 Preview
+## What Changed In 0.5.43 Preview
 
-- Resume interrupted Whisper and Parakeet downloads instead of starting over;
-  cancellation waits for the download to close its files.
-- Keep the real duration and timestamps of HE-AAC imports.
-- Remove model reasoning blocks from notes and fail generation on unfinished
-  reasoning tags instead of saving them.
-- Trim end-of-recording padding from the last speech segment.
-- Build Whisper's CPU code without build-machine tuning or AVX-512.
+- Export a local Word document with notes, the complete transcript, or both.
+- Organize meetings with project tags and filter the archive and transcript search.
+- Back up saved meeting data and recordings; restore missing meetings without
+  overwriting existing IDs.
+- Bookmark moments while recording and add, rename, remove, or seek to markers
+  while reviewing a saved meeting.
 
-The 0.5.41 model-list and request fixes and the 0.5.40 reliability fixes remain
-available. See the [0.5.42 preview release notes](docs/releases/0.5.42.md) for
-validation results, the [0.5.41 notes](docs/releases/0.5.41.md), the
+The 0.5.42 download, audio-timing, and CPU-portability fixes remain available.
+See the [0.5.43 preview release notes](docs/releases/0.5.43.md), the
+[local library guide](docs/local-library.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
