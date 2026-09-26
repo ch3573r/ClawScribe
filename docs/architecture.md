@@ -242,3 +242,7 @@ Microsoft refresh results are committed under the session lock only when the
 sign-in generation is unchanged and the connection is still active. Sign-out
 invalidates that generation and clears memory and persisted credentials under
 the same lock, so an in-flight refresh cannot restore a signed-out account.
+
+Microsoft authentication HTTP calls time out after 30 seconds. OpenClaw handoffs
+time out after 60 seconds and retain at most 64 KiB of response text in submission
+markers.

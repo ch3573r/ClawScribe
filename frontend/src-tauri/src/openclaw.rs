@@ -368,10 +368,7 @@ async fn submit_folder_with_config(
         });
     }
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Could not build OpenClaw client")?;
+    let client = submit_client(std::time::Duration::from_secs(60))?;
     let response = match client
         .post(config.endpoint.trim())
         .bearer_auth(config.bearer_token.trim())
@@ -406,7 +403,7 @@ async fn submit_folder_with_config(
     };
 
     let status = response.status();
-    let response_text = response.text().await.unwrap_or_default();
+    let response_text = bounded_response(response).await;
 
     if status.is_success() {
         write_submitted_marker(
@@ -969,6 +966,37 @@ fn pending_marker_is_stale(path: &Path) -> Result<bool, String> {
         > PENDING_STALE_SECONDS)
 }
 
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
+fn submit_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not build OpenClaw client".into())
+}
+
+async fn bounded_response(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_RESPONSE_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                bytes.extend_from_slice(&chunk[..chunk.len().min(MAX_RESPONSE_BYTES - bytes.len())])
+            }
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn marker_response(response: &str) -> &str {
+    let mut end = response.len().min(MAX_RESPONSE_BYTES);
+    while !response.is_char_boundary(end) {
+        end -= 1;
+    }
+    &response[..end]
+}
+
 fn write_submitted_marker(
     folder: &Path,
     status_code: u16,
@@ -980,7 +1008,7 @@ fn write_submitted_marker(
         "schema": "openclaw.meetily-submission.v1",
         "submitted_at": Utc::now().to_rfc3339(),
         "status_code": status_code,
-        "response": response,
+        "response": marker_response(response),
         "endpoint": config.endpoint,
         "source": config.source,
         "idempotency_key": idempotency_key
@@ -1021,4 +1049,45 @@ fn write_marker(path: PathBuf, marker: &Value) -> Result<(), String> {
     }
     let content = serde_json::to_string_pretty(marker).map_err(|e| e.to_string())?;
     fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn submit_client_times_out_stalled_responses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let error = submit_client(std::time::Duration::from_millis(50))
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout());
+        server.abort();
+    }
+    #[test]
+    fn submitted_marker_caps_oversized_utf8_response() {
+        let folder = tempfile::tempdir().unwrap();
+        let response = "€".repeat(MAX_RESPONSE_BYTES);
+        write_submitted_marker(
+            folder.path(),
+            200,
+            &response,
+            &OpenClawConfig::default(),
+            None,
+        )
+        .unwrap();
+        let marker: Value =
+            serde_json::from_slice(&fs::read(folder.path().join(SUBMITTED_MARKER)).unwrap())
+                .unwrap();
+        let stored = marker["response"].as_str().unwrap();
+        assert!(stored.len() <= MAX_RESPONSE_BYTES);
+        assert!(response.starts_with(stored));
+    }
 }

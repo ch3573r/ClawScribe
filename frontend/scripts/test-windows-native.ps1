@@ -110,6 +110,7 @@ try {
         "database::manager::tests",
         "credentials::tests",
         "exports::",
+        "openclaw::tests",
         "transcript_preservation_tests",
         "model_switch_tests",
         "audio::batch_audio::tests",

@@ -26,10 +26,17 @@ pub(crate) struct MicrosoftAuthInner {
     pub current_token: Option<token_store::StoredToken>,
 }
 
+fn auth_http_client(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("Microsoft HTTP client configuration")
+}
+
 impl MicrosoftAuthState {
     pub fn new() -> Self {
         let config = MicrosoftAuthConfig::default();
-        let http = reqwest::Client::new();
+        let http = auth_http_client(std::time::Duration::from_secs(30));
 
         let restored = match token_store::load_token() {
             Ok(Some(t)) if t.is_access_token_valid() || t.refresh_token.is_some() => Some(t),
@@ -125,6 +132,23 @@ pub(crate) fn begin_sign_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn auth_http_client_times_out_stalled_responses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let error = auth_http_client(std::time::Duration::from_millis(50))
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn sign_out_during_refresh_cannot_restore_memory_or_credentials() {
         use std::sync::{Arc, Mutex};
