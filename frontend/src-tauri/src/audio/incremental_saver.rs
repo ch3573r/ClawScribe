@@ -12,6 +12,7 @@ const CHECKPOINT_FILE_PREFIX: &str = "audio_chunk_";
 const CHECKPOINT_FILE_SUFFIX: &str = ".mp4";
 const FINAL_AUDIO_FILE: &str = "audio.mp4";
 const AUDIO_FILE_CANDIDATES: &[&str] = &[
+    "audio-recovered.mp4",
     "audio-recovered.wav",
     "audio.mp4",
     "audio.m4a",
@@ -170,7 +171,11 @@ impl IncrementalAudioSaver {
         // Merge all checkpoints using FFmpeg concat
         let final_audio_path = self.meeting_folder.join(FINAL_AUDIO_FILE);
         let staged = self.meeting_folder.join(".audio-finalizing.mp4");
-        self.merge_checkpoints(&staged).await?;
+        if self.meeting_folder.join(".audio-spool").is_dir() {
+            super::audio_spool::encode_capture(&self.meeting_folder, &staged)?;
+        } else {
+            self.merge_checkpoints(&staged).await?;
+        }
         validate_recoverable_audio_file(&staged)?;
         std::fs::OpenOptions::new()
             .write(true)
@@ -254,7 +259,7 @@ impl IncrementalAudioSaver {
         command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::piped());
         tokio::task::spawn_blocking(move || {
             let mut child = command.spawn()?;
             super::encode::wait_for_encoder(&mut child)
@@ -355,17 +360,26 @@ fn validate_recoverable_audio_file(path: &Path) -> Result<()> {
 
 fn validate_recoverable_temp_audio_file(path: &Path) -> Result<()> {
     validate_recoverable_audio_file(path)?;
-
-    let bytes = std::fs::read(path)
-        .map_err(|e| anyhow!("Failed to read temp audio file {}: {}", path.display(), e))?;
-    if !bytes.windows(4).any(|window| window == b"ftyp") {
-        return Err(anyhow!(
-            "Temp audio file does not look like a complete MP4 chunk: {}",
-            path.display()
-        ));
+    // A container signature survives a torn write. Require a complete decode
+    // before admitting an unpublished checkpoint to the recovery concatenation.
+    let ffmpeg = find_ffmpeg_path().ok_or_else(|| anyhow!("Audio verifier unavailable"))?;
+    let mut command = std::process::Command::new(ffmpeg);
+    command
+        .args(["-nostdin", "-v", "error", "-xerror", "-i"])
+        .arg(path)
+        .args(["-vn", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
     }
-
-    Ok(())
+    let mut child = command
+        .spawn()
+        .map_err(|_| anyhow!("Audio verifier could not start"))?;
+    super::encode::wait_for_encoder(&mut child)
 }
 
 fn publish_checkpoint_file(temp_path: &Path, checkpoint_path: &Path) -> Result<()> {
@@ -461,6 +475,17 @@ pub fn find_existing_audio_file(folder: &Path) -> Result<PathBuf> {
 
 /// Find an audio file, recovering it from checkpoints first when the final file is missing.
 pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
+    // Recovery originals are deliberately retained. Reuse the completed result;
+    // an explicit Recover action can rebuild it if originals are later changed.
+    for name in ["audio-recovered.mp4", "audio-recovered.wav"] {
+        let path = folder.join(name);
+        if validate_recoverable_audio_file(&path).is_ok() {
+            return Ok(path);
+        }
+    }
+    if super::recording_commands::is_recording().await {
+        return find_existing_audio_file(folder);
+    }
     if folder.join(".audio-spool").is_dir() {
         let status = recover_audio_from_checkpoints(folder.to_string_lossy().to_string())
             .await
@@ -640,7 +665,7 @@ fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatu
         .arg(&staged_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
 
     // Hide console window on Windows
     #[cfg(target_os = "windows")]
@@ -753,6 +778,69 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
+    async fn final_encode_has_only_one_aac_padding_boundary() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".checkpoints")).unwrap();
+        let (writer, _reader, _) =
+            super::super::transcription::queue::recording_audio_queue(root.path()).unwrap();
+        let mut saver = IncrementalAudioSaver::new(root.path().to_path_buf(), 48000).unwrap();
+        saver.checkpoint_interval_samples = 24000;
+        for id in 0..8 {
+            let chunk = AudioChunk {
+                data: vec![0.05; 24000],
+                sample_rate: 48000,
+                timestamp: id as f64 / 2.0,
+                chunk_id: id,
+                device_type: DeviceType::System,
+            };
+            writer.send(chunk.clone()).await.unwrap();
+            saver.add_chunk(chunk).unwrap();
+        }
+        drop(writer);
+        let output = saver.finalize().await.unwrap();
+        let mut command = std::process::Command::new(find_ffmpeg_path().unwrap());
+        command
+            .args(["-v", "error", "-i"])
+            .arg(output)
+            .args(["-f", "f32le", "-ac", "1", "pipe:1"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let decoded = command.output().unwrap();
+        assert!(decoded.status.success());
+        let samples = decoded.stdout.len() / 4;
+        assert!(
+            samples >= 192000 && samples - 192000 < 1024,
+            "Only final AAC frame padding is permitted; got {samples} samples"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_recovered_audio_does_not_rebuild_it() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".audio-spool")).unwrap();
+        let recovered = root.path().join("audio-recovered.wav");
+        std::fs::write(&recovered, b"previous recovery result").unwrap();
+        let before = std::fs::metadata(&recovered).unwrap().modified().unwrap();
+        assert_eq!(
+            find_or_recover_audio_file(root.path()).await.unwrap(),
+            recovered
+        );
+        assert_eq!(
+            resolve_audio_file_or_recover(root.path()).await.unwrap(),
+            Some(recovered.clone())
+        );
+        assert_eq!(
+            std::fs::metadata(recovered).unwrap().modified().unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
     async fn test_checkpoint_creation() {
         // Create temp meeting folder
         let temp_dir = tempdir().unwrap();
@@ -832,9 +920,12 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let checkpoints_dir = temp_dir.path().join(".checkpoints");
         std::fs::create_dir_all(&checkpoints_dir).unwrap();
+        let valid = checkpoints_dir.join(".audio_chunk_000.mp4.tmp");
+        encode_single_audio(bytemuck::cast_slice(&vec![0.1f32; 4800]), 48000, 1, &valid).unwrap();
+        let bytes = std::fs::read(&valid).unwrap();
         std::fs::write(
-            checkpoints_dir.join(".audio_chunk_000.mp4.tmp"),
-            b"\0\0\0 ftypisom\0\0\0\0",
+            checkpoints_dir.join(".audio_chunk_002.mp4.tmp"),
+            &bytes[..bytes.len() / 2],
         )
         .unwrap();
         std::fs::write(checkpoints_dir.join("audio_chunk_001.mp4"), b"ok").unwrap();

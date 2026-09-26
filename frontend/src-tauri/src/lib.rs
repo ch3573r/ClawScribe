@@ -222,18 +222,8 @@ async fn get_transcription_status() -> audio::recording_commands::TranscriptionS
 }
 
 #[tauri::command]
-async fn read_audio_file(file_path: String) -> Result<tauri::ipc::Response, String> {
-    // Return raw bytes over IPC. The default Vec<u8> path serializes to a
-    // JSON number array, which multiplies transfer size ~4-5x and blocks the
-    // webview parsing it for large recordings.
-    match tokio::fs::read(&file_path).await {
-        Ok(data) => Ok(tauri::ipc::Response::new(data)),
-        Err(e) => Err(format!("Failed to read audio file: {}", e)),
-    }
-}
-
-#[tauri::command]
 async fn resolve_meeting_audio_file(
+    app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
     meeting_folder: String,
 ) -> Result<Option<String>, String> {
@@ -256,9 +246,21 @@ async fn resolve_meeting_audio_file(
         return Ok(None);
     }
 
-    audio::incremental_saver::resolve_audio_file_or_recover(&folder)
-        .await
-        .map(|path| path.map(|path| path.to_string_lossy().to_string()))
+    let path = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await?;
+    if let Some(path) = &path {
+        let resolved = path
+            .canonicalize()
+            .map_err(|_| "Meeting audio could not be resolved")?;
+        if resolved.parent() != Some(folder.as_path()) {
+            return Err(
+                "Meeting audio links outside the recording folder are not supported".into(),
+            );
+        }
+        app.asset_protocol_scope()
+            .allow_file(&resolved)
+            .map_err(|_| "Meeting audio access could not be granted")?;
+    }
+    Ok(path.map(|path| path.to_string_lossy().to_string()))
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -727,7 +729,6 @@ pub fn run() {
             set_native_theme,
             get_transcription_status,
             audio::outcome::get_recording_outcome,
-            read_audio_file,
             resolve_meeting_audio_file,
             save_transcript,
             analytics::commands::init_analytics,

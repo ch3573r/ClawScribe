@@ -5,6 +5,44 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
+/// One encoder lifetime for the complete capture avoids AAC priming at every
+/// checkpoint boundary. Memory is bounded to one raw capture chunk.
+pub(super) fn encode_capture(folder: &Path, output: &std::path::PathBuf) -> anyhow::Result<()> {
+    encode_capture_with_timeout(folder, output, std::time::Duration::from_secs(240))
+}
+
+fn encode_capture_with_timeout(
+    folder: &Path,
+    output: &std::path::PathBuf,
+    timeout: std::time::Duration,
+) -> anyhow::Result<()> {
+    let mut paths = fs::read_dir(folder.join(".audio-spool"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.retain(|path| path.extension().is_some_and(|ext| ext == "chunk"));
+    paths.sort();
+    let first = read_chunk(
+        paths
+            .first()
+            .ok_or_else(|| std::io::Error::other("No captured audio"))?,
+    )?;
+    let sample_rate = first.sample_rate;
+    if sample_rate == 0 {
+        return Err(anyhow::anyhow!("Invalid capture sample rate"));
+    }
+    drop(first);
+    super::encode::encode_pcm_stream(sample_rate, 1, output, timeout, move |writer| {
+        for path in paths {
+            let chunk = read_chunk(&path)?;
+            if chunk.sample_rate != sample_rate {
+                return Err(std::io::Error::other("Inconsistent capture format"));
+            }
+            writer.write_all(bytemuck::cast_slice(&chunk.data))?;
+        }
+        Ok(())
+    })
+}
+
 pub(super) fn recover(folder: &Path) -> Result<AudioRecoveryStatus, String> {
     recover_inner(folder).map_err(|_| {
         "Audio recovery could not finish. Check disk space and keep the meeting recovery files."
@@ -20,6 +58,55 @@ fn recover_inner(folder: &Path) -> std::io::Result<AudioRecoveryStatus> {
     paths.retain(|path| path.extension().is_some_and(|ext| ext == "chunk"));
     paths.sort();
     let staged = folder.join(format!(".audio-recovered-{}.tmp", uuid::Uuid::new_v4()));
+    // Keep encoder-free WAV recovery for normal recordings. Above RIFF's
+    // 32-bit limit, stream into one AAC encode instead of rejecting the meeting.
+    let bytes = paths.iter().try_fold(0u64, |total, path| {
+        fs::metadata(path).map(|metadata| total.saturating_add(metadata.len()))
+    })?;
+    if bytes > u32::MAX as u64 - 36 {
+        let first = read_chunk(
+            paths
+                .first()
+                .ok_or_else(|| std::io::Error::other("No captured audio"))?,
+        )?;
+        let samples = paths.iter().try_fold(0u64, |total, path| {
+            fs::metadata(path)
+                .map(|metadata| total.saturating_add(metadata.len().saturating_sub(33) / 4))
+        })?;
+        let duration = samples as f64 / first.sample_rate as f64;
+        let timeout =
+            std::time::Duration::from_secs_f64((duration / 5.0 + 60.0).clamp(240.0, 3600.0));
+        let encoded = encode_capture_with_timeout(folder, &staged, timeout)
+            .map_err(|_| std::io::Error::other("Long recording recovery failed"));
+        if let Err(error) = encoded {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+        let output = folder.join("audio-recovered.mp4");
+        let published = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&staged)
+            .and_then(|file| file.sync_all())
+            .and_then(|_| fs::rename(&staged, &output));
+        if let Err(error) = published {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+        let partial = spool.join(".incomplete").exists()
+            || paths.iter().enumerate().any(|(index, path)| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.parse::<usize>().ok())
+                    != Some(index)
+            });
+        return Ok(AudioRecoveryStatus {
+            status: if partial { "partial" } else { "success" }.into(),
+            chunk_count: paths.len() as u32,
+            estimated_duration_seconds: samples as f64 / first.sample_rate as f64,
+            audio_file_path: Some(output.to_string_lossy().into_owned()),
+            message: "Recovered captured audio. Recovery originals have been retained.".into(),
+        });
+    }
     let output = folder.join("audio-recovered.wav");
     let result = (|| -> std::io::Result<AudioRecoveryStatus> {
         let mut writer = BufWriter::new(File::create(&staged)?);

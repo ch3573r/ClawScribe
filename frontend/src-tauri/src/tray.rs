@@ -235,6 +235,9 @@ pub fn set_tray_state<R: Runtime>(app: &AppHandle<R>, state: RecordingState) {
 }
 
 async fn get_current_recording_state() -> RecordingState {
+    if crate::audio::recording_commands::is_stopping() {
+        return RecordingState::Stopping;
+    }
     // Check if currently recording
     let is_recording = crate::audio::recording_commands::is_recording().await;
     log::info!(

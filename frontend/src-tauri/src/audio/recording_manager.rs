@@ -74,6 +74,25 @@ impl RecordingManager {
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
     ) -> Result<TranscriptionQueueReceiver> {
+        let result = self
+            .start_session(microphone_device, system_device, auto_save)
+            .await;
+        if result.is_err() {
+            self.state.stop_recording();
+            let _ = self.stream_manager.stop_streams();
+            let _ = self.pipeline_manager.stop().await;
+            self.recording_saver.failed_start().await;
+            self.state.cleanup();
+        }
+        result
+    }
+
+    async fn start_session(
+        &mut self,
+        microphone_device: Option<Arc<AudioDevice>>,
+        system_device: Option<Arc<AudioDevice>>,
+        auto_save: bool,
+    ) -> Result<TranscriptionQueueReceiver> {
         info!("Starting recording manager (auto_save: {})", auto_save);
 
         // Stage VAD segments on disk. Slow inference must not retain an
@@ -307,9 +326,8 @@ impl RecordingManager {
             self.state.mark_capture_incomplete();
         }
 
-        // CRITICAL: Full cleanup to release all Arc references and resources
-        // This ensures microphone is released even if Drop is delayed
-        self.state.cleanup();
+        // stop_recording already releases capture devices. Retain frozen timing
+        // and failure statistics until metadata and the final outcome are saved.
 
         info!("Recording streams stopped");
         flush_result

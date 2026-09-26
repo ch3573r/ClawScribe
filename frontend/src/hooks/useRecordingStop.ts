@@ -86,6 +86,7 @@ export function useRecordingStop(
     const setupRecordingStoppedListener = async () => {
       try {
         unlistenFn = await listen<RecordingStoppedPayload>('recording-stopped', async (event) => {
+          const sessionStorage = window.sessionStorage;
           if (disposed) return;
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
@@ -121,6 +122,7 @@ export function useRecordingStop(
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
+    const sessionStorage = window.sessionStorage;
     if (recordingStoppedDataRef.current) {
       await recordingStoppedDataRef.current;
     }
@@ -159,7 +161,7 @@ export function useRecordingStop(
           sessionStorage.setItem('last_recording_outcome', JSON.stringify(outcome));
         }
         transcriptionComplete = true;
-      });
+      }).catch(() => () => {});
 
       // Poll for transcription status
       while (elapsedTime < MAX_WAIT_TIME && !transcriptionComplete) {
@@ -207,6 +209,9 @@ export function useRecordingStop(
           elapsedTime += POLL_INTERVAL;
         } catch (error) {
           console.error("Error checking transcription status:");
+          toast.warning('Could not refresh transcription status', {
+            description: 'Saving the transcript preserved by ClawScribe. Review the meeting after it is saved.',
+          });
           break;
         }
       }
@@ -236,7 +241,7 @@ export function useRecordingStop(
       // Save to SQLite
       // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates
       // This ensures user sees all transcripts streaming in before database save
-      if (isCallApi && transcriptionComplete == true) {
+      if (isCallApi) {
 
         setStatus(RecordingStatus.SAVING, 'Saving meeting to database...');
 
@@ -254,6 +259,7 @@ export function useRecordingStop(
             freshTranscripts,
             folderPath,
             recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')),
+            true,
           );
 
           const meetingId = responseData.meeting_id;

@@ -1249,9 +1249,45 @@ pub async fn api_save_transcript<R: Runtime>(
     folder_path: Option<String>,
     auth_token: Option<String>,
     recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
+    use_saved_recording: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Saving meeting transcript");
+
+    let transcripts = if use_saved_recording.unwrap_or(false) {
+        let folder = folder_path
+            .as_ref()
+            .ok_or("Recording folder unavailable. Keep the recovery files and retry saving.")?;
+        let path = std::path::PathBuf::from(folder).join("transcripts.json");
+        tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+            let file = std::fs::File::open(path).map_err(|_| {
+                "Saved transcript could not be opened. Keep the recovery files and retry."
+            })?;
+            let snapshot: serde_json::Value =
+                serde_json::from_reader(std::io::BufReader::new(file)).map_err(|_| {
+                    "Saved transcript could not be read. Keep the recovery files and retry."
+                })?;
+            let mut segments = snapshot
+                .get("segments")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .ok_or("Saved transcript has no segment list.")?;
+            for segment in &mut segments {
+                if let Some(object) = segment.as_object_mut() {
+                    let timestamp = object
+                        .get("display_time")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!(""));
+                    object.insert("timestamp".into(), timestamp);
+                }
+            }
+            Ok(segments)
+        })
+        .await
+        .map_err(|_| "Saved transcript reader failed")??
+    } else {
+        transcripts
+    };
 
     // Convert serde_json::Value to TranscriptSegment
     let transcripts_to_save: Vec<TranscriptSegment> = transcripts

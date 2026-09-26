@@ -51,13 +51,35 @@ imports and retranscription. It does not detect the spoken language or translate
 choose the spoken language explicitly when it differs from the system setting.
 Parakeet Auto does not record English as the source language without evidence.
 
-With audio saving enabled, captured mixed audio is staged in one-second batches under the meeting's
-`.audio-spool` folder while AAC checkpoints are encoded separately. Accepted
-spool chunks remain until final audio and metadata are saved successfully.
-Recovery reads the spool in sequence, includes an unconsumed tail, and retains
-originals. A process crash can still lose the in-memory fraction of the current
-second. Full disks or capture overrun stop capture with a visible warning; they
-cannot guarantee recovery of samples that never reached disk.
+With audio saving enabled, captured mixed audio is staged in one-second batches
+under the meeting's `.audio-spool` folder while AAC checkpoints are encoded
+separately. Independent disk workers have bounded memory queues: up to 60 capture
+batches and eight speech segments. Temporary queue pressure or spool-write
+failures mark the meeting incomplete and keep capture running. Publication
+retries transient file locks five times. Samples that never reach disk cannot
+be recovered, and a crash can lose pending in-memory buffers.
+
+The raw spool uses approximately 700 MB per hour in addition to compressed
+checkpoints and final audio. Prefer a local recording folder with enough free
+space; syncing that folder with OneDrive can add disk contention. Originals
+remain until final audio and metadata succeed. Final audio is encoded once from
+the raw spool, avoiding repeated AAC priming at checkpoint joins. Older meetings
+without a raw spool still use their existing checkpoint recovery path.
+
+Recovery retains originals and includes an unconsumed tail. Opening a recovered
+meeting reuses its completed audio; an explicit recovery action can rebuild it.
+Long captures beyond WAV's 32-bit length limit use a streamed AAC recovery encode.
+Temporary legacy checkpoints must decode successfully before recovery uses them.
+Playback uses the browser's streaming audio element through scoped local-file
+access rather than decoding the whole recording into webview memory.
+
+Stop has one shared owner across the app, tray and shortcut. Recording duration
+is frozen before transcription drain, and device-error limits apply to a recent
+30-second window. Transcript snapshots flush every 15 seconds even during silence
+and once more before audio finalization. Library saving uses that backend snapshot
+and continues if the optional transcription status refresh fails. Failed starts
+stop their background workers; empty owned folders are removed, while possible
+recovery data is retained with an error status.
 
 The capture channel is bounded. Live recognition has a separate disk queue,
 and native inference runs outside the async executor. Stop ends capture before

@@ -96,8 +96,13 @@ time. Lifecycle events invalidate older polls. Cleanup also removes subscription
 whose asynchronous registration finishes after the provider unmounts.
 
 `audio/transcription/queue.rs` serves both live recognition and the retained
-recording spool. `audio/audio_spool.rs` recovers mixed float PCM into a playable
-WAV. `audio/outcome.rs` persists recording failures before the completion event;
+recording spool. Bounded producer buffers feed independent disk workers so disk
+latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
+the complete PCM spool in one pass and recovers it into WAV, or AAC above WAV's
+size limit. Playback uses scoped asset-protocol byte ranges and an HTML audio
+element. Periodic transcript snapshots continue during silence; the library-save
+command reads the backend snapshot when saving a finished recording.
+`audio/outcome.rs` persists recording failures before the completion event;
 meeting/transcript/outcome database writes share a transaction. New schema is
 added through a migration; shipped migrations remain unchanged.
 

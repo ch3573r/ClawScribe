@@ -34,6 +34,51 @@ pub use super::transcription::TranscriptUpdate;
 
 // Simple recording state tracking
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
+static STOP_OWNER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+mod stop_tests {
+    use super::acquire_stop_owner;
+    #[tokio::test]
+    async fn duplicate_stop_waits_without_taking_ownership_of_the_next_session() {
+        let lock = tokio::sync::Mutex::new(());
+        let first = acquire_stop_owner(&lock).await.unwrap();
+        let duplicate = acquire_stop_owner(&lock);
+        tokio::pin!(duplicate);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut duplicate)
+                .await
+                .is_err()
+        );
+        drop(first);
+        assert!(duplicate.await.is_none());
+        assert!(acquire_stop_owner(&lock).await.is_some());
+    }
+}
+static IS_STOPPING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn is_stopping() -> bool {
+    IS_STOPPING.load(Ordering::Acquire)
+}
+
+struct StopState;
+impl Drop for StopState {
+    fn drop(&mut self) {
+        IS_STOPPING.store(false, Ordering::Release);
+    }
+}
+
+async fn acquire_stop_owner(
+    lock: &tokio::sync::Mutex<()>,
+) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    match lock.try_lock() {
+        Ok(owner) => Some(owner),
+        Err(_) => {
+            let _completed = lock.lock().await;
+            None
+        }
+    }
+}
 static LIVE_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static RECORDING_JOB: Mutex<Option<tokio::sync::OwnedSemaphorePermit>> = Mutex::new(None);
 
@@ -635,6 +680,11 @@ pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
 ) -> Result<(), String> {
+    // All entry points share one owner through drain, save and completion.
+    // Concurrent callers wait for that owner rather than taking its manager.
+    let Some(_owner) = acquire_stop_owner(&STOP_OWNER).await else {
+        return Ok(());
+    };
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
     );
@@ -644,6 +694,22 @@ pub async fn stop_recording<R: Runtime>(
         info!("Recording was not active");
         return Ok(());
     }
+    IS_STOPPING.store(true, Ordering::Release);
+    let _stop_state = StopState;
+    crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
+
+    let device_names = RECORDING_MANAGER
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|manager| {
+            let state = manager.get_state();
+            (
+                state.get_microphone_device().map(|d| d.name.clone()),
+                state.get_system_device().map(|d| d.name.clone()),
+            )
+        })
+        .unwrap_or_default();
 
     // Emit shutdown progress to frontend
     let _ = app.emit(
@@ -962,8 +1028,8 @@ pub async fn stop_recording<R: Runtime>(
             manager.get_total_pause_duration(),
             manager.get_transcript_segments().len() as u64,
             state.has_fatal_error(),
-            state.get_microphone_device().map(|d| d.name.clone()),
-            state.get_system_device().map(|d| d.name.clone()),
+            device_names.0,
+            device_names.1,
             stats.chunks_processed,
         ))
     } else {
@@ -1117,23 +1183,14 @@ pub async fn stop_recording<R: Runtime>(
         (None, None)
     };
 
-    // Set recording flag to false
-    info!("🔍 Setting IS_RECORDING to false");
-    IS_RECORDING.store(false, Ordering::SeqCst);
-    RECORDING_JOB.lock().unwrap().take();
-
-    // Step 4.5: Prepare metadata for frontend (NO database save)
-    // NOTE: We do NOT save to database here. The frontend will save after all transcripts are displayed.
-    // This ensures the user sees all transcripts streaming in before the database save happens.
+    // The frontend initiates the library save using this folder's authoritative
+    // transcript snapshot after the stop operation completes.
     let (folder_path_str, meeting_name_str) = match (&meeting_folder, &meeting_name) {
         (Some(path), Some(name)) => (Some(path.to_string_lossy().to_string()), Some(name.clone())),
         _ => (None, None),
     };
 
     info!("📤 Preparing recording metadata for frontend save");
-
-    // Database save removed - frontend will handle this after receiving all transcripts
-    info!("ℹ️ Skipping database save in Rust - frontend will save after all transcripts received");
 
     if let Some(folder) = meeting_folder.clone() {
         let outcome = super::outcome::RecordingOutcome {
@@ -1147,6 +1204,12 @@ pub async fn stop_recording<R: Runtime>(
             audio_save_failed = true;
         }
     }
+
+    // Release the recording job only after the outcome is persisted.
+    IS_RECORDING.store(false, Ordering::SeqCst);
+    RECORDING_JOB.lock().unwrap().take();
+    IS_STOPPING.store(false, Ordering::Release);
+    crate::tray::update_tray_menu(&app);
 
     // Step 5: Complete shutdown
     let _ = app.emit(

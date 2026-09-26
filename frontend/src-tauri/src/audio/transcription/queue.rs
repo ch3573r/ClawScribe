@@ -172,6 +172,107 @@ pub struct TranscriptionQueueReceiver {
     next_read: u64,
 }
 
+/// A bounded handoff keeps filesystem latency out of the capture/mixing task.
+/// One worker owns the disk producer, preserving sequence order.
+pub(crate) struct BufferedSpool {
+    sender: Option<tokio::sync::mpsc::Sender<AudioChunk>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+    metrics: Arc<TranscriptionMetrics>,
+    state: Arc<crate::audio::recording_state::RecordingState>,
+    capture: bool,
+    warned: Arc<AtomicBool>,
+}
+
+impl BufferedSpool {
+    pub fn new(
+        writer: TranscriptionQueueSender,
+        state: Arc<crate::audio::recording_state::RecordingState>,
+        capture: bool,
+    ) -> Self {
+        // Capture arrives in one-second batches (about 12 MiB for a minute).
+        // Speech segments are capped by VAD; keep at most eight in RAM.
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(if capture { 60 } else { 8 });
+        let metrics = writer.shared.metrics.clone();
+        let warned = Arc::new(AtomicBool::new(false));
+        let worker_state = state.clone();
+        let worker_warned = warned.clone();
+        let worker = tokio::spawn(async move {
+            while let Some(chunk) = receiver.recv().await {
+                if writer.send(chunk).await.is_err() {
+                    Self::report_loss(&worker_state, capture, &worker_warned);
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+            metrics,
+            state,
+            capture,
+            warned,
+        }
+    }
+
+    fn report_loss(
+        state: &crate::audio::recording_state::RecordingState,
+        capture: bool,
+        warned: &AtomicBool,
+    ) {
+        if capture {
+            state.mark_capture_incomplete();
+        }
+        if !warned.swap(true, Ordering::AcqRel) {
+            state.report_warning(if capture {
+                "Some audio could not be saved. Recording continues and will be marked incomplete. Check available disk space; keep the recovery files."
+            } else {
+                "Live transcription could not keep up. Recording continues; use Retranscribe on the saved audio after stopping."
+            });
+        }
+    }
+
+    pub fn mark_failed(&self) {
+        self.metrics.mark_failed();
+    }
+
+    pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
+        if self
+            .sender
+            .as_ref()
+            .is_some_and(|sender| sender.try_send(chunk).is_ok())
+        {
+            return Ok(());
+        }
+        self.mark_failed();
+        Self::report_loss(&self.state, self.capture, &self.warned);
+        Err(io::Error::other("Audio spool buffer unavailable"))
+    }
+
+    pub async fn finish(&mut self) {
+        self.sender.take();
+        if let Some(mut worker) = self.worker.take() {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(30), &mut worker).await,
+                Ok(Ok(()))
+            ) {
+                self.mark_failed();
+                Self::report_loss(&self.state, self.capture, &self.warned);
+                worker.abort();
+                let _ = worker.await;
+            }
+        }
+    }
+}
+
+impl Drop for BufferedSpool {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.mark_failed();
+            Self::report_loss(&self.state, self.capture, &self.warned);
+            worker.abort();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct QueuedAudioChunk {
     pub chunk: AudioChunk,
@@ -268,10 +369,6 @@ fn cleanup_stale_spools(spool_root: &Path) {
 }
 
 impl TranscriptionQueueSender {
-    pub(crate) fn mark_failed(&self) {
-        self.shared.metrics.mark_failed();
-    }
-
     pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
@@ -406,8 +503,19 @@ fn write_chunk(temp_path: &Path, final_path: &Path, chunk: &AudioChunk) -> io::R
     writer.flush()?;
     writer.get_ref().sync_data()?;
     drop(writer);
-    fs::rename(temp_path, final_path)?;
+    retry_publish(|| fs::rename(temp_path, final_path))?;
     Ok(())
+}
+
+fn retry_publish(mut publish: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    for attempt in 0..5 {
+        match publish() {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 4 => return Err(error),
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    unreachable!()
 }
 
 pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
@@ -478,6 +586,75 @@ fn read_f64(reader: &mut impl Read) -> io::Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishing_retries_transient_locks_and_bounds_permanent_failures() {
+        let mut attempts = 0;
+        retry_publish(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        attempts = 0;
+        assert!(retry_publish(|| {
+            attempts += 1;
+            Err(io::ErrorKind::PermissionDenied.into())
+        })
+        .is_err());
+        assert_eq!(attempts, 5);
+    }
+
+    #[tokio::test]
+    async fn buffered_spool_survives_pressure_and_resumes_after_disk_failure() {
+        let folder = tempfile::tempdir().unwrap();
+        let (writer, mut receiver, metrics) = recording_audio_queue(folder.path()).unwrap();
+        let state = crate::audio::recording_state::RecordingState::new();
+        state.start_recording().unwrap();
+        let mut buffered = BufferedSpool::new(writer, state.clone(), true);
+        // On the current-thread executor the worker cannot run until we yield.
+        for id in 0..60 {
+            buffered.send(chunk(id)).await.unwrap();
+        }
+        assert!(buffered.send(chunk(60)).await.is_err());
+        assert!(state.is_recording() && state.capture_incomplete());
+        for id in 0..60 {
+            assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, id);
+        }
+        buffered.send(chunk(61)).await.unwrap();
+        assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, 61);
+        buffered.finish().await;
+        assert!(receiver.recv().await.unwrap().is_none());
+        assert_eq!(metrics.snapshot().failed_chunks, 1);
+    }
+
+    #[tokio::test]
+    async fn disk_write_failure_does_not_stop_later_capture() {
+        let folder = tempfile::tempdir().unwrap();
+        let (writer, mut receiver, metrics) = recording_audio_queue(folder.path()).unwrap();
+        let spool = folder.path().join(".audio-spool");
+        std::fs::remove_dir(&spool).unwrap();
+        let state = crate::audio::recording_state::RecordingState::new();
+        state.start_recording().unwrap();
+        let mut buffered = BufferedSpool::new(writer, state.clone(), true);
+        buffered.send(chunk(0)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.snapshot().failed_chunks == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::create_dir(&spool).unwrap();
+        buffered.send(chunk(1)).await.unwrap();
+        assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, 1);
+        assert!(state.is_recording() && state.capture_incomplete());
+        buffered.finish().await;
+    }
 
     fn chunk(id: u64) -> AudioChunk {
         AudioChunk {

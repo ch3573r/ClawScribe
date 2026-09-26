@@ -42,12 +42,14 @@ export class StorageService {
     transcripts: Transcript[],
     folderPath: string | null,
     recordingOutcome?: RecordingOutcome,
+    useSavedRecording = false,
   ): Promise<SaveMeetingResponse> {
     return invoke<SaveMeetingResponse>('api_save_transcript', {
       meetingTitle,
       transcripts,
       folderPath,
       recordingOutcome,
+      useSavedRecording,
     });
   }
 
