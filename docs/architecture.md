@@ -225,3 +225,7 @@ not product branding.
 Windows is the primary release target. Linux/macOS build paths may exist because
 of the upstream Tauri app and model libraries, but release validation currently
 focuses on Windows installers and GPU paths.
+
+Microsoft sign-in reuses existing consent by default. Only a token missing required
+permissions triggers one consent retry; any remaining missing permissions are
+reported for administrator review.

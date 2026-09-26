@@ -62,6 +62,7 @@ fn authorize_url(
     redirect_uri: &str,
     challenge: &str,
     state: &str,
+    consent: bool,
 ) -> String {
     let mut url = url::Url::parse(&format!(
         "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
@@ -76,12 +77,10 @@ fn authorize_url(
         .append_pair("scope", &config.scopes.join(" "))
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state)
-        // Force the consent screen rather than silently reusing a prior grant.
-        // Sign-in testing across builds can leave an older grant that lacks the
-        // OneNote/Planner scopes; reusing it yields a token that 403s on Graph.
-        // `prompt=consent` makes Entra re-issue consent for the full scope set.
-        .append_pair("prompt", "consent");
+        .append_pair("state", state);
+    if consent {
+        url.query_pairs_mut().append_pair("prompt", "consent");
+    }
     url.into()
 }
 
@@ -203,13 +202,61 @@ async fn exchange_code(
         .map_err(|e| MsAuthError::Unexpected(format!("Failed to parse token: {e}")))
 }
 
-/// Run the full interactive sign-in: open the browser, capture the loopback
-/// redirect, and exchange the code for tokens. `open_browser` is injected so
-/// callers reuse the app's existing URL opener.
 pub async fn run_interactive_sign_in(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
     open_browser: impl Fn(&str),
+) -> Result<TokenResponse, MsAuthError> {
+    sign_in_with_scopes(config, |consent| {
+        run_interactive_attempt(http, config, &open_browser, consent)
+    })
+    .await
+}
+
+async fn sign_in_with_scopes<F, Fut>(
+    config: &MicrosoftAuthConfig,
+    mut attempt: F,
+) -> Result<TokenResponse, MsAuthError>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<TokenResponse, MsAuthError>>,
+{
+    for consent in [false, true] {
+        let token = attempt(consent).await?;
+        let missing: Vec<_> = config
+            .scopes
+            .iter()
+            .filter(|required| {
+                // offline_access is represented by a refresh token, not a Graph permission.
+                if required.as_str() == "offline_access" {
+                    return token.refresh_token.as_ref().is_none_or(|t| t.is_empty());
+                }
+                !token.scope.split_whitespace().any(|granted| {
+                    granted
+                        .trim_start_matches("https://graph.microsoft.com/")
+                        .eq_ignore_ascii_case(required)
+                })
+            })
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(token);
+        }
+        if consent {
+            return Err(MsAuthError::Unexpected(format!("Microsoft sign-in is missing required permissions: {}. Ask your administrator to approve these permissions.", missing.join(", "))));
+        }
+    }
+    unreachable!()
+}
+
+/// Run the full interactive sign-in: open the browser, capture the loopback
+/// redirect, and exchange the code for tokens. `open_browser` is injected so
+/// callers reuse the app's existing URL opener.
+async fn run_interactive_attempt(
+    http: &reqwest::Client,
+    config: &MicrosoftAuthConfig,
+    open_browser: impl Fn(&str),
+    consent: bool,
 ) -> Result<TokenResponse, MsAuthError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| MsAuthError::Network(format!("could not bind loopback listener: {e}")))?;
@@ -221,7 +268,7 @@ pub async fn run_interactive_sign_in(
 
     let pkce = generate_pkce();
     let state = random_state();
-    let auth_url = authorize_url(config, &redirect_uri, &pkce.challenge, &state);
+    let auth_url = authorize_url(config, &redirect_uri, &pkce.challenge, &state, consent);
 
     open_browser(&auth_url);
 
@@ -282,6 +329,7 @@ mod tests {
             "http://localhost:12345",
             "challenge123",
             "state456",
+            false,
         );
         assert!(u.contains("code_challenge=challenge123"));
         assert!(u.contains("code_challenge_method=S256"));
@@ -289,6 +337,58 @@ mod tests {
         assert!(u.contains(&format!("client_id={}", config.client_id)));
         assert!(u.contains("redirect_uri=http%3A%2F%2Flocalhost%3A12345"));
         assert!(u.contains("state=state456"));
+        assert!(!u.contains("prompt=consent"));
+    }
+
+    #[tokio::test]
+    async fn requests_consent_only_once_for_missing_scopes() {
+        for still_missing in [false, true] {
+            let config = MicrosoftAuthConfig::default();
+            let mut calls = Vec::new();
+            let result = sign_in_with_scopes(&config, |consent| {
+                calls.push(consent);
+                assert_eq!(
+                    authorize_url(
+                        &config,
+                        "http://localhost:12345",
+                        "challenge",
+                        "state",
+                        consent
+                    )
+                    .contains("prompt=consent"),
+                    consent
+                );
+                std::future::ready(Ok(TokenResponse {
+                    access_token: "test-token".into(),
+                    refresh_token: Some("test-token".into()),
+                    expires_in: 3600,
+                    token_type: "Bearer".into(),
+                    scope: if consent && !still_missing {
+                        config.scopes.join(" ")
+                    } else {
+                        "User.Read".into()
+                    },
+                }))
+            })
+            .await;
+            assert_eq!(calls, [false, true]);
+            assert_eq!(result.is_err(), still_missing);
+        }
+        let config = MicrosoftAuthConfig::default();
+        let mut calls = Vec::new();
+        sign_in_with_scopes(&config, |consent| {
+            calls.push(consent);
+            std::future::ready(Ok(TokenResponse {
+                access_token: "test-token".into(),
+                refresh_token: Some("test-token".into()),
+                expires_in: 3600,
+                token_type: "Bearer".into(),
+                scope: config.scopes.join(" "),
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, [false]);
     }
 
     #[test]
