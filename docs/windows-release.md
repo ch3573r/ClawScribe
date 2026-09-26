@@ -114,6 +114,11 @@ From the repository root, after staging the required sidecars:
 .\frontend\scripts\test-windows-native.ps1 -Features windows-gpu
 ```
 
+The app build must first stage `frontend/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`.
+The test helper fails immediately if that file is missing, then copies it beside
+the test executable as `ffmpeg.exe`. Recording tests use this build-staged encoder
+without relying on PATH or downloading an encoder at test time.
+
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
 DLLs, zero matched tests, and failing test results. Required suites cover summary

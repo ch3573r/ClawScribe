@@ -6,6 +6,10 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $manifest = Join-Path $repoRoot "frontend/src-tauri/Cargo.toml"
 $runtime = Join-Path $repoRoot "frontend/src-tauri/binaries/sherpa-onnx"
+$stagedFfmpeg = Join-Path (Split-Path -Parent $manifest) "binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
+if (-not (Test-Path -LiteralPath $stagedFfmpeg -PathType Leaf)) {
+    throw "Missing staged ffmpeg; build the app first."
+}
 
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
@@ -74,6 +78,9 @@ try {
     Get-ChildItem -LiteralPath $runtime -Filter '*.dll' -File | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $testDirectory $_.Name) -Force
     }
+
+    # Prefer the build-staged encoder over PATH and runtime download fallback.
+    Copy-Item -LiteralPath $stagedFfmpeg -Destination (Join-Path $testDirectory "ffmpeg.exe") -Force
 
     foreach ($filter in @(
         "summary::",
