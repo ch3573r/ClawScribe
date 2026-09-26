@@ -7,15 +7,14 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.41**. The [0.5.41 Windows release](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.41)
-is the [latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest).
-It updates the AI model lists, fixes requests to current OpenAI and Claude models,
-and bundles Codex app-server 0.157.0 with GPT-6 models. It uses the same verified
-installers first published as a prerelease; 0.5.41 prerelease installations
-already have those exact binaries.
-Read the [release validation limits](docs/releases/0.5.41.md): real-device capture,
-install/upgrade acceptance, and sustained notebook performance remain unconfirmed
-for this build.
+Source version: **0.5.42 Preview**. The [0.5.42 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.42)
+adapts selected Meetily 0.4.1 reliability fixes: resumable speech-model downloads,
+correct HE-AAC import timing, stricter reasoning-text checks in notes, and a
+portable CPU baseline. Enable **Include prereleases** or install manually; the
+[latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest)
+remains 0.5.41.
+Read the [release validation limits](docs/releases/0.5.42.md): real-device capture,
+install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -142,20 +141,19 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.41
+## What Changed In 0.5.42 Preview
 
-- Fix HTTP 400 errors with current OpenAI models (GPT-5 and later, o-series) in
-  the OpenAI-compatible provider, and raise the Claude output cap so thinking
-  models do not cut summaries short.
-- Replace retired Claude, OpenAI and Groq model suggestions with current models.
-- Show the live Codex model catalog and bundle Codex app-server 0.157.0, which
-  adds GPT-6 Astra, Sol and Luna.
+- Resume interrupted Whisper and Parakeet downloads instead of starting over;
+  cancellation waits for the download to close its files.
+- Keep the real duration and timestamps of HE-AAC imports.
+- Remove model reasoning blocks from notes and fail generation on unfinished
+  reasoning tags instead of saving them.
+- Trim end-of-recording padding from the last speech segment.
+- Build Whisper's CPU code without build-machine tuning or AVX-512.
 
-The reliability fixes from 0.5.40 and the transcript corrections, summary source
-links, editable templates, and deferred transcription from 0.5.39 remain
-available. See the [0.5.41 release notes](docs/releases/0.5.41.md) for
-validation results and settings to raise before using reasoning models on long
-meetings, the [0.5.40 notes](docs/releases/0.5.40.md), the
+The 0.5.41 model-list and request fixes and the 0.5.40 reliability fixes remain
+available. See the [0.5.42 preview release notes](docs/releases/0.5.42.md) for
+validation results, the [0.5.41 notes](docs/releases/0.5.41.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status

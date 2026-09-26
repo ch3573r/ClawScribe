@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.42
+
+- Publish a Windows GPU prerelease with runtime/updater version `0.5.42`, newer than `0.5.41`. Enable **Include prereleases** to discover it; stable remains `0.5.41`.
+- Adapt selected Meetily 0.4.1 reliability fixes. This is not a wholesale merge of that release.
+- Resume interrupted Whisper and Parakeet downloads from `.partial` files after checking server byte ranges. Keep completed Parakeet files on retry, keep Whisper partial files on cancel, and mark a model available only after validation. Cancellation is per model and waits for the download to close its files.
+- Use the decoder's actual sample rate for HE-AAC imports so duration and timestamps survive conversion to 16 kHz.
+- Remove complete `<think>`/`<thinking>` blocks, including uppercase and attribute variants, and fail generation on unfinished or stray reasoning tags. Check Codex structured output the same way, reject saving edited summaries with reasoning tags, and hide affected saved notes behind a regeneration message without deleting them.
+- Trim the voice-activity detector's padded final frame to the real end of the recording, including when a long segment splits during that flush.
+- Build Rust code for `x86-64-v2` and Whisper's CPU code without build-machine tuning or AVX-512; AVX2 stays enabled. Bundling and native tests fail on a host-tuned Whisper build cache, and the release workflow removes such caches left on the build machine before building.
+- Pass 74 frontend tests and 325 Windows native tests in the GPU preflight, including new download, HE-AAC decoder, and VAD flush suites. A real resumed download, real HE-AAC recordings, and Whisper CPU behavior on other CPUs remain unverified, along with the real-device capture, install/upgrade, and notebook performance acceptance listed for earlier previews. This preview does not assert capture-smoke confirmation or stable readiness.
+
 ## 0.5.41
 
 - Publish a Windows GPU prerelease with runtime/updater version `0.5.41`, newer than `0.5.40`. Enable **Include prereleases** to discover it; stable remains `0.5.38`.
