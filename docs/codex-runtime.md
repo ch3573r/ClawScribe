@@ -90,3 +90,6 @@ Existing profiles receive this setting while retaining other configuration.
 Users with an older file-based sign-in sign in once again; the old `auth.json`
 is removed only after a keyring-backed account is available. Keyring failures
 do not fall back to plaintext.
+When that legacy file is present and the account is signed out, the sign-in
+message explains the move to Windows Credential Manager. The check uses only
+file existence, without reading the old credentials.

@@ -26,6 +26,15 @@ const CODEX_APP_SERVER_MISSING: &str =
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
 const CODEX_REAUTH_MESSAGE: &str =
     "Codex app-server authentication is required. Sign in with ChatGPT again to store credentials securely.";
+const CODEX_LEGACY_REAUTH_MESSAGE: &str = "ClawScribe now keeps your ChatGPT sign-in in Windows Credential Manager instead of a file. Sign in once more to continue.";
+
+fn codex_reauth_message(isolated_home: Option<&Path>) -> &'static str {
+    if isolated_home.is_some_and(|home| home.join("auth.json").exists()) {
+        CODEX_LEGACY_REAUTH_MESSAGE
+    } else {
+        CODEX_REAUTH_MESSAGE
+    }
+}
 const CODEX_OVERLOAD_CODE: i64 = -32001;
 const CODEX_MAX_OVERLOAD_RETRIES: usize = 3;
 
@@ -39,6 +48,21 @@ pub enum CodexHomeMode {
 #[cfg(test)]
 mod app_server_tests {
     use super::*;
+
+    #[test]
+    fn reauth_message_explains_legacy_file_migration_only_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(codex_reauth_message(None), CODEX_REAUTH_MESSAGE);
+        assert_eq!(
+            codex_reauth_message(Some(temp.path())),
+            CODEX_REAUTH_MESSAGE
+        );
+        fs::write(temp.path().join("auth.json"), "not parsed").unwrap();
+        assert_eq!(
+            codex_reauth_message(Some(temp.path())),
+            CODEX_LEGACY_REAUTH_MESSAGE
+        );
+    }
 
     fn make_executable(path: &Path) {
         fs::write(path, "# app-server placeholder\n").unwrap();
@@ -2280,7 +2304,7 @@ impl AppServerSession {
     async fn require_authenticated(&mut self) -> Result<(), String> {
         let account = self.account_read().await?;
         if account.is_unauthenticated() {
-            return Err(CODEX_REAUTH_MESSAGE.to_string());
+            return Err(codex_reauth_message(self.codex_home.as_deref()).to_string());
         }
         Ok(())
     }
@@ -2396,7 +2420,7 @@ impl AppServerSession {
                     sleep(delay).await;
                 }
                 Err(e) if is_auth_failure_message(&e) => {
-                    return Err(CODEX_REAUTH_MESSAGE.to_string());
+                    return Err(codex_reauth_message(self.codex_home.as_deref()).to_string());
                 }
                 Err(e) => return Err(e),
             }
@@ -2430,7 +2454,7 @@ impl AppServerSession {
                     sleep(delay).await;
                 }
                 Err(e) if is_auth_failure_message(&e) => {
-                    return Err(CODEX_REAUTH_MESSAGE.to_string());
+                    return Err(codex_reauth_message(self.codex_home.as_deref()).to_string());
                 }
                 Err(e) => return Err(e),
             }
@@ -2491,7 +2515,7 @@ impl AppServerSession {
                     sleep(delay).await;
                 }
                 Err(e) if is_auth_failure_message(&e) => {
-                    return Err(CODEX_REAUTH_MESSAGE.to_string())
+                    return Err(codex_reauth_message(self.codex_home.as_deref()).to_string())
                 }
                 Err(e) => return Err(e),
             }
