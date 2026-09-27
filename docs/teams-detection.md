@@ -48,8 +48,10 @@ The Windows detector considers:
 - browser Teams meeting titles
 - foreground Teams meeting-like windows
 
-The detector returns confidence, status, matched signals, bounded candidate
-process/window samples, diagnostics counters, and `nextRecommendedAction`.
+The detector returns confidence, status, matched signals, bounded matching
+candidates, diagnostics counters, and `nextRecommendedAction`. Settings
+diagnostics explicitly request non-matching window-title samples as well;
+background polling receives matching candidates only.
 
 ## Auto-Record Modes
 

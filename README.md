@@ -7,7 +7,7 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.46**. This draft candidate improves recording recovery,
+Source version: **0.5.46**. This release improves recording recovery,
 summary reliability, transcript review, and Windows audio-device stability.
 See the [0.5.46 release notes](docs/releases/0.5.46.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
@@ -17,10 +17,6 @@ acceptance.
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
 and [LICENSE.md](LICENSE.md).
-
-Meeting titles and summary edits save automatically. Regenerating edited notes asks
-for confirmation, and **Restore previous summary** lets you return to the previous
-version after a successful generation.
 
 ## Install And Start A Meeting
 
@@ -47,15 +43,6 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 
 ## Capture And Transcription
 
-Meeting deletion can also remove its recording folder, including audio,
-transcript copies, metadata, and generated documents. The option is on by
-default; folders outside the configured storage locations or shared with another
-meeting are kept and reported.
-
-Downloaded speech and speaker-detection models are pinned and checked with
-SHA-256 before use. A damaged or incomplete model requires re-download; verified,
-unchanged files reuse their integrity check across app restarts.
-
 - Microphone and system-audio capture from the local Windows session.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.
@@ -71,6 +58,10 @@ unchanged files reuse their integrity check across app restarts.
 - Correct transcript passages or preview literal find-and-replace across the
   entire meeting. Original recognition and segment timing are retained; undo
   restores previous corrections. Regenerate notes after correcting a transcript.
+- **Restore previous transcript** after retranscription or speaker detection.
+- Detect speakers in a saved recording and cancel from the dialog or meeting
+  toolbar. Cancellation waits for the current native step before another recording
+  can start.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
 - HE-AAC imports use the decoder's actual sample rate to preserve timing.
 - Interrupted Whisper and Parakeet downloads retain partial files for retry;
@@ -84,11 +75,13 @@ unchanged files reuse their integrity check across app restarts.
 | Parakeet | Default local fast path, with stock v3 int8, SmoothQuant int8, and v2 int8 options. Supported GPU builds can use DirectML. |
 | Whisper | Local whisper.cpp/whisper-rs engine with selectable models and Vulkan support in the Windows GPU build. |
 | Nemotron | Beta multilingual Nemotron 3.5 ASR path. fp16 is CPU-capable; int8 is intended for DirectML-capable builds. |
-| Hosted Whisper | Opt-in beta cloud retranscription through OpenAI-compatible file transcription. |
-| MAI-Transcribe | Opt-in beta Azure Speech Fast Transcription, using credentials separate from Microsoft Graph sign-in. |
+| Hosted Whisper | Import and Enhance only (beta), through an opt-in OpenAI-compatible file-transcription API. |
+| MAI-Transcribe | Import and Enhance only (beta), through opt-in Azure Speech Fast Transcription; credentials are separate from Microsoft Graph sign-in. |
 
-Models are downloaded in the app. Downloads are checked against expected file
-sizes to reject incomplete downloads and LFS pointer files.
+Speech, speaker-detection, and Built-in AI summary models downloaded in the app
+are pinned to specific revisions and SHA-256-verified before use. Damaged or
+incomplete files require re-download; unchanged verified files reuse their
+integrity checks.
 
 Whisper preserves recognized repetitions and short answers instead of removing
 them through phrase matching. Nemotron's **Auto** language follows the system
@@ -96,13 +89,13 @@ locale; select the spoken language explicitly when it differs. Parakeet's Auto
 selection does not label an unknown language as English.
 
 Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
-when the opt-in is off. The
-settings explain which local engine and model live recordings use. Cloud APIs
-apply to Import and Enhance (whole-file), while live recordings stay on-device.
-Hosted Whisper can provide word
-timestamps; MAI has sentence-level timing and may use approximate local VAD-row
-alignment, not fabricated word timestamps. The implemented OpenAI-hosted upload
-limit is 25 MB; the implemented MAI limit is 300 MB. MAI uploads use WAV, MP3, or
+when the opt-in is off. Settings explain which local engine and model live
+recordings use. Cloud APIs apply to Import and Enhance (whole-file), while live
+recordings stay on-device.
+Hosted Whisper can provide word timestamps; MAI has sentence-level timing and
+may use approximate local VAD-row alignment, not fabricated word timestamps.
+The implemented OpenAI-hosted upload limit is 25 MB; the implemented MAI limit
+is 300 MB. MAI uploads use WAV, MP3, or
 FLAC, with other formats converted locally to 16 kHz mono WAV. Rejected cloud
 requests can fall back to local transcription with a notification explaining
 why. See [hosted transcription verification](docs/hosted-transcription-smoke.md).
@@ -113,16 +106,10 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
   with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
   sign-in or Word installed.
 - **Project tags:** choose existing labels from a searchable list or create new
-  ones, then filter the archive and transcript
-  search by project, including an untagged view.
+  ones, then filter the archive and transcript search by project, including an
+  untagged view.
 - **Meeting bookmarks:** mark a moment while recording, then label and revisit
   it from the saved transcript panel. Add markers during playback too.
-- **Backup and restore:** save a portable archive of meeting data and recordings.
-  Restore adds missing meetings and skips existing IDs without retaining their
-  extracted audio. Backups continue when recording folders are missing and report
-  affected meetings, excluded recovery files, and unavailable audio. Archives
-  exclude provider credentials and models and are not encrypted. See
-  [local library tools](docs/local-library.md).
 
 Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Per-meeting summary
@@ -134,7 +121,11 @@ bundled Codex app-server path.
 In **Settings → Summary**, create or edit templates and choose a persistent
 default. Each meeting can use a different template when generating notes.
 Summary find-and-replace preserves formatting and source links; review the
-changes, then select Save. Use the editor's undo command to revert changes.
+changes, which save automatically. Use the editor's undo command to revert changes.
+
+Meeting titles and summary edits save automatically. Regenerating edited notes
+asks for confirmation, and **Restore previous summary** lets you return to the
+previous version after a successful generation.
 
 Saving a title leaves unchanged notes alone. Failed saves retain drafts, and
 edits made during a save remain available to save again. Switching meetings
@@ -174,6 +165,21 @@ for the saved server even while that server is offline.
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
+## Library And Data
+
+**Backup and restore** saves a portable archive of meeting data, summary context,
+and recordings. Restore adds missing meetings and skips existing IDs. Backups
+continue when recording folders are missing and report affected meetings,
+excluded recovery files, and unavailable audio. Archives exclude credentials and
+models and are not encrypted.
+
+Meeting deletion can also remove its recording folder, including audio,
+transcript copies, metadata, recovery originals, and generated documents. The
+option is on by default; folders outside supported storage locations, shared
+with another meeting, or failing ownership checks are kept and reported.
+Pre-migration database snapshots and separate backup archives can retain deleted
+meetings. See [local library tools](docs/local-library.md#deleting-meetings).
+
 ## Update Preferences
 
 ClawScribe checks **stable releases** by default. Enable **Include prereleases**
@@ -195,6 +201,9 @@ retain Tauri signature verification and remain subject to Windows security polic
 - Guard meeting deletion, retain unsaved recovery data, and back up meeting summary context.
 - Preserve database WAL data and create snapshots before pending migrations.
 - Fix Windows device-enumeration crashes after short-lived audio threads exit.
+- Enforce the Codex meeting output schema and accept an absent follow-up email.
+- Pick existing project tags or create them in a searchable list.
+- Keep saved cloud transcription engines visible and explain Import/Enhance versus live recording.
 
 See the [release notes](docs/releases/0.5.46.md), the
 [local library guide](docs/local-library.md), the
@@ -224,13 +233,10 @@ Recording and transcription remain local unless you explicitly enable cloud
 transcription or configure external summary/export processing. Data sent to an
 external provider is subject to that provider's configuration and policies.
 
-Microsoft refresh tokens use the platform credential store when possible. On
-Windows, the file fallback is DPAPI-encrypted for the current user. A legacy
-plaintext file is removed only after encrypted migration succeeds; if migration
-fails, that existing file may remain. Non-Windows platforms do not create a new
-plaintext fallback. Access tokens are not persisted by this token
-store. This protects that credential path; it does **not** mean all recordings,
-transcripts, or the meeting database are encrypted at rest.
+Provider keys, OpenClaw, and Microsoft refresh tokens use protected OS storage,
+with current-user DPAPI fallbacks on Windows. Codex sign-in and Confluence use
+the keyring without file fallback. Meeting files and the full database are not
+encrypted by this protection; see the [privacy policy](PRIVACY_POLICY.md).
 
 Never commit credentials, `.env` files, private logs, recordings, databases,
 generated installers, or personal workspace paths. Use explicit placeholders

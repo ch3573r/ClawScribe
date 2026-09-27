@@ -47,7 +47,7 @@ be pasted. Remove chips with their buttons or Backspace in the empty search fiel
 Save up to 20 tags of 60 characters each, or clear every chip to remove all tags. The
 Meetings page can filter by a project or show only untagged meetings. The filter
 also applies to transcript search results. Tags are stored in SQLite and refreshed
-across views after changes. A meeting can have up to 20 tags of 60 characters each.
+across views after changes.
 
 ## Bookmarks
 
@@ -58,6 +58,9 @@ expand **Bookmarks** to rename or remove markers, add a labeled time in seconds,
 or use the current playback time. Select a marker to seek in the recording.
 Playback requires available saved audio. An interrupted recording's markers remain
 local and become visible when that recording is recovered into the same folder.
+Startup removes abandoned, unattached recording bookmarks only when their folder
+is gone and no saved meeting uses it. Existing or inaccessible recovery folders
+are preserved, and cleanup skips active recording.
 
 ## Backup and restore
 
@@ -67,10 +70,11 @@ prevents these operations from overlapping an archive operation. Keep the app op
 until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
-summaries, meeting chat, project tags, bookmarks, and supported recording files.
+summaries, per-meeting summary context, meeting chat, project tags, bookmarks,
+and supported recording files.
 Microsoft export history (`exports.json`) is retained with the recording folder.
-Provider settings, credentials, model downloads, UI preferences, browser-stored
-meeting context, and unfinished recording recovery spools are excluded. Missing
+Provider settings, credentials, model downloads, UI preferences, and unfinished
+recording recovery spools are excluded. Missing
 recording folders are reported by meeting title without blocking the backup;
 their meeting data is included, and restore leaves their recording folder unset.
 Unreadable folders and folder links still stop backup with a named error.
@@ -94,6 +98,8 @@ its staged files are removed before commit; cleanup failure rolls back the impor
 If a previously skipped meeting is deleted during restore, retry is required so
 its audio can be extracted. Invalid archives leave existing meetings alone.
 Restore displays saved audio-omission warnings for imported meetings.
+Meetings whose recovery files were excluded retain a message directing recovery
+to the original computer.
 Folder references are rewritten for the destination computer. Interrupted summary
 jobs are marked cancelled; their saved output is retained.
 
@@ -109,3 +115,26 @@ manifest data, 100 GiB of file data, and 100,000 recording files. File copying r
 on a blocking worker and streams audio instead of loading recordings into RAM.
 This is a saved-library archive, not a replacement for crash recovery or a system
 backup. Test restoring a backup before relying on it as your only copy.
+
+## Deleting meetings
+
+Deletion removes the meeting's database records, including transcript revisions,
+previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
+history, Codex scratch runs, outputs under app data, and cached transcript recovery
+copies are also removed where possible; cleanup failures are reported separately.
+
+**Also delete the recording files** is on by default. It removes the whole
+recording folder, including audio, transcript copies, metadata, recovery originals,
+and generated documents. The folder must be inside the configured save location,
+a supported default recording location, or app-data `restored-recordings`; it must
+contain an app recording marker, have no links or junctions in its path, and not
+overlap another meeting's folder. Folders failing these checks or file deletion
+are kept and reported after the database deletion. Uncheck the option to keep
+the folder and its contents. While recording or transcription is running, only
+deletion with this option off is allowed.
+
+Pre-migration database snapshots in app-data `backups` can contain deleted
+meetings. Each new snapshot keeps the newest two, and startup cleanup removes
+snapshots older than 14 days. Retention can last longer while the app is closed
+or cleanup fails. Portable backups are separate, unencrypted archives. Meeting
+deletion does not remove these archives or copies exported elsewhere.

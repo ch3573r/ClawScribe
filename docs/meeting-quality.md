@@ -45,6 +45,8 @@ Refreshing transcript rows does not interrupt the display of an arriving
 utterance; stopping shows its complete text. Reloading the interface restores an
 active recording's state. Older polling responses cannot reverse a newer pause
 or stop event.
+Live transcription failures produce one user-facing failure notice per recording;
+later failures do not repeat it. Live wall-clock timestamps use local time.
 
 Nemotron's **Auto** uses the system locale for its language prompt, including
 imports and retranscription. It does not detect the spoken language or translate;
@@ -160,11 +162,30 @@ No target-notebook benchmark is implied by unit tests. Cloud processing is an
 optional, explicitly configured privacy trade-off, not an automatic performance
 fix that should be enabled without the user's consent.
 
-Speaker diarization shares the exclusive job/engine gate, so it cannot compete
-with capture or transcription. Its current offline analysis still materializes
-the decoded recording and needs more memory than the bounded ASR preparation
-path. Long-recording diarization on an 8 GiB notebook needs separate measurement
-and a future bounded analysis path before it can be treated as low-memory work.
+## Speaker Detection
+
+Speaker detection shares the exclusive job/engine gate, so it cannot compete
+with capture or transcription. It decodes and resamples through the streaming
+batch decoder. Only the 16 kHz mono float buffer is held in full: about 230 MB
+per hour of audio, plus a temporary file of similar size during preparation.
+The original-rate audio is not held in memory. Models and native analysis need
+additional memory; long-recording detection still needs measurement on an 8 GiB
+notebook.
+
+Detection temporarily blocks transcript corrections, undo, restore, and speaker
+renames for that meeting. Before saving labels it checks that the transcript has
+not changed; otherwise it preserves existing edits and asks you to run detection
+again. The previous transcript and speaker labels remain available through
+**Restore previous transcript**.
+
+Cancel from the detection dialog or meeting toolbar, including after continuing
+in the background. Cancellation discards pending labels and waits for the current
+native step before another recording can start. When detection blocks recording,
+the error offers **Cancel speaker detection and record**.
+
+If labels save to the database but the recording-folder transcript copy cannot
+be updated, the app reports a pending file warning. **Retry file update** writes
+the saved database transcript when that folder is available again.
 
 ## Summary Reliability
 
@@ -190,10 +211,22 @@ distinguish proposals from decisions, and forbid invented owners and deadlines.
 The shared, compatible-API, and bundled Codex routes all reduce long inputs
 before their final prompt and reject incomplete reductions. Budgets reserve
 output and prompt overhead, use UTF-8 bytes conservatively, and limit reduction
-to eight passes. Unknown API limits default to 8,192 tokens; compatible provider
-settings can specify the actual context. Built-in and Ollama inference cap the
-requested context at 8,192 tokens to limit local memory use. These limits may
-increase the number of reduction requests; they do not prove factual accuracy.
+to eight passes. Built-in AI and Ollama context is capped at 16,384 tokens.
+Cloud limits depend on the model; unknown cloud models use 32,768. Custom and
+OpenClaw endpoints use their configured context, or 8,192 when unspecified;
+GPT-5/6 and o1/o3/o4 names instead default to 128,000. Those reasoning names use
+16,000 output tokens and up to 8,000 extraction tokens before context-based
+limits. Codex keeps its separate 32,768-token context budget.
+Default output is capped at one quarter of context for contexts of at least
+4,096 tokens; smaller contexts use a 1,024-token cap. An explicitly configured
+output limit overrides that default. See the [budget table](architecture.md#summary-context-budgets).
+These limits may increase reduction requests; they do not prove factual accuracy.
+
+Summary HTTP providers make at most three attempts for transient connection or
+server errors. They do not retry reported quota exhaustion, a response timeout,
+or a Retry-After longer than 60 seconds. Backoff can be cancelled. Codex meeting
+turns send an output schema; missing or null follow-up emails render as no email
+suggested rather than failing the summary.
 
 Provider responses that report reaching an output or context limit are rejected
 as incomplete. Reduce the requested report or increase a supported output/context
@@ -225,19 +258,3 @@ migration. Recordings and transcripts remain local files, not encrypted vaults.
 
 See [Windows release acceptance](windows-release.md#required-real-device-acceptance)
 for the checks needed before recommending a build for everyday meetings.
-
-Speaker detection temporarily blocks transcript corrections, undo, restore and
-speaker renames for that meeting. Before saving labels it verifies the transcript
-has not changed; if it has, the existing edits are kept and detection must be run again.
-The previous transcript, including its speaker labels, is kept so **Restore previous
-transcript** can undo speaker detection.
-Cancel speaker detection from its dialog or the meeting toolbar, including after
-continuing in the background. Cancellation discards pending labels and waits for
-the current native speech step to finish before another recording can start. If
-recording is blocked by detection, its error offers **Cancel speaker detection and record**.
-Speaker detection decodes and resamples through the streaming batch decoder.
-Only the 16 kHz mono signal is held in full; the original-rate audio is not
-retained in memory.
-If the recording-folder transcript copy cannot be updated after labels are saved,
-the app reports success with a pending file warning. **Retry file update** writes
-the saved database transcript when the folder is available again.
