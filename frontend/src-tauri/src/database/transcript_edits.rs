@@ -119,7 +119,13 @@ async fn rows(pool: &SqlitePool, meeting: &str) -> Result<Vec<Transcript>, Strin
         .map_err(error)
 }
 
-async fn assert_editable(conn: &mut SqliteConnection, meeting: &str) -> Result<(), String> {
+pub(crate) async fn assert_editable(
+    conn: &mut SqliteConnection,
+    meeting: &str,
+) -> Result<(), String> {
+    if crate::audio::diarization::is_diarizing_meeting(meeting) {
+        return Err("Wait for speaker detection to finish before editing its transcript".into());
+    }
     let processing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM summary_processes WHERE meeting_id = ? AND LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating')")
         .bind(meeting).fetch_one(&mut *conn).await.map_err(error)?;
     if processing > 0 {
@@ -500,6 +506,61 @@ pub(crate) mod tests {
                 .bind(id).bind(content).bind(start).bind(start + 3.0).execute(&pool).await.unwrap();
         }
         pool
+    }
+
+    #[tokio::test]
+    async fn active_speaker_detection_blocks_edits_undo_restore_and_renames() {
+        let _lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = fixture().await;
+        let meeting = "diarization-edit-test";
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic detection', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(meeting).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES ('detection-row', ?, 'Original', '00:00')").bind(meeting).execute(&pool).await.unwrap();
+        let changes = vec![Change {
+            id: "detection-row".into(),
+            before: "Original".into(),
+            after: "Corrected".into(),
+            original: None,
+            words: None,
+        }];
+        let guard = crate::audio::diarization::DiarizationRunGuard::acquire(meeting).unwrap();
+        assert!(apply(&pool, meeting, &changes)
+            .await
+            .unwrap_err()
+            .contains("speaker detection"));
+        assert!(undo(&pool, meeting)
+            .await
+            .unwrap_err()
+            .contains("speaker detection"));
+        assert!(restore_previous(&pool, meeting)
+            .await
+            .unwrap_err()
+            .contains("speaker detection"));
+        use crate::database::repositories::transcript::TranscriptsRepository;
+        assert!(TranscriptsRepository::update_transcript_speaker(
+            &pool,
+            meeting,
+            "detection-row",
+            Some("Edited")
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("speaker detection"));
+        assert!(TranscriptsRepository::update_transcript_speakers_matching(
+            &pool,
+            meeting,
+            None,
+            Some("Edited")
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("speaker detection"));
+        assert_editable(&mut pool.acquire().await.unwrap(), "review-test")
+            .await
+            .unwrap();
+        drop(guard);
+        apply(&pool, meeting, &changes).await.unwrap();
     }
 
     #[tokio::test]

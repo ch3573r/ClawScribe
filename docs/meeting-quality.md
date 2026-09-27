@@ -225,3 +225,7 @@ migration. Recordings and transcripts remain local files, not encrypted vaults.
 
 See [Windows release acceptance](windows-release.md#required-real-device-acceptance)
 for the checks needed before recommending a build for everyday meetings.
+
+Speaker detection temporarily blocks transcript corrections, undo, restore and
+speaker renames for that meeting. Before saving labels it verifies the transcript
+has not changed; if it has, the existing edits are kept and detection must be run again.

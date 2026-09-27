@@ -22,7 +22,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -71,6 +71,8 @@ const SHERPA_RUNTIME_DLLS: &[&str] = &[
     "sherpa-onnx-c-api.dll",
     "sherpa-onnx-cxx-api.dll",
 ];
+
+static DIARIZATION_MEETING: Mutex<Option<String>> = Mutex::new(None);
 
 static DIARIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static DIARIZATION_DIRECTML_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -1958,21 +1960,38 @@ impl DiarizationEmbeddingChoice {
     }
 }
 
-struct DiarizationRunGuard;
+pub(crate) struct DiarizationRunGuard;
 
 impl DiarizationRunGuard {
-    fn acquire() -> std::result::Result<Self, String> {
-        DIARIZATION_IN_PROGRESS
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map(|_| Self)
-            .map_err(|_| "Speaker diarization is already running".to_string())
+    pub(crate) fn acquire(meeting: &str) -> std::result::Result<Self, String> {
+        let mut active = DIARIZATION_MEETING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if active.is_some() {
+            return Err("Speaker diarization is already running".into());
+        }
+        *active = Some(meeting.to_string());
+        DIARIZATION_IN_PROGRESS.store(true, Ordering::SeqCst);
+        Ok(Self)
     }
 }
 
 impl Drop for DiarizationRunGuard {
     fn drop(&mut self) {
+        let mut active = DIARIZATION_MEETING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *active = None;
         DIARIZATION_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
+}
+
+pub(crate) fn is_diarizing_meeting(meeting: &str) -> bool {
+    DIARIZATION_MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(meeting)
 }
 
 #[tauri::command]
@@ -1991,7 +2010,7 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     )
     .await?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
-    let guard = DiarizationRunGuard::acquire()?;
+    let guard = DiarizationRunGuard::acquire(&meeting_id)?;
     let meeting_id_for_task = meeting_id.clone();
 
     let _guard = guard;
@@ -2293,50 +2312,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     );
 
     let mapped_segments = attempt.mapped_segments;
-    let updated_segments = count_changed_transcript_segments(&stored_segments, &mapped_segments);
-    if updated_segments > 0 {
-        let mut tx = pool.begin().await?;
-        sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
-            .bind(&meeting_id)
-            .execute(&mut *tx)
-            .await?;
-
-        for mapped in &mapped_segments {
-            let word_timestamps_json = mapped
-                .word_timestamps
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|e| anyhow!("Invalid word timestamps: {}", e))?;
-            sqlx::query(
-                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&mapped.id)
-            .bind(&meeting_id)
-            .bind(&mapped.text)
-            .bind(
-                mapped
-                    .timestamp
-                    .as_deref()
-                    .unwrap_or_else(|| stored_segments[0].timestamp.as_str()),
-            )
-            .bind(mapped.audio_start_time)
-            .bind(mapped.audio_end_time)
-            .bind(mapped.duration)
-            .bind(&mapped.speaker)
-            .bind(word_timestamps_json)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
-            .bind(Utc::now())
-            .bind(&meeting_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-    }
+    let updated_segments =
+        save_diarization_labels(&pool, &meeting_id, &stored_segments, &mapped_segments).await?;
 
     let fallback_timestamp = stored_segments[0].timestamp.as_str();
     let transcript_file_segments: Vec<ApiTranscriptSegment> = mapped_segments
@@ -2384,6 +2361,75 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         embedding_model,
         turn_count,
     })
+}
+
+fn transcript_snapshot_fingerprint(rows: &[StoredTranscriptSegment]) -> Result<Vec<u8>> {
+    let fields: Vec<_> = rows
+        .iter()
+        .map(|row| (&row.id, &row.transcript, &row.speaker))
+        .collect();
+    Ok(Sha256::digest(serde_json::to_vec(&fields)?).to_vec())
+}
+
+async fn save_diarization_labels(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    stored_segments: &[StoredTranscriptSegment],
+    mapped_segments: &[TranscriptSegment],
+) -> Result<usize> {
+    let mut tx = pool.begin().await?;
+    let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
+        "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id"
+    ).bind(meeting_id).fetch_all(&mut *tx).await?;
+    if transcript_snapshot_fingerprint(&current)?
+        != transcript_snapshot_fingerprint(stored_segments)?
+    {
+        return Err(anyhow!("The transcript changed while speakers were being detected. Run speaker detection again."));
+    }
+    let updated_segments = count_changed_transcript_segments(stored_segments, mapped_segments);
+    if updated_segments > 0 {
+        sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+            .bind(&meeting_id)
+            .execute(&mut *tx)
+            .await?;
+
+        for mapped in mapped_segments {
+            let word_timestamps_json = mapped
+                .word_timestamps
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| anyhow!("Invalid word timestamps: {}", e))?;
+            sqlx::query(
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&mapped.id)
+            .bind(&meeting_id)
+            .bind(&mapped.text)
+            .bind(
+                mapped
+                    .timestamp
+                    .as_deref()
+                    .unwrap_or_else(|| stored_segments[0].timestamp.as_str()),
+            )
+            .bind(mapped.audio_start_time)
+            .bind(mapped.audio_end_time)
+            .bind(mapped.duration)
+            .bind(&mapped.speaker)
+            .bind(word_timestamps_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+            .bind(Utc::now())
+            .bind(&meeting_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(updated_segments)
 }
 
 async fn run_diarization_mapping_attempt<R: Runtime>(
@@ -4165,6 +4211,74 @@ fn first_existing_path(paths: &[PathBuf]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn label_save_fixture() -> (
+        sqlx::SqlitePool,
+        Vec<StoredTranscriptSegment>,
+        Vec<TranscriptSegment>,
+    ) {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let stored: Vec<StoredTranscriptSegment> =
+            sqlx::query_as("SELECT * FROM transcripts ORDER BY audio_start_time, timestamp, id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let mapped = stored
+            .iter()
+            .map(|row| TranscriptSegment {
+                id: row.id.clone(),
+                text: row.transcript.clone(),
+                timestamp: Some(row.timestamp.clone()),
+                audio_start_time: row.audio_start_time,
+                audio_end_time: row.audio_end_time,
+                duration: row.duration,
+                speaker: Some("Speaker 1".into()),
+                word_timestamps: None,
+            })
+            .collect();
+        (pool, stored, mapped)
+    }
+
+    #[tokio::test]
+    async fn speaker_save_rejects_a_changed_snapshot_without_overwriting_the_edit() {
+        let (pool, stored, mapped) = label_save_fixture().await;
+        sqlx::query("UPDATE transcripts SET transcript = 'Reviewed correction' WHERE id = 'a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = save_diarization_labels(&pool, "review-test", &stored, &mapped)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "The transcript changed while speakers were being detected. Run speaker detection again.");
+        let rows: Vec<StoredTranscriptSegment> =
+            sqlx::query_as("SELECT * FROM transcripts ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].transcript, "Reviewed correction");
+        assert!(rows.iter().all(|row| row.speaker.is_none()));
+    }
+
+    #[tokio::test]
+    async fn speaker_save_applies_labels_when_the_snapshot_matches() {
+        let (pool, stored, mapped) = label_save_fixture().await;
+        assert_eq!(
+            save_diarization_labels(&pool, "review-test", &stored, &mapped)
+                .await
+                .unwrap(),
+            2
+        );
+        let rows: Vec<StoredTranscriptSegment> =
+            sqlx::query_as("SELECT * FROM transcripts ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(rows
+            .iter()
+            .all(|row| row.speaker.as_deref() == Some("Speaker 1")));
+        assert_eq!(rows[0].transcript, stored[0].transcript);
+    }
 
     fn transcript(id: &str, start: Option<f64>, end: Option<f64>) -> TranscriptSegment {
         TranscriptSegment {
