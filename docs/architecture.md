@@ -60,7 +60,10 @@ SQLite connections explicitly enable WAL, normal synchronous mode, foreign keys
 and a five-second busy timeout. Legacy database transfers checkpoint first and
 use a consistent SQLite snapshot so committed WAL data is retained.
 Before pending migrations, startup writes a consistent database snapshot under
-the app-data backups folder and retains the newest two. A backup failure warns
+the app-data backups folder and retains the newest two. Fresh databases with no
+user tables do not create an empty snapshot. After successful migrations, each
+startup removes snapshots older than 14 days, limiting retention of deleted
+meeting data. A backup failure warns
 without blocking startup; already-applied migrations do not create another copy.
 
 Background Teams detection returns matching candidates only. Unmatched browser

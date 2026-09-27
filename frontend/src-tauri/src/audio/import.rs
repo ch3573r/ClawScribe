@@ -286,10 +286,11 @@ pub async fn start_import<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<ImportResult> {
-    let _job = super::inference::claim_job().map_err(anyhow::Error::msg)?;
-    crate::summary::SummaryService::cancel_local_summaries(
+    let _job = super::inference::claim_job_preempting_local_summary(
         "Local summary stopped because import started. Generate it again afterwards.",
-    );
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
@@ -621,6 +622,7 @@ async fn run_import<R: Runtime>(
     // Process each speech segment
     let mut all_transcripts: Vec<TranscribedSegment> = Vec::new();
     let mut failed_segments = 0usize;
+    let mut consecutive_failures = 0usize;
     let mut total_confidence = 0.0f32;
     let mut confidence_count = 0usize;
 
@@ -698,14 +700,17 @@ async fn run_import<R: Runtime>(
             Ok(value)
         })
         .await;
-        let (text, conf, word_timestamps) = match segment_result {
-            Ok(value) => value,
-            Err(error) if IMPORT_CANCELLED.load(Ordering::SeqCst) => return Err(error),
-            Err(_) => {
-                failed_segments += 1;
-                warn!("Import segment {} failed after retry", i + 1);
-                continue;
-            }
+        if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+            return Err(anyhow!("Import cancelled"));
+        }
+        let Some((text, conf, word_timestamps)) = accept_import_segment(
+            segment_result,
+            i + 1,
+            &mut consecutive_failures,
+            &mut failed_segments,
+        )?
+        else {
+            continue;
         };
 
         let trimmed = text.trim();
@@ -1302,11 +1307,71 @@ pub async fn is_import_in_progress_command() -> bool {
     is_import_in_progress()
 }
 
+fn accept_import_segment<T>(
+    result: Result<T>,
+    segment: usize,
+    consecutive: &mut usize,
+    failed: &mut usize,
+) -> Result<Option<T>> {
+    match result {
+        Ok(value) => {
+            *consecutive = 0;
+            Ok(Some(value))
+        }
+        Err(error) => {
+            *consecutive += 1;
+            *failed += 1;
+            // Engine errors contain failure diagnostics, never successful text.
+            warn!(
+                "Import segment {} failed after retry: {}",
+                segment,
+                crate::summary::codex_provider::redact_secrets(&error.to_string())
+            );
+            if *consecutive >= 3 {
+                Err(error)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::common::create_transcript_segments;
     use super::*;
     use crate::audio::common::split_segment_at_silence;
+
+    #[tokio::test]
+    async fn three_consecutive_engine_failures_abort_and_remove_the_import() {
+        static CANCELLED: AtomicBool = AtomicBool::new(false);
+        let root = tempfile::tempdir().unwrap();
+        let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+        let mut calls = 0;
+        let result: Result<()> = async {
+            let _guard = ImportFolderGuard::new(folder.clone());
+            std::fs::write(folder.join("audio.wav"), b"synthetic audio")?;
+            let mut consecutive = 0;
+            let mut failed = 0;
+            for index in 1..=10 {
+                let result: Result<()> =
+                    super::super::batch_audio::retry_segment(&CANCELLED, || {
+                        calls += 1;
+                        async move { Err(anyhow!("Engine unavailable on segment {index}")) }
+                    })
+                    .await;
+                accept_import_segment(result, index, &mut consecutive, &mut failed)?;
+            }
+            Ok(())
+        }
+        .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Engine unavailable on segment 3"
+        );
+        assert_eq!(calls, 6);
+        assert!(!folder.exists());
+    }
 
     #[test]
     fn failed_or_cancelled_import_removes_only_its_owned_copy() {
@@ -1355,6 +1420,7 @@ mod tests {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let mut kept = Vec::new();
         let mut failed = 0;
+        let mut consecutive = 0;
         for index in 0..3 {
             let result = super::super::batch_audio::retry_segment(&CANCELLED, || async {
                 if index == 1 {
@@ -1368,9 +1434,10 @@ mod tests {
                 }
             })
             .await;
-            match result {
-                Ok(segment) => kept.push(segment),
-                Err(_) => failed += 1,
+            if let Some(segment) =
+                accept_import_segment(result, index + 1, &mut consecutive, &mut failed).unwrap()
+            {
+                kept.push(segment);
             }
         }
         let folder = tempfile::tempdir().unwrap();

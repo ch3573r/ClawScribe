@@ -51,12 +51,23 @@ pub struct ModelManagerState(pub Arc<Mutex<Option<Arc<ModelManager>>>>);
 /// Initialize the model manager
 pub async fn init_model_manager<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<()> {
     let models_dir = app.path().app_data_dir()?.join("models").join("summary");
-
-    let manager = ModelManager::new_with_models_dir(Some(models_dir))?;
-    manager.init().await?;
-
     let state: State<ModelManagerState> = app.state();
+    init_manager_once(&state, || {
+        ModelManager::new_with_models_dir(Some(models_dir))
+    })
+    .await
+}
+
+async fn init_manager_once(
+    state: &ModelManagerState,
+    create: impl FnOnce() -> anyhow::Result<ModelManager>,
+) -> anyhow::Result<()> {
     let mut manager_lock = state.0.lock().await;
+    if manager_lock.is_some() {
+        return Ok(());
+    }
+    let manager = create()?;
+    manager.init().await?;
     *manager_lock = Some(Arc::new(manager));
 
     log::info!("Built-in AI model manager initialized");
@@ -361,27 +372,9 @@ pub async fn builtin_ai_get_available_summary_model<R: Runtime>(
 // ============================================================================
 
 pub async fn init_model_manager_at_startup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let models_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?
-        .join("models")
-        .join("summary");
-
-    let manager = ModelManager::new_with_models_dir(Some(models_dir))
-        .map_err(|e| format!("Failed to create ModelManager: {}", e))?;
-
-    manager
-        .init()
+    init_model_manager(app)
         .await
-        .map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
-
-    let state: State<ModelManagerState> = app.state();
-    let mut manager_lock = state.0.lock().await;
-    *manager_lock = Some(Arc::new(manager));
-
-    log::info!("ModelManager initialized at startup");
-    Ok(())
+        .map_err(|e| format!("Failed to initialize ModelManager: {e}"))
 }
 
 /// Get recommended summary model based on platform and system RAM.
@@ -412,6 +405,34 @@ fn get_system_ram_gb() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_lazy_initialization_keeps_one_manager() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(ModelManagerState(Arc::new(Mutex::new(None))));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..5 {
+            let state = state.clone();
+            let calls = calls.clone();
+            let path = directory.path().to_path_buf();
+            tasks.push(tokio::spawn(async move {
+                init_manager_once(&state, || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ModelManager::new_with_models_dir(Some(path))
+                })
+                .await
+                .unwrap();
+                let manager = state.0.lock().await.as_ref().unwrap().clone();
+                manager
+            }));
+        }
+        let first = tasks.remove(0).await.unwrap();
+        for task in tasks {
+            assert!(Arc::ptr_eq(&first, &task.await.unwrap()));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn recommended_summary_model_uses_qwen2b_below_effective_16gb_floor() {

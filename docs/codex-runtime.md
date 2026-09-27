@@ -45,14 +45,15 @@ GStreamer/GLib and Microsoft Visual C++ runtime libraries.
 
 ## Auth And State
 
-ClawScribe always sets an isolated `CODEX_HOME` for the sidecar:
+ClawScribe defaults to an isolated `CODEX_HOME` for the sidecar:
 
 ```text
 %APPDATA%\ClawScribe\codex
 ```
 
-ClawScribe does not read or write the user's normal `~/.codex` profile and does
-not reuse the user's standalone Codex CLI auth state.
+The default mode does not read or write the user's normal `~/.codex` profile or
+reuse standalone Codex CLI auth state. Advanced existing-session mode requires
+explicit opt-in and the MCP check described below.
 
 ## Protocol
 
@@ -75,6 +76,13 @@ read-only sandbox and `never` approval policy. Shell and unified execution are
 disabled through thread configuration; server approval requests are declined.
 The fields follow the pinned [0.157 thread protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json)
 and [turn protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json).
+
+In the advanced existing-session mode, ClawScribe checks the effective config
+for the summary's working directory before starting a thread. If it defines MCP
+servers, summaries require switching to the isolated profile. A config-read
+failure also prevents submission. An empty `mcp_servers` override cannot disable
+inherited servers because the pinned [0.157 config merger](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/config/src/merge.rs)
+merges tables recursively; the check uses the pinned [config/read implementation](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server/src/config_manager_service.rs).
 
 The isolated profile requires `cli_auth_credentials_store = "keyring"`, supported
 by the [pinned credential-storage implementation](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/login/src/auth/storage.rs).

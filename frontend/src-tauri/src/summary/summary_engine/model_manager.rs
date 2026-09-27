@@ -116,6 +116,16 @@ pub struct ModelManager {
     /// Active downloads (model names)
     active_downloads: crate::model_download::Downloads,
     verified: RwLock<HashMap<PathBuf, (u64, std::time::SystemTime, String)>>,
+    #[cfg(test)]
+    verify_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VerifiedFile {
+    file: String,
+    size: u64,
+    mtime: std::time::SystemTime,
+    sha256: String,
 }
 
 impl ModelManager {
@@ -158,6 +168,8 @@ impl ModelManager {
             available_models: Arc::new(RwLock::new(HashMap::new())),
             active_downloads: Default::default(),
             verified: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            verify_calls: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -169,6 +181,23 @@ impl ModelManager {
             log::info!("Created models directory: {}", self.models_dir.display());
         }
 
+        if let Ok(bytes) = fs::read(self.models_dir.join("verified.json")).await {
+            if let Ok(entries) = serde_json::from_slice::<Vec<VerifiedFile>>(&bytes) {
+                let mut verified = self.verified.write().await;
+                for entry in entries {
+                    if std::path::Path::new(&entry.file)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        == Some(entry.file.as_str())
+                    {
+                        verified.insert(
+                            self.models_dir.join(entry.file),
+                            (entry.size, entry.mtime, entry.sha256),
+                        );
+                    }
+                }
+            }
+        }
         // Scan for existing models
         self.scan_models().await?;
 
@@ -322,6 +351,7 @@ impl ModelManager {
             }
             return Ok(());
         }
+        self.invalidate_verified(&path).await;
         let progress_callback = std::sync::Mutex::new(progress_callback);
         if let Some(info) = self.available_models.write().await.get_mut(model_name) {
             info.status = ModelStatus::Downloading { progress: 0 };
@@ -388,12 +418,38 @@ impl ModelManager {
     async fn cache_verified(&self, path: &PathBuf, hash: &str) {
         if let Ok(meta) = fs::metadata(path).await {
             if let Ok(modified) = meta.modified() {
-                self.verified
-                    .write()
-                    .await
-                    .insert(path.clone(), (meta.len(), modified, hash.into()));
+                let mut verified = self.verified.write().await;
+                verified.insert(path.clone(), (meta.len(), modified, hash.into()));
+                self.persist_verified(&verified).await;
             }
         }
+    }
+
+    async fn persist_verified(
+        &self,
+        verified: &HashMap<PathBuf, (u64, std::time::SystemTime, String)>,
+    ) {
+        let entries: Vec<_> = verified
+            .iter()
+            .filter_map(|(path, (size, mtime, sha256))| {
+                Some(VerifiedFile {
+                    file: path.file_name()?.to_str()?.to_owned(),
+                    size: *size,
+                    mtime: *mtime,
+                    sha256: sha256.clone(),
+                })
+            })
+            .collect();
+        // An interrupted or unwritable receipt only causes re-verification.
+        if let Ok(bytes) = serde_json::to_vec(&entries) {
+            let _ = fs::write(self.models_dir.join("verified.json"), bytes).await;
+        }
+    }
+
+    async fn invalidate_verified(&self, path: &PathBuf) {
+        let mut verified = self.verified.write().await;
+        verified.remove(path);
+        self.persist_verified(&verified).await;
     }
 
     async fn verified_model(&self, path: &PathBuf, model: &super::models::ModelDef) -> bool {
@@ -410,13 +466,22 @@ impl ModelManager {
                 return true;
             }
         }
+        #[cfg(test)]
+        self.verify_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if crate::model_download::verify_file(path, model.size_bytes, &model.sha256)
             .await
             .is_err()
         {
             return false;
         }
-        self.cache_verified(path, &model.sha256).await;
+        if fs::metadata(path).await.is_ok_and(|after| {
+            after.len() == meta.len() && after.modified().ok() == meta.modified().ok()
+        }) {
+            self.cache_verified(path, &model.sha256).await;
+        } else {
+            return false;
+        }
         true
     }
 
@@ -439,7 +504,7 @@ impl ModelManager {
         if fs::try_exists(&partial).await? {
             fs::remove_file(partial).await?;
         }
-        self.verified.write().await.remove(&file_path);
+        self.invalidate_verified(&file_path).await;
 
         if file_path.exists() {
             fs::remove_file(&file_path).await?;
@@ -466,6 +531,41 @@ impl ModelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn verification_survives_restart_and_invalidates_changed_files() {
+        use sha2::{Digest, Sha256};
+        use std::sync::atomic::Ordering;
+        let directory = tempfile::tempdir().unwrap();
+        let mut model = get_available_models().remove(0);
+        model.gguf_file = "synthetic.gguf".into();
+        model.size_bytes = 8;
+        model.sha256 = format!("{:x}", Sha256::digest(b"GGUFtest"));
+        let path = directory.path().join(&model.gguf_file);
+        fs::write(&path, b"GGUFtest").await.unwrap();
+        let first = ModelManager::new_with_models_dir(Some(directory.path().into())).unwrap();
+        assert!(first.verified_model(&path, &model).await);
+        assert_eq!(first.verify_calls.load(Ordering::SeqCst), 1);
+        let second = ModelManager::new_with_models_dir(Some(directory.path().into())).unwrap();
+        second.init().await.unwrap();
+        assert!(second.verified_model(&path, &model).await);
+        assert_eq!(second.verify_calls.load(Ordering::SeqCst), 0);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+        assert!(second.verified_model(&path, &model).await);
+        assert_eq!(second.verify_calls.load(Ordering::SeqCst), 1);
+        second.invalidate_verified(&path).await;
+        let third = ModelManager::new_with_models_dir(Some(directory.path().into())).unwrap();
+        third.init().await.unwrap();
+        assert!(third.verified_model(&path, &model).await);
+        assert_eq!(third.verify_calls.load(Ordering::SeqCst), 1);
+    }
     #[tokio::test]
     async fn readiness_requires_complete_hash_and_ignores_partial_files() {
         use sha2::{Digest, Sha256};

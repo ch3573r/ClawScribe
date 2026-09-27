@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -82,10 +82,12 @@ fn strip_title_if_present(markdown: &str) -> String {
 }
 
 fn is_default_meeting_title(title: &str) -> bool {
-    title == "New Meeting"
-        || regex::Regex::new(r"^Meeting \d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
-            .unwrap()
-            .is_match(title)
+    static DEFAULT: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(
+        r"^Meeting (?:\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}|\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2})$"
+    ).unwrap()
+    });
+    title == "New Meeting" || DEFAULT.is_match(title)
 }
 
 async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str) {
@@ -101,8 +103,10 @@ async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str)
     if let Ok(Some(current)) = current {
         if is_default_meeting_title(&current) {
             // A rename while generation was in flight wins over the generated heading.
-            if sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ?")
-                .bind(title).bind(meeting).bind(current).execute(pool).await.is_err() {
+            if MeetingsRepository::update_generated_meeting_name(pool, meeting, &current, &title)
+                .await
+                .is_err()
+            {
                 warn!("Could not apply generated meeting title");
             }
         }
@@ -352,6 +356,12 @@ impl SummaryService {
                 job.token.cancel();
             }
         }
+    }
+
+    pub(crate) fn has_active_local_summary() -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .is_ok_and(|jobs| jobs.values().any(|job| job.builtin))
     }
 
     /// Cancels the summary generation for a meeting
@@ -677,11 +687,20 @@ impl SummaryService {
                 .await
                 .ok()
                 .flatten();
-            let output_dir = meeting_metadata
-                .as_ref()
-                .and_then(|m| m.folder_path.as_ref())
-                .filter(|p| !p.trim().is_empty())
-                .map(PathBuf::from);
+            let output_dir = match _app.path().app_data_dir() {
+                Ok(data) => {
+                    super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
+                        .await
+                }
+                Err(_) => Err("Could not locate meeting output storage".into()),
+            };
+            let output_dir = match output_dir {
+                Ok(path) => path,
+                Err(error) => {
+                    Self::update_process_failed(&pool, &meeting_id, &error).await;
+                    return;
+                }
+            };
             let meeting_title = meeting_metadata.map(|m| m.title);
 
             let provider_config = match provider {
@@ -761,7 +780,7 @@ impl SummaryService {
                                 meeting_title,
                                 transcript: text.clone(),
                                 custom_prompt: Some(custom_prompt.clone()),
-                                output_dir,
+                                output_dir: Some(output_dir),
                             },
                             Some(cancellation_token),
                         )
@@ -824,40 +843,37 @@ impl SummaryService {
                 .await
                 .ok()
                 .flatten();
-            let output_dir = meeting_metadata
-                .as_ref()
-                .and_then(|m| m.folder_path.as_ref())
-                .filter(|p| !p.trim().is_empty())
-                .map(PathBuf::from);
+            let output_dir = match _app.path().app_data_dir() {
+                Ok(data) => {
+                    super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
+                        .await
+                }
+                Err(_) => Err("Could not locate meeting output storage".into()),
+            };
+            let output_dir = match output_dir {
+                Ok(path) => path,
+                Err(error) => {
+                    Self::update_process_failed(&pool, &meeting_id, &error).await;
+                    return;
+                }
+            };
             let meeting_title = meeting_metadata.map(|m| m.title);
 
             let result = match provider_from_app(&_app) {
                 Ok(codex_provider) => {
-                    let output_dir = match output_dir {
-                        Some(path) => Ok(path),
-                        None => {
-                            super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id)
-                                .await
-                        }
-                    };
-                    match output_dir {
-                        Err(error) => Err(error),
-                        Ok(output_dir) => {
-                            super::llm_client::with_cancellation(
-                                Some(cancellation_token),
-                                codex_provider.process_meeting(CodexMeetingProcessRequest {
-                                    sources: summary_sources.clone(),
-                                    meeting_id: meeting_id.clone(),
-                                    meeting_title,
-                                    transcript: text.clone(),
-                                    custom_prompt: Some(custom_prompt.clone()),
-                                    output_dir: Some(output_dir),
-                                    scratch_root: None,
-                                }),
-                            )
-                            .await
-                        }
-                    }
+                    super::llm_client::with_cancellation(
+                        Some(cancellation_token),
+                        codex_provider.process_meeting(CodexMeetingProcessRequest {
+                            sources: summary_sources.clone(),
+                            meeting_id: meeting_id.clone(),
+                            meeting_title,
+                            transcript: text.clone(),
+                            custom_prompt: Some(custom_prompt.clone()),
+                            output_dir: Some(output_dir),
+                            scratch_root: None,
+                        }),
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             };
@@ -1420,17 +1436,26 @@ mod generated_title_tests {
     #[tokio::test]
     async fn only_default_titles_are_replaced_and_placeholders_are_ignored() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO transcript_chunks (meeting_id, meeting_name, transcript_text, model, model_name, created_at) VALUES ('review-test', '', '', 'test', 'test', CURRENT_TIMESTAMP)").execute(&pool).await.unwrap();
         for (existing, proposed, expected) in [
             ("My chosen title", "New title", "My chosen title"),
             ("New Meeting", "<Add Title here>", "New Meeting"),
             ("New Meeting", "Planning", "Planning"),
             ("Meeting 2026-01-02_03-04-05", "Planning", "Planning"),
+            ("Meeting 27_09_26_10_30_00", "Planning", "Planning"),
         ] {
             sqlx::query("UPDATE meetings SET title = ? WHERE id = 'review-test'")
                 .bind(existing)
                 .execute(&pool)
                 .await
                 .unwrap();
+            sqlx::query(
+                "UPDATE transcript_chunks SET meeting_name = ? WHERE meeting_id = 'review-test'",
+            )
+            .bind(existing)
+            .execute(&pool)
+            .await
+            .unwrap();
             apply_generated_title(&pool, "review-test", &format!("# {proposed}\nNotes")).await;
             let actual: String =
                 sqlx::query_scalar("SELECT title FROM meetings WHERE id = 'review-test'")
@@ -1438,6 +1463,13 @@ mod generated_title_tests {
                     .await
                     .unwrap();
             assert_eq!(actual, expected);
+            let chunk_title: String = sqlx::query_scalar(
+                "SELECT meeting_name FROM transcript_chunks WHERE meeting_id = 'review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(chunk_title, expected);
         }
     }
 }
@@ -1512,6 +1544,55 @@ mod cancellation_status_tests {
 #[cfg(test)]
 mod recording_cancellation_tests {
     use super::*;
+    #[tokio::test]
+    async fn preemption_waits_for_local_owner_and_persists_its_reason() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let held = crate::audio::inference::claim_job().unwrap();
+        let token = local.token.clone();
+        let release = tokio::spawn(async move {
+            token.cancelled().await;
+            drop(held);
+        });
+        let reason = "Local summary stopped because import started. Generate it again afterwards.";
+        let _next = crate::audio::inference::claim_job_preempting_local_summary(reason)
+            .await
+            .unwrap();
+        release.await.unwrap();
+        finish_provider_error(&pool, "review-test", &local.token, "cancelled").await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.error.as_deref(), Some(reason));
+    }
+
+    #[tokio::test]
+    async fn preemption_refuses_other_jobs_and_times_out_without_cancelling_cloud() {
+        let held = crate::audio::inference::claim_job().unwrap();
+        let cloud = SummaryService::register_job("preempt-cloud", "openai").unwrap();
+        let expected = crate::audio::inference::claim_job().unwrap_err();
+        let immediate = tokio::time::timeout(
+            Duration::from_millis(100),
+            crate::audio::inference::claim_job_preempting_local_summary("test interruption"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(immediate.unwrap_err(), expected);
+        let _local = SummaryService::register_job("preempt-stuck", "builtin-ai").unwrap();
+        assert_eq!(
+            crate::audio::inference::claim_job_preempting_local_summary("test interruption")
+                .await
+                .unwrap_err(),
+            expected
+        );
+        assert!(!cloud.token.is_cancelled());
+        drop(held);
+    }
     #[tokio::test]
     async fn import_cancels_local_summary_with_its_specific_reason() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
