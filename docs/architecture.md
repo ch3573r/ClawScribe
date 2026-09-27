@@ -126,7 +126,8 @@ time. Lifecycle events invalidate older polls. Cleanup also removes subscription
 whose asynchronous registration finishes after the provider unmounts.
 
 `audio/transcription/queue.rs` serves both live recognition and the retained
-recording spool. Bounded producer buffers feed independent disk workers so disk
+recording spool. Startup removes abandoned UUID-named temporary transcription
+queues without following links; queues owned by a running session are retained. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
 it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence

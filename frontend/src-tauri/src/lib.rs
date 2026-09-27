@@ -574,6 +574,7 @@ pub fn run() {
         )))
         .setup(|_app| {
             audio::com_anchor::ensure_device_enumerator();
+            audio::transcription::queue::cleanup_abandoned_transcription_spools();
             log::info!("Application setup complete");
 
             // Initialize system tray
