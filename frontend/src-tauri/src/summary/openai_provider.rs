@@ -23,6 +23,8 @@ const TEST_EXPECTED: &str = "4";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAICompatibleProviderConfig {
+    #[serde(default)]
+    pub allow_unencrypted: bool,
     #[serde(default = "default_openai_base_url")]
     pub base_url: String,
     pub api_key: Option<String>,
@@ -44,6 +46,7 @@ pub struct OpenAICompatibleProviderConfig {
 impl Default for OpenAICompatibleProviderConfig {
     fn default() -> Self {
         Self {
+            allow_unencrypted: false,
             base_url: default_openai_base_url(),
             api_key: None,
             model: default_openai_model(),
@@ -62,6 +65,7 @@ impl Default for OpenAICompatibleProviderConfig {
 impl From<CustomOpenAIConfig> for OpenAICompatibleProviderConfig {
     fn from(config: CustomOpenAIConfig) -> Self {
         Self {
+            allow_unencrypted: config.allow_unencrypted,
             base_url: normalize_base_url(config.endpoint),
             api_key: clean_optional(config.api_key),
             model: clean_model(config.model),
@@ -149,6 +153,7 @@ impl OpenAICompatibleProcessingProvider {
     pub fn new(config: OpenAICompatibleProviderConfig) -> Result<Self, String> {
         let config = normalize_config(config)?;
         let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(config.timeout_seconds))
             .build()
             .map_err(|e| format!("Failed to create OpenAI-compatible HTTP client: {e}"))?;
@@ -399,8 +404,8 @@ impl OpenAICompatibleProcessingProvider {
             response_format,
         };
 
-        let request = self.build_request(&body)?;
         super::llm_client::with_cancellation(cancellation_token, async {
+            let request = self.build_request(&body).await?;
             let response = request
                 .send()
                 .await
@@ -427,7 +432,7 @@ impl OpenAICompatibleProcessingProvider {
         self.send_chat(system, user, None, None).await
     }
 
-    fn build_request(
+    async fn build_request(
         &self,
         body: &ChatCompletionRequest,
     ) -> Result<reqwest::RequestBuilder, String> {
@@ -462,8 +467,21 @@ impl OpenAICompatibleProcessingProvider {
             );
         }
 
-        Ok(self
-            .client
+        let client = if self.config.base_url.starts_with("http:") {
+            crate::openai::secret_destination::secret_client(
+                Client::builder().timeout(Duration::from_secs(self.config.timeout_seconds)),
+                &self.config.base_url,
+                self.config.allow_unencrypted,
+            )
+            .await?
+        } else {
+            crate::openai::secret_destination::validate_secret_destination(
+                &self.config.base_url,
+                self.config.allow_unencrypted,
+            )?;
+            self.client.clone()
+        };
+        Ok(client
             .post(self.chat_completions_url())
             .headers(headers)
             .json(body))

@@ -103,6 +103,7 @@ pub async fn generate_summary(
     user_prompt: &str,
     ollama_endpoint: Option<&str>,
     custom_openai_endpoint: Option<&str>,
+    allow_unencrypted: bool,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
@@ -292,6 +293,21 @@ pub async fn generate_summary(
     );
 
     with_cancellation(cancellation_token, async {
+        let checked_client;
+        let client = if matches!(
+            provider,
+            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
+        ) {
+            checked_client = crate::openai::secret_destination::secret_client(
+                Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
+                &api_url,
+                allow_unencrypted,
+            )
+            .await?;
+            &checked_client
+        } else {
+            client
+        };
         let response = client
             .post(api_url)
             .headers(headers)
@@ -479,6 +495,7 @@ pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
     let mut api_key = String::new();
     let mut ollama_endpoint: Option<String> = None;
     let mut custom_openai_endpoint: Option<String> = None;
+    let mut allow_unencrypted = false;
 
     match provider {
         LLMProvider::Ollama | LLMProvider::BuiltInAI => {}
@@ -488,6 +505,7 @@ pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
             if !cfg.enabled || cfg.bearer_token.trim().is_empty() {
                 return Err("OpenClaw handoff is disabled or missing a bearer token.".to_string());
             }
+            allow_unencrypted = cfg.allow_unencrypted;
             custom_openai_endpoint = Some(cfg.model_endpoint);
             api_key = cfg.bearer_token;
         }
@@ -519,6 +537,7 @@ pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
         user,
         ollama_endpoint.as_deref(),
         custom_openai_endpoint.as_deref(),
+        allow_unencrypted,
         None,
         None,
         None,
@@ -595,6 +614,29 @@ mod response_tests {
     }
 
     #[tokio::test]
+    async fn openclaw_summary_refuses_unapproved_http_before_sending() {
+        let error = generate_summary(
+            &Client::new(),
+            &LLMProvider::OpenClaw,
+            "test",
+            "synthetic-token",
+            "system",
+            "question",
+            None,
+            Some("http://openclaw.local/v1/chat/completions"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Allow unencrypted HTTP"));
+    }
+
+    #[tokio::test]
     async fn cancellation_aborts_a_body_after_response_headers_arrive() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -619,6 +661,7 @@ mod response_tests {
                 "question",
                 None,
                 Some(&endpoint),
+                false,
                 None,
                 None,
                 None,

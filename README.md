@@ -145,6 +145,10 @@ An interrupted export with an unknown outcome is not automatically repeated;
 check the destination before creating another page or task. See
 [Microsoft export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
+Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
+an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups
+retain access on upgrade; public HTTP destinations are rejected.
+
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 

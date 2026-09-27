@@ -1,3 +1,4 @@
+import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
 import { useState, useEffect, useRef } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
@@ -88,6 +89,7 @@ interface OpenAIAuthStatus {
 }
 
 interface OpenClawConfigStatus {
+  allow_unencrypted: boolean;
   enabled: boolean;
   configured: boolean;
   ready: boolean;
@@ -249,6 +251,8 @@ export function ModelSettingsModal({
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
 
   // Custom OpenAI state
+  const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(false);
+  const [openClawAllowUnencrypted, setOpenClawAllowUnencrypted] = useState(false);
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
   const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
@@ -454,6 +458,7 @@ export function ModelSettingsModal({
               if (customConfig) {
                 setCustomOpenAIEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                 setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+                setCustomAllowUnencrypted(customConfig.allow_unencrypted ?? false);
                 setCustomOpenAIApiKey(customConfig.apiKey || '');
                 setCustomMaxTokens(customConfig.maxTokens?.toString() || '');
                 setCustomContextWindow(customConfig.contextWindow?.toString() || '8192');
@@ -771,6 +776,7 @@ export function ModelSettingsModal({
       setOpenClawEnabled(status.enabled);
       setOpenClawEndpoint(status.endpoint || '');
       setOpenClawModelEndpoint(status.model_endpoint || '');
+      setOpenClawAllowUnencrypted(status.allow_unencrypted ?? false);
       setOpenClawSource(status.source || 'ClawScribe');
       setOpenClawIncludeAudioPath(status.include_audio_path);
       setOpenClawBearerToken('');
@@ -988,6 +994,7 @@ export function ModelSettingsModal({
     if (modelConfig.provider === 'custom-openai') {
       try {
         await invoke('api_save_custom_openai_config', {
+        allowUnencrypted: customAllowUnencrypted,
           endpoint: customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
           apiKey: customOpenAIApiKey.trim() || null,
           model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
@@ -1060,6 +1067,7 @@ export function ModelSettingsModal({
         await invoke('save_openclaw_config', {
           config: {
             enabled: openClawEnabled,
+            allow_unencrypted: openClawAllowUnencrypted,
             endpoint: openClawEndpoint.trim(),
             model_endpoint: openClawModelEndpoint.trim(),
             bearer_token: openClawBearerToken.trim(),
@@ -1123,6 +1131,7 @@ export function ModelSettingsModal({
     setIsTestingConnection(true);
     try {
       const result = await invoke<{ status: string; message: string }>('api_test_custom_openai_connection', {
+        allowUnencrypted: customAllowUnencrypted,
         ...customOpenAIInvokeConfig(),
       });
       toast.success(result.message || 'Connection successful!');
@@ -1143,6 +1152,7 @@ export function ModelSettingsModal({
     setIsTestingConnection(true);
     try {
       const result = await invoke<{ status: string; message: string; outputJsonPath?: string }>('api_test_custom_openai_processing', {
+        allowUnencrypted: customAllowUnencrypted,
         ...customOpenAIInvokeConfig(),
       });
       toast.success(result.message || 'Test meeting processed successfully');
@@ -1329,6 +1339,7 @@ export function ModelSettingsModal({
                     if (config) {
                       setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                       setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+                      setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
                       setCustomOpenAIApiKey(config.apiKey || '');
                       setCustomMaxTokens(config.maxTokens?.toString() || '');
       setCustomContextWindow(config.contextWindow?.toString() || '8192');
@@ -1454,6 +1465,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
+              <UnencryptedHttpOptIn urls={[customOpenAIEndpoint]} checked={customAllowUnencrypted} onChange={setCustomAllowUnencrypted} />
               <Label htmlFor="custom-model">Model Name *</Label>
               <Input
                 id="custom-model"
@@ -1868,6 +1880,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
+              <UnencryptedHttpOptIn urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
               <Label htmlFor="openclaw-bearer-token">Bearer Token *</Label>
               <Input
                 id="openclaw-bearer-token"

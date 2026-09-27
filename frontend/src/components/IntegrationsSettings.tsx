@@ -1,5 +1,6 @@
 "use client";
 
+import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ElementType, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -1260,11 +1261,19 @@ function ConfluencePanel() {
   const [baseUrl, setBaseUrl] = useState(saved.confluenceBaseUrl ?? "");
   const [spaceKey, setSpaceKey] = useState(saved.confluenceSpaceKey ?? "");
   const [parentId, setParentId] = useState(saved.confluenceParentId ?? "");
+  const [allowUnencrypted, setAllowUnencrypted] = useState(false);
   const [patInput, setPatInput] = useState("");
   const [status, setStatus] = useState<ConfluenceConnectionStatus | null>(null);
   const [busy, setBusy] = useState<"save" | "clear" | "test" | null>(null);
   const trimmedUrl = createUrl.trim();
   const trimmedBaseUrl = baseUrl.trim();
+  useEffect(() => {
+    let active = true;
+    confluenceExportService.httpOptIn(trimmedBaseUrl).then(value => {
+      if (active) setAllowUnencrypted(value);
+    }).catch(() => { if (active) setAllowUnencrypted(false); });
+    return () => { active = false; };
+  }, [trimmedBaseUrl]);
   const trimmedSpaceKey = spaceKey.trim();
   const trimmedParentId = parentId.trim();
 
@@ -1326,7 +1335,7 @@ function ConfluencePanel() {
 
     setBusy("save");
     try {
-      await confluenceExportService.savePat(pat, baseUrl);
+      await confluenceExportService.savePat(pat, trimmedBaseUrl, allowUnencrypted);
       setPatInput("");
       if (trimmedBaseUrl) {
         setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
@@ -1348,7 +1357,7 @@ function ConfluencePanel() {
     } finally {
       setBusy(null);
     }
-  }, [patInput, trimmedBaseUrl]);
+  }, [allowUnencrypted, patInput, trimmedBaseUrl]);
 
   const clearPat = useCallback(async () => {
     setBusy("clear");
@@ -1514,6 +1523,7 @@ function ConfluencePanel() {
                   className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
+              <UnencryptedHttpOptIn urls={[baseUrl]} checked={allowUnencrypted} onChange={setAllowUnencrypted} />
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Space key

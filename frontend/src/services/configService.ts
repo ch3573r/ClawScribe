@@ -32,6 +32,7 @@ export interface ModelConfig {
 }
 
 export interface CustomOpenAIConfig {
+  allow_unencrypted?: boolean;
   endpoint: string;
   apiKey: string | null;
   model: string;

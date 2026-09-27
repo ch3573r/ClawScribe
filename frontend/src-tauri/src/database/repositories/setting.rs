@@ -349,7 +349,29 @@ impl SettingsRepository {
             Some(record) => {
                 let config_json: Option<String> = record.get("customOpenAIConfig");
 
-                if let Some(json) = config_json {
+                if let Some(mut json) = config_json {
+                    let mut value: serde_json::Value =
+                        serde_json::from_str(&json).map_err(|_| {
+                            sqlx::Error::Protocol("Invalid provider configuration".into())
+                        })?;
+                    let migrated = crate::openai::secret_destination::migrate_http_opt_in(
+                        &mut value,
+                        &["endpoint"],
+                    )
+                    .map_err(sqlx::Error::Protocol)?;
+                    if migrated {
+                        let updated = serde_json::to_string(&value).map_err(|_| {
+                            sqlx::Error::Protocol("Invalid provider configuration".into())
+                        })?;
+                        let changed = sqlx::query("UPDATE settings SET customOpenAIConfig = ? WHERE id = '1' AND customOpenAIConfig = ?")
+                            .bind(&updated).bind(&json).execute(pool).await?;
+                        if changed.rows_affected() != 1 {
+                            return Err(sqlx::Error::Protocol(
+                                "Provider settings changed; retry".into(),
+                            ));
+                        }
+                        json = updated;
+                    }
                     // Parse JSON into CustomOpenAIConfig
                     let mut config: CustomOpenAIConfig =
                         serde_json::from_str(&json).map_err(|e| {

@@ -413,6 +413,7 @@ impl SummaryService {
             None
         };
 
+        let mut allow_unencrypted = false;
         // Get operator-managed OpenAI-compatible endpoint config.
         let (
             custom_openai_endpoint,
@@ -423,6 +424,7 @@ impl SummaryService {
         ) = if provider == LLMProvider::CustomOpenAI {
             match SettingsRepository::get_custom_openai_config(&pool).await {
                 Ok(Some(config)) => {
+                    allow_unencrypted = config.allow_unencrypted;
                     info!("Using the configured OpenAI-compatible endpoint");
                     (
                         Some(config.endpoint),
@@ -446,6 +448,7 @@ impl SummaryService {
         } else if provider == LLMProvider::OpenClaw {
             match crate::openclaw::load_config(&_app) {
                 Ok(config) if config.enabled && !config.bearer_token.trim().is_empty() => {
+                    allow_unencrypted = config.allow_unencrypted;
                     info!("Using the configured OpenClaw model endpoint");
                     (
                         Some(config.model_endpoint),
@@ -623,6 +626,7 @@ impl SummaryService {
                     config_from_openai_api_key(Some(final_api_key.clone()), model_name.clone())
                 }
                 LLMProvider::OpenClaw => config_from_custom_openai(CustomOpenAIConfig {
+                    allow_unencrypted,
                     endpoint: custom_openai_endpoint.clone().unwrap_or_default(),
                     api_key: Some(final_api_key.clone()),
                     model: model_name.clone(),
@@ -858,6 +862,7 @@ impl SummaryService {
             token_threshold,
             ollama_endpoint.as_deref(),
             custom_openai_endpoint.as_deref(),
+            allow_unencrypted,
             custom_openai_max_tokens,
             custom_openai_temperature,
             custom_openai_top_p,

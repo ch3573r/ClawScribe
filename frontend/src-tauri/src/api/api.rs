@@ -1581,6 +1581,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     endpoint: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
@@ -1601,7 +1602,10 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
         return Err("Model name is required".to_string());
     }
 
-    crate::openai::auth::validate_url_field("Custom OpenAI endpoint", endpoint.trim())?;
+    crate::openai::secret_destination::validate_secret_destination(
+        endpoint.trim(),
+        allow_unencrypted.unwrap_or(false),
+    )?;
 
     // Validate optional numeric parameters
     if let Some(temp) = temperature {
@@ -1626,6 +1630,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     }
 
     let config = CustomOpenAIConfig {
+        allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint: endpoint.trim().to_string(),
         api_key: api_key.filter(|k| !k.trim().is_empty()),
         model: model.trim().to_string(),
@@ -1687,6 +1692,7 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
 pub async fn api_test_custom_openai_connection<R: Runtime>(
     _app: AppHandle<R>,
     endpoint: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
@@ -1699,9 +1705,13 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     log_info!("api_test_custom_openai_connection called");
 
-    crate::openai::auth::validate_url_field("Custom OpenAI endpoint", endpoint.trim())?;
+    crate::openai::secret_destination::validate_secret_destination(
+        endpoint.trim(),
+        allow_unencrypted.unwrap_or(false),
+    )?;
 
     let config = CustomOpenAIConfig {
+        allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint,
         api_key,
         model,
@@ -1732,6 +1742,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 pub async fn api_test_custom_openai_processing<R: Runtime>(
     _app: AppHandle<R>,
     endpoint: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
@@ -1743,6 +1754,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config = CustomOpenAIConfig {
+        allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint,
         api_key,
         model,

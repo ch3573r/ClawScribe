@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
-use url::Url;
 
 use crate::{database::repositories::setting::SettingsRepository, state::AppState};
 
@@ -102,16 +101,8 @@ fn parse_openai_auth_config(json: Option<String>) -> Result<Option<OpenAIAuthCon
 }
 
 pub(crate) fn validate_url_field(label: &str, value: &str) -> Result<(), String> {
-    let parsed = Url::parse(value).map_err(|e| format!("{} must be a valid URL: {}", label, e))?;
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http" if matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) => Ok(()),
-        "http" => Err(format!(
-            "{} must use https unless it targets localhost",
-            label
-        )),
-        _ => Err(format!("{} must use http or https", label)),
-    }
+    super::secret_destination::validate_secret_destination(value, false)
+        .map_err(|error| format!("{label}: {error}"))
 }
 
 fn normalize_oauth_pkce_config(
@@ -619,7 +610,7 @@ mod tests {
         })
         .expect_err("non-localhost http endpoint should fail");
 
-        assert!(error.contains("must use https"));
+        assert!(error.contains("HTTPS"));
     }
 
     #[test]
@@ -680,6 +671,6 @@ mod tests {
         })
         .expect_err("non-localhost http endpoint should fail");
 
-        assert!(error.contains("must use https"));
+        assert!(error.contains("HTTPS"));
     }
 }

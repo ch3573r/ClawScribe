@@ -16,8 +16,12 @@ export interface ConfluenceExportResponse {
 }
 
 export const confluenceExportService = {
-  savePat(pat: string, baseUrl: string): Promise<void> {
-    return invoke("confluence_save_pat", { pat, baseUrl });
+  savePat(pat: string, baseUrl: string, allowUnencrypted = false): Promise<void> {
+    return invoke("confluence_save_pat", { pat, baseUrl, allowUnencrypted });
+  },
+
+  httpOptIn(baseUrl: string): Promise<boolean> {
+    return invoke("confluence_http_opt_in", { baseUrl });
   },
 
   clearPat(): Promise<void> {

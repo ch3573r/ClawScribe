@@ -24,6 +24,7 @@ const DEFAULT_SOURCE: &str = "ClawScribe";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenClawConfig {
+    pub allow_unencrypted: bool,
     pub enabled: bool,
     pub endpoint: String,
     pub model_endpoint: String,
@@ -35,6 +36,7 @@ pub struct OpenClawConfig {
 impl Default for OpenClawConfig {
     fn default() -> Self {
         Self {
+            allow_unencrypted: false,
             enabled: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             model_endpoint: DEFAULT_MODEL_ENDPOINT.to_string(),
@@ -47,6 +49,7 @@ impl Default for OpenClawConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawConfigStatus {
+    pub allow_unencrypted: bool,
     pub enabled: bool,
     pub configured: bool,
     pub ready: bool,
@@ -97,6 +100,7 @@ pub async fn get_openclaw_config_status<R: Runtime>(
     let ready = config.enabled && configured;
 
     Ok(OpenClawConfigStatus {
+        allow_unencrypted: config.allow_unencrypted,
         enabled: config.enabled,
         configured,
         ready,
@@ -368,7 +372,12 @@ async fn submit_folder_with_config(
         });
     }
 
-    let client = submit_client(std::time::Duration::from_secs(60))?;
+    let client = crate::openai::secret_destination::secret_client(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)),
+        &config.endpoint,
+        config.allow_unencrypted,
+    )
+    .await?;
     let response = match client
         .post(config.endpoint.trim())
         .bearer_auth(config.bearer_token.trim())
@@ -469,7 +478,24 @@ fn load_config_unlocked<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig
     let path = config_path(app)?;
     let mut config = match fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => {
-            serde_json::from_str::<OpenClawConfig>(&content).map_err(|e| e.to_string())?
+            let mut value: Value =
+                serde_json::from_str(&content).map_err(|_| "Invalid OpenClaw configuration")?;
+            let migrated = crate::openai::secret_destination::migrate_http_opt_in(
+                &mut value,
+                &["endpoint", "model_endpoint"],
+            )?;
+            let mut config: OpenClawConfig =
+                serde_json::from_value(value).map_err(|_| "Invalid OpenClaw configuration")?;
+            if migrated {
+                if !config.bearer_token.is_empty()
+                    && !crate::credentials::is_protected(&config.bearer_token)
+                {
+                    config.bearer_token =
+                        crate::credentials::seal("openclaw/bearer-token", &config.bearer_token)?;
+                }
+                write_config_atomically(&path, &config)?;
+            }
+            config
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenClawConfig::default(),
         _ => {
@@ -539,7 +565,10 @@ fn write_config_atomically(path: &Path, config: &OpenClawConfig) -> Result<(), S
 fn validate_endpoints(config: &OpenClawConfig) -> Result<(), String> {
     for endpoint in [&config.endpoint, &config.model_endpoint] {
         if !endpoint.trim().is_empty() {
-            crate::openai::auth::validate_url_field("OpenClaw endpoint", endpoint)?;
+            crate::openai::secret_destination::validate_secret_destination(
+                endpoint,
+                config.allow_unencrypted,
+            )?;
         }
     }
     Ok(())
@@ -968,6 +997,7 @@ fn pending_marker_is_stale(path: &Path) -> Result<bool, String> {
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
 fn submit_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(timeout)

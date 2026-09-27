@@ -230,7 +230,10 @@ Microsoft sign-in reuses existing consent by default. Only a token missing requi
 permissions triggers one consent retry; any remaining missing permissions are
 reported for administrator review.
 
-Credential-bearing integration endpoints require HTTPS, except loopback HTTP.
+Credential-bearing integration endpoints require HTTPS, loopback HTTP, or an explicit
+private-network HTTP opt-in. Legacy private HTTP settings migrate on load. HTTP
+requests validate and pin DNS results and disable redirects and proxies. Public
+HTTP destinations are rejected even with the opt-in.
 Confluence credentials include their saved origin and cannot be reused against a
 different origin; older unbound PATs must be saved again before use.
 

@@ -163,3 +163,17 @@ The Rust unit tests cover legacy API-key compatibility, disabled mode, optional
 OpenClaw managed endpoint normalization and status capability fields, legacy
 public OAuth metadata handling, URL validation, and PKCE S256 authorization
 request compatibility.
+
+## Local-network HTTP opt-in
+
+OpenClaw and custom OpenAI settings allow private-network HTTP only with
+**Allow unencrypted HTTP to this local-network server** enabled. The token/key
+is sent without encryption. Prefer HTTPS. Loopback HTTP needs no opt-in; public
+HTTP is always rejected. Before each HTTP request, all resolved addresses must
+be loopback or private, and the connection uses that checked resolution without
+redirects or a proxy. Existing private HTTP configurations migrate to opted-in
+on their first load; explicit choices are preserved thereafter.
+
+The OpenClaw `allow_unencrypted` JSON flag covers both handoff and model
+endpoints. Custom OpenAI configuration has its own `allow_unencrypted` flag.
+Confluence stores the choice with the PAT's saved origin.
