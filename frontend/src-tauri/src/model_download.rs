@@ -164,11 +164,58 @@ pub(crate) async fn download_file(
     url: &str,
     path: &Path,
     token: &CancellationToken,
+    progress: impl FnMut(u64, u64),
+) -> Result<u64> {
+    download_file_checked(client, url, path, token, None, progress).await
+}
+
+pub(crate) async fn verify_file(path: &Path, size: u64, hash: &str) -> Result<()> {
+    let path = path.to_path_buf();
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        if file.metadata()?.len() != size {
+            bail!("Model size does not match the pinned download");
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = [0; 1024 * 64];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        if format!("{:x}", digest.finalize()) != hash {
+            bail!("Model SHA-256 does not match the pinned download; retry to download again");
+        }
+        Ok(())
+    })
+    .await?
+}
+
+pub(crate) async fn download_file_checked(
+    client: &Client,
+    url: &str,
+    path: &Path,
+    token: &CancellationToken,
+    integrity: Option<(u64, &str)>,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<u64> {
     let operation = async {
         let partial = partial_path(path);
         let final_size = fs::metadata(path).await.ok().map(|m| m.len());
+        if let Some((size, hash)) = integrity {
+            if final_size == Some(size) {
+                if verify_file(path, size, hash).await.is_ok() {
+                    progress(size, size);
+                    return Ok(size);
+                }
+                fs::remove_file(path).await?;
+            }
+        }
         // HEAD avoids redownloading completed files on servers ignoring Range.
         let remote_size = match http(
             token,
@@ -188,7 +235,7 @@ pub(crate) async fn download_file(
             Err(error) if error.is::<Cancelled>() => return Err(error),
             _ => None,
         };
-        if final_size.is_some() && final_size == remote_size {
+        if integrity.is_none() && final_size.is_some() && final_size == remote_size {
             let size = final_size.unwrap();
             // A completed final file wins over a leftover partial from a crash.
             if fs::try_exists(&partial).await? {
@@ -198,7 +245,7 @@ pub(crate) async fn download_file(
             return Ok(size);
         }
         // Preserve legacy partial files written directly to the final filename.
-        if final_size.is_some() && !fs::try_exists(&partial).await? {
+        if fs::try_exists(path).await? && !fs::try_exists(&partial).await? {
             fs::rename(path, &partial).await?;
         }
         let mut offset = fs::metadata(&partial).await.ok().map_or(0, |m| m.len());
@@ -274,6 +321,15 @@ pub(crate) async fn download_file(
         if token.is_cancelled() {
             return Err(Cancelled.into());
         }
+        if let Some((size, hash)) = integrity {
+            if let Err(error) = verify_file(&partial, size, hash).await {
+                fs::remove_file(&partial).await?;
+                return Err(error);
+            }
+        }
+        if token.is_cancelled() {
+            return Err(Cancelled.into());
+        }
         // Windows cannot replace a destination with rename. A valid completed
         // file returned above; any remaining destination is an invalid legacy file.
         if fs::try_exists(path).await? {
@@ -318,6 +374,45 @@ mod tests {
         (url, task)
     }
     const HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n";
+
+    #[tokio::test]
+    async fn verified_complete_file_needs_no_network_and_bad_hash_is_removed() {
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("model.gguf");
+        let hash = format!("{:x}", Sha256::digest(b"abcdef"));
+        fs::write(&path, b"abcdef").await.unwrap();
+        download_file_checked(
+            &client().unwrap(),
+            "http://127.0.0.1:1/model",
+            &path,
+            &CancellationToken::new(),
+            Some((6, &hash)),
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        fs::remove_file(&path).await.unwrap();
+        let (url, task) = server(vec![
+            HEAD,
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabcbad",
+        ])
+        .await;
+        let error = download_file_checked(
+            &client().unwrap(),
+            &url,
+            &path,
+            &CancellationToken::new(),
+            Some((6, &hash)),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("SHA-256"));
+        assert!(!path.exists());
+        assert!(!partial_path(&path).exists());
+        assert_eq!(task.await.unwrap().len(), 2);
+    }
 
     #[tokio::test]
     async fn completed_file_is_preserved_without_get() {

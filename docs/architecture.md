@@ -210,6 +210,11 @@ HTTP 408, 429, 500, 502, 503, 504 or 529. Backoff is cancellable, honors
 Retry-After up to 60 seconds, and never restarts a full response timeout.
 Provider error messages are bounded and redact credentials and input echoes.
 
+Built-in summary models use pinned Hugging Face revisions with exact byte sizes
+and SHA-256 hashes. Transfers resume from `.partial` files and verify integrity
+before promotion to the final filename. Readiness caches successful verification
+for an unchanged file; a complete verified model needs no network request.
+
 Codex output documents and their processing log live in the meeting folder.
 Temporary prompt/transcript run files are removed on success, failure or
 cancellation. Meeting deletion removes legacy run files, and startup retries
