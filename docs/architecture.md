@@ -210,6 +210,11 @@ HTTP 408, 429, 500, 502, 503, 504 or 529. Backoff is cancellable, honors
 Retry-After up to 60 seconds, and never restarts a full response timeout.
 Provider error messages are bounded and redact credentials and input echoes.
 
+Codex summary and chat threads use an ephemeral scratch working directory,
+read-only sandbox, no approval escalation, and disabled shell tools. Every turn
+reapplies the sandbox and approval policy; unexpected server approval requests
+are declined. These overrides also cover legacy home-mode configurations.
+
 Summary and chat budgets resolve provider/model context and output tokens together.
 GPT-4o uses 128,000 context tokens, GPT-4.1 uses 1,047,576, Llama 3.1/3.3 uses
 131,072, and Claude uses a conservative 200,000; unknown cloud models use 32,768.

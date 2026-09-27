@@ -69,3 +69,9 @@ The provider uses Codex app-server over stdio JSONL:
 
 Secrets, auth headers, token-looking values, and transcript content are redacted
 or omitted from debug logs by default.
+
+Summary threads and turns explicitly set their scratch working directory,
+read-only sandbox and `never` approval policy. Shell and unified execution are
+disabled through thread configuration; server approval requests are declined.
+The fields follow the pinned [0.157 thread protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json)
+and [turn protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json).

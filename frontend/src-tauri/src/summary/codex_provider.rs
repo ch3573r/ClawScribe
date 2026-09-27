@@ -50,6 +50,92 @@ mod app_server_tests {
         }
     }
 
+    #[tokio::test]
+    async fn fake_server_receives_restrictions_and_approval_decline_in_both_home_modes() {
+        for mode in [
+            CodexHomeMode::ClawscribeIsolated,
+            CodexHomeMode::ExistingUserCodexSession,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let script = temp.path().join("fake-server.cjs");
+            fs::write(&script, r#"
+const readline = require('readline');
+const assert = require('assert');
+const fs = require('fs');
+let turn;
+const send = m => process.stdout.write(JSON.stringify(m)+'\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+ const m=JSON.parse(line);
+ if(m.method==='initialize') send({id:m.id,result:{}});
+ if(m.method==='thread/start') {
+   assert.equal(m.params.approvalPolicy,'never'); assert.equal(m.params.sandbox,'read-only');
+   assert.equal(m.params.config['features.shell_tool'],false);
+   assert.equal(m.params.config['features.unified_exec'],false);
+   assert.equal(m.params.cwd,process.cwd());
+   send({id:m.id,result:{thread:{id:'thread-1'}}});
+ }
+ if(m.method==='turn/start') {
+   assert.equal(m.params.approvalPolicy,'never'); assert.equal(m.params.sandboxPolicy.type,'readOnly');
+   assert.equal(m.params.sandboxPolicy.networkAccess,false); assert.equal(m.params.cwd,process.cwd());
+   turn=m; send({id:900,method:'item/commandExecution/requestApproval',params:{}});
+ }
+ if(m.id===900) {
+   assert.equal(m.result.decision,'decline');
+   fs.writeFileSync('verified', 'restricted');
+   send({id:turn.id,result:{text:'safe answer'}});
+   send({method:'turn/completed',params:{status:'completed'}});
+ }
+});
+"#).unwrap();
+            let mut provider = CodexAppServerProvider::new(
+                CodexProviderConfig {
+                    codex_home_path: Some(
+                        temp.path().join("profile").to_string_lossy().to_string(),
+                    ),
+                    ..CodexProviderConfig::default()
+                },
+                script.clone(),
+            )
+            .unwrap();
+            provider.config.codex_home_mode = mode.clone();
+            if mode == CodexHomeMode::ExistingUserCodexSession {
+                provider.codex_home = None;
+            }
+            let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+            let node = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|dir| dir.join(node_name))
+                .find(|path| path.is_file())
+                .expect("Node.js is required for frontend and fake app-server tests");
+            let mut command = TokioCommand::new(node);
+            command.arg(&script);
+            let mut session =
+                AppServerSession::start_command(&provider, command, Some(temp.path()))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                session
+                    .process_raw_prompt("test-model", "Do not run commands")
+                    .await
+                    .unwrap(),
+                "safe answer"
+            );
+            assert_eq!(
+                session
+                    .process_turn(
+                        "test-model",
+                        "untrusted transcript",
+                        None,
+                        serde_json::json!({})
+                    )
+                    .await
+                    .unwrap(),
+                "safe answer"
+            );
+            assert!(temp.path().join("verified").exists());
+            session.take_stderr().await;
+        }
+    }
+
     #[test]
     fn bundled_app_server_runtime_is_discovered() {
         let temp = tempfile::tempdir().unwrap();
@@ -1069,7 +1155,7 @@ impl CodexAppServerProvider {
             .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
         validate_codex_runtime_file(&self.app_server_binary)?;
         let started = std::time::Instant::now();
-        let mut session = AppServerSession::start(self).await?;
+        let mut session = AppServerSession::start_in(self, Some(&scratch_dir)).await?;
         session.require_authenticated().await?;
         let raw_output = match session
             .process_turn(
@@ -1685,6 +1771,45 @@ impl CodexAccountState {
     }
 }
 
+// Pinned 0.157 ThreadStartParams / TurnStartParams. Apply independently of home mode.
+fn restricted_thread_params(model: &str, cwd: &Path) -> Value {
+    serde_json::json!({ "model": model, "cwd": cwd, "approvalPolicy": "never",
+        "sandbox": "read-only", "ephemeral": true,
+        "config": { "features.shell_tool": false, "features.unified_exec": false,
+            "features.apply_patch_freeform": false, "features.apps": false,
+            "features.multi_agent": false, "features.multi_agent_v2": false,
+            "features.js_repl": false, "features.code_mode": false,
+            "web_search": "disabled" } })
+}
+
+fn restrict_turn(request: &mut Value, cwd: &Path) {
+    request["params"]["cwd"] = serde_json::json!(cwd);
+    request["params"]["approvalPolicy"] = serde_json::json!("never");
+    request["params"]["sandboxPolicy"] =
+        serde_json::json!({"type": "readOnly", "networkAccess": false});
+}
+
+fn decline_server_request(message: &Value) -> Option<Value> {
+    let id = message.get("id")?;
+    let method = message.get("method")?.as_str()?;
+    let result = match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            serde_json::json!({"decision": "decline"})
+        }
+        "item/permissions/requestApproval" => {
+            serde_json::json!({"permissions": {}, "scope": "turn"})
+        }
+        "execCommandApproval" | "applyPatchApproval" => serde_json::json!({"decision": "denied"}),
+        "item/tool/requestUserInput" => serde_json::json!({"answers": {}}),
+        _ => {
+            return Some(
+                serde_json::json!({"id": id, "error": {"code": -32601, "message": "Tools are unavailable for meeting summaries"}}),
+            )
+        }
+    };
+    Some(serde_json::json!({"id": id, "result": result}))
+}
+
 struct AppServerSession {
     child: Child,
     stdin: ChildStdin,
@@ -1693,13 +1818,39 @@ struct AppServerSession {
     next_id: u64,
     timeout: Duration,
     overload_retries: usize,
+    cwd: PathBuf,
+    _scratch: Option<tempfile::TempDir>,
 }
 
 impl AppServerSession {
     async fn start(provider: &CodexAppServerProvider) -> Result<Self, String> {
+        Self::start_in(provider, None).await
+    }
+
+    async fn start_in(
+        provider: &CodexAppServerProvider,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
         let mut command = TokioCommand::new(&provider.app_server_binary);
+        command.arg("app-server");
+        Self::start_command(provider, command, cwd).await
+    }
+
+    async fn start_command(
+        provider: &CodexAppServerProvider,
+        mut command: TokioCommand,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
+        let scratch = if cwd.is_none() {
+            Some(tempfile::tempdir().map_err(|_| "Could not create Codex scratch folder")?)
+        } else {
+            None
+        };
+        let cwd = cwd
+            .unwrap_or_else(|| scratch.as_ref().unwrap().path())
+            .to_path_buf();
         command
-            .arg("app-server")
+            .current_dir(&cwd)
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1738,6 +1889,8 @@ impl AppServerSession {
             next_id: 1,
             timeout: Duration::from_secs(provider.config.timeout_seconds.max(30)),
             overload_retries: 0,
+            cwd,
+            _scratch: scratch,
         };
         session.initialize().await?;
         Ok(session)
@@ -1826,7 +1979,7 @@ impl AppServerSession {
         metadata: Value,
     ) -> Result<String, String> {
         let thread_response = self
-            .request_with_overload_retry("thread/start", serde_json::json!({ "model": model }))
+            .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
         let thread_id = json_string_at(&thread_response, &["thread", "id"])
             .or_else(|| json_string_at(&thread_response, &["id"]))
@@ -1835,15 +1988,16 @@ impl AppServerSession {
             })?;
         for attempt in 0..=CODEX_MAX_OVERLOAD_RETRIES {
             let id = self.next_id();
-            self.send(&app_server_turn_start_request(
+            let mut request = app_server_turn_start_request(
                 id,
                 &thread_id,
                 model,
                 transcript,
                 custom_prompt,
                 metadata.clone(),
-            ))
-            .await?;
+            );
+            restrict_turn(&mut request, &self.cwd);
+            self.send(&request).await?;
             match self.read_turn_result(id).await {
                 Ok(output) => return Ok(output),
                 Err(e) if is_overload_message(&e) && attempt < CODEX_MAX_OVERLOAD_RETRIES => {
@@ -1865,7 +2019,7 @@ impl AppServerSession {
     /// `process_turn`.
     async fn process_raw_prompt(&mut self, model: &str, prompt: &str) -> Result<String, String> {
         let thread_response = self
-            .request_with_overload_retry("thread/start", serde_json::json!({ "model": model }))
+            .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
         let thread_id = json_string_at(&thread_response, &["thread", "id"])
             .or_else(|| json_string_at(&thread_response, &["id"]))
@@ -1874,8 +2028,9 @@ impl AppServerSession {
             })?;
         for attempt in 0..=CODEX_MAX_OVERLOAD_RETRIES {
             let id = self.next_id();
-            self.send(&raw_turn_start_request(id, &thread_id, model, prompt))
-                .await?;
+            let mut request = raw_turn_start_request(id, &thread_id, model, prompt);
+            restrict_turn(&mut request, &self.cwd);
+            self.send(&request).await?;
             match self.read_turn_result(id).await {
                 Ok(output) => return Ok(output),
                 Err(e) if is_overload_message(&e) && attempt < CODEX_MAX_OVERLOAD_RETRIES => {
@@ -1985,15 +2140,20 @@ impl AppServerSession {
     }
 
     async fn read_message(&mut self) -> Result<Value, String> {
-        timeout(self.timeout, self.lines.next_line())
-            .await
-            .map_err(|_| "Timed out waiting for Codex app-server response".to_string())?
-            .map_err(|e| format!("Failed to read Codex app-server response: {e}"))?
-            .ok_or_else(|| "Codex app-server exited before completing the request".to_string())
-            .and_then(|line| {
-                serde_json::from_str::<Value>(&line)
-                    .map_err(|e| format!("Invalid Codex app-server JSONL response: {e}"))
-            })
+        loop {
+            let line = timeout(self.timeout, self.lines.next_line())
+                .await
+                .map_err(|_| "Timed out waiting for Codex app-server response")?
+                .map_err(|_| "Failed to read Codex app-server response")?
+                .ok_or("Codex app-server exited before completing the request")?;
+            let message: Value = serde_json::from_str(&line)
+                .map_err(|_| "Invalid Codex app-server JSONL response")?;
+            if let Some(reply) = decline_server_request(&message) {
+                self.send(&reply).await?;
+                continue;
+            }
+            return Ok(message);
+        }
     }
 
     async fn send(&mut self, value: &Value) -> Result<(), String> {
