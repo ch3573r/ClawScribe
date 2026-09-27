@@ -276,7 +276,7 @@ pub async fn api_get_summary<R: Runtime>(
             // Fetch meeting title from database
             let meeting_name = match MeetingsRepository::get_meeting(pool, &meeting_id).await {
                 Ok(Some(meeting_details)) => {
-                    log_info!("Fetched meeting title: {}", &meeting_details.title);
+                    log_info!("Fetched meeting metadata for {}", meeting_id);
                     Some(meeting_details.title)
                 }
                 Ok(None) => {
@@ -300,11 +300,10 @@ pub async fn api_get_summary<R: Runtime>(
             };
 
             log_info!(
-                "Summary status for {}: {}, has_data: {}, meeting_name: {:?}",
+                "Summary status for {}: {}, has_data: {}",
                 meeting_id,
                 status,
-                response.data.is_some(),
-                response.meeting_name
+                response.data.is_some()
             );
             Ok(response)
         }

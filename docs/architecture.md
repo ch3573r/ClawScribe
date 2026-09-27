@@ -53,6 +53,8 @@ recordings and migration paths continue to work.
 The backend contains no analytics client or analytics commands. Frontend analytics
 calls remain inert compatibility stubs; recording stop does not read provider
 credentials or copy transcripts for telemetry.
+Recording, summary status and notification logs omit meeting names and
+notification contents. Summary diagnostics use the meeting ID instead.
 
 SQLite connections explicitly enable WAL, normal synchronous mode, foreign keys
 and a five-second busy timeout. Legacy database transfers checkpoint first and

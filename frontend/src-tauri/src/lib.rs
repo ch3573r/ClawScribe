@@ -94,13 +94,7 @@ async fn start_recording<R: Runtime>(
     system_device_name: Option<String>,
     meeting_name: Option<String>,
 ) -> Result<(), String> {
-    log_info!("🔥 CALLED start_recording with meeting: {:?}", meeting_name);
-    log_info!(
-        "📋 Backend received parameters - mic: {:?}, system: {:?}, meeting: {:?}",
-        mic_device_name,
-        system_device_name,
-        meeting_name
-    );
+    log_info!("Recording start requested");
 
     if is_recording().await {
         return Err("Recording already in progress".to_string());
@@ -239,10 +233,7 @@ async fn resolve_meeting_audio_file(
     .map_err(|e| format!("Failed to verify meeting folder: {}", e))?;
 
     if !canonical_folder_is_registered(&folder, saved_meeting_folders.iter().map(String::as_str)) {
-        log::warn!(
-            "Refusing to resolve audio from unregistered meeting folder: {}",
-            folder.display()
-        );
+        log::warn!("Refusing to resolve audio from an unregistered meeting folder");
         return Ok(None);
     }
 
@@ -428,8 +419,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     system_device_name: Option<String>,
     meeting_name: Option<String>,
 ) -> Result<(), String> {
-    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}",
-             mic_device_name, system_device_name, meeting_name);
+    log_info!("Recording start requested");
 
     // Clone meeting_name for notification use later
     let meeting_name_for_notification = meeting_name.clone();
@@ -437,20 +427,12 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Call the recording module functions that support meeting names
     let recording_result = match (mic_device_name.clone(), system_device_name.clone()) {
         (None, None) => {
-            log_info!(
-                "No devices specified, starting with defaults and meeting: {:?}",
-                meeting_name
-            );
+            log_info!("Starting recording with default devices");
             audio::recording_commands::start_recording_with_meeting_name(app.clone(), meeting_name)
                 .await
         }
         _ => {
-            log_info!(
-                "Starting with specified devices: mic={:?}, system={:?}, meeting={:?}",
-                mic_device_name,
-                system_device_name,
-                meeting_name
-            );
+            log_info!("Starting recording with selected devices");
             audio::recording_commands::start_recording_with_devices_and_meeting(
                 app.clone(),
                 mic_device_name,
