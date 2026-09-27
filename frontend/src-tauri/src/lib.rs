@@ -568,11 +568,13 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
-        .manage(summary::commands::SummaryEditsState::default())
+        .manage(summary::edit_exit::SummaryEditsState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
+            audio::com_anchor::ensure_device_enumerator();
+            audio::transcription::queue::cleanup_abandoned_transcription_spools();
             log::info!("Application setup complete");
 
             // Initialize system tray
@@ -694,6 +696,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            library::context::get_meeting_context,
+            library::context::set_meeting_context,
             library::list_meeting_tags,
             library::set_meeting_tags,
             library::list_meeting_bookmarks,
@@ -872,8 +876,9 @@ pub fn run() {
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
             summary::commands::api_restore_previous_summary,
-            summary::commands::api_set_summary_edits_pending,
-            summary::commands::api_finish_summary_edit_exit,
+            summary::edit_exit::api_set_summary_edits_pending,
+            summary::edit_exit::api_finish_summary_edit_exit,
+            summary::edit_exit::api_summary_edit_exit_failed,
             summary::commands::api_get_meeting_summary_language,
             summary::commands::api_save_meeting_summary_language,
             summary::commands::api_get_meeting_detected_summary_language,
@@ -974,6 +979,8 @@ pub fn run() {
             audio::retranscription::is_retranscription_in_progress_command,
             // Speaker diarization commands
             audio::diarization::start_speaker_diarization_command,
+            audio::diarization::active_speaker_diarization_command,
+            audio::diarization::cancel_speaker_diarization_command,
             audio::diarization::is_speaker_diarization_in_progress_command,
             // Import audio commands
             audio::import::select_and_validate_audio_command,
@@ -1026,12 +1033,10 @@ pub fn run() {
                     tray::focus_main_window(_app_handle);
                 }
                 tauri::RunEvent::ExitRequested { code, api, .. } => {
-                    let edits = _app_handle.state::<summary::commands::SummaryEditsState>();
-                    if edits.pending.load(std::sync::atomic::Ordering::SeqCst) {
-                        api.prevent_exit();
-                        *edits.exit_code.lock().unwrap() = Some(code.unwrap_or(0));
+                    if summary::edit_exit::request_exit(_app_handle, code.unwrap_or(0), || {
+                        api.prevent_exit()
+                    }) {
                         tray::focus_main_window(_app_handle);
-                        let _ = _app_handle.emit("summary-flush-before-exit", ());
                     }
                 }
                 tauri::RunEvent::Exit => {

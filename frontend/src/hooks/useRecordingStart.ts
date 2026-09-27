@@ -6,6 +6,7 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { recordingService } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
+import { offerSpeakerDetectionCancellation } from '@/lib/speakerDetectionCancellation';
 import { getPendingCalendar, beginRecordingCalendar } from '@/lib/meetingCalendar';
 
 interface UseRecordingStartReturn {
@@ -18,6 +19,7 @@ function isTranscriptionReadinessError(error: unknown): boolean {
   return (
     message.includes('transcription') ||
     message.includes('speech recognition') ||
+    message.includes('speaker detection') ||
     message.includes('model') ||
     message.includes('provider')
   );
@@ -70,16 +72,21 @@ export function useRecordingStart(
   }, [generateMeetingTitle]);
 
   const startBackendRecording = useCallback(
-    async (source: 'home_page' | 'sidebar_auto' | 'sidebar_direct') => {
+    async (source: 'home_page' | 'sidebar_auto' | 'sidebar_direct'): Promise<string> => {
       const { title, calendar: pendingCal } = snapshotPendingForStart();
       setMeetingTitle(title);
       setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
-      await recordingService.startRecordingWithDevices(
-        selectedDevices?.micDevice || null,
-        selectedDevices?.systemDevice || null,
-        title,
-      );
+      try {
+        await recordingService.startRecordingWithDevices(
+          selectedDevices?.micDevice || null,
+          selectedDevices?.systemDevice || null,
+          title,
+        );
+      } catch (error) {
+        await offerSpeakerDetectionCancellation(error, () => startBackendRecording(source));
+        throw error;
+      }
 
       beginRecordingCalendar(pendingCal);
       setIsRecording(true);

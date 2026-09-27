@@ -102,3 +102,13 @@ export async function confirmSummaryRegeneration(
   const current = await read();
   return !current?.data?.user_edited_at || await confirm('Regenerate will replace your edited summary. You can restore it afterwards.');
 }
+
+// Failure is reported to the backend, whose deadline also covers an unresponsive webview.
+export async function flushSummaryEditsBeforeExit(attemptId: number, flush = flushMeetingDrafts) {
+  try {
+    await flush();
+    await invoke('api_finish_summary_edit_exit', { attemptId });
+  } catch {
+    await invoke('api_summary_edit_exit_failed', { attemptId });
+  }
+}

@@ -83,3 +83,15 @@ test('generation blocks draft writes without discarding edits', async () => {
   await queue.drain();
   assert.deepEqual(writes, ['api_save_meeting_title', 'api_save_meeting_summary']);
 });
+
+test('a rejected quit flush reports failure with its attempt identity', async () => {
+  const calls = [];
+  const { flushSummaryEditsBeforeExit } = loadTsModule(fileURLToPath(new URL('../../src/lib/meetingDrafts.ts', import.meta.url)), {
+    '@tauri-apps/api/core': { invoke: async (command, args) => { calls.push([command, args.attemptId]); } },
+    sonner: { toast: { error() {} } },
+  });
+  await flushSummaryEditsBeforeExit(12, async () => { throw new Error('Synthetic save failure'); });
+  assert.deepEqual(calls, [['api_summary_edit_exit_failed', 12]]);
+  await flushSummaryEditsBeforeExit(13, async () => {});
+  assert.deepEqual(calls[1], ['api_finish_summary_edit_exit', 13]);
+});

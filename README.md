@@ -120,7 +120,8 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
   [local library tools](docs/local-library.md).
 
 Generate template-based meeting summaries from the transcript and optional
-context, regenerate notes, and chat about the selected meeting. Configurable
+context, regenerate notes, and chat about the selected meeting. Per-meeting summary
+context is saved in the local library and included in backups. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
 bundled Codex app-server path.

@@ -99,45 +99,7 @@ pub(crate) async fn prepare(
         .prefix("clawscribe-batch-")
         .tempdir()?;
     let pcm = directory.path().join("audio.f32");
-    let ffmpeg = super::ffmpeg::find_ffmpeg_path().ok_or_else(|| {
-        anyhow!("FFmpeg is required to prepare meeting audio. Repair the ClawScribe installation.")
-    })?;
-    let mut command = tokio::process::Command::new(ffmpeg);
-    command
-        .args(["-nostdin", "-nostats", "-loglevel", "error", "-y", "-i"])
-        .arg(path)
-        .args([
-            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le",
-        ])
-        .arg(&pcm)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(0x08000000);
-    let mut child = command
-        .spawn()
-        .map_err(|_| anyhow!("Could not start audio decoder"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
-    loop {
-        if cancelled.load(Ordering::Acquire) || std::time::Instant::now() >= deadline {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(anyhow!(
-                "Audio preparation cancelled or timed out; original audio retained"
-            ));
-        }
-        if let Some(status) = child.try_wait()? {
-            if !status.success() {
-                return Err(anyhow!(
-                    "Audio decoding failed. Check the file and available disk space."
-                ));
-            }
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    decode_to_pcm(path, &pcm, cancelled).await?;
     tokio::task::spawn_blocking(move || -> Result<PreparedAudio> {
         let bytes = std::fs::metadata(&pcm)?.len();
         if bytes == 0 || bytes % 4 != 0 {
@@ -197,8 +159,143 @@ pub(crate) async fn prepare(
     .map_err(|_| anyhow!("Speech preparation task failed"))?
 }
 
+async fn decode_to_pcm(path: &Path, pcm: &Path, cancelled: &AtomicBool) -> Result<()> {
+    let ffmpeg = super::ffmpeg::find_ffmpeg_path().ok_or_else(|| {
+        anyhow!("FFmpeg is required to prepare meeting audio. Repair the ClawScribe installation.")
+    })?;
+    let mut command = tokio::process::Command::new(ffmpeg);
+    command
+        .args(["-nostdin", "-nostats", "-loglevel", "error", "-y", "-i"])
+        .arg(path)
+        .args([
+            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le",
+        ])
+        .arg(&pcm)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+    let mut child = command
+        .spawn()
+        .map_err(|_| anyhow!("Could not start audio decoder"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+    loop {
+        if cancelled.load(Ordering::Acquire) || std::time::Instant::now() >= deadline {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(anyhow!(
+                "Audio preparation cancelled or timed out; original audio retained"
+            ));
+        }
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                return Err(anyhow!(
+                    "Audio decoding failed. Check the file and available disk space."
+                ));
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+pub(crate) async fn prepare_diarization_samples(
+    path: &Path,
+    cancelled: std::sync::Arc<AtomicBool>,
+) -> Result<Vec<f32>> {
+    let directory = tempfile::Builder::new()
+        .prefix("clawscribe-diarization-")
+        .tempdir()?;
+    let pcm = directory.path().join("audio.f32");
+    decode_to_pcm(path, &pcm, &cancelled).await?;
+    tokio::task::spawn_blocking(move || {
+        let _directory = directory;
+        read_diarization_samples(&pcm, &cancelled, |_| {})
+    })
+    .await
+    .map_err(|_| anyhow!("Speaker audio preparation task failed"))?
+}
+
+fn read_diarization_samples(
+    path: &Path,
+    cancelled: &AtomicBool,
+    mut observe_chunk: impl FnMut(usize),
+) -> Result<Vec<f32>> {
+    let bytes = std::fs::metadata(path)?.len();
+    if bytes == 0 || bytes % 4 != 0 {
+        return Err(anyhow!("Decoder produced no valid audio"));
+    }
+    let count = usize::try_from(bytes / 4)?;
+    let mut samples = Vec::with_capacity(count);
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut frame = vec![0.0f32; 16_000];
+    while samples.len() < count {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(anyhow!("Speaker detection cancelled"));
+        }
+        let size = frame.len().min(count - samples.len());
+        reader.read_exact(bytemuck::cast_slice_mut(&mut frame[..size]))?;
+        observe_chunk(size);
+        samples.extend(frame[..size].iter().map(|sample| sample.clamp(-1.0, 1.0)));
+    }
+    Ok(samples)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diarization_pcm_reader_uses_bounded_chunks() {
+        let directory = tempfile::tempdir().unwrap();
+        let pcm = directory.path().join("synthetic.f32");
+        let expected: Vec<f32> = (0..64_123).map(|i| (i % 100) as f32 / 100.0).collect();
+        std::fs::write(&pcm, bytemuck::cast_slice(&expected)).unwrap();
+        let mut largest = 0;
+        let mut reads = 0;
+        let actual = read_diarization_samples(&pcm, &AtomicBool::new(false), |size| {
+            largest = largest.max(size);
+            reads += 1;
+        })
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(largest, 16_000);
+        assert_eq!(reads, 5);
+    }
+
+    #[tokio::test]
+    async fn streaming_diarization_matches_existing_conversion_for_short_mono_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.wav");
+        let mut wav = Vec::new();
+        let data_bytes = 32_123_u32 * 2;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(data_bytes + 36).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for i in 0..32_123 {
+            wav.extend_from_slice(&((i % 2000) as i16 - 1000).to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+        let previous = crate::audio::decoder::decode_audio_file(&path)
+            .unwrap()
+            .to_whisper_format();
+        let streamed =
+            prepare_diarization_samples(&path, std::sync::Arc::new(AtomicBool::new(false)))
+                .await
+                .unwrap();
+        assert_eq!(streamed, previous);
+    }
+
     #[tokio::test]
     async fn segment_retry_recovers_transient_failure_and_stops_after_two_attempts() {
         static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

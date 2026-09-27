@@ -7,18 +7,20 @@
 
 use crate::audio::recording_state::{AudioChunk, DeviceType};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 const QUEUE_MAGIC: &[u8; 4] = b"CSQ1";
 const HEADER_BYTES: u64 = 4 + 4 + 8 + 8 + 1 + 8;
 const MAX_SAMPLES_PER_CHUNK: usize = 16_000 * 120;
-const STALE_SPOOL_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+static ACTIVE_SPOOLS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TranscriptionMetricsSnapshot {
@@ -155,6 +157,8 @@ impl Drop for QueueShared {
         if self.retain_files {
             return; // Recording recovery data belongs to the meeting, not this task.
         }
+        let mut active = ACTIVE_SPOOLS.lock().unwrap_or_else(|e| e.into_inner());
+        active.remove(&self.spool_dir);
         if let Err(error) = fs::remove_dir_all(&self.spool_dir) {
             if error.kind() != io::ErrorKind::NotFound {
                 log::warn!("Failed to remove transcription spool");
@@ -295,14 +299,34 @@ pub fn transcription_queue() -> io::Result<(
     TranscriptionQueueReceiver,
     Arc<TranscriptionMetrics>,
 )> {
-    let spool_root = std::env::temp_dir()
+    transcription_queue_in(&transcription_spool_root())
+}
+
+fn transcription_spool_root() -> PathBuf {
+    std::env::temp_dir()
         .join("clawscribe")
-        .join("transcription-queue");
-    cleanup_stale_spools(&spool_root);
+        .join("transcription-queue")
+}
+
+fn transcription_queue_in(
+    spool_root: &Path,
+) -> io::Result<(
+    TranscriptionQueueSender,
+    TranscriptionQueueReceiver,
+    Arc<TranscriptionMetrics>,
+)> {
+    // Serialize directory creation/registration with startup cleanup.
+    let mut active = ACTIVE_SPOOLS.lock().unwrap_or_else(|e| e.into_inner());
     let spool_dir = spool_root.join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(&spool_dir)?;
+    let queue = create_queue(spool_dir.clone(), false)?;
+    active.insert(spool_dir);
+    Ok(queue)
+}
 
-    create_queue(spool_dir, false)
+/// Called during setup, before the UI can start a recording.
+pub fn cleanup_abandoned_transcription_spools() {
+    cleanup_stale_spools(&transcription_spool_root());
 }
 
 /// Preserve mixed capture on disk until final audio has been durably saved.
@@ -348,22 +372,44 @@ fn create_queue(
     ))
 }
 
+fn plain_directory(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Also exclude junctions and other Windows reparse points.
+        if metadata.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    metadata.is_dir() && !metadata.file_type().is_symlink()
+}
+
 fn cleanup_stale_spools(spool_root: &Path) {
+    let active = ACTIVE_SPOOLS.lock().unwrap_or_else(|e| e.into_inner());
+    if !plain_directory(spool_root) || !spool_root.parent().is_some_and(plain_directory) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(spool_root) else {
         return;
     };
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !uuid::Uuid::parse_str(name).is_ok_and(|id| id.to_string() == name) {
+            continue;
+        }
         let path = entry.path();
-        let is_stale = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .and_then(|modified| modified.elapsed().map_err(io::Error::other))
-            .map(|age| age >= STALE_SPOOL_AGE)
-            .unwrap_or(false);
-        if is_stale {
-            if let Err(_error) = fs::remove_dir_all(&path) {
-                log::warn!("Failed to remove stale transcription spool");
-            }
+        if active.contains(&path) || !plain_directory(&path) {
+            continue;
+        }
+        // remove_dir_all removes nested links themselves, never their targets.
+        if fs::remove_dir_all(&path).is_err() {
+            log::warn!("Failed to remove abandoned transcription spool");
         }
     }
 }
@@ -586,6 +632,26 @@ fn read_f64(reader: &mut impl Read) -> io::Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_removes_only_abandoned_queue_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let abandoned = root.path().join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&abandoned).unwrap();
+        fs::write(abandoned.join("0.bin"), b"staged audio").unwrap();
+        let unrelated = root.path().join("other-application");
+        fs::create_dir(&unrelated).unwrap();
+        let (sender, receiver, _) = transcription_queue_in(root.path()).unwrap();
+        let active = sender.shared.spool_dir.clone();
+        cleanup_stale_spools(root.path());
+        assert!(!abandoned.exists(), "No age threshold after a crash");
+        assert!(active.is_dir());
+        assert!(unrelated.is_dir());
+        drop(sender);
+        assert!(active.is_dir(), "Receiver still owns the session");
+        drop(receiver);
+        assert!(!active.exists());
+    }
 
     #[test]
     fn publishing_retries_transient_locks_and_bounds_permanent_failures() {

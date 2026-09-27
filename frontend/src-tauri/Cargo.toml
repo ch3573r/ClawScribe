@@ -199,7 +199,7 @@ futures-channel = "0.3.31"
 # DPAPI (CryptProtectData) for the Microsoft-token file fallback: refresh
 # tokens exceed the Credential Manager 2560-byte blob cap, so the fallback is
 # the steady state on Windows and must not be plaintext.
-windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Com"] }
 # Shared CPU build avoids MSVC static/dynamic runtime conflicts with existing native deps.
 # sherpa-onnx 1.13.3 exposes only static/shared Cargo features; DirectML is supplied by staged DLLs.
 sherpa-onnx = { version = "1.13.3", default-features = false, features = ["shared"] }

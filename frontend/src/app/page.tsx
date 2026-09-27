@@ -22,7 +22,6 @@ import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
-import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 
@@ -86,22 +85,7 @@ export default function Home() {
           return;
         }
 
-        // 1. Clean up old meetings (7+ days)
-        try {
-          await indexedDBService.deleteOldMeetings(7);
-        } catch (error) {
-          console.warn('⚠️ Failed to clean up old meetings:', error);
-        }
-
-        // 2. Clean up saved meetings (24+ hours after save)
-        try {
-          await indexedDBService.deleteSavedMeetings(24);
-        } catch (error) {
-          console.warn('⚠️ Failed to clean up saved meetings:', error);
-        }
-
-        // 3. Always check for recoverable meetings on startup
-        // Don't skip based on sessionStorage - we need to check every time
+        // Recovery copies that have not been saved are never expired by age.
         await checkForRecoverableTranscripts();
       } catch (error) {
         console.error('Failed to perform startup checks:', error);

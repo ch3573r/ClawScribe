@@ -203,6 +203,8 @@ pub fn start_transcription_task<R: Runtime>(
             if NUM_WORKERS == 1 { "" } else { "s" }
         );
 
+        let failure_notice = Arc::new(SegmentFailureNotice::default());
+
         // Spawn worker tasks
         let mut worker_handles = tokio::task::JoinSet::new();
         for worker_id in 0..NUM_WORKERS {
@@ -217,6 +219,7 @@ pub fn start_transcription_task<R: Runtime>(
             let input_finished_clone = input_finished.clone();
             let chunks_queued_clone = chunks_queued.clone();
             let metrics_clone = task_metrics.clone();
+            let failure_notice = failure_notice.clone();
 
             worker_handles.spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -294,7 +297,7 @@ pub fn start_transcription_task<R: Runtime>(
                             };
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
+                            match transcribe_chunk_with_provider(&engine_clone, chunk)
                                 .await
                             {
                                 Ok((
@@ -406,6 +409,9 @@ pub fn start_transcription_task<R: Runtime>(
                                         TranscriptionError::ModelNotLoaded => {
                                             metrics_clone.mark_failed();
                                             warn!("Model unloaded during transcription");
+                                            failure_notice.report(&e, |event, payload| {
+                                                let _ = app_clone.emit(event, payload);
+                                            });
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             metrics_guard.complete();
                                             continue;
@@ -413,8 +419,9 @@ pub fn start_transcription_task<R: Runtime>(
                                         _ => {
                                             metrics_clone.mark_failed();
                                             warn!("Worker transcription failed");
-                                            let _ = app_clone
-                                                .emit("transcription-warning", e.to_string());
+                                            failure_notice.report(&e, |event, payload| {
+                                                let _ = app_clone.emit(event, payload);
+                                            });
                                         }
                                     }
                                 }
@@ -514,11 +521,14 @@ pub fn start_transcription_task<R: Runtime>(
                 Err(error) => {
                     task_metrics.mark_failed();
                     error!("Failed to read transcription queue");
-                    let _ = app.emit("transcription-error", serde_json::json!({
-                        "error": error.to_string(),
-                        "userMessage": "A staged audio segment could not be read. The recording audio is still preserved.",
-                        "actionable": false
-                    }));
+                    let _ = app.emit("transcription-warning", "A staged audio segment could not be read. The recording audio is still preserved.");
+                    if !failure_notice.error_emitted.swap(true, Ordering::AcqRel) {
+                        let _ = app.emit("transcription-error", serde_json::json!({
+                            "error": error.to_string(),
+                            "userMessage": "A staged audio segment could not be read. The recording audio is still preserved.",
+                            "actionable": false
+                        }));
+                    }
                     break;
                 }
             }
@@ -612,12 +622,35 @@ pub fn start_transcription_task<R: Runtime>(
     }
 }
 
+#[derive(Default)]
+struct SegmentFailureNotice {
+    error_emitted: AtomicBool,
+}
+
+impl SegmentFailureNotice {
+    fn report(&self, error: &TranscriptionError, mut emit: impl FnMut(&str, serde_json::Value)) {
+        emit(
+            "transcription-warning",
+            serde_json::json!(error.to_string()),
+        );
+        if !self.error_emitted.swap(true, Ordering::AcqRel) {
+            emit(
+                "transcription-error",
+                serde_json::json!({
+                    "error": error.to_string(),
+                    "userMessage": format!("Transcription failed: {}", error),
+                    "actionable": false
+                }),
+            );
+        }
+    }
+}
+
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
 /// Returns: (text, confidence Option, is_partial)
-async fn transcribe_chunk_with_provider<R: Runtime>(
+async fn transcribe_chunk_with_provider(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
-    app: &AppHandle<R>,
 ) -> std::result::Result<(String, Option<f32>, bool, Option<Vec<TranscriptWord>>), TranscriptionError>
 {
     let chunk_start_time = chunk.timestamp;
@@ -680,14 +713,6 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                     error!("Whisper transcription failed for chunk");
 
                     let transcription_error = TranscriptionError::EngineFailed(e.to_string());
-                    let _ = app.emit(
-                        "transcription-error",
-                        &serde_json::json!({
-                            "error": transcription_error.to_string(),
-                            "userMessage": format!("Transcription failed: {}", transcription_error),
-                            "actionable": false
-                        }),
-                    );
 
                     Err(transcription_error)
                 }
@@ -723,14 +748,6 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                     error!("Parakeet transcription failed for chunk");
 
                     let transcription_error = TranscriptionError::EngineFailed(e.to_string());
-                    let _ = app.emit(
-                        "transcription-error",
-                        &serde_json::json!({
-                            "error": transcription_error.to_string(),
-                            "userMessage": format!("Transcription failed: {}", transcription_error),
-                            "actionable": false
-                        }),
-                    );
 
                     Err(transcription_error)
                 }
@@ -764,15 +781,6 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 Err(e) => {
                     error!("transcription failed for chunk");
 
-                    let _ = app.emit(
-                        "transcription-error",
-                        &serde_json::json!({
-                            "error": e.to_string(),
-                            "userMessage": format!("Transcription failed: {}", e),
-                            "actionable": false
-                        }),
-                    );
-
                     Err(e)
                 }
             }
@@ -782,15 +790,13 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
 
 /// Format current timestamp (wall-clock time)
 fn format_current_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    format_timestamp_at(std::time::SystemTime::now())
+}
 
-    let hours = (now.as_secs() / 3600) % 24;
-    let minutes = (now.as_secs() / 60) % 60;
-    let seconds = now.as_secs() % 60;
-
-    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+fn format_timestamp_at(now: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(now)
+        .format("%H:%M:%S")
+        .to_string()
 }
 
 fn with_word_speaker(words: Vec<TranscriptWord>, speaker: Option<&str>) -> Vec<TranscriptWord> {
@@ -820,6 +826,49 @@ fn format_recording_time(seconds: f64) -> String {
 #[cfg(test)]
 mod metrics_lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn live_timestamp_uses_local_time_for_the_supplied_instant() {
+        let instant = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
+        let expected = chrono::DateTime::<chrono::Local>::from(instant)
+            .format("%H:%M:%S")
+            .to_string();
+        assert_eq!(format_timestamp_at(instant), expected);
+    }
+
+    #[test]
+    fn repeated_segment_failures_warn_but_only_notify_once_per_session() {
+        let notice = SegmentFailureNotice::default();
+        let mut errors = 0;
+        let mut warnings = 0;
+        for _ in 0..10 {
+            notice.report(
+                &TranscriptionError::EngineFailed("Synthetic failure".into()),
+                |event, payload| match event {
+                    "transcription-warning" => {
+                        warnings += 1;
+                        assert!(payload.is_string());
+                    }
+                    "transcription-error" => {
+                        errors += 1;
+                        assert!(payload["userMessage"].is_string());
+                    }
+                    _ => panic!("Unexpected event"),
+                },
+            );
+        }
+        assert_eq!(errors, 1);
+        assert_eq!(warnings, 10);
+        SegmentFailureNotice::default().report(
+            &TranscriptionError::EngineFailed("Synthetic failure".into()),
+            |event, _| {
+                if event == "transcription-error" {
+                    errors += 1;
+                }
+            },
+        );
+        assert_eq!(errors, 2, "A new recording gets its own notice");
+    }
 
     #[test]
     fn completed_session_only_clears_its_own_metrics() {

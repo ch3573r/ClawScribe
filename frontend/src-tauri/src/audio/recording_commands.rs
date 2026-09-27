@@ -1479,6 +1479,7 @@ pub async fn attempt_device_reconnect(
         }
     } // Release lock
 
+    super::com_anchor::ensure_device_enumerator();
     // Spawn blocking task to handle the async reconnection
     let result = tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(async {

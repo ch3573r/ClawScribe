@@ -13,7 +13,9 @@ import {
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
-import { flushMeetingDrafts } from '@/lib/meetingDrafts'
+import { cleanupTranscriptRecoveryOnce } from '@/services/indexedDBService'
+import { migrateLegacyMeetingContexts } from '@/lib/meetingContext'
+import { flushMeetingDrafts, flushSummaryEditsBeforeExit } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { Toaster, toast } from 'sonner'
@@ -110,10 +112,20 @@ export default function RootLayout({
 
   useEffect(() => {
     const close = listen('summary-flush-on-close', () => { void flushMeetingDrafts().catch(() => {}); });
-    const quit = listen('summary-flush-before-exit', () => {
-      void flushMeetingDrafts().then(() => invoke('api_finish_summary_edit_exit')).catch(() => {});
+    const quit = listen<number>('summary-flush-before-exit', event => {
+      void flushSummaryEditsBeforeExit(event.payload).catch(() => {
+        toast.error('Could not notify ClawScribe about the save failure. A quit confirmation will appear shortly.');
+      });
     });
     return () => { void close.then(unlisten => unlisten()); void quit.then(unlisten => unlisten()); };
+  }, []);
+
+  useEffect(() => {
+    void migrateLegacyMeetingContexts().catch(() => toast.error('Could not migrate meeting context. Existing context is retained for retry.'));
+  }, []);
+
+  useEffect(() => {
+    void cleanupTranscriptRecoveryOnce().catch(() => toast.warning('Could not clean saved transcript recovery copies.'));
   }, []);
 
   // Import audio state

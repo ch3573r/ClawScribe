@@ -95,6 +95,10 @@ window titles are returned only when the settings diagnostics panel requests the
 
 ## Recording And Inference Lifetimes
 
+On Windows, `audio/com_anchor.rs` initializes CPAL’s device enumerator on a
+process-lifetime MTA thread before device access. This keeps its COM apartment
+alive when microphone-monitor or reconnect worker threads exit.
+
 `audio/inference.rs` serializes recording, batch, diarization and model-changing jobs and holds a
 separate native-call permit inside the blocking task. Cancelling the async caller
 cannot free a model that native code still uses. `audio/batch_audio.rs` normalizes
@@ -122,7 +126,8 @@ time. Lifecycle events invalidate older polls. Cleanup also removes subscription
 whose asynchronous registration finishes after the provider unmounts.
 
 `audio/transcription/queue.rs` serves both live recognition and the retained
-recording spool. Bounded producer buffers feed independent disk workers so disk
+recording spool. Startup removes abandoned UUID-named temporary transcription
+queues without following links; queues owned by a running session are retained. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
 it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
@@ -389,9 +394,22 @@ tenant, or granted scopes; access-token-only changes stay in memory.
 Meeting title and summary edits autosave after two seconds of inactivity. Pending
 revisions remain owned by a shared draft queue across navigation; leaving a meeting
 flushes that queue. Closing the window flushes edits, and quitting waits for pending
-writes. Failed writes retain the draft and offer retry. Summary generation blocks
+writes for up to five seconds. A failed save or timeout opens one native dialog
+with Quit (discard pending edits) and Keep ClawScribe open. Choosing Keep preserves
+the drafts; stale callbacks cannot complete a later quit attempt. Failed writes
+retain the draft and offer retry. Summary generation blocks
 edit writes, and regeneration asks before replacing a result marked `user_edited_at`.
 A generated replacement removes that marker and retains one `previous_result` with
 its timestamp. Restore atomically swaps current and previous results when generation
 is idle. These columns are independent of `result_backup`, whose failure and
 interruption recovery behavior is unchanged.
+
+Per-meeting summary context is stored in `meetings.summary_context`. Startup
+migrates legacy browser-storage values without replacing existing database
+context and removes each legacy value only after persistence succeeds. Library
+archives include the column; older archives omit it and restore with empty
+context. Deleting the meeting removes its context.
+
+Live-transcript IndexedDB copies are removed after SQLite save and library
+deletion. Startup cleanup runs once from the root layout and removes only aged
+saved copies; unsaved recovery data never expires automatically.

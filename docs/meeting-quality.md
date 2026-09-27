@@ -225,3 +225,19 @@ migration. Recordings and transcripts remain local files, not encrypted vaults.
 
 See [Windows release acceptance](windows-release.md#required-real-device-acceptance)
 for the checks needed before recommending a build for everyday meetings.
+
+Speaker detection temporarily blocks transcript corrections, undo, restore and
+speaker renames for that meeting. Before saving labels it verifies the transcript
+has not changed; if it has, the existing edits are kept and detection must be run again.
+The previous transcript, including its speaker labels, is kept so **Restore previous
+transcript** can undo speaker detection.
+Cancel speaker detection from its dialog or the meeting toolbar, including after
+continuing in the background. Cancellation discards pending labels and waits for
+the current native speech step to finish before another recording can start. If
+recording is blocked by detection, its error offers **Cancel speaker detection and record**.
+Speaker detection decodes and resamples through the streaming batch decoder.
+Only the 16 kHz mono signal is held in full; the original-rate audio is not
+retained in memory.
+If the recording-folder transcript copy cannot be updated after labels are saved,
+the app reports success with a pending file warning. **Retry file update** writes
+the saved database transcript when the folder is available again.

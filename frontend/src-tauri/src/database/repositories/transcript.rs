@@ -83,6 +83,9 @@ impl TranscriptsRepository {
     ) -> Result<u64, SqlxError> {
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
+        crate::database::transcript_edits::assert_editable(&mut transaction, meeting_id)
+            .await
+            .map_err(SqlxError::Protocol)?;
         let now = Utc::now();
 
         let result =
@@ -113,6 +116,9 @@ impl TranscriptsRepository {
     ) -> Result<u64, SqlxError> {
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
+        crate::database::transcript_edits::assert_editable(&mut transaction, meeting_id)
+            .await
+            .map_err(SqlxError::Protocol)?;
         let now = Utc::now();
 
         let result = match from_speaker {

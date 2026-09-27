@@ -170,6 +170,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_system_audio_devices() {
+        crate::audio::com_anchor::ensure_device_enumerator();
         let devices = list_system_audio_devices_command().await;
         match devices {
             Ok(device_list) => {
@@ -185,6 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_permissions() {
+        crate::audio::com_anchor::ensure_device_enumerator();
         let has_permission = check_system_audio_permissions_command().await;
         println!("Has system audio permissions: {}", has_permission);
         // This is mainly a smoke test to ensure it doesn't crash

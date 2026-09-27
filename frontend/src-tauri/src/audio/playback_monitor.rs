@@ -172,7 +172,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires audio output device; run manually"]
     async fn test_get_output_device() {
+        crate::audio::com_anchor::ensure_device_enumerator();
         let result = get_active_audio_output().await;
         assert!(result.is_ok(), "Should be able to get output device");
 
