@@ -1289,14 +1289,22 @@ mod export_history_tests {
                     assert!(force);
                     assert!(token.is_access_token_valid());
                     refreshes.set(refreshes.get() + 1);
+                    token.access_token = "test-refreshed-access".into();
                     token.refresh_token = Some("test-rotated".into());
                     if approved {
                         token.granted_scopes.push_str(" Tasks.ReadWrite");
                     }
                     std::future::ready(Ok(token))
                 },
-                |_| {
+                |token| {
                     saves.set(saves.get() + 1);
+                    assert_eq!(
+                        super::super::permissions::has_scope(
+                            &token.granted_scopes,
+                            "Tasks.ReadWrite"
+                        ),
+                        approved
+                    );
                     Ok(())
                 },
             )
@@ -1304,7 +1312,14 @@ mod export_history_tests {
             assert_eq!(refreshes.get(), 1);
             assert_eq!(saves.get(), 1);
             if approved {
-                assert!(result.is_ok());
+                assert_eq!(
+                    result.unwrap(),
+                    (
+                        "test-refreshed-access".into(),
+                        "organizations".into(),
+                        "test-user".into()
+                    )
+                );
             } else {
                 assert_eq!(
                     result.unwrap_err(),
