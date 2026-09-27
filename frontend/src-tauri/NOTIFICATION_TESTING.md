@@ -1,86 +1,25 @@
-# Testing Notifications on macOS
+# Notification checks
 
-## Quick Test Commands
-
-### 1. Test Notification Immediately
-To test if notifications are working, call this command from your frontend:
+These Tauri commands remain registered in the desktop app. They test app-side
+notification handling; confirm actual delivery in the installed Windows app.
 
 ```javascript
-// This will initialize the notification system and show a test notification
-await invoke('test_notification_with_auto_consent');
-```
-
-### 2. Initialize Notification System First
-If you want to initialize the notification system manually:
-
-```javascript
-// Initialize the notification system
 await invoke('initialize_notification_manager_manual');
-
-// Then show a test notification
-await invoke('show_test_notification');
-```
-
-### 3. Recording Notifications
-When you start recording, the app should automatically show a notification. The system will:
-
-1. Check if notification manager is initialized
-2. Automatically grant consent and permissions for testing
-3. Show "Recording has started" notification
-
-## Expected Behavior on macOS
-
-When working correctly, you should see:
-- A native macOS notification appear in the top-right corner
-- Title: "ClawScribe"
-- Body: "Recording has started" (or test message)
-- The notification should appear like system notifications (microphone detected, etc.)
-
-## Troubleshooting
-
-### If notifications don't appear:
-
-1. **Check macOS Notification Settings:**
-   - Go to System Preferences → Notifications & Focus
-   - Find your app in the list
-   - Ensure notifications are enabled
-
-2. **Check Do Not Disturb:**
-   - Make sure Do Not Disturb is off
-   - Or use: `await invoke('get_system_dnd_status')` to check
-
-3. **Check Logs:**
-   - Look for log messages about notification initialization
-   - Check for permission/consent messages
-
-4. **Manual Permission Request:**
-   ```javascript
-   await invoke('request_notification_permission');
-   ```
-
-## Available Commands for Testing
-
-```javascript
-// System status
 await invoke('is_notification_system_ready');
-await invoke('get_system_dnd_status');
-await invoke('get_notification_stats');
-
-// Permissions and consent
-await invoke('request_notification_permission');
-await invoke('set_notification_consent', { consent: true });
-
-// Testing
-await invoke('test_notification_with_auto_consent');
-await invoke('show_test_notification');
-
-// Settings
 await invoke('get_notification_settings');
+await invoke('show_test_notification');
 ```
 
-## Development Notes
+For an explicit consent-enabled test, `test_notification_with_auto_consent`
+initializes the manager if needed, enables stored app consent, calls the app's
+permission helper, and sends a test notification. This changes the app's consent
+setting; it does not establish that the operating system will display a toast.
 
-- The notification system is designed to work like native macOS notifications
-- For development/testing, consent and permissions are automatically granted
-- The system respects Do Not Disturb settings
-- All notification preferences are saved locally
+The underlying `request_permission` helper assumes native OS permission is
+granted, and `get_system_dnd_status` returns `false` rather
+than querying system Do Not Disturb. Check notification permissions and Do Not
+Disturb in Windows when diagnosing missing notifications. A successful command
+alone is not proof of visible delivery.
+
+Implementation: `src/notifications/commands.rs`, `src/notifications/manager.rs`,
+`src/notifications/system.rs`, and command registration in `src/lib.rs`.

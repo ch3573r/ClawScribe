@@ -62,9 +62,9 @@ use a consistent SQLite snapshot so committed WAL data is retained.
 Before pending migrations, startup writes a consistent database snapshot under
 the app-data backups folder and retains the newest two. Fresh databases with no
 user tables do not create an empty snapshot. After successful migrations, each
-startup removes snapshots older than 14 days, limiting retention of deleted
-meeting data. A backup failure warns
-without blocking startup; already-applied migrations do not create another copy.
+startup removes snapshots older than 14 days. Deleted meeting data can remain
+longer while the app is closed or cleanup fails. A backup failure warns without
+blocking startup; already-applied migrations do not create another copy.
 
 Background Teams detection returns matching candidates only. Unmatched browser
 window titles are returned only when the settings diagnostics panel requests them.
@@ -245,6 +245,7 @@ Chat and reviewed task polishing share provider configuration resolution.
 Summary HTTP providers make at most three attempts for connection failures and
 HTTP 408, 429, 500, 502, 503, 504 or 529. Backoff is cancellable, honors
 Retry-After up to 60 seconds, and never restarts a full response timeout.
+Reported `insufficient_quota` and Retry-After values above 60 seconds are not retried.
 Provider error messages are bounded and redact credentials and input echoes.
 
 Built-in summary models use pinned Hugging Face revisions with exact byte sizes
@@ -261,18 +262,21 @@ The default Parakeet v3 Hugging Face mirror is byte-identical to the previous
 four-file download. SmoothQuant retains the original export filenames from the
 last pinned revision before upstream reorganized those files.
 
-Codex output documents and their processing log live in the meeting folder.
+Codex output documents and their processing log live in the meeting folder, or
+app data `meeting-outputs/<id>` when no recording folder is set.
 Temporary prompt/transcript run files are removed on success, failure or
 cancellation. Meeting deletion removes legacy run files, and startup retries
 orphan cleanup without blocking local recording.
 
 Meeting deletion defaults to removing recording files after the database commit.
-Deletion requires an unshared, marked ClawScribe folder within the configured
-recordings or restored-recordings root, with no links or junctions in its path.
+File deletion requires an unshared, marked ClawScribe folder within configured
+or supported default recording locations, or app-data restored-recordings, with
+no links or junctions in its path.
 Users can retain recording files. Export ledgers and temporary Codex runs are
 removed either way; any retained folder is reported without undoing database deletion.
 
-Codex summary and chat threads use an ephemeral scratch working directory,
+Codex meeting turns send `outputSchema`; raw prompts do not. Summary and chat
+threads use an ephemeral scratch working directory,
 read-only sandbox, no approval escalation, and disabled shell tools. Every turn
 reapplies the sandbox and approval policy; unexpected server approval requests
 are declined. These overrides also cover legacy home-mode configurations.
@@ -301,20 +305,37 @@ Release builds resolve the local summary helper only by exact packaged filenames
 beside the executable or in its resource directory. Environment overrides and
 workspace lookup are available only in debug builds.
 
-Summary and chat budgets resolve provider/model context and output tokens together.
-GPT-4o uses 128,000 context tokens, GPT-4.1 uses 1,047,576, Llama 3.1/3.3 uses
-131,072, and Claude uses a conservative 200,000; unknown cloud models use 32,768.
-These families also apply to namespaced OpenRouter IDs. See the
-[OpenAI model specifications](https://developers.openai.com/api/docs/models/gpt-4.1)
-and [Groq Llama specifications](https://console.groq.com/docs/model/llama-3.3-70b-versatile).
-Operator endpoints use their configured context or 8,192. Ollama metadata and
-the Built-in AI registry are capped at 16,384, with an 8,192 Ollama fallback;
-the local helper receives that same context. Codex retains 32,768.
+### Summary context budgets
+
+`summary/context_budget.rs` resolves summary and chat budgets together. These
+are ClawScribe's request-planning limits, not guarantees about a provider account:
+
+| Provider or model family | Context tokens |
+| --- | --- |
+| GPT-4o; GPT-5/6 and o1/o3/o4 reasoning names | 128,000 |
+| GPT-4.1 | 1,047,576 |
+| Llama 3.1/3.3 | 131,072 |
+| Claude | 200,000 |
+| Unknown cloud model | 32,768 |
+| Custom/OpenAI-compatible/OpenClaw endpoint | Configured context; otherwise 128,000 for reasoning names, 8,192 for other names |
+| Ollama | Model metadata, capped at 16,384; 8,192 fallback |
+| Built-in AI | Model registry, capped at 16,384 |
+| Codex | 32,768 |
+
+Family matching also applies to namespaced OpenRouter IDs. GPT-5/6 and o1/o3/o4
+names, and the Claude provider, default to 16,000 output tokens and up to 8,000
+extraction tokens. Other names default to 4,096 output tokens for Built-in AI
+and Codex, or 2,048 elsewhere. Default output is capped at `max(context / 4, 1024)`;
+thus it never exceeds a quarter of context when context is at least 4,096.
+Explicit output settings override the default. Codex reasoning names still use
+the Codex context budget, so their default output is capped at 8,192.
+The local helper receives the resolved local context.
 After reserving output tokens and 256 tokens, planning converts the remainder
 to three UTF-8 bytes per token and subtracts prompt overhead in bytes. Extraction
-pieces use their short prompt and at most 1,024 output tokens; the final report
-reserves its full template. Structured OpenAI requests carry the schema once,
-with an inline schema only for strict-JSON fallback.
+pieces use their short prompt and at most 1,024 output tokens for non-reasoning
+models, or 8,000 for reasoning models (never more than the resolved output limit).
+The final report reserves its full template. Structured OpenAI requests carry
+the schema once, with an inline schema only for strict-JSON fallback.
 
 Summary status polling has one shared timer owner across meetings. Starting or
 finishing one poll keeps other meetings' polls alive; stopped or replaced requests

@@ -51,9 +51,9 @@ ClawScribe defaults to an isolated `CODEX_HOME` for the sidecar:
 %APPDATA%\ClawScribe\codex
 ```
 
-The default mode does not read or write the user's normal `~/.codex` profile or
-reuse standalone Codex CLI auth state. Advanced existing-session mode requires
-explicit opt-in and the MCP check described below.
+The provider does not reuse the user's normal `~/.codex` profile or standalone
+Codex CLI sign-in. Existing-user session mode is disabled; legacy mode flags are
+normalized to the isolated profile.
 
 ## Protocol
 
@@ -64,7 +64,8 @@ The provider uses Codex app-server over stdio JSONL:
 3. Send `initialized`.
 4. Use `account/read`, `account/login/start`, and `account/logout` for auth.
 5. Use `model/list` to populate the Summary model picker.
-6. Use `thread/start` and `turn/start` for meeting processing.
+6. Use `thread/start` and `turn/start` for meeting processing. Meeting turns send
+   `outputSchema` to constrain the final message; raw prompts do not.
 7. Retry JSON-RPC overload errors with bounded backoff.
 8. Convert auth failures to a typed re-auth prompt.
 
@@ -77,16 +78,17 @@ disabled through thread configuration; server approval requests are declined.
 The fields follow the pinned [0.157 thread protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json)
 and [turn protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json).
 
-In the advanced existing-session mode, ClawScribe checks the effective config
-for the summary's working directory before starting a thread. If it defines MCP
-servers, summaries require switching to the isolated profile. A config-read
-failure also prevents submission. An empty `mcp_servers` override cannot disable
-inherited servers because the pinned [0.157 config merger](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/config/src/merge.rs)
-merges tables recursively; the check uses the pinned [config/read implementation](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server/src/config_manager_service.rs).
+Each run owns a temporary scratch folder for prompts and transcript input.
+Cleanup runs after success, failure, or cancellation and retries transient removal
+failures. Output documents and processing logs are saved in the meeting's
+recording folder, or app data `meeting-outputs/<id>` when it has no recording
+folder. Meeting deletion removes app-data outputs and legacy scratch runs, with
+failures reported. Outputs inside a recording folder follow the recording-file
+deletion choice and its ownership guards; keeping that folder keeps those outputs.
 
 The isolated profile requires `cli_auth_credentials_store = "keyring"`, supported
 by the [pinned credential-storage implementation](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/login/src/auth/storage.rs).
-Existing profiles receive this setting while retaining other configuration.
+Existing isolated profiles receive this setting while retaining other configuration.
 Users with an older file-based sign-in sign in once again; the old `auth.json`
 is removed only after a keyring-backed account is available. Keyring failures
 do not fall back to plaintext.

@@ -84,9 +84,9 @@ make performance regressions easier to compare.
 | Nemotron | fp16, int8 | Multilingual beta path. Requires per-hardware validation because DirectML graph behavior varies. |
 | Whisper | local whisper.cpp models | Compatibility path with feature-specific acceleration options. |
 
-Model downloads are managed in app settings. Large-file sizes are checked so CDN
-errors, interrupted downloads, and Git LFS pointer stubs are rejected instead of
-being treated as valid models.
+Model downloads are managed in app settings. Speech, speaker-detection, and
+Built-in AI summary models use pinned revisions, expected sizes, and SHA-256
+verification before use. Mismatched or incomplete files must be downloaded again.
 
 ## Performance Validation
 

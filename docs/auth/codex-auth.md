@@ -18,7 +18,7 @@ private Codex backend traffic, or depend on a global `codex.exe`.
 
 The supported boundary is the official Codex app-server runtime:
 
-- bundled/pinned platform-specific runtime, or controlled first-run installer
+- bundled/pinned platform-specific runtime
 - JSON-RPC over stdio / JSONL
 - isolated ClawScribe `CODEX_HOME`
 - app-server account/thread/turn RPC methods

@@ -1,6 +1,6 @@
 # ClawScribe Documentation
 
-Documentation for source version **0.5.42**. Installer availability and stable,
+Documentation for source version **0.5.46**. Installer availability and stable,
 prerelease, or draft status are tracked in
 [GitHub Releases](https://github.com/ch3573r/ClawScribe/releases), not inferred
 from the source version.
@@ -8,12 +8,18 @@ from the source version.
 ## Product And Build Guides
 
 - [Meeting quality and notebook performance](meeting-quality.md)
+- [Local library, tags, bookmarks, backup, and deletion](local-library.md)
 - [Architecture](architecture.md)
 - [Building from source](BUILDING.md)
 - [Windows release, signing, and acceptance checks](windows-release.md)
+- [0.5.46 release notes](releases/0.5.46.md)
+- [0.5.45 release notes](releases/0.5.45.md)
+- [0.5.44 release notes](releases/0.5.44.md)
+- [0.5.43 release notes](releases/0.5.43.md)
 - [0.5.42 preview release notes](releases/0.5.42.md)
 - [0.5.41 stable release notes](releases/0.5.41.md)
 - [0.5.40 preview release notes](releases/0.5.40.md)
+- [0.5.39 release notes](releases/0.5.39.md)
 - [0.5.38 stable release notes](releases/0.5.38.md)
 - [0.5.37 preview release notes](releases/0.5.37.md)
 - [0.5.36 release notes](releases/0.5.36.md)
@@ -27,7 +33,7 @@ from the source version.
 
 - [Codex authentication](auth/codex-auth.md)
 - [OpenAI authentication modes](openai-oauth.md)
-- [OpenAI login background](auth/openai-login.md)
+- [OpenAI authentication paths](auth/openai-login.md)
 - [Bundled Codex runtime](codex-runtime.md)
 
 ## Microsoft 365 Exports
