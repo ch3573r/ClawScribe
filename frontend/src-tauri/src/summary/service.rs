@@ -73,6 +73,34 @@ fn strip_title_if_present(markdown: &str) -> String {
     }
 }
 
+fn is_default_meeting_title(title: &str) -> bool {
+    title == "New Meeting"
+        || regex::Regex::new(r"^Meeting \d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+            .unwrap()
+            .is_match(title)
+}
+
+async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str) {
+    let Some(title) = extract_meeting_name_from_markdown(markdown).filter(|title| {
+        !title.trim().is_empty() && !title.to_lowercase().contains("<add title here>")
+    }) else {
+        return;
+    };
+    let current = sqlx::query_scalar::<_, String>("SELECT title FROM meetings WHERE id = ?")
+        .bind(meeting)
+        .fetch_optional(pool)
+        .await;
+    if let Ok(Some(current)) = current {
+        if is_default_meeting_title(&current) {
+            // A rename while generation was in flight wins over the generated heading.
+            if sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ?")
+                .bind(title).bind(meeting).bind(current).execute(pool).await.is_err() {
+                warn!("Could not apply generated meeting title");
+            }
+        }
+    }
+}
+
 const ENGLISH_CACHE_FIELD: &str = "english_cache";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -652,6 +680,7 @@ impl SummaryService {
                         "✓ OpenAI-compatible provider processed meeting_id: {}. Duration: {:.2}s",
                         meeting_id, duration
                     );
+                    apply_generated_title(&pool, &meeting_id, &api_result.markdown).await;
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&api_result.markdown),
                         "structured_meeting_output": api_result.structured_output,
@@ -760,6 +789,7 @@ impl SummaryService {
                         "✓ Codex processed meeting_id: {}. Duration: {:.2}s",
                         meeting_id, duration
                     );
+                    apply_generated_title(&pool, &meeting_id, &codex_result.markdown).await;
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&codex_result.markdown),
                         "structured_meeting_output": codex_result.structured_output,
@@ -882,18 +912,7 @@ impl SummaryService {
                 );
                 info!("Final markdown generated ({} chars)", final_markdown.len());
 
-                if let Some(name) =
-                    extract_meeting_name_from_markdown(&final_markdown).filter(|n| !n.is_empty())
-                {
-                    info!("Extracted a meeting title from the summary");
-                    if let Err(e) =
-                        MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name).await
-                    {
-                        error!("Failed to update meeting name for {}: {}", meeting_id, e);
-                    } else {
-                        info!("Successfully updated meeting name for {}", meeting_id);
-                    }
-                }
+                apply_generated_title(&pool, &meeting_id, &final_markdown).await;
 
                 let mut result_json = build_summary_result_json(
                     &final_markdown,
@@ -1350,4 +1369,32 @@ pub(crate) fn structured_provider_prompt(
     language: &str,
 ) -> String {
     format!("{custom}\n\nPopulate notes_markdown with the complete meeting report in language {language}, using the exact section layout and instructions below. Include supplied source links with supported claims. Also populate all structured decision, risk, question, action and email fields for exports. Do not omit structured fields just because they are in the report.\n\n{}\n\n{}", template.to_markdown_structure(), template.to_section_instructions())
+}
+
+#[cfg(test)]
+mod generated_title_tests {
+    use super::*;
+    #[tokio::test]
+    async fn only_default_titles_are_replaced_and_placeholders_are_ignored() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for (existing, proposed, expected) in [
+            ("My chosen title", "New title", "My chosen title"),
+            ("New Meeting", "<Add Title here>", "New Meeting"),
+            ("New Meeting", "Planning", "Planning"),
+            ("Meeting 2026-01-02_03-04-05", "Planning", "Planning"),
+        ] {
+            sqlx::query("UPDATE meetings SET title = ? WHERE id = 'review-test'")
+                .bind(existing)
+                .execute(&pool)
+                .await
+                .unwrap();
+            apply_generated_title(&pool, "review-test", &format!("# {proposed}\nNotes")).await;
+            let actual: String =
+                sqlx::query_scalar("SELECT title FROM meetings WHERE id = 'review-test'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
 }

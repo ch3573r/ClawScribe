@@ -225,6 +225,9 @@ read-only sandbox, no approval escalation, and disabled shell tools. Every turn
 reapplies the sandbox and approval policy; unexpected server approval requests
 are declined. These overrides also cover legacy home-mode configurations.
 
+Generated headings replace only untouched recording titles or “New Meeting”.
+Regeneration preserves manual names and ignores template title placeholders.
+
 Summary and chat budgets resolve provider/model context and output tokens together.
 GPT-4o uses 128,000 context tokens, GPT-4.1 uses 1,047,576, Llama 3.1/3.3 uses
 131,072, and Claude uses a conservative 200,000; unknown cloud models use 32,768.
