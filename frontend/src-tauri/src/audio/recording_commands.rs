@@ -1065,6 +1065,7 @@ pub async fn stop_recording<R: Runtime>(
             transcription_incomplete,
             capture_incomplete,
             recording_files_incomplete,
+            recovery_files_elsewhere: false,
         };
         if !matches!(
             tokio::task::spawn_blocking(move || outcome.write(&folder)).await,

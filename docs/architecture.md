@@ -417,3 +417,7 @@ saved copies; unsaved recovery data never expires automatically.
 Startup removes unattached live bookmarks only when their recording folder is
 gone and no saved meeting owns that folder. Existing recovery folders and
 attached bookmarks are retained, and cleanup skips active recordings.
+
+Restored recording outcomes retain whether recovery files were excluded from the
+archive. Those meetings direct recovery to the original computer; they do not
+recommend retranscribing unavailable audio. Older archives default this flag to false.

@@ -3,6 +3,7 @@ export interface RecordingOutcome {
   transcription_incomplete: boolean;
   capture_incomplete?: boolean;
   recording_files_incomplete?: boolean;
+  recovery_files_elsewhere?: boolean;
 }
 
 export function recordingOutcome(value?: Partial<RecordingOutcome> | null): RecordingOutcome {
@@ -11,6 +12,7 @@ export function recordingOutcome(value?: Partial<RecordingOutcome> | null): Reco
     transcription_incomplete: value?.transcription_incomplete === true,
     capture_incomplete: value?.capture_incomplete === true,
     recording_files_incomplete: value?.recording_files_incomplete === true,
+    recovery_files_elsewhere: value?.recovery_files_elsewhere === true,
   };
 }
 
@@ -19,6 +21,9 @@ export function recordingBlocksAutoSummary(value?: Partial<RecordingOutcome> | n
 }
 
 export function recordingRecoveryMessage(value: RecordingOutcome): string | null {
+  if (value.recovery_files_elsewhere) {
+    return 'Audio could not be fully saved on the computer where this meeting was recorded. Its recovery files were not included in this backup. Recover the audio on that computer, then back it up again.';
+  }
   const messages: string[] = [];
   if (value.audio_save_failed) {
     messages.push('Audio could not be fully saved. Check disk space and use Retranscribe to recover the available audio. Keep the meeting recovery files.');

@@ -5,6 +5,15 @@ const { recordingOutcome, recordingRecoveryMessage, recordingBlocksAutoSummary }
 
 test('completed and legacy recordings do not invent a failure', () => {
   assert.equal(recordingRecoveryMessage(recordingOutcome()), null);
+  assert.equal(recordingOutcome().recovery_files_elsewhere, false);
+});
+
+test('restored recordings direct recovery to the source computer without suggesting unavailable local audio', () => {
+  for (const flags of [{}, { audio_save_failed: true, transcription_incomplete: true }]) {
+    const message = recordingRecoveryMessage(recordingOutcome({ ...flags, recovery_files_elsewhere: true }));
+    assert.equal(message, 'Audio could not be fully saved on the computer where this meeting was recorded. Its recovery files were not included in this backup. Recover the audio on that computer, then back it up again.');
+    assert.doesNotMatch(message, /Retranscribe|Keep the meeting recovery files/);
+  }
 });
 
 test('capture gaps and backup file failures do not claim playable audio failed to save', () => {

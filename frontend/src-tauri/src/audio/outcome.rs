@@ -10,6 +10,9 @@ pub struct RecordingOutcome {
     #[serde(default)]
     #[sqlx(default)]
     pub recording_files_incomplete: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub recovery_files_elsewhere: bool,
 }
 
 impl RecordingOutcome {
@@ -18,6 +21,7 @@ impl RecordingOutcome {
             || self.transcription_incomplete
             || self.capture_incomplete
             || self.recording_files_incomplete
+            || self.recovery_files_elsewhere
     }
 
     pub(crate) fn read(folder: &std::path::Path) -> Result<Option<Self>, String> {
@@ -67,6 +71,42 @@ pub async fn get_recording_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_location_migration_preserves_previous_version_outcomes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in sqlx::migrate!("./migrations")
+            .iter()
+            .filter(|migration| migration.version < 20260927000003)
+        {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('existing', 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('existing', 1, 1)")
+            .execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20260927000003_recovery_files_elsewhere.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let outcome: RecordingOutcome =
+            sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = 'existing'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(outcome.audio_save_failed && outcome.transcription_incomplete);
+        assert!(!outcome.recovery_files_elsewhere);
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap()["recovery_files_elsewhere"],
+            false
+        );
+    }
 
     #[tokio::test]
     async fn capture_gap_migration_preserves_existing_recovery_status() {
