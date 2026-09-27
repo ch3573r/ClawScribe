@@ -198,6 +198,21 @@ configuration. API summary response readers enforce an 8 MiB limit, reject
 reported output truncation, and keep cancellation active while reading the body.
 Chat and reviewed task polishing share provider configuration resolution.
 
+Summary and chat budgets resolve provider/model context and output tokens together.
+GPT-4o uses 128,000 context tokens, GPT-4.1 uses 1,047,576, Llama 3.1/3.3 uses
+131,072, and Claude uses a conservative 200,000; unknown cloud models use 32,768.
+These families also apply to namespaced OpenRouter IDs. See the
+[OpenAI model specifications](https://developers.openai.com/api/docs/models/gpt-4.1)
+and [Groq Llama specifications](https://console.groq.com/docs/model/llama-3.3-70b-versatile).
+Operator endpoints use their configured context or 8,192. Ollama metadata and
+the Built-in AI registry are capped at 16,384, with an 8,192 Ollama fallback;
+the local helper receives that same context. Codex retains 32,768.
+After reserving output tokens and 256 tokens, planning converts the remainder
+to three UTF-8 bytes per token and subtracts prompt overhead in bytes. Extraction
+pieces use their short prompt and at most 1,024 output tokens; the final report
+reserves its full template. Structured OpenAI requests carry the schema once,
+with an inline schema only for strict-JSON fallback.
+
 Summary status polling has one shared timer owner across meetings. Starting or
 finishing one poll keeps other meetings' polls alive; stopped or replaced requests
 cannot publish late responses. Missing jobs and completed jobs without saved

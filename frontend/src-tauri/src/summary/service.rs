@@ -482,34 +482,17 @@ impl SummaryService {
             api_key
         };
 
-        // Dynamically fetch context size based on provider and model
-        let token_threshold = if provider == LLMProvider::Ollama {
-            super::context_budget::ollama_context(&model_name, ollama_endpoint.as_deref()).await
-        } else if provider == LLMProvider::BuiltInAI {
-            // Get model's context size from registry
-            use crate::summary::summary_engine::models;
-            let model = models::get_model_by_name(&model_name)
-                .ok_or_else(|| format!("Unknown model: {}", model_name));
-
-            match model {
-                Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.min(8192) as usize;
-                    info!(
-                        "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
-                        model_def.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!("{}, using default 2048", e);
-                    1748 // 2048 - 300 for overhead
-                }
-            }
+        let context_hint = if provider == LLMProvider::Ollama {
+            Some(
+                super::context_budget::ollama_context(&model_name, ollama_endpoint.as_deref())
+                    .await,
+            )
         } else {
-            // Unknown cloud endpoints also have finite context limits.
-            super::context_budget::DEFAULT_CONTEXT_TOKENS
+            None
         };
+        let token_threshold =
+            super::context_budget::resolve(&provider, &model_name, context_hint, None)
+                .context_tokens;
 
         // Get app data directory for BuiltInAI provider
         let app_data_dir = _app.path().app_data_dir().ok();
@@ -540,7 +523,7 @@ impl SummaryService {
                 .as_deref()
                 .or(detected_summary_language.as_deref())
                 .unwrap_or("en");
-            format!("{custom_prompt}\n\nPopulate notes_markdown with the complete meeting report in language {language}, using the exact section layout and instructions below. Include supplied source links with supported claims. Also populate all structured decision, risk, question, action and email fields for exports. Do not omit structured fields just because they are in the report.\n\n{}\n\n{}", template.to_markdown_structure(), template.to_section_instructions())
+            structured_provider_prompt(&custom_prompt, &template, language)
         } else {
             custom_prompt
         };
@@ -1344,4 +1327,13 @@ mod tests {
         let raw = r#"{ not valid json"#;
         assert!(extract_cached_english_markdown(raw, &sample_cache_source(), Some("de")).is_err());
     }
+}
+
+/// The exact structured-provider instructions used by generation and budget tests.
+pub(crate) fn structured_provider_prompt(
+    custom: &str,
+    template: &super::templates::Template,
+    language: &str,
+) -> String {
+    format!("{custom}\n\nPopulate notes_markdown with the complete meeting report in language {language}, using the exact section layout and instructions below. Include supplied source links with supported claims. Also populate all structured decision, risk, question, action and email fields for exports. Do not omit structured fields just because they are in the report.\n\n{}\n\n{}", template.to_markdown_structure(), template.to_section_instructions())
 }

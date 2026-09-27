@@ -1003,16 +1003,35 @@ impl CodexAppServerProvider {
             + output_schema_json().len()
             + request.custom_prompt.as_ref().map_or(0, String::len)
             + 1024;
-        let budget = super::context_budget::input_budget(32_768, 4096, overhead)?;
-        let (bounded_transcript, _) =
-            super::context_budget::reduce(&request.transcript, budget, |chunk| async move {
+        let limits = super::context_budget::resolve(
+            &super::llm_client::LLMProvider::Codex,
+            &self.config.model,
+            None,
+            None,
+        );
+        let budget = limits.input(
+            &super::llm_client::LLMProvider::Codex,
+            &self.config.model,
+            overhead,
+        )?;
+        let piece_budget = limits.extraction().input(
+            &super::llm_client::LLMProvider::Codex,
+            &self.config.model,
+            super::context_budget::EXTRACT_FACTS.len() + 256,
+        )?;
+        let (bounded_transcript, _) = super::context_budget::reduce(
+            &request.transcript,
+            budget,
+            piece_budget,
+            |chunk| async move {
                 self.run_text_prompt(&format!(
                     "{}\n\n<excerpt>{chunk}</excerpt>",
                     super::context_budget::EXTRACT_FACTS
                 ))
                 .await
-            })
-            .await?;
+            },
+        )
+        .await?;
         let scratch_dir = request
             .scratch_root
             .unwrap_or_else(default_codex_runs_root)

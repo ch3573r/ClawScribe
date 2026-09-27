@@ -8,7 +8,6 @@ use tracing::info;
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 /// Current Claude models think adaptively by default, and thinking counts toward
 /// `max_tokens`; this cap leaves room for it while staying non-streaming.
-const CLAUDE_MAX_OUTPUT_TOKENS: u32 = 16_000;
 
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]
@@ -127,6 +126,7 @@ pub async fn generate_summary(
             model_name,
             system_prompt,
             user_prompt,
+            max_tokens,
             cancellation_token,
         )
         .await
@@ -227,7 +227,9 @@ pub async fn generate_summary(
     );
 
     // Build request body based on provider
-    let output_tokens = max_tokens.unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32);
+    let output_tokens =
+        super::context_budget::resolve(provider, model_name, None, max_tokens.map(|v| v as usize))
+            .output_tokens as u32;
     let request_body = if provider == &LLMProvider::Ollama {
         let context = super::context_budget::ollama_context(model_name, ollama_endpoint).await;
         let budget = super::context_budget::input_budget(
@@ -278,7 +280,7 @@ pub async fn generate_summary(
         serde_json::json!(ClaudeRequest {
             system: system_prompt.to_string(),
             model: model_name.to_string(),
-            max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
+            max_tokens: output_tokens,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_prompt.to_string(),

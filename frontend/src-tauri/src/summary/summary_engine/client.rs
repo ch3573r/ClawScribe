@@ -134,6 +134,7 @@ pub async fn generate_with_builtin(
     model_name: &str,
     system_prompt: &str,
     user_prompt: &str,
+    max_tokens: Option<u32>,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<String> {
     let _job = crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?;
@@ -179,10 +180,16 @@ pub async fn generate_with_builtin(
 
     // Prepare generation request with model-specific sampling parameters
     let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let limits = crate::summary::context_budget::resolve(
+        &crate::summary::llm_client::LLMProvider::BuiltInAI,
+        model_name,
+        None,
+        max_tokens.map(|v| v as usize),
+    );
     let request = Request::Generate {
         prompt: formatted_prompt,
-        max_tokens: Some(models::DEFAULT_MAX_TOKENS),
-        context_size: Some(model_def.context_size.min(8192)),
+        max_tokens: Some(limits.output_tokens as i32),
+        context_size: Some(limits.context_tokens as u32),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(sampling.temperature),
         top_k: Some(sampling.top_k),
