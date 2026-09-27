@@ -1,12 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.46
 
-- Include the post-0.5.45 recovery fixes: detect raw capture audio in the recovery dialog, allow audio-only recovery, preserve capture-gap warnings, and report final save outcomes accurately. Recover to compact AAC when available and release fully recovered raw audio after library save or retranscription; preserve originals when recovery is incomplete.
-
-- Allow retranscription when recording status is damaged, preserving capture gaps from retained audio and the library while rewriting the status file.
-
-- Mark recovered live transcripts incomplete so the meeting offers Retranscribe; audio-only recoveries retain the normal Transcribe flow.
+- Recover interrupted recordings even without transcripts. The recovery dialog recognizes raw capture audio instead of incorrectly showing "No audio". Keep originals until recovered audio is complete, fall back to WAV if compression fails, preserve capture-gap warnings, and allow retranscription when recording status is damaged.
+- Make long-meeting summaries more reliable with provider-aware context and output budgets, bounded reduction, clearer retry and failure states, and support for reasoning models and custom endpoints. Improve source citations and preserve useful partial chat output without duplicate assistant messages; generated notes still require review.
+- Save meeting titles and summaries automatically, preserve drafts across navigation, confirm replacement of edited notes, and offer Restore previous summary. Quit waits briefly for pending edits and offers an explicit discard choice if they cannot be saved.
+- Restore the previous transcript after retranscription or speaker detection. Preserve correction history when applying speaker labels, block conflicting edits, and keep a successful database save when its file copy needs retry.
+- Make speaker detection safer for long recordings with bounded decoding memory, cancellation from the dialog or background toolbar, and a clear wait before recording can start. The current native step may take several minutes to finish after cancellation.
+- Verify model downloads against pinned revisions, expected sizes, and SHA-256 hashes before use. Open external links only through validated destinations and supported URL schemes.
+- Guard meeting deletion and remove saved transcript recovery copies promptly while retaining unsaved recovery data. Clean abandoned queue folders and bookmarks only when their recordings are no longer recoverable. Store summary context with the meeting so it survives library backup and restore.
+- Preserve SQLite WAL data during database transfers and take consistent snapshots before pending migrations. Restored meetings whose recovery files were excluded from the archive now explain that recovery must happen on the original computer.
+- Fix the Windows audio-device crash that could follow a short-lived monitoring or enumeration thread. Keep live transcription failure notices to one per recording and display live timestamps in local time.
+- Advance installer/runtime/updater version to 0.5.46 with Whisper Vulkan and ONNX/sherpa DirectML. Installers are staged as a draft for real-device acceptance; drafts do not change the stable updater. See `docs/releases/0.5.46.md` for validation and signing caveats.
 
 ## 0.5.45
 

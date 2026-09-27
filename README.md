@@ -7,12 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.45**. This release improves recording saves and recovery,
-fixes backup and export problems, and includes project tags, portable backups,
-and meeting bookmarks. See the [0.5.45 release notes](docs/releases/0.5.45.md)
-and the [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
+Source version: **0.5.46**. This draft candidate improves recording recovery,
+summary reliability, transcript review, and Windows audio-device stability.
+See the [0.5.46 release notes](docs/releases/0.5.46.md) and the
+[latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Draft candidates are excluded from updates; Stable publication follows real-device
-acceptance and makes the release available without opting into previews.
+acceptance.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -180,22 +180,18 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.45
+## What Changed In 0.5.46
 
-- Save available audio even when live transcription or recording-file writes fail,
-  recover readable temporary tails, and release redundant raw audio after saving.
-- Persist stopped metadata before encoding; prevent duplicate Stop and Save actions.
-- Clear repaired warnings after retranscription while retaining capture-gap information.
-  Informational warnings allow automatic notes, and summary polling stays active.
-- Report incomplete backups, skip existing restore audio before extraction, and
-  use recording offsets in exported transcripts.
-- Export Word, Confluence, OneNote, or OneDrive DOCX/PDF from one menu with
-  summary/transcript selection, optional speaker labels, and timestamps.
-- Organize meetings with project tags, bookmark recording moments, and restore
-  portable library backups without overwriting existing meeting IDs.
-- Fix native Save As permissions and duplicate title-bar gestures.
+- Recover audio-only meetings and recognize retained raw audio in the recovery dialog.
+- Improve summary budgets, citations, retries, reasoning models, and custom endpoints.
+- Autosave titles and summaries, and restore the previous summary or transcript.
+- Preserve corrections during speaker detection, protect concurrent edits, and allow cancellation.
+- Verify pinned model downloads and validate external links before opening them.
+- Guard meeting deletion, retain unsaved recovery data, and back up meeting summary context.
+- Preserve database WAL data and create snapshots before pending migrations.
+- Fix Windows device-enumeration crashes after short-lived audio threads exit.
 
-See the [release notes](docs/releases/0.5.45.md), the
+See the [release notes](docs/releases/0.5.46.md), the
 [local library guide](docs/local-library.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 
