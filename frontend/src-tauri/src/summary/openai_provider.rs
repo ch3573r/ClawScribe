@@ -408,10 +408,7 @@ impl OpenAICompatibleProcessingProvider {
         if user_prompt.len() > budget {
             return Err("The request exceeds this provider's configured context. Increase Context window to the model's supported limit or shorten the notes prompt.".into());
         }
-        let output_tokens = self
-            .config
-            .max_tokens
-            .unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32);
+        let output_tokens = limits.output_tokens as u32;
         let reasoning = is_openai_reasoning_model(&self.config.model);
         let body = ChatCompletionRequest {
             model: self.config.model.clone(),
@@ -869,6 +866,25 @@ mod tests {
         ] {
             assert!(!is_openai_reasoning_model(model), "{model}");
         }
+    }
+
+    #[tokio::test]
+    async fn reasoning_models_default_to_a_sufficient_completion_budget() {
+        let base_url = fake_openai_server(|request, _| {
+            assert!(request.contains("\"max_completion_tokens\":16000"));
+            assert!(!request.contains("\"max_tokens\""));
+            (200, chat_response("ok"))
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url,
+            model: "gpt-6-sol".into(),
+            context_window: 128_000,
+            max_tokens: None,
+            ..OpenAICompatibleProviderConfig::default()
+        })
+        .unwrap();
+        assert_eq!(provider.send_text_prompt("s", "u").await.unwrap(), "ok");
     }
 
     #[tokio::test]
