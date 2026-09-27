@@ -68,6 +68,7 @@ pub async fn start_monitoring<R: Runtime>(
     let worker_device_names = normalized_device_names.clone();
     let worker_app_handle = app_handle.clone();
 
+    super::com_anchor::ensure_device_enumerator();
     let worker = std::thread::Builder::new()
         .name("clawscribe-mic-level-monitor".to_string())
         .spawn(move || {

@@ -425,6 +425,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Only run manually as it requires audio hardware
     async fn test_system_audio_detector() {
+        crate::audio::com_anchor::ensure_device_enumerator();
         let mut detector = SystemAudioDetector::new();
         detector.start(new_system_audio_callback(|event| {
             println!("System audio event: {:?}", event);

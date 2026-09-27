@@ -86,6 +86,7 @@ try {
         "summary::",
         "model_download::tests",
         "audio::decoder::tests",
+        "audio::com_anchor::tests",
         "audio::vad::tests::flush_",
         "audio::async_logger::tests",
         "audio::hardware_detector::tests",

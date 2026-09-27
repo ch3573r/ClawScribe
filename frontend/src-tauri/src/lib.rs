@@ -573,6 +573,7 @@ pub fn run() {
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
+            audio::com_anchor::ensure_device_enumerator();
             log::info!("Application setup complete");
 
             // Initialize system tray

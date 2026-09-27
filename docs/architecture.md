@@ -95,6 +95,10 @@ window titles are returned only when the settings diagnostics panel requests the
 
 ## Recording And Inference Lifetimes
 
+On Windows, `audio/com_anchor.rs` initializes CPAL’s device enumerator on a
+process-lifetime MTA thread before device access. This keeps its COM apartment
+alive when microphone-monitor or reconnect worker threads exit.
+
 `audio/inference.rs` serializes recording, batch, diarization and model-changing jobs and holds a
 separate native-call permit inside the blocking task. Cancelling the async caller
 cannot free a model that native code still uses. `audio/batch_audio.rs` normalizes
