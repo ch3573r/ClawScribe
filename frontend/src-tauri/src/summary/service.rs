@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -687,11 +687,20 @@ impl SummaryService {
                 .await
                 .ok()
                 .flatten();
-            let output_dir = meeting_metadata
-                .as_ref()
-                .and_then(|m| m.folder_path.as_ref())
-                .filter(|p| !p.trim().is_empty())
-                .map(PathBuf::from);
+            let output_dir = match _app.path().app_data_dir() {
+                Ok(data) => {
+                    super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
+                        .await
+                }
+                Err(_) => Err("Could not locate meeting output storage".into()),
+            };
+            let output_dir = match output_dir {
+                Ok(path) => path,
+                Err(error) => {
+                    Self::update_process_failed(&pool, &meeting_id, &error).await;
+                    return;
+                }
+            };
             let meeting_title = meeting_metadata.map(|m| m.title);
 
             let provider_config = match provider {
@@ -771,7 +780,7 @@ impl SummaryService {
                                 meeting_title,
                                 transcript: text.clone(),
                                 custom_prompt: Some(custom_prompt.clone()),
-                                output_dir,
+                                output_dir: Some(output_dir),
                             },
                             Some(cancellation_token),
                         )
@@ -834,40 +843,37 @@ impl SummaryService {
                 .await
                 .ok()
                 .flatten();
-            let output_dir = meeting_metadata
-                .as_ref()
-                .and_then(|m| m.folder_path.as_ref())
-                .filter(|p| !p.trim().is_empty())
-                .map(PathBuf::from);
+            let output_dir = match _app.path().app_data_dir() {
+                Ok(data) => {
+                    super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
+                        .await
+                }
+                Err(_) => Err("Could not locate meeting output storage".into()),
+            };
+            let output_dir = match output_dir {
+                Ok(path) => path,
+                Err(error) => {
+                    Self::update_process_failed(&pool, &meeting_id, &error).await;
+                    return;
+                }
+            };
             let meeting_title = meeting_metadata.map(|m| m.title);
 
             let result = match provider_from_app(&_app) {
                 Ok(codex_provider) => {
-                    let output_dir = match output_dir {
-                        Some(path) => Ok(path),
-                        None => {
-                            super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id)
-                                .await
-                        }
-                    };
-                    match output_dir {
-                        Err(error) => Err(error),
-                        Ok(output_dir) => {
-                            super::llm_client::with_cancellation(
-                                Some(cancellation_token),
-                                codex_provider.process_meeting(CodexMeetingProcessRequest {
-                                    sources: summary_sources.clone(),
-                                    meeting_id: meeting_id.clone(),
-                                    meeting_title,
-                                    transcript: text.clone(),
-                                    custom_prompt: Some(custom_prompt.clone()),
-                                    output_dir: Some(output_dir),
-                                    scratch_root: None,
-                                }),
-                            )
-                            .await
-                        }
-                    }
+                    super::llm_client::with_cancellation(
+                        Some(cancellation_token),
+                        codex_provider.process_meeting(CodexMeetingProcessRequest {
+                            sources: summary_sources.clone(),
+                            meeting_id: meeting_id.clone(),
+                            meeting_title,
+                            transcript: text.clone(),
+                            custom_prompt: Some(custom_prompt.clone()),
+                            output_dir: Some(output_dir),
+                            scratch_root: None,
+                        }),
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             };

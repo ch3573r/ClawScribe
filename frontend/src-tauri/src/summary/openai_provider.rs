@@ -217,6 +217,10 @@ impl OpenAICompatibleProcessingProvider {
             }
         }
 
+        let output_dir = request
+            .output_dir
+            .as_ref()
+            .ok_or("Meeting output storage was not resolved")?;
         let started_at = Instant::now();
         let transcript = normalize_transcript_markdown(&request.transcript);
         let system_prompt = build_system_prompt(false);
@@ -286,9 +290,7 @@ impl OpenAICompatibleProcessingProvider {
 
         let structured_output = super::sources::expand_output(structured_output, &request.sources)?;
         let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
-        let output_dir = request
-            .output_dir
-            .unwrap_or_else(|| std::env::temp_dir().join("clawscribe-openai-compatible"));
+
         fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create meeting output folder: {e}"))?;
 

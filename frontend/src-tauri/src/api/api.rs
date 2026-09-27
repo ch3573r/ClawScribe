@@ -1063,6 +1063,17 @@ pub async fn api_delete_meeting<R: Runtime>(
     match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
         Ok(true) => {
             let mut warnings = Vec::new();
+            match app.path().app_data_dir() {
+                Ok(data) => {
+                    if let Some(warning) =
+                        crate::summary::codex_provider::remove_meeting_outputs(&data, &meeting_id)
+                            .await
+                    {
+                        warnings.push(warning);
+                    }
+                }
+                Err(_) => warnings.push("Could not locate generated meeting outputs".into()),
+            }
             if let Some(warning) =
                 crate::summary::codex_provider::remove_meeting_runs(&meeting_id).await
             {
