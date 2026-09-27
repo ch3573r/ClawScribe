@@ -18,9 +18,10 @@
 //! its "Mobile and desktop applications" (public client) platform; Entra
 //! ignores the loopback port at match time.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
@@ -62,6 +63,7 @@ fn authorize_url(
     redirect_uri: &str,
     challenge: &str,
     state: &str,
+    consent: bool,
 ) -> String {
     let mut url = url::Url::parse(&format!(
         "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
@@ -76,12 +78,10 @@ fn authorize_url(
         .append_pair("scope", &config.scopes.join(" "))
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state)
-        // Force the consent screen rather than silently reusing a prior grant.
-        // Sign-in testing across builds can leave an older grant that lacks the
-        // OneNote/Planner scopes; reusing it yields a token that 403s on Graph.
-        // `prompt=consent` makes Entra re-issue consent for the full scope set.
-        .append_pair("prompt", "consent");
+        .append_pair("state", state);
+    if consent {
+        url.query_pairs_mut().append_pair("prompt", "consent");
+    }
     url.into()
 }
 
@@ -96,25 +96,71 @@ struct Redirect {
 /// Block on the loopback listener until Entra redirects back, then return the
 /// parsed query parameters. Responds to the browser with a small "you can close
 /// this window" page.
-fn wait_for_redirect(listener: TcpListener) -> Result<Redirect, MsAuthError> {
+fn wait_for_redirect(
+    listener: TcpListener,
+    cancel: CancellationToken,
+    deadline: Instant,
+) -> Result<Redirect, MsAuthError> {
     listener
-        .set_nonblocking(false)
+        .set_nonblocking(true)
         .map_err(|e| MsAuthError::Network(e.to_string()))?;
 
-    // Loop so we can ignore stray requests (e.g. favicon) that carry no params.
-    loop {
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|e| MsAuthError::Network(format!("loopback accept failed: {e}")))?;
-
-        let request_line = {
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .map_err(|e| MsAuthError::Network(e.to_string()))?;
-            line
+    // Polling and per-read deadlines also cover local clients that never finish a request.
+    'accept: loop {
+        if cancel.is_cancelled() {
+            return Err(MsAuthError::AuthorizationDeclined);
+        }
+        if Instant::now() >= deadline {
+            return Err(MsAuthError::Unexpected("Sign-in timed out".into()));
+        }
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(_) => return Err(MsAuthError::Network("Loopback listener failed".into())),
         };
+        // Windows may inherit the listener's nonblocking mode on accepted sockets.
+        stream
+            .set_nonblocking(false)
+            .map_err(|_| MsAuthError::Network("Could not configure sign-in connection".into()))?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .map_err(|_| MsAuthError::Network("Could not configure sign-in listener".into()))?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .map_err(|_| MsAuthError::Network("Could not configure sign-in listener".into()))?;
+        let connection_deadline = Instant::now() + Duration::from_secs(5);
+        let mut request = Vec::new();
+        while !request.contains(&b'\n') {
+            if cancel.is_cancelled() {
+                return Err(MsAuthError::AuthorizationDeclined);
+            }
+            if Instant::now() >= deadline {
+                return Err(MsAuthError::Unexpected("Sign-in timed out".into()));
+            }
+            if Instant::now() >= connection_deadline {
+                continue 'accept;
+            }
+            let mut buffer = [0u8; 256];
+            match stream.read(&mut buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue
+                }
+                Ok(0) | Err(_) => continue 'accept,
+                Ok(count) => request.extend_from_slice(&buffer[..count]),
+            }
+            if request.len() > 8192 {
+                continue 'accept;
+            }
+        }
+        let request_line = String::from_utf8_lossy(&request);
 
         // Request line looks like: `GET /?code=...&state=... HTTP/1.1`
         let path = request_line.split_whitespace().nth(1).unwrap_or("");
@@ -203,13 +249,40 @@ async fn exchange_code(
         .map_err(|e| MsAuthError::Unexpected(format!("Failed to parse token: {e}")))
 }
 
-/// Run the full interactive sign-in: open the browser, capture the loopback
-/// redirect, and exchange the code for tokens. `open_browser` is injected so
-/// callers reuse the app's existing URL opener.
 pub async fn run_interactive_sign_in(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
     open_browser: impl Fn(&str),
+    consent: bool,
+    cancel: CancellationToken,
+) -> Result<TokenResponse, MsAuthError> {
+    tokio::select! {
+        _ = cancel.cancelled() => Err(MsAuthError::AuthorizationDeclined),
+        result = sign_in_with_scopes(consent, |consent| run_interactive_attempt(http, config, &open_browser, consent, cancel.clone())) => result,
+    }
+}
+
+async fn sign_in_with_scopes<F, Fut>(
+    consent: bool,
+    attempt: F,
+) -> Result<TokenResponse, MsAuthError>
+where
+    F: FnOnce(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<TokenResponse, MsAuthError>>,
+{
+    // Partial grants are a usable session. Only an explicit UI action requests consent.
+    attempt(consent).await
+}
+
+/// Run the full interactive sign-in: open the browser, capture the loopback
+/// redirect, and exchange the code for tokens. `open_browser` is injected so
+/// callers reuse the app's existing URL opener.
+async fn run_interactive_attempt(
+    http: &reqwest::Client,
+    config: &MicrosoftAuthConfig,
+    open_browser: impl Fn(&str),
+    consent: bool,
+    cancel: CancellationToken,
 ) -> Result<TokenResponse, MsAuthError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| MsAuthError::Network(format!("could not bind loopback listener: {e}")))?;
@@ -221,18 +294,15 @@ pub async fn run_interactive_sign_in(
 
     let pkce = generate_pkce();
     let state = random_state();
-    let auth_url = authorize_url(config, &redirect_uri, &pkce.challenge, &state);
+    let auth_url = authorize_url(config, &redirect_uri, &pkce.challenge, &state, consent);
 
     open_browser(&auth_url);
 
-    // Capture the redirect on a blocking thread, bounded by a timeout.
-    let redirect = tokio::time::timeout(
-        SIGN_IN_TIMEOUT,
-        tokio::task::spawn_blocking(move || wait_for_redirect(listener)),
-    )
-    .await
-    .map_err(|_| MsAuthError::Unexpected("Sign-in timed out".to_string()))?
-    .map_err(|e| MsAuthError::Unexpected(format!("loopback task failed: {e}")))??;
+    let deadline = Instant::now() + SIGN_IN_TIMEOUT;
+    let redirect =
+        tokio::task::spawn_blocking(move || wait_for_redirect(listener, cancel, deadline))
+            .await
+            .map_err(|_| MsAuthError::Unexpected("Sign-in listener failed".into()))??;
 
     if let Some(err) = redirect.error {
         let desc = redirect.error_description.unwrap_or_default();
@@ -261,6 +331,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn listener_accepts_callback_after_client_connects() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            wait_for_redirect(
+                listener,
+                CancellationToken::new(),
+                Instant::now() + Duration::from_secs(2),
+            )
+        });
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        client
+            .write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let result = worker.join().unwrap().unwrap();
+        assert_eq!(result.code.as_deref(), Some("test-code"));
+        assert_eq!(result.state.as_deref(), Some("test-state"));
+    }
+
+    #[test]
+    fn idle_callback_connection_expires_and_next_client_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            wait_for_redirect(
+                listener,
+                CancellationToken::new(),
+                Instant::now() + Duration::from_secs(9),
+            )
+        });
+        let _idle = std::net::TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let mut next = std::net::TcpStream::connect(address).unwrap();
+        next.write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
+            .unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap().code.as_deref(),
+            Some("test-code")
+        );
+        assert!(started.elapsed() >= Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[test]
+    fn listener_exits_and_releases_port_after_timeout_or_cancel() {
+        for cancelled in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let cancel = CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let worker = std::thread::spawn(move || {
+                wait_for_redirect(
+                    listener,
+                    worker_cancel,
+                    Instant::now() + Duration::from_millis(150),
+                )
+                .map(|_| ())
+            });
+            let stalled = std::net::TcpStream::connect(address).unwrap();
+            if cancelled {
+                cancel.cancel();
+            }
+            assert!(worker.join().unwrap().is_err());
+            drop(stalled);
+            assert!(TcpListener::bind(address).is_ok());
+        }
+    }
+
+    #[test]
     fn pkce_challenge_is_sha256_of_verifier() {
         let pkce = generate_pkce();
         // Recompute the challenge from the verifier and confirm it matches.
@@ -282,6 +423,7 @@ mod tests {
             "http://localhost:12345",
             "challenge123",
             "state456",
+            false,
         );
         assert!(u.contains("code_challenge=challenge123"));
         assert!(u.contains("code_challenge_method=S256"));
@@ -289,6 +431,36 @@ mod tests {
         assert!(u.contains(&format!("client_id={}", config.client_id)));
         assert!(u.contains("redirect_uri=http%3A%2F%2Flocalhost%3A12345"));
         assert!(u.contains("state=state456"));
+        assert!(!u.contains("prompt=consent"));
+    }
+
+    #[tokio::test]
+    async fn partial_scopes_connect_without_automatic_consent() {
+        let mut calls = Vec::new();
+        let token = sign_in_with_scopes(false, |consent| {
+            calls.push(consent);
+            std::future::ready(Ok(TokenResponse {
+                access_token: "test-token".into(),
+                refresh_token: None,
+                expires_in: 3600,
+                token_type: "Bearer".into(),
+                scope: "User.Read Notes.Create".into(),
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, [false]);
+        assert_eq!(token.scope, "User.Read Notes.Create");
+        assert!(token.refresh_token.is_none());
+        let config = MicrosoftAuthConfig::default();
+        assert!(authorize_url(
+            &config,
+            "http://localhost:12345",
+            "challenge",
+            "state",
+            true
+        )
+        .contains("prompt=consent"));
     }
 
     #[test]

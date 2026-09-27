@@ -87,6 +87,7 @@ export default function SettingsPage() {
             model: config.model || "large-v3",
             apiKey: config.apiKey || null,
             baseUrl: config.baseUrl || null,
+            allowUnencrypted: config.allowUnencrypted ?? false,
             endpoint: config.endpoint || null,
             region: config.region || null,
           });

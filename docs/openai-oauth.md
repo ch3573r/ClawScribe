@@ -123,19 +123,10 @@ Status: compatibility metadata only, not request-ready by itself.
 
 Public OpenAI OAuth PKCE metadata is intentionally distinct from both standalone
 OpenAI API-key auth and managed OpenAI-compatible endpoints. The backend may
-still validate legacy PKCE metadata and prepare a short-lived browser
-authorization URL for compatibility, but that metadata alone does not
-authenticate ClawScribe requests.
-
-Compatibility commands:
-
-- `api_prepare_openai_oauth_pkce_authorization`
-- `api_exchange_openai_oauth_pkce_code`
-
-`api_exchange_openai_oauth_pkce_code` returns an error. No OAuth client secret,
-access token, refresh token, ChatGPT token, Codex token, or fake token is stored
-in source code or settings. For OAuth-backed processing in the distributable app,
-use a standalone OpenAI-compatible managed endpoint.
+still validate legacy PKCE metadata for compatibility, but it cannot launch a
+browser flow or exchange codes. That metadata alone does not authenticate
+ClawScribe requests. For OAuth-backed processing, use a standalone
+OpenAI-compatible managed endpoint.
 
 ## Disabled Or Not Configured
 
@@ -154,7 +145,7 @@ Important fields:
 - `openclawCodexManagedConfigured`: whether managed endpoint metadata exists.
 - `openclawCodexEndpointPresent`: whether the managed request endpoint exists.
 - `oauthPkceConfigured`: whether legacy public OAuth PKCE metadata exists.
-- `oauthBrowserLaunchReady`: whether a legacy authorization URL can be prepared.
+- `oauthBrowserLaunchReady`: false; legacy OAuth browser commands are not supported.
 - `oauthDeviceFlowConfigured`: whether a legacy device endpoint was configured.
 - `canAuthenticateRequests`: true for API-key auth with a stored key, or for
   `openclaw_codex_managed` with an endpoint configured. Custom OpenAI-compatible
@@ -172,3 +163,19 @@ The Rust unit tests cover legacy API-key compatibility, disabled mode, optional
 OpenClaw managed endpoint normalization and status capability fields, legacy
 public OAuth metadata handling, URL validation, and PKCE S256 authorization
 request compatibility.
+
+## Local-network HTTP opt-in
+
+OpenClaw and custom OpenAI settings allow private-network HTTP only with
+**Allow unencrypted HTTP to this local-network server** enabled. The token/key
+is sent without encryption. Prefer HTTPS. Loopback HTTP needs no opt-in; public
+HTTP is rejected on save/send; saved settings remain editable with a warning.
+Tailscale's `100.64.0.0/10` range and `.ts.net` names count as local destinations.
+Before each HTTP request, all resolved addresses must
+be loopback or private, and the connection uses that checked resolution without
+redirects or a proxy. Existing private HTTP configurations migrate to opted-in
+on their first load; explicit choices are preserved thereafter.
+
+The OpenClaw `allow_unencrypted` JSON flag covers both handoff and model
+endpoints. Custom OpenAI configuration has its own `allow_unencrypted` flag.
+Confluence stores the choice with the PAT's saved origin.

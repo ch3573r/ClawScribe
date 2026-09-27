@@ -114,13 +114,21 @@ From the repository root, after staging the required sidecars:
 .\frontend\scripts\test-windows-native.ps1 -Features windows-gpu
 ```
 
+The app build must first stage `frontend/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`.
+The test helper fails immediately if that file is missing, then copies it beside
+the test executable as `ffmpeg.exe`. Recording tests use this build-staged encoder
+without relying on PATH or downloading an encoder at test time.
+
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
 DLLs, zero matched tests, and failing test results. Required suites cover summary
 providers and sidecar exchanges, audio cancellation and model switching,
 transcript preservation and paging, credentials, Microsoft export persistence,
 and updater selection. It also runs the local summary helper protocol, sampling,
-and stop-sequence tests. Tests run serially where they share native resources.
+and stop-sequence tests. Recording suites cover partial audio finalization,
+checkpoint fallback, capture gaps, transcript snapshot failures, duplicate saves,
+outcome migrations and acceleration selection. Tests run serially where they
+share native resources.
 It does not perform live capture, GUI interaction, or model-quality benchmarking.
 
 ## GitHub Actions
@@ -221,11 +229,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.5.42, installer filenames are:
+For source version 0.5.45, installer filenames are:
 
 ```text
-ClawScribe_0.5.42_x64-setup.exe
-ClawScribe_0.5.42_x64_en-US.msi
+ClawScribe_0.5.45_x64-setup.exe
+ClawScribe_0.5.45_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).

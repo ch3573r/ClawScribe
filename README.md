@@ -7,14 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.42 Preview**. The [0.5.42 Windows prerelease](https://github.com/ch3573r/ClawScribe/releases/tag/v0.5.42)
-adapts selected Meetily 0.4.1 reliability fixes: resumable speech-model downloads,
-correct HE-AAC import timing, stricter reasoning-text checks in notes, and a
-portable CPU baseline. Enable **Include prereleases** or install manually; the
-[latest stable-channel release](https://github.com/ch3573r/ClawScribe/releases/latest)
-remains 0.5.41.
-Read the [release validation limits](docs/releases/0.5.42.md): real-device capture,
-install/upgrade acceptance, and sustained notebook performance remain unconfirmed.
+Source version: **0.5.45**. This release improves recording saves and recovery,
+fixes backup and export problems, and includes project tags, portable backups,
+and meeting bookmarks. See the [0.5.45 release notes](docs/releases/0.5.45.md)
+and the [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
+Draft candidates are excluded from updates; Stable publication follows real-device
+acceptance and makes the release available without opting into previews.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -51,6 +49,12 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 - **Record now, transcribe later:** choose audio-only mode on Home or in
   Recording settings. It always saves audio, skips the speech model and live
   transcription, and leaves a **Transcribe** action on the saved meeting.
+- Recording continues after temporary queue pressure or spool-write failures,
+  with incomplete audio reported visibly. Playback streams saved recordings.
+  Stop saves available audio even if transcript backup writes fail, and capture
+  gaps are reported separately from save failures. Repeated Stop actions reuse
+  the same library meeting. Recovery originals use about 700 MB per hour while recording; choose a local
+  folder with enough space. See [recording and recovery](docs/meeting-quality.md).
 - Correct transcript passages or preview literal find-and-replace across the
   entire meeting. Original recognition and segment timing are retained; undo
   restores previous corrections. Regenerate notes after correcting a transcript.
@@ -87,6 +91,20 @@ requests can fall back to local transcription with a notification explaining
 why. See [hosted transcription verification](docs/hosted-transcription-smoke.md).
 
 ## Meeting Notes And Exports
+
+- **Local Word export:** save a summary, full transcript, or both as `.docx`,
+  with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
+  sign-in or Word installed.
+- **Project tags:** label saved meetings and filter the archive and transcript
+  search by project, including an untagged view.
+- **Meeting bookmarks:** mark a moment while recording, then label and revisit
+  it from the saved transcript panel. Add markers during playback too.
+- **Backup and restore:** save a portable archive of meeting data and recordings.
+  Restore adds missing meetings and skips existing IDs without retaining their
+  extracted audio. Backups continue when recording folders are missing and report
+  affected meetings, excluded recovery files, and unavailable audio. Archives
+  exclude provider credentials and models and are not encrypted. See
+  [local library tools](docs/local-library.md).
 
 Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Configurable
@@ -127,6 +145,13 @@ An interrupted export with an unknown outcome is not automatically repeated;
 check the destination before creating another page or task. See
 [Microsoft export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
+Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
+an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups
+retain access on upgrade. Tailscale addresses and MagicDNS names are supported.
+Public HTTP destinations are rejected on save/send; existing settings remain
+editable and explain what needs correction. Confluence remembers its HTTP choice
+for the saved server even while that server is offline.
+
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
@@ -141,19 +166,23 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.42 Preview
+## What Changed In 0.5.45
 
-- Resume interrupted Whisper and Parakeet downloads instead of starting over;
-  cancellation waits for the download to close its files.
-- Keep the real duration and timestamps of HE-AAC imports.
-- Remove model reasoning blocks from notes and fail generation on unfinished
-  reasoning tags instead of saving them.
-- Trim end-of-recording padding from the last speech segment.
-- Build Whisper's CPU code without build-machine tuning or AVX-512.
+- Save available audio even when live transcription or recording-file writes fail,
+  recover readable temporary tails, and release redundant raw audio after saving.
+- Persist stopped metadata before encoding; prevent duplicate Stop and Save actions.
+- Clear repaired warnings after retranscription while retaining capture-gap information.
+  Informational warnings allow automatic notes, and summary polling stays active.
+- Report incomplete backups, skip existing restore audio before extraction, and
+  use recording offsets in exported transcripts.
+- Export Word, Confluence, OneNote, or OneDrive DOCX/PDF from one menu with
+  summary/transcript selection, optional speaker labels, and timestamps.
+- Organize meetings with project tags, bookmark recording moments, and restore
+  portable library backups without overwriting existing meeting IDs.
+- Fix native Save As permissions and duplicate title-bar gestures.
 
-The 0.5.41 model-list and request fixes and the 0.5.40 reliability fixes remain
-available. See the [0.5.42 preview release notes](docs/releases/0.5.42.md) for
-validation results, the [0.5.41 notes](docs/releases/0.5.41.md), the
+See the [release notes](docs/releases/0.5.45.md), the
+[local library guide](docs/local-library.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status

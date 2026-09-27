@@ -4,11 +4,20 @@ use serde::{Deserialize, Serialize};
 pub struct RecordingOutcome {
     pub audio_save_failed: bool,
     pub transcription_incomplete: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub capture_incomplete: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub recording_files_incomplete: bool,
 }
 
 impl RecordingOutcome {
     pub fn needs_recovery(&self) -> bool {
-        self.audio_save_failed || self.transcription_incomplete
+        self.audio_save_failed
+            || self.transcription_incomplete
+            || self.capture_incomplete
+            || self.recording_files_incomplete
     }
 
     pub(crate) fn read(folder: &std::path::Path) -> Result<Option<Self>, String> {
@@ -48,14 +57,50 @@ pub async fn get_recording_outcome(
     state: tauri::State<'_, crate::state::AppState>,
     meeting_id: String,
 ) -> Result<Option<RecordingOutcome>, String> {
-    sqlx::query_as("SELECT audio_save_failed, transcription_incomplete FROM recording_outcomes WHERE meeting_id = ?")
-        .bind(meeting_id).fetch_optional(state.db_manager.pool()).await
+    sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .fetch_optional(state.db_manager.pool())
+        .await
         .map_err(|_| "Could not read meeting recovery status".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capture_gap_migration_preserves_existing_recovery_status() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in sqlx::migrate!("./migrations")
+            .iter()
+            .filter(|migration| migration.version < 20260926000001)
+        {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('existing', 'Synthetic meeting', '2026-01-01', '2026-01-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('existing', 1, 1)").execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20260926000001_recording_capture_gaps.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let outcome: RecordingOutcome =
+            sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = 'existing'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(outcome.audio_save_failed && outcome.transcription_incomplete);
+        assert!(!outcome.capture_incomplete && !outcome.recording_files_incomplete);
+        let legacy: RecordingOutcome =
+            serde_json::from_str(r#"{"audio_save_failed":false,"transcription_incomplete":false}"#)
+                .unwrap();
+        assert!(!legacy.needs_recovery());
+    }
 
     #[test]
     fn recovery_status_survives_restart_and_corruption_is_not_success() {
@@ -64,6 +109,7 @@ mod tests {
         RecordingOutcome {
             audio_save_failed: true,
             transcription_incomplete: true,
+            ..Default::default()
         }
         .write(folder.path())
         .unwrap();

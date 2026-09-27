@@ -130,9 +130,15 @@ export default function Home() {
 
       if (result.success) {
         toast.success('Meeting recovered successfully!', {
-          description: result.audioRecoveryStatus?.status === 'success'
-            ? 'Transcripts and audio recovered'
-            : 'Transcripts recovered (no audio available)',
+          description: result.audioRecoveryStatus?.status === 'partial'
+            ? 'Available audio recovered with gaps. You can transcribe it from the saved meeting.'
+            : result.audioRecoveryStatus?.status === 'success'
+              ? result.transcriptCount === 0
+                ? 'Audio recovered. You can transcribe it from the saved meeting.'
+                : 'Transcripts and audio recovered'
+              : result.audioRecoveryStatus?.status === 'failed'
+                ? 'Transcripts saved. Audio recovery needs a retry; original recording files were kept.'
+                : 'Transcripts recovered (no audio available)',
           action: result.meetingId ? {
             label: 'View Meeting',
             onClick: () => {

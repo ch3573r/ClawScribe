@@ -68,6 +68,11 @@ Title-bar requirements:
 - keeps minimize, maximize/restore, and close controls predictable
 - avoids clashing with the user's accent color
 
+Tauri's `data-tauri-drag-region` handler owns title-bar dragging and double-click
+maximization. Do not also dispatch those actions from a React mouse handler:
+the same gesture would reach both handlers and issue duplicate native requests.
+Window-control buttons remain outside the drag regions.
+
 ## Screenshot Policy
 
 The old `docs/brand/screenshots/` images were removed because they showed an

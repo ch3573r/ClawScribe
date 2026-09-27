@@ -51,13 +51,67 @@ imports and retranscription. It does not detect the spoken language or translate
 choose the spoken language explicitly when it differs from the system setting.
 Parakeet Auto does not record English as the source language without evidence.
 
-With audio saving enabled, captured mixed audio is staged in one-second batches under the meeting's
-`.audio-spool` folder while AAC checkpoints are encoded separately. Accepted
-spool chunks remain until final audio and metadata are saved successfully.
-Recovery reads the spool in sequence, includes an unconsumed tail, and retains
-originals. A process crash can still lose the in-memory fraction of the current
-second. Full disks or capture overrun stop capture with a visible warning; they
-cannot guarantee recovery of samples that never reached disk.
+With audio saving enabled, captured mixed audio is staged in one-second batches
+under the meeting's `.audio-spool` folder. New recordings do not launch periodic
+checkpoint encoders or create `.checkpoints` folders. Older checkpoint recordings
+can still be recovered. Independent disk workers have bounded memory queues: up to 60 capture
+batches and eight speech segments. Temporary queue pressure or spool-write
+failures mark the meeting incomplete and keep capture running. Publication
+retries transient file locks five times. Samples that never reach disk cannot
+be recovered, and a crash can lose pending in-memory buffers.
+
+The raw spool uses approximately 700 MB per hour in addition to final audio. Prefer a local recording folder with enough free
+space; syncing that folder with OneDrive can add disk contention. Originals
+remain until all readable raw chunks are encoded, final audio is published, and
+warning status is saved. Transcript or metadata failures remain visible but do not
+retain raw audio that cannot repair those files. A transient stopped-metadata
+write failure leaves no file warning if the final write repairs it. Capture gaps have their own persistent warning and do not keep
+an otherwise fully encoded spool forever. A readable temporary chunk at the next sequence position is included in final
+audio and recovery. A torn temporary tail records a gap without retaining the
+spool; unreadable published chunks and originals needed after a failed save
+are retained.
+
+Stopped duration and completion time are saved before the final encode; a crash
+during encoding leaves a stopped, unfinished meeting rather than an active recording.
+Final audio is encoded once from available raw chunks, avoiding repeated AAC
+priming at checkpoint joins. Missing or unreadable chunks do not prevent saving
+the rest. The encode deadline scales with recording duration (one fifth of the
+duration plus one minute, bounded between four minutes and one hour); the outer
+save deadline allows two additional minutes for publication and fallback work.
+If raw encoding fails, existing legacy checkpoints are tried and originals are
+retained. New sessions rely on their raw spool for recovery.
+
+Recovery accepts recordings without a transcript: recover the saved audio first,
+then use Transcribe in the saved meeting. If audio recovery fails and there is no
+transcript, the recovery entry and originals remain available for retry. Recovered
+live transcripts are marked incomplete and offer Retranscribe, since queued speech
+may not have been transcribed before the crash. Audio-only recoveries keep the
+normal Transcribe flow.
+Recovery includes an unconsumed tail. After library save or successful retranscription,
+fully recovered raw audio is released once the recovered file is validated and
+capture warnings are saved. Unreadable or missing chunks keep their originals. Opening a recovered
+meeting reuses its completed audio; an explicit recovery action can rebuild it.
+Retranscription checks retained chunks and saved warnings for gaps, including
+when reusing a recovered file, and preserves that information in the library.
+Recovery uses compact AAC when FFmpeg is available; WAV remains the fallback
+if the encoder is missing or encoding fails, within its 32-bit size limit. Existing recovered WAV files
+remain supported.
+Temporary legacy checkpoints must decode successfully before recovery uses them.
+Playback uses the browser's streaming audio element through scoped local-file
+access rather than decoding the whole recording into webview memory.
+
+Stop has one shared owner across the app, tray and shortcut. Recording duration
+is frozen before transcription drain, and device-error limits apply to a recent
+30-second window. Transcript snapshots flush every 15 seconds even during silence
+and once more before audio finalization. Library saving uses that backend snapshot
+and continues if the optional transcription status refresh fails. An unavailable
+or invalid snapshot falls back to the UI transcript with a visible review warning.
+Transcript, audio and metadata writes each get an independent attempt; failures
+are reported together. The app-wide post-processing guard and transactional folder
+lookup prevent concurrent or delayed stop callbacks from creating duplicate
+library entries. Failed starts
+stop their background workers; empty owned folders are removed, while possible
+recovery data is retained with an error status.
 
 The capture channel is bounded. Live recognition has a separate disk queue,
 and native inference runs outside the async executor. Stop ends capture before
@@ -67,8 +121,14 @@ its native abort callback; Nemotron checks between streaming windows. A Parakeet
 native call may finish after cancellation, retaining its model/permit and
 blocking another job until it returns.
 
-Audio-save failures and incomplete transcription are saved with the meeting and
-in its recording folder. Automatic notes are withheld for these meetings. Empty
+Audio-save failures, capture gaps, incomplete recording files and incomplete
+transcription are saved with the meeting and
+in its recording folder. Automatic notes wait only for failed audio saves or an
+incomplete transcript. Capture gaps and recording-file warnings remain visible
+without blocking notes. Successful retranscription clears audio-save and
+transcript failure flags; recording-file warnings clear only after both transcript
+and metadata files are rewritten successfully. Permanent capture gaps remain.
+Empty
 retranscription is rejected before replacement, and a successful replacement
 retains the prior transcript as a database revision. Capture-loss warnings remain
 conservative: retranscribing available audio cannot restore missing samples.

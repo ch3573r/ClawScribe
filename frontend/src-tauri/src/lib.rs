@@ -49,6 +49,7 @@ pub mod database;
 pub mod diagnostics;
 pub mod exports;
 pub mod groq;
+pub mod library;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
 pub mod notifications;
@@ -168,7 +169,8 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
     )
     .await
     {
-        Ok(_) => {
+        Ok(false) => Ok(()),
+        Ok(true) => {
             RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
@@ -221,18 +223,8 @@ async fn get_transcription_status() -> audio::recording_commands::TranscriptionS
 }
 
 #[tauri::command]
-async fn read_audio_file(file_path: String) -> Result<tauri::ipc::Response, String> {
-    // Return raw bytes over IPC. The default Vec<u8> path serializes to a
-    // JSON number array, which multiplies transfer size ~4-5x and blocks the
-    // webview parsing it for large recordings.
-    match tokio::fs::read(&file_path).await {
-        Ok(data) => Ok(tauri::ipc::Response::new(data)),
-        Err(e) => Err(format!("Failed to read audio file: {}", e)),
-    }
-}
-
-#[tauri::command]
 async fn resolve_meeting_audio_file(
+    app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
     meeting_folder: String,
 ) -> Result<Option<String>, String> {
@@ -255,9 +247,21 @@ async fn resolve_meeting_audio_file(
         return Ok(None);
     }
 
-    audio::incremental_saver::resolve_audio_file_or_recover(&folder)
-        .await
-        .map(|path| path.map(|path| path.to_string_lossy().to_string()))
+    let path = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await?;
+    if let Some(path) = &path {
+        let resolved = path
+            .canonicalize()
+            .map_err(|_| "Meeting audio could not be resolved")?;
+        if resolved.parent() != Some(folder.as_path()) {
+            return Err(
+                "Meeting audio links outside the recording folder are not supported".into(),
+            );
+        }
+        app.asset_protocol_scope()
+            .allow_file(&resolved)
+            .map_err(|_| "Meeting audio access could not be granted")?;
+    }
+    Ok(path.map(|path| path.to_string_lossy().to_string()))
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -708,6 +712,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            library::list_meeting_tags,
+            library::set_meeting_tags,
+            library::list_meeting_bookmarks,
+            library::add_meeting_bookmark,
+            library::delete_meeting_bookmark,
+            library::rename_meeting_bookmark,
+            library::export_local_word,
+            library::backup::backup_library,
+            library::backup::restore_library,
             updates::get_update_channel,
             updates::set_update_channel,
             updates::check_app_update,
@@ -717,7 +730,6 @@ pub fn run() {
             set_native_theme,
             get_transcription_status,
             audio::outcome::get_recording_outcome,
-            read_audio_file,
             resolve_meeting_audio_file,
             save_transcript,
             analytics::commands::init_analytics,
@@ -834,6 +846,7 @@ pub fn run() {
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,
+            audio::incremental_saver::release_recovered_capture,
             audio::incremental_saver::has_audio_checkpoints,
             console_utils::show_console,
             console_utils::hide_console,
@@ -845,8 +858,6 @@ pub fn run() {
             openai::auth::api_get_openai_auth_status,
             openai::auth::api_save_openai_auth_config,
             openai::auth::api_clear_openai_auth_config,
-            openai::auth::api_prepare_openai_oauth_pkce_authorization,
-            openai::auth::api_exchange_openai_oauth_pkce_code,
             openai::openai::get_openai_models,
             summary::codex_provider::codex_get_config,
             summary::codex_provider::codex_save_config,
@@ -1011,6 +1022,7 @@ pub fn run() {
             audio::import::is_import_in_progress_command,
             // Microsoft Graph export commands
             exports::commands::microsoft_sign_in,
+            exports::commands::microsoft_cancel_sign_in,
             exports::commands::microsoft_sign_out,
             exports::commands::microsoft_connection_status,
             exports::commands::export_to_onenote,
@@ -1040,6 +1052,7 @@ pub fn run() {
             exports::commands::export_selected_todo_tasks,
             exports::confluence::confluence_save_pat,
             exports::confluence::confluence_clear_pat,
+            exports::confluence::confluence_settings_status,
             exports::confluence::confluence_connection_status,
             exports::confluence::confluence_export_page,
         ])

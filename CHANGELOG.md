@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- Include the post-0.5.45 recovery fixes: detect raw capture audio in the recovery dialog, allow audio-only recovery, preserve capture-gap warnings, and report final save outcomes accurately. Recover to compact AAC when available and release fully recovered raw audio after library save or retranscription; preserve originals when recovery is incomplete.
+
+- Allow retranscription when recording status is damaged, preserving capture gaps from retained audio and the library while rewriting the status file.
+
+- Mark recovered live transcripts incomplete so the meeting offers Retranscribe; audio-only recoveries retain the normal Transcribe flow.
+
+## 0.5.45
+
+- Preserve recording continuity when live transcription, disk queueing, or device delivery degrades. Keep bounded capture buffers and recoverable raw audio, freeze duration at Stop, and prevent duplicate stop/save operations and duplicate saved meetings.
+- Encode final audio once with a duration-scaled deadline, avoiding repeated AAC padding between chunks. Save transcript, metadata, and warning status independently; write stopped metadata before encoding so a crash cannot leave the folder marked as recording.
+- Recover readable temporary audio tails. A torn temporary tail records a capture gap without retaining the entire successfully encoded raw spool; unreadable published chunks and failed-save originals remain available. Keep legacy checkpoint recovery while removing the unused checkpoint writer and empty checkpoint folders.
+- Allow automatic notes when only capture-gap or recording-file warnings remain. Successful retranscription clears repaired audio/transcription warnings, clears file warnings only after both file rewrites succeed, and preserves permanent capture-gap information. Keep summary status polling active across meeting updates, and surface failed automatic generation.
+- Back up libraries containing missing recording folders or unfinished recovery files with explicit incomplete-meeting reports. Skip existing meetings before extracting restore audio, preserve older version-1 archives with missing optional tables, and avoid orphaned restored recordings.
+- Use recording offsets for transcript export timestamps, with a legacy timestamp fallback. Unify Word, OneDrive, OneNote, and Confluence export content options; fix local Word dates and native Save As permissions. Stabilize tag loading and bookmark refresh/retry behavior, and dispatch title-bar gestures once.
+- Include the project tags, live/saved bookmarks, local Word export, and additive portable backups introduced after stable 0.5.41, plus resumable model downloads, HE-AAC timing fixes, reasoning-tag filtering, and portable Windows CPU build settings.
+- Advance installer/runtime/updater version to 0.5.45 with Whisper Vulkan and ONNX/sherpa DirectML. Stage installers as a draft for real-device acceptance; drafts do not change the stable updater. Stable publication makes this version available to older installations without opting into previews.
+- Automated validation covers 114 frontend tests and 401 native tests (two ignored), including partial saves, legacy recovery, temporary tails, and stopped metadata. Real-device acceptance and installed-app update discovery must be completed separately; see `docs/releases/0.5.45.md`. Tauri updater signatures do not provide Windows publisher signing, and a Vulkan loader remains required.
+
+## 0.5.44
+
+- Fix the missing Tauri Save As permission that caused local Word export and backup creation to fail with an ACL error. File-picker permissions remain limited to the local main window; restore retains its existing Open permission.
+- Add a regression check against the shipped desktop capability so mocked browser dialogs cannot hide a missing file-picker permission.
+- Fix duplicate title-bar drag and double-click maximize actions. Window controls keep their dedicated actions.
+- Advance runtime/updater version to `0.5.44` for a Windows GPU preview. Draft builds are excluded from update discovery; once published, enable **Include prereleases** or install manually. Stable remains `0.5.41`.
+- Real-device recording, graphical install/upgrade and file-picker acceptance, Word desktop rendering, and installed-app update discovery remain unverified. See `docs/releases/0.5.44.md`.
+
+## 0.5.43
+
+- Add local Word document export for summaries, full saved transcripts, or both. Optional speaker labels and timestamps, a Save As dialog, and offline DOCX generation require neither Microsoft sign-in nor Word installed. Basic headings, bullets, and paragraphs are preserved; advanced editor formatting is not.
+- Add project tags to saved meetings and project/untagged filters to the Meetings archive and transcript search. Tags persist locally and refresh across views.
+- Add portable ZIP backup and additive restore for saved meeting data, recordings, notes, summaries, chat, correction history, tags, bookmarks, and recording-folder export history. Existing meeting IDs are skipped. Restore validates archive entries and commits database inserts together. Provider credentials, models, UI preferences, browser-stored meeting context, and unfinished recovery spools are excluded. Archives are not encrypted.
+- Add live recording bookmarks and a saved-meeting bookmark panel with labels, playback seeking, renaming, and removal. Live timestamps exclude pauses; markers persist in SQLite and attach to the saved recording folder.
+- Add regression coverage for archive round-tripping, duplicate skipping, unsafe paths, rollback, migration preservation, tag filtering, and bookmark cleanup. Frontend and Windows GPU preflight gates run before preview packaging.
+- Publish runtime/updater version `0.5.43` as a preview, newer than `0.5.42`. Enable **Include prereleases** or install manually; the stable channel stays on `0.5.41`.
+- Real-device dual-source capture, installed-app bookmark timing, Word desktop rendering, large-library restore, graphical install/upgrade, and installed-app update discovery remain unverified. This preview does not assert capture-smoke confirmation or stable readiness. See `docs/releases/0.5.43.md`.
+
 ## 0.5.42
 
 - Publish a Windows GPU prerelease with runtime/updater version `0.5.42`, newer than `0.5.41`. Enable **Include prereleases** to discover it; stable remains `0.5.41`.

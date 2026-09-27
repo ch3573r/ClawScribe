@@ -12,6 +12,7 @@ import { NemotronModelManager } from './NemotronModelManager';
 import { WhisperAccelerationStatus } from './WhisperAccelerationStatus';
 import { useCloudTranscription } from '@/hooks/useCloudTranscription';
 import { toast } from 'sonner';
+import { UnencryptedHttpOptIn } from './UnencryptedHttpOptIn';
 
 
 export interface TranscriptModelProps {
@@ -21,6 +22,7 @@ export interface TranscriptModelProps {
     baseUrl?: string | null;
     endpoint?: string | null;
     region?: string | null;
+    allowUnencrypted?: boolean;
 }
 
 interface TranscriptProviderTestResult {
@@ -40,6 +42,8 @@ export interface TranscriptSettingsProps {
 
 export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
     const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
+    const [apiKeyEdited, setApiKeyEdited] = useState(false);
+    const [allowUnencrypted, setAllowUnencrypted] = useState(transcriptModelConfig.allowUnencrypted ?? false);
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
@@ -55,6 +59,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
         setUiProvider(transcriptModelConfig.provider);
+        setAllowUnencrypted(transcriptModelConfig.allowUnencrypted ?? false);
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
@@ -82,6 +87,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             const data = await invoke('api_get_transcript_api_key', { provider }) as string;
 
             setApiKey(data || '');
+            setApiKeyEdited(false);
         } catch (err) {
             console.error('Error fetching API key:', err);
             setApiKey(null);
@@ -155,6 +161,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             provider: uiProvider,
             model,
             apiKey: apiKey || null,
+            allowUnencrypted,
             baseUrl: uiProvider === 'cloud-whisper' ? cloudWhisperBaseUrl.trim() || 'https://api.openai.com/v1' : null,
             endpoint: uiProvider === 'mai-transcribe' ? maiEndpoint.trim() || null : null,
             region: uiProvider === 'mai-transcribe' ? maiRegion.trim() || null : null,
@@ -169,18 +176,20 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                 provider: nextConfig.provider,
                 model: nextConfig.model,
                 apiKey: nextConfig.apiKey,
+                allowUnencrypted: nextConfig.allowUnencrypted,
                 baseUrl: nextConfig.baseUrl,
                 endpoint: nextConfig.endpoint,
                 region: nextConfig.region,
             });
             setTranscriptModelConfig(nextConfig);
+            setApiKeyEdited(false);
             toast.success('Transcription settings saved');
             if (onModelSelect) {
                 onModelSelect();
             }
         } catch (err) {
             console.error('Failed to save cloud transcription settings:', err);
-            toast.error('Failed to save transcription settings');
+            toast.error(`Failed to save transcription settings: ${String(err)}`);
         }
     };
 
@@ -201,8 +210,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                 multiple: false,
                 filters: [
                     {
-                        name: 'Audio and video',
-                        extensions: ['aac', 'flac', 'm4a', 'mkv', 'mp3', 'mp4', 'ogg', 'opus', 'wav', 'webm', 'wma'],
+                        name: 'Audio',
+                        extensions: ['aac', 'flac', 'm4a', 'mp3', 'mp4', 'ogg', 'opus', 'wav', 'webm', 'wma'],
                     },
                 ],
             });
@@ -214,7 +223,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             const result = await invoke<TranscriptProviderTestResult>('api_test_transcript_provider', {
                 provider: nextConfig.provider,
                 model: nextConfig.model,
-                apiKey: nextConfig.apiKey,
+                apiKey: apiKeyEdited ? nextConfig.apiKey : null,
+                allowUnencrypted: nextConfig.allowUnencrypted,
                 baseUrl: nextConfig.baseUrl,
                 endpoint: nextConfig.endpoint,
                 region: nextConfig.region,
@@ -253,6 +263,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 onValueChange={(value) => {
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
+                                    setAllowUnencrypted(false);
                                     if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'nemotron') {
                                         fetchApiKey(provider);
                                     }
@@ -414,6 +425,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                     )}
 
 
+                    {isCloudProvider && <UnencryptedHttpOptIn
+                        urls={[uiProvider === 'cloud-whisper' ? cloudWhisperBaseUrl : maiEndpoint]}
+                        checked={allowUnencrypted} onChange={setAllowUnencrypted}
+                    />}
                     {requiresApiKey && (
                         <div>
                             <Label className="block text-sm font-medium text-foreground mb-1">
@@ -425,7 +440,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     className={`pr-24 focus:ring-1 focus:ring-ring focus:border-primary ${isApiKeyLocked ? 'bg-muted cursor-not-allowed' : ''
                                         }`}
                                     value={apiKey || ''}
-                                    onChange={(e) => setApiKey(e.target.value)}
+                                    onChange={(e) => { setApiKey(e.target.value); setApiKeyEdited(true); }}
                                     disabled={isApiKeyLocked}
                                     onClick={handleInputClick}
                                     placeholder="Enter your API key"

@@ -1,10 +1,5 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{Duration, Utc};
-use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Runtime};
-use url::Url;
 
 use crate::{database::repositories::setting::SettingsRepository, state::AppState};
 
@@ -14,8 +9,6 @@ const OPENAI_OAUTH_UNSUPPORTED_REASON: &str =
     "Public OpenAI OAuth PKCE metadata alone cannot authenticate OpenAI API requests in ClawScribe. Use direct OpenAI API-key auth, or configure a standalone OpenAI-compatible managed endpoint that owns OAuth and accepts bearer-authenticated chat/completions requests.";
 const OPENCLAW_CODEX_MANAGED_MESSAGE: &str =
     "Optional OpenClaw managed auth is configured. ClawScribe sends requests to the configured OpenClaw endpoint and does not store ChatGPT or Codex tokens locally.";
-const PKCE_CODE_CHALLENGE_METHOD: &str = "S256";
-const PKCE_AUTH_REQUEST_TTL_MINUTES: i64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -89,22 +82,6 @@ pub struct OpenAIAuthStatus {
     pub oauth_pkce: Option<OpenAIOAuthPkceConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAIOAuthPkceAuthorizationRequest {
-    pub authorization_url: String,
-    pub redirect_uri: String,
-    pub scopes: Vec<String>,
-    pub state: String,
-    pub nonce: String,
-    pub code_verifier: String,
-    pub code_challenge: String,
-    pub code_challenge_method: String,
-    pub expires_at: String,
-    pub token_exchange_supported: bool,
-    pub unsupported_reason: String,
-}
-
 fn is_present(value: Option<&str>) -> bool {
     value.map(|v| !v.trim().is_empty()).unwrap_or(false)
 }
@@ -123,21 +100,9 @@ fn parse_openai_auth_config(json: Option<String>) -> Result<Option<OpenAIAuthCon
     .map(|parsed| parsed.flatten())
 }
 
-fn validate_url_field(label: &str, value: &str) -> Result<(), String> {
-    let parsed = Url::parse(value).map_err(|e| format!("{} must be a valid URL: {}", label, e))?;
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http"
-            if parsed.host_str() == Some("localhost") || parsed.host_str() == Some("127.0.0.1") =>
-        {
-            Ok(())
-        }
-        "http" => Err(format!(
-            "{} must use https unless it targets localhost",
-            label
-        )),
-        _ => Err(format!("{} must use http or https", label)),
-    }
+pub(crate) fn validate_url_field(label: &str, value: &str) -> Result<(), String> {
+    super::secret_destination::validate_secret_destination(value, false)
+        .map_err(|error| format!("{label}: {error}"))
 }
 
 fn normalize_oauth_pkce_config(
@@ -396,7 +361,7 @@ fn build_openai_auth_status(
                     openclaw_codex_managed_configured: false,
                     openclaw_codex_endpoint_present: false,
                     oauth_pkce_configured,
-                    oauth_browser_launch_ready: oauth_pkce_configured,
+                    oauth_browser_launch_ready: false,
                     oauth_device_flow_configured,
                     can_authenticate_requests: false,
                     requires_user_action: true,
@@ -449,65 +414,6 @@ fn build_openai_auth_status(
             oauth_pkce: None,
         },
     }
-}
-
-fn random_urlsafe_string(len: usize) -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(len)
-        .map(char::from)
-        .collect()
-}
-
-fn pkce_s256_challenge(code_verifier: &str) -> String {
-    let digest = Sha256::digest(code_verifier.as_bytes());
-    URL_SAFE_NO_PAD.encode(digest)
-}
-
-fn build_oauth_authorization_request(
-    oauth: OpenAIOAuthPkceConfig,
-) -> Result<OpenAIOAuthPkceAuthorizationRequest, String> {
-    let state = random_urlsafe_string(32);
-    let nonce = random_urlsafe_string(32);
-    let code_verifier = random_urlsafe_string(96);
-    let code_challenge = pkce_s256_challenge(&code_verifier);
-    let expires_at = (Utc::now() + Duration::minutes(PKCE_AUTH_REQUEST_TTL_MINUTES)).to_rfc3339();
-
-    let mut authorization_url = Url::parse(&oauth.authorization_endpoint)
-        .map_err(|e| format!("Authorization endpoint must be a valid URL: {}", e))?;
-    {
-        let mut pairs = authorization_url.query_pairs_mut();
-        pairs
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &oauth.client_id)
-            .append_pair("redirect_uri", &oauth.redirect_uri)
-            .append_pair("code_challenge", &code_challenge)
-            .append_pair("code_challenge_method", PKCE_CODE_CHALLENGE_METHOD)
-            .append_pair("state", &state)
-            .append_pair("nonce", &nonce);
-
-        if !oauth.scopes.is_empty() {
-            pairs.append_pair("scope", &oauth.scopes.join(" "));
-        }
-
-        if let Some(audience) = oauth.audience.as_deref() {
-            pairs.append_pair("audience", audience);
-        }
-    }
-
-    Ok(OpenAIOAuthPkceAuthorizationRequest {
-        authorization_url: authorization_url.to_string(),
-        redirect_uri: oauth.redirect_uri,
-        scopes: oauth.scopes,
-        state,
-        nonce,
-        code_verifier,
-        code_challenge,
-        code_challenge_method: PKCE_CODE_CHALLENGE_METHOD.to_string(),
-        expires_at,
-        token_exchange_supported: false,
-        unsupported_reason: OPENAI_OAUTH_UNSUPPORTED_REASON.to_string(),
-    })
 }
 
 /// Reports the configured OpenAI auth mode without returning secrets.
@@ -573,48 +479,27 @@ pub async fn api_clear_openai_auth_config<R: Runtime>(
     Ok(build_openai_auth_status(None, api_key.as_deref()))
 }
 
-/// Compatibility helper for public OAuth PKCE metadata.
-/// This does not exchange codes, refresh tokens, or authenticate OpenAI API requests.
-#[tauri::command]
-pub async fn api_prepare_openai_oauth_pkce_authorization<R: Runtime>(
-    _app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
-) -> Result<OpenAIOAuthPkceAuthorizationRequest, String> {
-    let pool = state.db_manager.pool();
-    let stored_config = parse_openai_auth_config(
-        SettingsRepository::get_openai_auth_config(pool)
-            .await
-            .map_err(|e| format!("Failed to read OpenAI auth configuration: {}", e))?,
-    )?;
-
-    let config =
-        stored_config.ok_or_else(|| "OpenAI OAuth PKCE metadata is not configured".to_string())?;
-    if config.mode != OpenAIAuthMode::OauthPkce {
-        return Err("OpenAI auth mode is not oauth_pkce".to_string());
-    }
-
-    let oauth = config
-        .oauth_pkce
-        .ok_or_else(|| "OpenAI OAuth PKCE metadata is incomplete".to_string())?;
-
-    build_oauth_authorization_request(oauth)
-}
-
-/// Explicit unsupported state for public OAuth callback compatibility.
-/// No fake OAuth, ChatGPT, or Codex tokens are minted.
-#[tauri::command]
-pub async fn api_exchange_openai_oauth_pkce_code<R: Runtime>(
-    _app: AppHandle<R>,
-    _state: tauri::State<'_, AppState>,
-    _code: String,
-    _state_param: String,
-    _code_verifier: String,
-) -> Result<OpenAIAuthStatus, String> {
-    Err(OPENAI_OAUTH_UNSUPPORTED_REASON.to_string())
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_destinations_require_tls_except_loopback() {
+        for url in [
+            "https://example.com/api",
+            "http://localhost/api",
+            "http://127.0.0.1/api",
+            "http://[::1]/api",
+        ] {
+            assert!(super::validate_url_field("Endpoint", url).is_ok());
+        }
+        for url in [
+            "http://example.com/api",
+            "http://localhost.example.com/api",
+            "ftp://example.com",
+        ] {
+            assert!(super::validate_url_field("Endpoint", url).is_err());
+        }
+    }
+
     use super::*;
 
     fn oauth_config() -> OpenAIOAuthPkceConfig {
@@ -725,7 +610,7 @@ mod tests {
         })
         .expect_err("non-localhost http endpoint should fail");
 
-        assert!(error.contains("must use https"));
+        assert!(error.contains("HTTPS"));
     }
 
     #[test]
@@ -742,7 +627,7 @@ mod tests {
         assert_eq!(status.mode, OpenAIAuthMode::OauthPkce);
         assert!(status.configured);
         assert!(status.oauth_pkce_configured);
-        assert!(status.oauth_browser_launch_ready);
+        assert!(!status.oauth_browser_launch_ready);
         assert!(status.oauth_device_flow_configured);
         assert!(!status.can_authenticate_requests);
         assert!(status.unsupported_reason.is_some());
@@ -786,27 +671,6 @@ mod tests {
         })
         .expect_err("non-localhost http endpoint should fail");
 
-        assert!(error.contains("must use https"));
-    }
-
-    #[test]
-    fn pkce_authorization_request_uses_s256_without_claiming_token_exchange() {
-        let config = normalize_oauth_pkce_config(oauth_config()).expect("valid oauth config");
-        let request = build_oauth_authorization_request(config).expect("authorization request");
-
-        assert!(request
-            .authorization_url
-            .starts_with("https://auth.example.test/oauth/authorize?"));
-        assert!(request.authorization_url.contains("response_type=code"));
-        assert!(request
-            .authorization_url
-            .contains("code_challenge_method=S256"));
-        assert!(request.authorization_url.contains("scope=openai"));
-        assert_eq!(request.code_challenge_method, "S256");
-        assert_eq!(request.code_verifier.len(), 96);
-        assert!(!request.token_exchange_supported);
-        assert!(request
-            .unsupported_reason
-            .contains("Public OpenAI OAuth PKCE"));
+        assert!(error.contains("HTTPS"));
     }
 }

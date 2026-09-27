@@ -8,11 +8,6 @@ use serde::{Deserialize, Serialize};
 
 pub const CLAWSCRIBE_CLIENT_ID: &str = "4ab2ca8f-c2f1-45f3-b4ee-8bc9a511bcc8";
 
-/// The tenant where the app is registered. Kept for reference; sign-in uses the
-/// multi-tenant authority below so accounts from any work/school tenant can
-/// sign in (the registration must be set to multi-tenant in Entra).
-pub const RISMONDO_TENANT_ID: &str = "d0627577-cabb-4909-8ea1-c5d86abfd204";
-
 /// Authority used for sign-in. `organizations` accepts any Entra work/school
 /// tenant but not personal Microsoft accounts. (Use a specific tenant GUID to
 /// lock to one org, or `common` to also allow personal accounts — but Planner

@@ -17,6 +17,8 @@ export interface SaveMeetingRequest {
 
 export interface SaveMeetingResponse {
   meeting_id: string;
+  warning?: string;
+  recording_outcome?: RecordingOutcome;
 }
 
 export interface Meeting {
@@ -42,12 +44,14 @@ export class StorageService {
     transcripts: Transcript[],
     folderPath: string | null,
     recordingOutcome?: RecordingOutcome,
+    useSavedRecording = false,
   ): Promise<SaveMeetingResponse> {
     return invoke<SaveMeetingResponse>('api_save_transcript', {
       meetingTitle,
       transcripts,
       folderPath,
       recordingOutcome,
+      useSavedRecording,
     });
   }
 

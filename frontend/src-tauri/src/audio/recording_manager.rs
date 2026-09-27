@@ -67,8 +67,27 @@ impl RecordingManager {
     /// # Arguments
     /// * `microphone_device` - Optional microphone device to use
     /// * `system_device` - Optional system audio device to use
-    /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `auto_save` - Whether to save raw audio (true) or just transcripts/metadata (false)
     pub async fn start_recording(
+        &mut self,
+        microphone_device: Option<Arc<AudioDevice>>,
+        system_device: Option<Arc<AudioDevice>>,
+        auto_save: bool,
+    ) -> Result<TranscriptionQueueReceiver> {
+        let result = self
+            .start_session(microphone_device, system_device, auto_save)
+            .await;
+        if result.is_err() {
+            self.state.stop_recording();
+            let _ = self.stream_manager.stop_streams();
+            let _ = self.pipeline_manager.stop().await;
+            self.recording_saver.failed_start().await;
+            self.state.cleanup();
+        }
+        result
+    }
+
+    async fn start_session(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
@@ -82,7 +101,7 @@ impl RecordingManager {
 
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
-        // Pass auto_save to control whether audio checkpoints are created
+        // Pass auto_save to control whether raw audio is saved
         let recording_sender = self
             .recording_saver
             .start_accumulation(auto_save, self.state.clone())?;
@@ -168,7 +187,7 @@ impl RecordingManager {
     /// Start recording with default devices and auto_save setting
     ///
     /// # Arguments
-    /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `auto_save` - Whether to save raw audio (true) or just transcripts/metadata (false)
     ///
     /// # Platform-Specific Behavior
     ///
@@ -307,9 +326,8 @@ impl RecordingManager {
             self.state.mark_capture_incomplete();
         }
 
-        // CRITICAL: Full cleanup to release all Arc references and resources
-        // This ensures microphone is released even if Drop is delayed
-        self.state.cleanup();
+        // stop_recording already releases capture devices. Retain frozen timing
+        // and failure statistics until metadata and the final outcome are saved.
 
         info!("Recording streams stopped");
         flush_result
@@ -319,33 +337,15 @@ impl RecordingManager {
     pub async fn save_recording_only<R: tauri::Runtime>(
         &mut self,
         app: &tauri::AppHandle<R>,
-    ) -> Result<()> {
-        debug!("Saving recording with transcript chunks");
-
-        // Get actual recording duration from state
-        let recording_duration = self.state.get_active_recording_duration();
-        info!("Recording duration from state: {:?}s", recording_duration);
-
-        // Save the recording with actual duration
-        match self
-            .recording_saver
-            .stop_and_save(app, recording_duration, self.state.capture_incomplete())
+    ) -> Result<super::recording_saver::RecordingSaveReport> {
+        self.recording_saver
+            .stop_and_save(
+                app,
+                self.state.get_active_recording_duration(),
+                self.state.capture_incomplete(),
+            )
             .await
-        {
-            Ok(Some(_)) => {
-                info!("Recording audio saved successfully");
-            }
-            Ok(None) => {
-                debug!("Recording not saved (auto-save disabled or no audio data)");
-            }
-            Err(e) => {
-                error!("Failed to save recording");
-                return Err(anyhow::anyhow!(e));
-            }
-        }
-
-        debug!("Recording save operation completed");
-        Ok(())
+            .map_err(anyhow::Error::msg)
     }
 
     /// Stop recording and save audio (legacy method)
@@ -378,10 +378,10 @@ impl RecordingManager {
             .stop_and_save(app, recording_duration, self.state.capture_incomplete())
             .await
         {
-            Ok(Some(_)) => {
+            Ok(report) if report.audio_path.is_some() => {
                 info!("Recording audio saved successfully");
             }
-            Ok(None) => {
+            Ok(_) => {
                 info!("Recording not saved (auto-save disabled or no audio data)");
             }
             Err(_e) => {
@@ -392,11 +392,6 @@ impl RecordingManager {
 
         info!("Recording manager stopped");
         Ok(())
-    }
-
-    /// Get recording stats from the saver
-    pub fn get_recording_stats(&self) -> (usize, u32) {
-        self.recording_saver.get_stats()
     }
 
     /// Check if currently recording

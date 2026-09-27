@@ -101,6 +101,17 @@ if ($Feature -ne "cpu") {
     $featureArgs = @("--features", $Feature)
 }
 
+# Reused runner checkouts may retain generated types for deleted routes.
+$generatedRouteTypes = Join-Path $frontendRoot ".next/types"
+if (Test-Path -LiteralPath $generatedRouteTypes) {
+    $resolvedRouteTypes = (Resolve-Path -LiteralPath $generatedRouteTypes).Path
+    $frontendPrefix = $frontendRoot.Path.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedRouteTypes.StartsWith($frontendPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Generated route types are outside the frontend workspace."
+    }
+    Remove-Item -LiteralPath $resolvedRouteTypes -Recurse -Force
+}
+
 if ($CheckOnly) {
     Push-Location $tauriRoot
     try {

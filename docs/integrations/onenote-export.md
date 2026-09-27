@@ -9,7 +9,8 @@ OneDrive/SharePoint libraries.
 
 1. User signs in to Microsoft.
 2. User selects an existing notebook or creates a notebook.
-3. Export creates a fresh dated section for the meeting.
+3. User chooses summary, full transcript, or both, with optional speaker labels
+   and timestamps. Export creates a fresh dated section for the meeting.
 4. ClawScribe writes editable OneNote pages into that section.
 5. Local export metadata prevents accidental duplicate exports.
 

@@ -204,6 +204,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             model: config.model || 'parakeet-tdt-0.6b-v3-int8',
             apiKey: config.apiKey || null,
             baseUrl: config.baseUrl || null,
+            allowUnencrypted: config.allowUnencrypted ?? false,
             endpoint: config.endpoint || null,
             region: config.region || null,
           });

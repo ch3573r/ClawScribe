@@ -6,6 +6,10 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $manifest = Join-Path $repoRoot "frontend/src-tauri/Cargo.toml"
 $runtime = Join-Path $repoRoot "frontend/src-tauri/binaries/sherpa-onnx"
+$stagedFfmpeg = Join-Path (Split-Path -Parent $manifest) "binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
+if (-not (Test-Path -LiteralPath $stagedFfmpeg -PathType Leaf)) {
+    throw "Missing staged ffmpeg; build the app first."
+}
 
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
@@ -75,6 +79,9 @@ try {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $testDirectory $_.Name) -Force
     }
 
+    # Prefer the build-staged encoder over PATH and runtime download fallback.
+    Copy-Item -LiteralPath $stagedFfmpeg -Destination (Join-Path $testDirectory "ffmpeg.exe") -Force
+
     foreach ($filter in @(
         "summary::",
         "model_download::tests",
@@ -85,11 +92,26 @@ try {
         "updates::tests",
         "audio::recording_mode::tests",
         "audio::pipeline::queue_failure_tests",
+        "audio::recording_saver::snapshot_tests",
+        "audio::audio_spool::tests",
+        "audio::incremental_saver::tests",
+        "audio::audio_processing::folder_tests",
+        "audio::recording_state::tests",
+        "audio::recording_commands::stop_tests",
+        "audio::transcription::queue::tests",
+        "audio::outcome::tests",
+        "audio::retranscription::tests",
+        "api::",
+        "database::repositories::transcript::recording_save_tests",
+        "whisper_engine::acceleration::tests",
         "database::transcript_edits::tests",
+        "library::",
         "database::repositories::meeting::tests",
         "database::manager::tests",
         "credentials::tests",
         "exports::",
+        "openclaw::tests",
+        "openai::",
         "transcript_preservation_tests",
         "model_switch_tests",
         "audio::batch_audio::tests",

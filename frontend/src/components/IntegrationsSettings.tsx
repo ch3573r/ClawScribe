@@ -1,5 +1,6 @@
 "use client";
 
+import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ElementType, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -290,35 +291,22 @@ function MicrosoftSignInPanel() {
                 Sign out
               </Button>
             </div>
-            {ms.connection.grantedScopes !== undefined &&
-              ms.connection.grantedScopes !== null &&
-              !/\bNotes\./i.test(ms.connection.grantedScopes ?? "") && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>
-                    This session was granted no OneNote permission, so notebook
-                    discovery will fail. Granted scopes:{" "}
-                    <code className="break-all">
-                      {ms.connection.grantedScopes || "(none)"}
-                    </code>
-                    . Sign out and sign in again to grant Microsoft export
-                    access; if the consent screen does not list them, the Entra
-                    app registration needs those Graph permissions and admin
-                    consent.
-                  </span>
-                </div>
-              )}
-            {ms.connection.grantedScopes !== undefined &&
-              ms.connection.grantedScopes !== null &&
-              !/\bFiles\.ReadWrite\b/i.test(ms.connection.grantedScopes ?? "") && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>
-                    This session was granted no OneDrive file permission. Sign
-                    out and sign in again to grant DOCX/PDF export access.
-                  </span>
-                </div>
-              )}
+            {(ms.connection.unavailableExports?.length ?? 0) > 0 && (
+              <div className="rounded-lg border border-border p-3 text-sm">
+                Unavailable with this account's current permissions: {ms.connection.unavailableExports?.join(', ')}.
+              </div>
+            )}
+            {ms.connection.sessionOnly && (
+              <p className="text-sm text-muted-foreground">Sign-in will not persist after closing ClawScribe because offline access was not granted.</p>
+            )}
+            {(ms.connection.missingScopes?.length ?? 0) > 0 && (
+              <div className="space-y-2 text-sm">
+                <p className="text-muted-foreground">Missing permissions: {ms.connection.missingScopes?.join(', ')}. Your administrator may need to approve them.</p>
+                <Button type="button" variant="outline" disabled={ms.signingIn} onClick={ms.requestMissingPermissions}>
+                  Request missing permissions
+                </Button>
+              </div>
+            )}
           </>
         )}
 
@@ -329,6 +317,7 @@ function MicrosoftSignInPanel() {
               <span>
                 Complete sign-in in your browser, then return to ClawScribe.
               </span>
+              <Button type="button" variant="outline" onClick={ms.cancelSignIn}>Cancel sign-in</Button>
             </div>
           </div>
         )}
@@ -1259,11 +1248,34 @@ function ConfluencePanel() {
   const [baseUrl, setBaseUrl] = useState(saved.confluenceBaseUrl ?? "");
   const [spaceKey, setSpaceKey] = useState(saved.confluenceSpaceKey ?? "");
   const [parentId, setParentId] = useState(saved.confluenceParentId ?? "");
+  const [allowUnencrypted, setAllowUnencrypted] = useState(false);
+  const httpOptionRevision = useRef(0);
   const [patInput, setPatInput] = useState("");
   const [status, setStatus] = useState<ConfluenceConnectionStatus | null>(null);
   const [busy, setBusy] = useState<"save" | "clear" | "test" | null>(null);
   const trimmedUrl = createUrl.trim();
   const trimmedBaseUrl = baseUrl.trim();
+  useEffect(() => {
+    let active = true;
+    const revision = ++httpOptionRevision.current;
+    setAllowUnencrypted(false);
+    confluenceExportService.settingsStatus(trimmedBaseUrl).then(value => {
+      if (active && revision === httpOptionRevision.current) {
+        setStatus(value);
+        setAllowUnencrypted(value.allowUnencrypted);
+        if (!trimmedBaseUrl && value.baseUrl) setBaseUrl(value.baseUrl);
+      }
+    }).catch(error => {
+      if (active && revision === httpOptionRevision.current) setStatus({
+        tokenConfigured: false,
+        allowUnencrypted: false,
+        reachable: false,
+        userDisplayName: null,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return () => { active = false; };
+  }, [trimmedBaseUrl]);
   const trimmedSpaceKey = spaceKey.trim();
   const trimmedParentId = parentId.trim();
 
@@ -1286,9 +1298,11 @@ function ConfluencePanel() {
   ]);
 
   const testConnection = useCallback(async () => {
+    const revision = ++httpOptionRevision.current;
     if (!trimmedBaseUrl) {
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: "Enter a Confluence base URL first.",
@@ -1298,10 +1312,15 @@ function ConfluencePanel() {
 
     setBusy("test");
     try {
-      setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
+      const value = await confluenceExportService.connectionStatus(trimmedBaseUrl);
+      if (revision === httpOptionRevision.current) {
+        setStatus(value);
+        setAllowUnencrypted(value.allowUnencrypted);
+      }
     } catch (e) {
       setStatus({
         tokenConfigured: true,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: e instanceof Error ? e.message : String(e),
@@ -1309,13 +1328,15 @@ function ConfluencePanel() {
     } finally {
       setBusy(null);
     }
-  }, [trimmedBaseUrl]);
+  }, [allowUnencrypted, trimmedBaseUrl]);
 
   const savePat = useCallback(async () => {
+    const revision = ++httpOptionRevision.current;
     const pat = patInput.trim();
     if (!pat) {
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: "Paste a Confluence personal access token first.",
@@ -1325,13 +1346,18 @@ function ConfluencePanel() {
 
     setBusy("save");
     try {
-      await confluenceExportService.savePat(pat);
+      await confluenceExportService.savePat(pat, trimmedBaseUrl, allowUnencrypted);
       setPatInput("");
       if (trimmedBaseUrl) {
-        setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
+        const value = await confluenceExportService.connectionStatus(trimmedBaseUrl);
+        if (revision === httpOptionRevision.current) {
+          setStatus(value);
+          setAllowUnencrypted(value.allowUnencrypted);
+        }
       } else {
         setStatus({
           tokenConfigured: true,
+          allowUnencrypted,
           reachable: false,
           userDisplayName: null,
           message: "PAT saved. Add a base URL, then test the connection.",
@@ -1340,6 +1366,7 @@ function ConfluencePanel() {
     } catch (e) {
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: e instanceof Error ? e.message : String(e),
@@ -1347,15 +1374,18 @@ function ConfluencePanel() {
     } finally {
       setBusy(null);
     }
-  }, [patInput, trimmedBaseUrl]);
+  }, [allowUnencrypted, patInput, trimmedBaseUrl]);
 
   const clearPat = useCallback(async () => {
+    httpOptionRevision.current += 1;
     setBusy("clear");
     try {
       await confluenceExportService.clearPat();
       setPatInput("");
+      setAllowUnencrypted(false);
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted: false,
         reachable: false,
         userDisplayName: null,
         message: "Saved Confluence PAT cleared.",
@@ -1363,6 +1393,7 @@ function ConfluencePanel() {
     } catch (e) {
       setStatus({
         tokenConfigured: true,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: e instanceof Error ? e.message : String(e),
@@ -1370,7 +1401,7 @@ function ConfluencePanel() {
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [allowUnencrypted]);
 
   const restDestinationConfigured = !!trimmedBaseUrl && !!trimmedSpaceKey;
   const restReady = restDestinationConfigured && !!status?.reachable;
@@ -1400,7 +1431,7 @@ function ConfluencePanel() {
       state={mode === "draft" ? "prompt" : restReady ? "ready" : "advanced"}
       badgeLabel={badgeLabel}
       badgeClasses={badgeClasses}
-      detail="Export meeting summaries as a browser draft, or create pages directly on self-hosted Confluence with a PAT."
+      detail="Export meeting notes, transcripts, or both as a browser draft, or create pages directly on self-hosted Confluence with a PAT."
     >
       <div className="space-y-3">
         <div className="grid gap-2 sm:grid-cols-2">
@@ -1513,6 +1544,10 @@ function ConfluencePanel() {
                   className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
+              <UnencryptedHttpOptIn destinationProblem={status?.destinationProblem} urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
+                httpOptionRevision.current += 1;
+                setAllowUnencrypted(value);
+              }} />
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Space key
@@ -1618,8 +1653,8 @@ function ConfluencePanel() {
           <p className="font-medium text-foreground">Export flow</p>
           <p className="mt-1">
             {mode === "draft"
-              ? "Meeting summary -> Confluence button -> clipboard -> browser create page. Paste into the editor and save under the space/page you want."
-              : "Meeting summary -> Confluence button -> REST API page create. If the API call fails, ClawScribe copies the browser draft instead."}
+              ? "Meeting -> Export -> Confluence -> choose content -> clipboard and browser. Paste into the editor and save under the space/page you want."
+              : "Meeting -> Export -> Confluence -> choose content -> create page. If the API call fails, ClawScribe copies the selected content as a browser draft instead."}
           </p>
         </div>
       </div>
@@ -2049,11 +2084,12 @@ const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
 function CalendarPanel() {
   const ms = useMicrosoftExport();
   const isConnected = ms.connection.state === "connected";
+  const calendarAvailable = isConnected && !ms.connection.unavailableExports?.includes("Calendar lookup");
   const [usedForNext, setUsedForNext] = useState(false);
   const [attendeeIncluded, setAttendeeIncluded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    if (!isConnected) return;
+    if (!calendarAvailable) return;
     let cancelled = false;
     const refresh = () => {
       if (!cancelled) void ms.loadCalendar();
@@ -2071,11 +2107,13 @@ function CalendarPanel() {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [isConnected, ms.loadCalendar]);
+  }, [calendarAvailable, ms.loadCalendar]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
-    ? "Your current/next meeting and upcoming events, with invited attendees."
+    ? calendarAvailable
+      ? "Your current/next meeting and upcoming events, with invited attendees."
+      : "Calendar permission is unavailable. Request missing permissions in Microsoft settings above."
     : "Sign in with Microsoft above to see your calendar.";
   const current = ms.currentMeeting;
 
@@ -2102,7 +2140,7 @@ function CalendarPanel() {
       detail={detail}
       showBadge={!isConnected}
     >
-      {isConnected && (
+      {calendarAvailable && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">

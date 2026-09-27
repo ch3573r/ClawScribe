@@ -18,6 +18,10 @@ import {
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
+// Shared by the recording page and app-wide tray handler.
+let stopInProgress = false;
+let lastSavedFolder: string | null = null;
+
 interface UseRecordingStopReturn {
   handleRecordingStop: (callApi: boolean) => Promise<void>;
   isStopping: boolean;
@@ -73,7 +77,6 @@ export function useRecordingStop(
   const router = useRouter();
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
-  const stopInProgressRef = useRef(false);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -86,6 +89,7 @@ export function useRecordingStop(
     const setupRecordingStoppedListener = async () => {
       try {
         unlistenFn = await listen<RecordingStoppedPayload>('recording-stopped', async (event) => {
+          const sessionStorage = window.sessionStorage;
           if (disposed) return;
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
@@ -96,6 +100,8 @@ export function useRecordingStop(
             // Store folder_path and meeting_name for later use in handleRecordingStop
             if (folder_path) {
               sessionStorage.setItem('last_recording_folder_path', folder_path);
+            } else {
+              sessionStorage.removeItem('last_recording_folder_path');
             }
             if (meeting_name) {
               sessionStorage.setItem('last_recording_meeting_name', meeting_name);
@@ -121,15 +127,17 @@ export function useRecordingStop(
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
+    const sessionStorage = window.sessionStorage;
     if (recordingStoppedDataRef.current) {
       await recordingStoppedDataRef.current;
     }
 
     // Guard: prevent duplicate/concurrent stop calls
-    if (stopInProgressRef.current) {
+    const stoppedFolder = sessionStorage.getItem('last_recording_folder_path');
+    if (stopInProgress || (isCallApi && stoppedFolder !== null && stoppedFolder === lastSavedFolder)) {
       return;
     }
-    stopInProgressRef.current = true;
+    stopInProgress = true;
 
     // Set status to STOPPING immediately
     setStatus(RecordingStatus.STOPPING);
@@ -159,7 +167,7 @@ export function useRecordingStop(
           sessionStorage.setItem('last_recording_outcome', JSON.stringify(outcome));
         }
         transcriptionComplete = true;
-      });
+      }).catch(() => () => {});
 
       // Poll for transcription status
       while (elapsedTime < MAX_WAIT_TIME && !transcriptionComplete) {
@@ -207,6 +215,9 @@ export function useRecordingStop(
           elapsedTime += POLL_INTERVAL;
         } catch (error) {
           console.error("Error checking transcription status:");
+          toast.warning('Could not refresh transcription status', {
+            description: 'Saving the transcript preserved by ClawScribe. Review the meeting after it is saved.',
+          });
           break;
         }
       }
@@ -236,7 +247,7 @@ export function useRecordingStop(
       // Save to SQLite
       // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates
       // This ensures user sees all transcripts streaming in before database save
-      if (isCallApi && transcriptionComplete == true) {
+      if (isCallApi) {
 
         setStatus(RecordingStatus.SAVING, 'Saving meeting to database...');
 
@@ -254,12 +265,20 @@ export function useRecordingStop(
             freshTranscripts,
             folderPath,
             recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')),
+            true,
           );
 
           const meetingId = responseData.meeting_id;
           if (!meetingId) {
             console.error("No meeting_id in response:");
             throw new Error('No meeting ID received from save operation');
+          }
+          lastSavedFolder = stoppedFolder;
+          if (responseData.recording_outcome) {
+            sessionStorage.setItem('last_recording_outcome', JSON.stringify(recordingOutcome(responseData.recording_outcome)));
+          }
+          if (responseData.warning) {
+            toast.warning('Meeting saved with a warning', { description: responseData.warning });
           }
 
           // Bind the calendar event that was frozen at THIS recording's start
@@ -304,8 +323,8 @@ export function useRecordingStop(
           await markMeetingAsSaved();
 
           // Clean up session storage
-          sessionStorage.removeItem('last_recording_folder_path');
-          sessionStorage.removeItem('last_recording_meeting_name');
+          // Retain the completed folder token until the next recording-stopped
+          // event so a delayed tray/UI callback is recognized as the same stop.
           // Clean up IndexedDB meeting ID (redundant with markMeetingAsSaved cleanup, but ensures cleanup)
           sessionStorage.removeItem('indexeddb_current_meeting_id');
 
@@ -330,7 +349,7 @@ export function useRecordingStop(
 
           // Show success toast with navigation option
           const recoveryMessage = recordingRecoveryMessage(recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')));
-          (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with recovery needed' : 'Recording saved successfully!', {
+          (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with warnings' : 'Recording saved successfully!', {
             description: recoveryMessage || (audioOnly ? 'Audio saved. Open the meeting and choose Transcribe when ready.' : `${freshTranscripts.length} transcript segments saved.`),
             action: {
               label: 'View Meeting',
@@ -425,7 +444,7 @@ export function useRecordingStop(
       setIsRecordingDisabled(false);
     } finally {
       // Always reset the guard flag when done
-      stopInProgressRef.current = false;
+      stopInProgress = false;
     }
   }, [
     setIsRecording,

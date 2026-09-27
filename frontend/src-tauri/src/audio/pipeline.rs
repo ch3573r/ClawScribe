@@ -13,7 +13,7 @@ use super::audio_processing::{
 };
 use super::devices::AudioDevice;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
-use super::transcription::queue::TranscriptionQueueSender;
+use super::transcription::queue::{BufferedSpool, TranscriptionQueueSender};
 use super::vad::ContinuousVadProcessor;
 
 /// Ring buffer for synchronized audio mixing
@@ -760,7 +760,7 @@ impl AudioCapture {
 /// Uses Voice Activity Detection to segment speech in real-time and send only speech to Whisper
 pub struct AudioPipeline {
     receiver: mpsc::Receiver<AudioChunk>,
-    transcription_sender: TranscriptionQueueSender,
+    transcription_sender: BufferedSpool,
     state: Arc<RecordingState>,
     vad_processor: Option<ContinuousVadProcessor>,
     sample_rate: u32,
@@ -773,7 +773,7 @@ pub struct AudioPipeline {
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
-    recording_sender_for_mixed: Option<super::transcription::queue::TranscriptionQueueSender>,
+    recording_sender_for_mixed: Option<BufferedSpool>,
     recording_buffer: Vec<f32>,
     recording_buffer_timestamp: f64,
     queue_write_failures: QueueWriteFailureTracker,
@@ -858,7 +858,7 @@ impl AudioPipeline {
 
         Self {
             receiver,
-            transcription_sender,
+            transcription_sender: BufferedSpool::new(transcription_sender, state.clone(), false),
             state,
             vad_processor,
             sample_rate,
@@ -1136,6 +1136,13 @@ impl AudioPipeline {
         // Flush any remaining VAD segments
         self.flush_remaining_audio().await?;
 
+        // Drain independent disk workers after capture has closed. The bounded
+        // deadlines mark omissions and retain recovery data on a stalled drive.
+        if let Some(recording) = &mut self.recording_sender_for_mixed {
+            recording.finish().await;
+        }
+        self.transcription_sender.finish().await;
+
         info!("VAD-driven audio pipeline ended");
         Ok(())
     }
@@ -1169,9 +1176,6 @@ impl AudioPipeline {
             };
             if sender.send(chunk).await.is_err() {
                 self.state.mark_capture_incomplete();
-                self.state.stop_recording();
-                self.state.report_warning("Audio capture stopped because recorded audio could not be written. Press Stop to save the available audio, then free disk space.");
-                return Err(anyhow::anyhow!("Captured audio could not be saved"));
             }
         }
         Ok(())
@@ -1297,7 +1301,7 @@ impl AudioPipelineManager {
         );
 
         // Create audio processing channel
-        let (audio_sender, audio_receiver) = mpsc::channel::<AudioChunk>(512);
+        let (audio_sender, audio_receiver) = mpsc::channel::<AudioChunk>(2048);
 
         // Set sender in state for audio captures to use
         state.set_audio_sender(audio_sender.clone());
@@ -1318,7 +1322,8 @@ impl AudioPipelineManager {
 
         // CRITICAL FIX: Connect recording sender to receive pre-mixed audio
         // This ensures both mic AND system audio are captured in recordings
-        pipeline.recording_sender_for_mixed = recording_sender;
+        pipeline.recording_sender_for_mixed =
+            recording_sender.map(|sender| BufferedSpool::new(sender, state, true));
 
         let handle = tokio::spawn(async move { pipeline.run().await });
 
@@ -1386,7 +1391,8 @@ mod queue_failure_tests {
             false,
         );
         assert!(pipeline.vad_processor.is_none());
-        pipeline.recording_sender_for_mixed = Some(recording);
+        pipeline.recording_sender_for_mixed =
+            Some(BufferedSpool::new(recording, pipeline.state.clone(), true));
         pipeline
             .preserve_mixed_audio(&vec![0.1; 4800], 0.0)
             .await
@@ -1396,6 +1402,13 @@ mod queue_failure_tests {
         assert_eq!(chunk.data.len(), 4800);
         assert_eq!(chunk.sample_rate, 48000);
         assert_eq!(metrics.snapshot().chunks_in_queue, 0);
+        pipeline
+            .recording_sender_for_mixed
+            .as_mut()
+            .unwrap()
+            .finish()
+            .await;
+        pipeline.transcription_sender.finish().await;
     }
 
     #[test]

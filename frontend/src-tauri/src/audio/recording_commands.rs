@@ -34,11 +34,74 @@ pub use super::transcription::TranscriptUpdate;
 
 // Simple recording state tracking
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
+static STOP_OWNER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+mod stop_tests {
+    use super::acquire_stop_owner;
+    #[tokio::test]
+    async fn duplicate_stop_waits_without_taking_ownership_of_the_next_session() {
+        let lock = tokio::sync::Mutex::new(());
+        let first = acquire_stop_owner(&lock).await.unwrap();
+        let duplicate = acquire_stop_owner(&lock);
+        tokio::pin!(duplicate);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut duplicate)
+                .await
+                .is_err()
+        );
+        drop(first);
+        assert!(duplicate.await.is_none());
+        assert!(acquire_stop_owner(&lock).await.is_some());
+    }
+}
+static IS_STOPPING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn is_stopping() -> bool {
+    IS_STOPPING.load(Ordering::Acquire)
+}
+
+struct StopState;
+impl Drop for StopState {
+    fn drop(&mut self) {
+        IS_STOPPING.store(false, Ordering::Release);
+    }
+}
+
+async fn acquire_stop_owner(
+    lock: &tokio::sync::Mutex<()>,
+) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    match lock.try_lock() {
+        Ok(owner) => Some(owner),
+        Err(_) => {
+            let _completed = lock.lock().await;
+            None
+        }
+    }
+}
 static LIVE_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static RECORDING_JOB: Mutex<Option<tokio::sync::OwnedSemaphorePermit>> = Mutex::new(None);
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
+
+/// Snapshot the active recording's folder and pause-adjusted time without disk work.
+pub(crate) fn bookmark_position() -> Result<(String, f64), String> {
+    let guard = RECORDING_MANAGER
+        .lock()
+        .map_err(|_| "Recording state unavailable.")?;
+    let manager = guard
+        .as_ref()
+        .filter(|m| m.is_recording())
+        .ok_or("No active recording.")?;
+    let folder = manager
+        .get_meeting_folder()
+        .ok_or("Recording folder is not ready.")?;
+    let seconds = manager
+        .get_active_recording_duration()
+        .ok_or("Recording time is unavailable.")?;
+    Ok((folder.to_string_lossy().into_owned(), seconds))
+}
 static TRANSCRIPTION_TASK: Mutex<Option<transcription::TranscriptionTask>> = Mutex::new(None);
 static PENDING_TRANSCRIPT_SEGMENTS: Mutex<Vec<crate::audio::recording_saver::TranscriptSegment>> =
     Mutex::new(Vec::new());
@@ -616,7 +679,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    // All entry points share one owner through drain, save and completion.
+    // Concurrent callers wait for that owner rather than taking its manager.
+    let Some(_owner) = acquire_stop_owner(&STOP_OWNER).await else {
+        return Ok(false);
+    };
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
     );
@@ -624,8 +692,24 @@ pub async fn stop_recording<R: Runtime>(
     // Check if recording is active
     if !IS_RECORDING.load(Ordering::SeqCst) {
         info!("Recording was not active");
-        return Ok(());
+        return Ok(false);
     }
+    IS_STOPPING.store(true, Ordering::Release);
+    let _stop_state = StopState;
+    crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
+
+    let device_names = RECORDING_MANAGER
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|manager| {
+            let state = manager.get_state();
+            (
+                state.get_microphone_device().map(|d| d.name.clone()),
+                state.get_system_device().map(|d| d.name.clone()),
+            )
+        })
+        .unwrap_or_default();
 
     // Emit shutdown progress to frontend
     let _ = app.emit(
@@ -638,6 +722,8 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     let mut audio_save_failed = false;
+    let mut capture_incomplete = false;
+    let mut recording_files_incomplete = false;
     // Step 1: Stop audio capture immediately (no more new chunks) with proper error handling
     let manager_for_cleanup = {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
@@ -648,7 +734,7 @@ pub async fn stop_recording<R: Runtime>(
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
         info!("🚀 Using FORCE FLUSH to eliminate pipeline accumulation delays");
         let result = manager.stop_streams_and_force_flush().await;
-        audio_save_failed |= manager.get_state().capture_incomplete();
+        capture_incomplete |= manager.get_state().capture_incomplete();
         // Store manager back for later cleanup
         let manager_for_cleanup = Some(manager);
         (result, manager_for_cleanup)
@@ -664,7 +750,7 @@ pub async fn stop_recording<R: Runtime>(
             info!("✅ Audio streams stopped successfully - no more chunks will be created");
         }
         Err(_) => {
-            audio_save_failed = true;
+            capture_incomplete = true;
             warn!("Audio pipeline did not finish cleanly; preserving recovery data");
         }
     }
@@ -944,8 +1030,8 @@ pub async fn stop_recording<R: Runtime>(
             manager.get_total_pause_duration(),
             manager.get_transcript_segments().len() as u64,
             state.has_fatal_error(),
-            state.get_microphone_device().map(|d| d.name.clone()),
-            state.get_system_device().map(|d| d.name.clone()),
+            device_names.0,
+            device_names.1,
             stats.chunks_processed,
         ))
     } else {
@@ -1073,13 +1159,21 @@ pub async fn stop_recording<R: Runtime>(
         let meeting_name = manager.get_meeting_name();
 
         match tokio::time::timeout(
-            tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
+            super::audio_spool::encode_timeout(
+                manager
+                    .get_state()
+                    .get_active_recording_duration()
+                    .unwrap_or(0.0),
+            ) + tokio::time::Duration::from_secs(120), // encoding plus bounded publication/fallback time
             manager.save_recording_only(&app),
         )
         .await
         {
-            Ok(Ok(_)) => {
-                info!("✅ Recording data saved successfully during cleanup");
+            Ok(Ok(report)) => {
+                audio_save_failed |= report.outcome.audio_save_failed;
+                capture_incomplete |= report.outcome.capture_incomplete;
+                recording_files_incomplete |= report.outcome.recording_files_incomplete;
+                info!("Recording file save attempts completed");
             }
             Ok(Err(_e)) => {
                 audio_save_failed = true;
@@ -1088,7 +1182,7 @@ pub async fn stop_recording<R: Runtime>(
             }
             Err(_) => {
                 audio_save_failed = true;
-                warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
+                warn!("Recording finalization deadline reached; originals retained");
                 // Don't fail shutdown - transcripts are already preserved
             }
         }
@@ -1099,14 +1193,8 @@ pub async fn stop_recording<R: Runtime>(
         (None, None)
     };
 
-    // Set recording flag to false
-    info!("🔍 Setting IS_RECORDING to false");
-    IS_RECORDING.store(false, Ordering::SeqCst);
-    RECORDING_JOB.lock().unwrap().take();
-
-    // Step 4.5: Prepare metadata for frontend (NO database save)
-    // NOTE: We do NOT save to database here. The frontend will save after all transcripts are displayed.
-    // This ensures the user sees all transcripts streaming in before the database save happens.
+    // The frontend initiates the library save using this folder's authoritative
+    // transcript snapshot after the stop operation completes.
     let (folder_path_str, meeting_name_str) = match (&meeting_folder, &meeting_name) {
         (Some(path), Some(name)) => (Some(path.to_string_lossy().to_string()), Some(name.clone())),
         _ => (None, None),
@@ -1114,28 +1202,33 @@ pub async fn stop_recording<R: Runtime>(
 
     info!("📤 Preparing recording metadata for frontend save");
 
-    // Database save removed - frontend will handle this after receiving all transcripts
-    info!("ℹ️ Skipping database save in Rust - frontend will save after all transcripts received");
-
     if let Some(folder) = meeting_folder.clone() {
         let outcome = super::outcome::RecordingOutcome {
             audio_save_failed,
             transcription_incomplete,
+            capture_incomplete,
+            recording_files_incomplete,
         };
         if !matches!(
             tokio::task::spawn_blocking(move || outcome.write(&folder)).await,
             Ok(Ok(()))
         ) {
-            audio_save_failed = true;
+            recording_files_incomplete = true;
         }
     }
+
+    // Release the recording job only after the outcome is persisted.
+    IS_RECORDING.store(false, Ordering::SeqCst);
+    RECORDING_JOB.lock().unwrap().take();
+    IS_STOPPING.store(false, Ordering::Release);
+    crate::tray::update_tray_menu(&app);
 
     // Step 5: Complete shutdown
     let _ = app.emit(
         "recording-shutdown-progress",
         serde_json::json!({
             "stage": "complete",
-            "message": if audio_save_failed || transcription_incomplete { "Recording stopped; recovery needed" } else { "Recording stopped" },
+            "message": if audio_save_failed || transcription_incomplete || capture_incomplete || recording_files_incomplete { "Recording stopped; review needed" } else { "Recording stopped" },
             "progress": 100
         }),
     );
@@ -1146,6 +1239,8 @@ pub async fn stop_recording<R: Runtime>(
         serde_json::json!({
             "message": if audio_save_failed {
                 "Recording stopped; audio recovery is needed"
+            } else if capture_incomplete {
+                "Recording stopped; available audio was saved with capture gaps"
             } else if transcription_incomplete {
                 "Recording stopped; some queued audio still needs retranscription"
             } else {
@@ -1155,12 +1250,19 @@ pub async fn stop_recording<R: Runtime>(
             "meeting_name": meeting_name_str,
             "recording_mode": if transcribes { "live" } else { "audio_only" },
             "transcription_incomplete": transcription_incomplete,
-            "audio_save_failed": audio_save_failed
+            "audio_save_failed": audio_save_failed,
+            "capture_incomplete": capture_incomplete,
+            "recording_files_incomplete": recording_files_incomplete
         }),
     )
     .map_err(|e| e.to_string())?;
 
-    if transcribes && !transcription_incomplete && !audio_save_failed {
+    if transcribes
+        && !transcription_incomplete
+        && !audio_save_failed
+        && !capture_incomplete
+        && !recording_files_incomplete
+    {
         crate::openclaw::submit_completed_recording(
             app.clone(),
             folder_path_str.clone(),
@@ -1176,7 +1278,7 @@ pub async fn stop_recording<R: Runtime>(
     } else {
         info!("🎉 Recording stopped successfully with all transcript chunks processed");
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Check if recording is active

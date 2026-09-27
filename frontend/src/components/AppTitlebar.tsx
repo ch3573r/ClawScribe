@@ -9,23 +9,6 @@ const getAppWindow = () => {
 };
 
 export function AppTitlebar() {
-  const handleDrag = async (event: React.MouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-
-    try {
-      const appWindow = getAppWindow();
-      if (!appWindow) return;
-
-      if (event.detail === 2) {
-        await appWindow.toggleMaximize();
-      } else {
-        await appWindow.startDragging();
-      }
-    } catch {
-      // Browser previews do not have Tauri's native window API.
-    }
-  };
-
   const handleMinimize = async () => {
     try {
       const appWindow = getAppWindow();
@@ -57,9 +40,10 @@ export function AppTitlebar() {
   };
 
   return (
+    // Tauri owns drag and double-click gestures through data-tauri-drag-region.
+    // A React mousedown handler here would dispatch the same native action twice.
     <header
       className="fixed inset-x-0 top-0 z-[100] flex h-[var(--titlebar-height)] select-none items-center border-b border-sidebar-border/80 bg-sidebar text-foreground"
-      onMouseDown={handleDrag}
       data-tauri-drag-region
     >
       <div className="min-w-0 flex-1 self-stretch" data-tauri-drag-region />

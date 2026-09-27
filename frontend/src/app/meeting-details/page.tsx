@@ -10,7 +10,7 @@ import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { listen } from '@tauri-apps/api/event';
-import { RecordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
+import { RecordingOutcome, recordingRecoveryMessage, recordingBlocksAutoSummary } from '@/lib/recording-outcome';
 
 interface MeetingDetailsResponse {
   id: string;
@@ -79,7 +79,7 @@ function MeetingDetailsContent() {
     try {
       if (source !== 'recording' || !isAutoSummary) return;
       const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
-      if (request !== autoGenRequest.current || (outcome && recordingRecoveryMessage(outcome))) return;
+      if (request !== autoGenRequest.current || recordingBlocksAutoSummary(outcome)) return;
       const config = await invoke<{ model?: string }>('api_get_model_config');
       if (request === autoGenRequest.current && config?.model) setShouldAutoGenerate(true);
     } catch {

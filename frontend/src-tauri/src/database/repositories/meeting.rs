@@ -261,6 +261,10 @@ async fn delete_meeting_with_transaction(
         return Ok(false);
     }
 
+    // Live bookmarks may not have been associated by the library view yet.
+    sqlx::query("DELETE FROM meeting_bookmarks WHERE meeting_id = ? OR folder_path IN (SELECT folder_path FROM meetings WHERE id = ?)")
+        .bind(meeting_id).bind(meeting_id).execute(&mut *transaction).await?;
+
     // Delete from related tables in proper order
     // 1. Delete from transcript_chunks
     sqlx::query("DELETE FROM transcript_chunks WHERE meeting_id = ?")

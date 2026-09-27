@@ -76,8 +76,8 @@ Observed behavior:
 - `api_key` is request-ready only when a stored OpenAI API key is present.
 - `openclaw_codex_managed` is request-ready when an OpenClaw model endpoint is
   configured.
-- `oauth_pkce` can validate metadata and prepare a PKCE S256 authorization URL,
-  but `api_exchange_openai_oauth_pkce_code` always returns an unsupported error.
+- `oauth_pkce` remains compatibility metadata only. It cannot launch a browser
+  flow or exchange authorization codes.
 - The backend explicitly says public OpenAI OAuth PKCE metadata alone cannot
   authenticate OpenAI API requests.
 - No OAuth client secret, access token, refresh token, ChatGPT token, Codex

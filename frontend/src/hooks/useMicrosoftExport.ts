@@ -42,6 +42,7 @@ export function useMicrosoftExport() {
     try {
       const status = await microsoftExportService.connectionStatus();
       setConnection(status);
+      if (status.requestingPermissions) setSigningIn(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -57,9 +58,10 @@ export function useMicrosoftExport() {
       "microsoft-auth-complete",
       (event) => {
         setSigningIn(false);
-        if (event.payload.state !== "connected" && event.payload.error) {
+        if (event.payload.error) {
           setError(event.payload.error);
         }
+        void refreshStatus();
         setConnection({
           state: event.payload.state as MicrosoftConnectionInfo["state"],
           userDisplayName: event.payload.userDisplayName ?? null,
@@ -82,7 +84,7 @@ export function useMicrosoftExport() {
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [refreshStatus]);
 
   const signIn = useCallback(async () => {
     setSigningIn(true);
@@ -95,6 +97,26 @@ export function useMicrosoftExport() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
+
+  const requestMissingPermissions = useCallback(async () => {
+    setSigningIn(true);
+    setError(null);
+    try {
+      await microsoftExportService.requestMissingPermissions();
+    } catch (e) {
+      setSigningIn(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const cancelSignIn = useCallback(async () => {
+    try {
+      await microsoftExportService.cancelSignIn();
+      setSigningIn(false);
+      setError(null);
+      await refreshStatus();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+  }, [refreshStatus]);
 
   const signOut = useCallback(async () => {
     setError(null);
@@ -179,6 +201,12 @@ export function useMicrosoftExport() {
   const loadCalendar = useCallback(async () => {
     setLoadingCalendar(true);
     try {
+      const status = await microsoftExportService.connectionStatus();
+      if (status.state !== "connected" || status.unavailableExports?.includes("Calendar lookup")) {
+        setCalendarEvents([]);
+        setCurrentMeeting(null);
+        return;
+      }
       const now = new Date();
       const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
       const [events, current] = await Promise.all([
@@ -256,6 +284,8 @@ export function useMicrosoftExport() {
     signingIn,
     error,
     signIn,
+    cancelSignIn,
+    requestMissingPermissions,
     signOut,
     notebooks,
     plans,

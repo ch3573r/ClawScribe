@@ -48,6 +48,10 @@ impl StoredToken {
         }
     }
 
+    pub(super) fn same_persisted_fields(&self, other: &Self) -> bool {
+        PersistedToken::from_stored(self) == PersistedToken::from_stored(other)
+    }
+
     pub fn is_access_token_valid(&self) -> bool {
         Utc::now() + Duration::seconds(60) < self.expires_at
     }
@@ -76,7 +80,7 @@ impl std::fmt::Display for TokenStoreError {
 /// silently failed every keychain write and lost the sign-in on restart. Only
 /// the refresh token (plus metadata) is needed to restore a session; it is
 /// re-exchanged for an access token on first use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PersistedToken {
     refresh_token: Option<String>,
     user_id: String,
@@ -274,23 +278,42 @@ pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
         }
         Err(e) => {
             log::warn!("Keychain token write failed ({e}); using file fallback");
-            save_to_file(&json)
+            save_fallback(&json, save_to_file, || {
+                keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)?.delete_credential()
+            })
         }
+    }
+}
+
+fn save_fallback(
+    json: &str,
+    save: impl FnOnce(&str) -> Result<(), TokenStoreError>,
+    delete_stale: impl FnOnce() -> Result<(), keyring::Error>,
+) -> Result<(), TokenStoreError> {
+    save(json)?;
+    match delete_stale() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err(TokenStoreError::KeyringError(
+            "Could not remove stale Microsoft token after fallback save".into(),
+        )),
     }
 }
 
 pub fn load_token() -> Result<Option<StoredToken>, TokenStoreError> {
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
         .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
-    match entry.get_password() {
-        Ok(json) => {
-            let persisted: PersistedToken = serde_json::from_str(&json)
-                .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
-            Ok(Some(persisted.into_stored()))
-        }
-        // Nothing in the keychain — check the file fallback before giving up.
-        Err(keyring::Error::NoEntry) => Ok(load_from_file().map(PersistedToken::into_stored)),
-        Err(_) => Ok(load_from_file().map(PersistedToken::into_stored)),
+    load_token_from_sources(entry.get_password(), load_from_file)
+}
+
+fn load_token_from_sources(
+    keychain: Result<String, keyring::Error>,
+    fallback: impl FnOnce() -> Option<PersistedToken>,
+) -> Result<Option<StoredToken>, TokenStoreError> {
+    match keychain {
+        Ok(json) => serde_json::from_str::<PersistedToken>(&json)
+            .map(|token| Some(token.into_stored()))
+            .map_err(|e| TokenStoreError::SerializationError(e.to_string())),
+        Err(_) => Ok(fallback().map(PersistedToken::into_stored)),
     }
 }
 
@@ -316,10 +339,8 @@ pub async fn get_valid_access_token(
 
 /// Get a valid access token, refreshing if expired.
 ///
-/// `current` is the session's in-memory token (the source of truth). When it is
-/// `None` we fall back to the keychain. A refreshed token is written back to the
-/// keychain on a best-effort basis: persistence failure does not fail the call,
-/// because the caller keeps the returned token in memory for the session.
+/// `current` is the session token. This function never persists refresh results;
+/// the caller must check the session generation under its lock before persisting.
 pub async fn ensure_valid_token(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
@@ -336,6 +357,16 @@ pub async fn ensure_valid_token(
         return Ok(stored);
     }
 
+    refresh_session_token(http, config, stored).await
+}
+
+/// Refresh even an unexpired access token to discover newly approved scopes.
+/// The caller still owns generation checking and persistence.
+pub(super) async fn refresh_session_token(
+    http: &reqwest::Client,
+    config: &MicrosoftAuthConfig,
+    stored: StoredToken,
+) -> Result<StoredToken, MsAuthError> {
     let refresh = stored
         .refresh_token
         .as_deref()
@@ -356,12 +387,47 @@ pub async fn ensure_valid_token(
         ..stored
     };
 
-    // Best-effort: a keychain write failure must not invalidate a token we
-    // already hold and can use for this session.
-    if let Err(e) = save_token(&updated) {
-        log::warn!("Failed to persist refreshed Microsoft token: {e}");
-    }
     Ok(updated)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn fallback_replaces_stale_keychain_token() {
+        use std::cell::RefCell;
+        let keychain = RefCell::new(Some("old token".to_string()));
+        let fallback = RefCell::new(None);
+        let fresh = PersistedToken {
+            refresh_token: Some("test-fresh".into()),
+            user_id: "test-user".into(),
+            user_display_name: "Test User".into(),
+            user_email: None,
+            tenant_id: "organizations".into(),
+            granted_scopes: "User.Read".into(),
+        };
+        save_fallback(
+            &serde_json::to_string(&fresh).unwrap(),
+            |json| {
+                *fallback.borrow_mut() =
+                    Some(serde_json::from_str::<PersistedToken>(json).unwrap());
+                Ok(())
+            },
+            || {
+                *keychain.borrow_mut() = None;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let loaded =
+            load_token_from_sources(keychain.into_inner().ok_or(keyring::Error::NoEntry), || {
+                fallback.into_inner()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.refresh_token, fresh.refresh_token);
+        assert!(save_fallback("test", |_| Ok(()), || Err(keyring::Error::NoEntry)).is_ok());
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

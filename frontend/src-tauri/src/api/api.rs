@@ -104,6 +104,8 @@ pub struct GetApiKeyRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TranscriptConfig {
+    #[serde(rename = "allowUnencrypted", default)]
+    pub allow_unencrypted: bool,
     pub provider: String,
     pub model: String,
     #[serde(rename = "apiKey")]
@@ -643,6 +645,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
                 Ok(api_key) => {
                     log_info!("Successfully retrieved transcript config and API key.");
                     Ok(Some(TranscriptConfig {
+                        allow_unencrypted: config.cloud_http_opt_in(&config.provider),
                         provider: config.provider.clone(),
                         model: config.model,
                         api_key,
@@ -660,6 +663,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
         Ok(None) => {
             log_info!("No transcript config found, returning default.");
             Ok(Some(TranscriptConfig {
+                allow_unencrypted: false,
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
@@ -681,6 +685,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     base_url: Option<String>,
     endpoint: Option<String>,
@@ -693,6 +698,18 @@ pub async fn api_save_transcript_config<R: Runtime>(
     );
     let pool = state.db_manager.pool();
 
+    let allow_unencrypted = allow_unencrypted.unwrap_or(false);
+    match provider.as_str() {
+        PROVIDER_CLOUD_WHISPER => crate::openai::secret_destination::validate_secret_destination(
+            clean_optional(base_url.as_deref()).unwrap_or("https://api.openai.com/v1"),
+            allow_unencrypted,
+        )?,
+        PROVIDER_MAI_TRANSCRIBE => crate::openai::secret_destination::validate_secret_destination(
+            clean_optional(endpoint.as_deref()).unwrap_or(""),
+            allow_unencrypted,
+        )?,
+        _ => {}
+    }
     if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
         log_error!("Failed to save transcript config");
         return Err(e.to_string());
@@ -716,6 +733,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
         clean_base_url,
         clean_endpoint,
         clean_region,
+        allow_unencrypted,
     )
     .await
     {
@@ -769,6 +787,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     base_url: Option<String>,
     endpoint: Option<String>,
@@ -782,18 +801,53 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         &provider
     );
     let audio_path = Path::new(&audio_path);
-    let audio_size_bytes = tokio::fs::metadata(audio_path)
-        .await
-        .map_err(|e| format!("Failed to inspect test audio file: {e}"))?
-        .len();
-    if audio_size_bytes == 0 {
-        return Err("Test audio file is empty".to_string());
-    }
-
+    let audio_size_bytes =
+        crate::audio::transcription::cloud::validate_test_audio_path(audio_path).await?;
     let pool = state.db_manager.pool();
     let saved_config = SettingsRepository::get_transcript_config(pool)
         .await
-        .map_err(|e| format!("Failed to read saved transcript settings: {e}"))?;
+        .map_err(|_| "Failed to read saved transcript settings")?;
+    let saved_endpoint = saved_config
+        .as_ref()
+        .and_then(|config| match provider.as_str() {
+            PROVIDER_CLOUD_WHISPER => Some(
+                config
+                    .cloud_whisper_base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1"),
+            ),
+            PROVIDER_MAI_TRANSCRIBE => config.mai_transcribe_endpoint.as_deref(),
+            _ => None,
+        });
+    let requested = match provider.as_str() {
+        PROVIDER_CLOUD_WHISPER => clean_optional(base_url.as_deref()).or_else(|| {
+            saved_endpoint
+                .is_none()
+                .then_some("https://api.openai.com/v1")
+        }),
+        PROVIDER_MAI_TRANSCRIBE => clean_optional(endpoint.as_deref()),
+        _ => return Err("Unsupported cloud transcription provider".into()),
+    };
+    let destination = crate::audio::transcription::cloud::test_destination(
+        saved_endpoint,
+        requested,
+        clean_optional(api_key.as_deref()).is_some(),
+    )?;
+    let allow_unencrypted = allow_unencrypted.unwrap_or_else(|| {
+        crate::audio::transcription::cloud::test_destination(
+            saved_endpoint,
+            Some(&destination),
+            false,
+        )
+        .is_ok()
+            && saved_config
+                .as_ref()
+                .is_some_and(|config| config.cloud_http_opt_in(&provider))
+    });
+    crate::openai::secret_destination::validate_secret_destination(
+        &destination,
+        allow_unencrypted,
+    )?;
     let api_key = match clean_optional(api_key.as_deref()).map(str::to_string) {
         Some(key) => key,
         None => SettingsRepository::get_transcript_api_key(pool, &provider)
@@ -812,18 +866,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
 
     match provider.as_str() {
         PROVIDER_CLOUD_WHISPER => {
-            let base_url = clean_string(base_url)
-                .or_else(|| {
-                    saved_config
-                        .as_ref()
-                        .and_then(|config| {
-                            (config.provider == PROVIDER_CLOUD_WHISPER)
-                                .then(|| config.cloud_whisper_base_url.clone())
-                                .flatten()
-                        })
-                        .and_then(|value| clean_string(Some(value)))
-                })
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let base_url = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.to_string());
             validate_provider_upload_size(
@@ -840,7 +883,8 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             let audio = tokio::fs::read(audio_path)
                 .await
                 .map_err(|e| format!("Failed to read test audio file: {e}"))?;
-            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone());
+            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone())
+                .with_http_opt_in(allow_unencrypted);
             let segments = provider_client
                 .transcribe_file(audio, file_name, mime_type, language)
                 .await
@@ -853,18 +897,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             build_cloud_test_result(PROVIDER_CLOUD_WHISPER, &model, &segments, true)
         }
         PROVIDER_MAI_TRANSCRIBE => {
-            let endpoint = clean_string(endpoint)
-                .or_else(|| {
-                    saved_config
-                        .as_ref()
-                        .and_then(|config| {
-                            (config.provider == PROVIDER_MAI_TRANSCRIBE)
-                                .then(|| config.mai_transcribe_endpoint.clone())
-                                .flatten()
-                        })
-                        .and_then(|value| clean_string(Some(value)))
-                })
-                .ok_or_else(|| "Azure Speech endpoint is missing".to_string())?;
+            let endpoint = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
             validate_provider_upload_size(
@@ -881,7 +914,8 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             let audio = tokio::fs::read(audio_path)
                 .await
                 .map_err(|e| format!("Failed to read test audio file: {e}"))?;
-            let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone());
+            let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone())
+                .with_http_opt_in(allow_unencrypted);
             let segments = provider_client
                 .transcribe_file(audio, file_name, mime_type, language)
                 .await
@@ -1240,6 +1274,96 @@ pub async fn api_save_meeting_title<R: Runtime>(
     }
 }
 
+fn parse_recording_transcripts(
+    values: Vec<serde_json::Value>,
+) -> Result<Vec<TranscriptSegment>, String> {
+    values
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|_| "Invalid transcript segment data".into())
+}
+
+fn read_recording_snapshot(
+    folder: Option<&std::path::Path>,
+) -> Result<Vec<TranscriptSegment>, String> {
+    let path = folder
+        .ok_or("Recording folder unavailable")?
+        .join("transcripts.json");
+    let file = std::fs::File::open(path).map_err(|_| "Saved transcript could not be opened")?;
+    let snapshot: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file))
+        .map_err(|_| "Saved transcript could not be read")?;
+    let mut segments = snapshot
+        .get("segments")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .ok_or("Saved transcript has no segment list")?;
+    for segment in &mut segments {
+        if let Some(object) = segment.as_object_mut() {
+            let timestamp = object
+                .get("display_time")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(""));
+            object.insert("timestamp".into(), timestamp);
+        }
+    }
+    parse_recording_transcripts(segments)
+}
+
+fn select_recording_transcripts(
+    saved: Result<Vec<TranscriptSegment>, String>,
+    fallback: Vec<serde_json::Value>,
+) -> Result<(Vec<TranscriptSegment>, bool), String> {
+    match saved {
+        Ok(segments) => Ok((segments, false)),
+        Err(_) => Ok((parse_recording_transcripts(fallback)?, true)),
+    }
+}
+
+#[cfg(test)]
+mod recording_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn missing_and_invalid_snapshots_fall_back_to_valid_ui_segments() {
+        let root = tempfile::tempdir().unwrap();
+        for contents in [
+            None,
+            Some("not json"),
+            Some(r#"{"segments":[{"invalid":true}]}"#),
+        ] {
+            if let Some(contents) = contents {
+                std::fs::write(root.path().join("transcripts.json"), contents).unwrap();
+            }
+            let fallback = vec![
+                serde_json::json!({"id":"ui", "text":"Synthetic fallback", "timestamp":"00:01"}),
+            ];
+            let (segments, used_fallback) =
+                select_recording_transcripts(read_recording_snapshot(Some(root.path())), fallback)
+                    .unwrap();
+            assert!(used_fallback);
+            assert_eq!(segments[0].id, "ui");
+        }
+        assert!(select_recording_transcripts(
+            Err("unavailable".into()),
+            vec![serde_json::json!({})]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn valid_backend_snapshot_remains_authoritative() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("transcripts.json"), r#"{"segments":[{"id":"backend","text":"Synthetic saved sentence","display_time":"00:02"}]}"#).unwrap();
+        let (segments, used_fallback) =
+            select_recording_transcripts(read_recording_snapshot(Some(root.path())), vec![])
+                .unwrap();
+        assert!(!used_fallback);
+        assert_eq!(segments[0].id, "backend");
+        assert_eq!(segments[0].timestamp, "00:02");
+    }
+}
+
 #[tauri::command]
 pub async fn api_save_transcript<R: Runtime>(
     _app: AppHandle<R>,
@@ -1249,33 +1373,47 @@ pub async fn api_save_transcript<R: Runtime>(
     folder_path: Option<String>,
     auth_token: Option<String>,
     recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
+    use_saved_recording: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Saving meeting transcript");
 
-    // Convert serde_json::Value to TranscriptSegment
-    let transcripts_to_save: Vec<TranscriptSegment> = transcripts
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            log_error!("Failed to parse transcript segments");
-            format!(
-                "Invalid transcript data format: {}. Please check the data structure.",
-                e
-            )
-        })?;
+    let (transcripts_to_save, used_fallback) = if use_saved_recording.unwrap_or(false) {
+        let folder = folder_path.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            read_recording_snapshot(folder.as_deref().map(std::path::Path::new))
+        })
+        .await
+        .unwrap_or_else(|_| Err("Saved transcript reader failed".into()));
+        select_recording_transcripts(saved, transcripts)?
+    } else {
+        (parse_recording_transcripts(transcripts)?, false)
+    };
 
+    let mut save_warnings = Vec::new();
     let mut recording_outcome = recording_outcome.unwrap_or_default();
+    if used_fallback {
+        recording_outcome.transcription_incomplete = true;
+        save_warnings.push("The final transcript snapshot was unavailable. Saved the transcript visible in the app; review it for missing lines.");
+        log_warn!("Library save used the UI transcript because the final snapshot was unavailable");
+    }
     if let Some(folder) = folder_path.as_ref().map(std::path::PathBuf::from) {
         let saved = tokio::task::spawn_blocking(move || {
             crate::audio::outcome::RecordingOutcome::read(&folder)
         })
-        .await
-        .map_err(|_| "Recording status reader failed")??;
-        if let Some(saved) = saved {
-            recording_outcome.audio_save_failed |= saved.audio_save_failed;
-            recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
+        .await;
+        match saved {
+            Ok(Ok(Some(saved))) => {
+                recording_outcome.audio_save_failed |= saved.audio_save_failed;
+                recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
+                recording_outcome.capture_incomplete |= saved.capture_incomplete;
+                recording_outcome.recording_files_incomplete |= saved.recording_files_incomplete;
+            }
+            Ok(Ok(None)) => {}
+            _ => {
+                recording_outcome.recording_files_incomplete = true;
+                save_warnings.push("The recording warning file could not be read. Review the saved meeting and keep its folder.");
+            }
         }
     }
     let pool = state.db_manager.pool();
@@ -1295,7 +1433,9 @@ pub async fn api_save_transcript<R: Runtime>(
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",
-                "meeting_id": meeting_id
+                "meeting_id": meeting_id,
+                "warning": if save_warnings.is_empty() { None } else { Some(save_warnings.join(" ")) },
+                "recording_outcome": recording_outcome
             }))
         }
         Err(e) => {
@@ -1475,6 +1615,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     endpoint: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
@@ -1485,11 +1626,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     organization: Option<String>,
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_custom_openai_config called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    log_info!("api_save_custom_openai_config called");
 
     // Validate required fields
     if endpoint.trim().is_empty() {
@@ -1499,10 +1636,10 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
         return Err("Model name is required".to_string());
     }
 
-    // Validate endpoint URL format
-    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        return Err("Endpoint must start with http:// or https://".to_string());
-    }
+    crate::openai::secret_destination::validate_secret_destination(
+        endpoint.trim(),
+        allow_unencrypted.unwrap_or(false),
+    )?;
 
     // Validate optional numeric parameters
     if let Some(temp) = temperature {
@@ -1527,6 +1664,8 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     }
 
     let config = CustomOpenAIConfig {
+        destination_problem: None,
+        allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint: endpoint.trim().to_string(),
         api_key: api_key.filter(|k| !k.trim().is_empty()),
         model: model.trim().to_string(),
@@ -1543,10 +1682,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!(
-                "✅ Successfully saved custom OpenAI config for endpoint: {}",
-                config.endpoint
-            );
+            log_info!("Saved custom OpenAI configuration");
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1571,12 +1707,8 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
-            if let Some(ref c) = config {
-                log_info!(
-                    "✅ Found custom OpenAI config: endpoint='{}', model='{}'",
-                    c.endpoint,
-                    c.model
-                );
+            if config.is_some() {
+                log_info!("Found custom OpenAI configuration");
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1595,6 +1727,7 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
 pub async fn api_test_custom_openai_connection<R: Runtime>(
     _app: AppHandle<R>,
     endpoint: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
@@ -1605,13 +1738,16 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     organization: Option<String>,
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_test_custom_openai_connection called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    log_info!("api_test_custom_openai_connection called");
+
+    crate::openai::secret_destination::validate_secret_destination(
+        endpoint.trim(),
+        allow_unencrypted.unwrap_or(false),
+    )?;
 
     let config = CustomOpenAIConfig {
+        destination_problem: None,
+        allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint,
         api_key,
         model,
@@ -1642,6 +1778,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 pub async fn api_test_custom_openai_processing<R: Runtime>(
     _app: AppHandle<R>,
     endpoint: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
@@ -1653,6 +1790,8 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config = CustomOpenAIConfig {
+        destination_problem: None,
+        allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint,
         api_key,
         model,

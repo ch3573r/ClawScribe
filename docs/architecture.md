@@ -96,8 +96,43 @@ time. Lifecycle events invalidate older polls. Cleanup also removes subscription
 whose asynchronous registration finishes after the provider unmounts.
 
 `audio/transcription/queue.rs` serves both live recognition and the retained
-recording spool. `audio/audio_spool.rs` recovers mixed float PCM into a playable
-WAV. `audio/outcome.rs` persists recording failures before the completion event;
+recording spool. Bounded producer buffers feed independent disk workers so disk
+latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
+the available PCM spool in one pass with a duration-scaled deadline and recovers
+it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
+position. Torn temporary writes record a gap without preventing spool cleanup;
+unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
+element. Periodic transcript snapshots continue during silence; the library-save
+command reads the backend snapshot when saving a finished recording, falling
+back to the UI transcript with a warning if that snapshot is unavailable. New
+capture creates no checkpoint folder or periodic AAC encodes. The legacy
+checkpoint reader and merge fallback remain available for older meetings. The
+recovery dialog probes raw chunks (including a readable temporary tail), recovered
+files, and legacy checkpoints without encoding the spool. Recovery attempts audio
+before checking for recoverable content, so zero transcript rows do not block
+audio-only meetings; unsuccessful attempts retain the recovery entry and originals. Final transcript, audio and
+metadata writes are independent. Stopped duration and completion time are
+persisted before encoding, using the existing error status until finalization
+succeeds; capture gaps and artifact-save failures have
+separate persistent flags. File warnings reflect final write results. Spool cleanup
+requires published audio, complete raw encoding, and a saved outcome; independent
+transcript/metadata failures do not retain redundant audio. Retranscription updates repaired flags in the transcript
+transaction and mirrors the outcome afterwards; capture gaps remain informational.
+Its audio resolver checks retained raw chunks and the saved outcome on a blocking
+worker, even when reusing recovered audio, so older partial recoveries also set
+the permanent capture-gap flag. Unreadable saved status is treated as unknown;
+retained capture and database warnings still preserve gaps, and committed
+retranscription rewrites the status file. After library save or committed retranscription,
+fully readable recovered spools are released only after audio validation, a
+presentation-duration check against all retained samples, and saved outcome status.
+The check uses the same preferred recovery file as playback/retranscription; a
+longer alternate file cannot authorize cleanup. Publishing a recovered format
+removes the superseded recovery format only after the new file is safely written. Frontend release requests require a canonical registered meeting
+folder; incomplete chunks retain their originals.
+Shared stop ownership suppresses duplicate completion
+events, and a SQLite write reservation protects the folder lookup and insert
+against concurrent saves.
+`audio/outcome.rs` persists recording failures before the completion event;
 meeting/transcript/outcome database writes share a transaction. New schema is
 added through a migration; shipped migrations remain unchanged.
 
@@ -163,6 +198,12 @@ configuration. API summary response readers enforce an 8 MiB limit, reject
 reported output truncation, and keep cancellation active while reading the body.
 Chat and reviewed task polishing share provider configuration resolution.
 
+Summary status polling has one shared timer owner across meetings. Starting or
+finishing one poll keeps other meetings' polls alive; stopped or replaced requests
+cannot publish late responses. Missing jobs and completed jobs without saved
+content surface retry errors. Status checks do not overlap, and the polling limit
+reports an unconfirmed status without claiming that provider work was cancelled.
+
 ## Microsoft Export Persistence
 
 `exports/commands.rs` serializes export owners so separate dialogs cannot race
@@ -187,3 +228,45 @@ not product branding.
 Windows is the primary release target. Linux/macOS build paths may exist because
 of the upstream Tauri app and model libraries, but release validation currently
 focuses on Windows installers and GPU paths.
+
+Microsoft sign-in keeps partially granted sessions connected. Missing permissions
+and unavailable exports are shown in Settings; only “Request missing permissions”
+opens a consent flow. A declined request retains the session. Without offline
+access, sign-in lasts only for the current app run. Export commands check their
+required permissions before Graph calls. If a permission is missing, one token
+refresh checks for newly approved scopes before reporting it unavailable. Missing
+permissions trigger at most one forced refresh per scope per hour; signing in or
+requesting missing permissions resets that limit. Calendar views skip calendar
+requests when connection status reports Calendar lookup unavailable.
+
+Credential-bearing integration endpoints require HTTPS, loopback HTTP, or an explicit
+private-network HTTP opt-in. Legacy private HTTP settings migrate on load. HTTP
+requests validate and pin DNS results and disable redirects and proxies. Public
+HTTP destinations are rejected on save/send even with the opt-in. Rejected saved
+settings remain editable and show an attention message. Tailscale's shared address
+range and MagicDNS names are accepted as local, with the same DNS pinning checks.
+Settings responses carry `destination_problem` (camelCase for Confluence); this
+diagnostic is recomputed on load and is not saved as configuration.
+Confluence credentials include their saved origin and cannot be reused against a
+different origin; older unbound PATs must be saved again before use.
+Confluence status includes its saved base URL and HTTP opt-in, so settings can
+restore both without reaching the server or overwriting an edited destination.
+
+Microsoft sign-in has one active flow. Cancel stops its loopback listener and
+prevents late completion from restoring a session. Listener polling and bounded
+connection reads release the port after cancellation or timeout.
+
+Microsoft refresh results are committed under the session lock only when the
+sign-in generation is unchanged and the connection is still active. Sign-out
+invalidates that generation and clears memory and persisted credentials under
+the same lock, so an in-flight refresh cannot restore a signed-out account.
+
+Microsoft authentication HTTP calls time out after 30 seconds. OpenClaw handoffs
+time out after 60 seconds and retain at most 64 KiB of response text in submission
+markers.
+
+A Microsoft token fallback save removes the older keychain entry so the next
+load cannot prefer stale credentials over the encrypted fallback.
+
+Microsoft refreshes persist only changes to refresh tokens, account metadata,
+tenant, or granted scopes; access-token-only changes stay in memory.

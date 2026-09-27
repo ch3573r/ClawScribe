@@ -13,6 +13,7 @@ the Settings page to see the exact resolved config path on the recorder.
 ```json
 {
   "enabled": true,
+  "allow_unencrypted": true,
   "endpoint": "http://openclaw.local:8765/meetings/completed",
   "model_endpoint": "http://openclaw.local:8765/v1/chat/completions",
   "bearer_token": "",
@@ -130,3 +131,22 @@ Frontend status commands:
 The companion Windows tray/agent is no longer needed for the happy path once
 this fork is used as the recorder. It can remain as a diagnostic/manual
 processor outside the recorder's production submission path.
+
+## Local-network HTTP opt-in
+
+OpenClaw and custom OpenAI settings allow private-network HTTP only with
+**Allow unencrypted HTTP to this local-network server** enabled. The token/key
+is sent without encryption. Prefer HTTPS. Loopback HTTP needs no opt-in; public
+HTTP is rejected on save/send; saved settings remain editable with a warning.
+Tailscale's `100.64.0.0/10` range and `.ts.net` names count as local destinations.
+Before each HTTP request, all resolved addresses must
+be loopback or private, and the connection uses that checked resolution without
+redirects or a proxy. Existing private HTTP configurations migrate to opted-in
+on their first load; explicit choices are preserved thereafter.
+Rejected saved endpoints return a `destination_problem` alongside their settings.
+Correct the endpoint and save; an empty token field retains the existing token.
+
+The OpenClaw `allow_unencrypted` JSON flag covers both handoff and model
+endpoints. Custom OpenAI configuration has its own `allow_unencrypted` flag.
+Confluence stores the choice with the PAT's saved origin and restores it in
+Settings without needing a successful connection to the server.

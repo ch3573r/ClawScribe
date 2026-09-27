@@ -20,6 +20,8 @@ export interface RecordingState {
 export interface RecordingStoppedPayload {
   recording_mode?: 'live' | 'audio_only';
   audio_save_failed?: boolean;
+  capture_incomplete?: boolean;
+  recording_files_incomplete?: boolean;
   transcription_incomplete?: boolean;
   message: string;
   folder_path?: string;

@@ -4,7 +4,10 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { MeetingTag } from '@/lib/library';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useSummaryPolling } from '@/hooks/useSummaryPolling';
 
 
 interface SidebarItem {
@@ -30,6 +33,10 @@ interface TranscriptSearchResult {
 };
 
 interface SidebarContextType {
+  projectTags: MeetingTag[];
+  projectTagsError: string | null;
+  projectTagsLoading: boolean;
+  refreshProjectTags: () => Promise<void>;
   currentMeeting: CurrentMeeting | null;
   setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
   sidebarItems: SidebarItem[];
@@ -67,6 +74,21 @@ export const useSidebar = () => {
 };
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
+  const [projectTags, setProjectTags] = useState<MeetingTag[]>([]);
+  const [projectTagsError, setProjectTagsError] = useState<string | null>(null);
+  const [projectTagsLoading, setProjectTagsLoading] = useState(true);
+  const tagsVersion = React.useRef(0);
+  const tagsLoaded = React.useRef(false);
+  const refreshProjectTags = React.useCallback(async () => {
+    const version = ++tagsVersion.current;
+    setProjectTagsLoading(!tagsLoaded.current);
+    setProjectTagsError(null);
+    try {
+      const tags = await invoke<MeetingTag[]>('list_meeting_tags');
+      if (version === tagsVersion.current) { tagsLoaded.current = true; setProjectTags(tags); setProjectTagsError(null); }
+    } catch { if (version === tagsVersion.current) setProjectTagsError('Could not load project tags.'); }
+    finally { if (version === tagsVersion.current) setProjectTagsLoading(false); }
+  }, []);
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
   const [isCollapsed, setIsCollapsed] = useState(false);
   useEffect(() => {
@@ -83,7 +105,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [isSearching, setIsSearching] = useState(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
-  const [activeSummaryPolls, setActiveSummaryPolls] = useState<Map<string, NodeJS.Timeout>>(new Map());
+  const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling } = useSummaryPolling();
 
   // Use recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
@@ -120,6 +142,13 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetchMeetings();
   }, [serverAddress, fetchMeetings]);
+
+  useEffect(() => {
+    void refreshProjectTags();
+    const subscription = listen('library-changed', () => { void refreshProjectTags(); void fetchMeetings(); });
+    void subscription.catch(() => setProjectTagsError('Could not watch project tags. Reopen ClawScribe to retry.'));
+    return () => { tagsVersion.current++; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+  }, [refreshProjectTags, fetchMeetings]);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -210,113 +239,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // Summary polling management
-  const startSummaryPolling = React.useCallback((
-    meetingId: string,
-    processId: string,
-    onUpdate: (result: any) => void
-  ) => {
-    // Stop existing poll for this meeting if any
-    if (activeSummaryPolls.has(meetingId)) {
-      clearInterval(activeSummaryPolls.get(meetingId)!);
-    }
-
-    console.log(`📊 Starting polling for meeting ${meetingId}, process ${processId}`);
-
-    let pollCount = 0;
-    const MAX_POLLS = 200; // ~16.5 minutes at 5-second intervals (slightly longer than backend's 15-min timeout to avoid race conditions)
-
-    const pollInterval = setInterval(async () => {
-      pollCount++;
-
-      // Timeout safety: Stop after 10 minutes
-      if (pollCount >= MAX_POLLS) {
-        console.warn(`⏱️ Polling timeout for ${meetingId} after ${MAX_POLLS} iterations`);
-        clearInterval(pollInterval);
-        setActiveSummaryPolls(prev => {
-          const next = new Map(prev);
-          next.delete(meetingId);
-          return next;
-        });
-        onUpdate({
-          status: 'error',
-          error: 'Summary generation timed out after 15 minutes. Please try again or check your model configuration.'
-        });
-        return;
-      }
-      try {
-        const result = await invoke('api_get_summary', {
-          meetingId: meetingId,
-        }) as any;
-
-        console.log(`📊 Polling update for ${meetingId}:`, result.status);
-
-        // Call the update callback with result
-        onUpdate(result);
-
-        // Stop polling if completed, error, failed, cancelled, or idle (after initial processing)
-        if (result.status === 'completed' || result.status === 'error' || result.status === 'failed' || result.status === 'cancelled') {
-          console.log(`Polling completed for ${meetingId}, status: ${result.status}`);
-          clearInterval(pollInterval);
-          setActiveSummaryPolls(prev => {
-            const next = new Map(prev);
-            next.delete(meetingId);
-            return next;
-          });
-        } else if (result.status === 'idle' && pollCount > 1) {
-          // If we get 'idle' after polling started, process completed/disappeared
-          console.log(`Process completed or not found for ${meetingId}, stopping poll`);
-          clearInterval(pollInterval);
-          setActiveSummaryPolls(prev => {
-            const next = new Map(prev);
-            next.delete(meetingId);
-            return next;
-          });
-        }
-      } catch (error) {
-        console.error(`Polling error for ${meetingId}:`, error);
-        // Report error to callback
-        onUpdate({
-          status: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-        clearInterval(pollInterval);
-        setActiveSummaryPolls(prev => {
-          const next = new Map(prev);
-          next.delete(meetingId);
-          return next;
-        });
-      }
-    }, 5000); // Poll every 5 seconds
-
-    setActiveSummaryPolls(prev => new Map(prev).set(meetingId, pollInterval));
-  }, [activeSummaryPolls]);
-
-  const stopSummaryPolling = React.useCallback((meetingId: string) => {
-    const pollInterval = activeSummaryPolls.get(meetingId);
-    if (pollInterval) {
-      console.log(`⏹️ Stopping polling for meeting ${meetingId}`);
-      clearInterval(pollInterval);
-      setActiveSummaryPolls(prev => {
-        const next = new Map(prev);
-        next.delete(meetingId);
-        return next;
-      });
-    }
-  }, [activeSummaryPolls]);
-
-  // Cleanup all polling intervals on unmount
-  useEffect(() => {
-    return () => {
-      console.log('🧹 Cleaning up all summary polling intervals');
-      activeSummaryPolls.forEach(interval => clearInterval(interval));
-    };
-  }, [activeSummaryPolls]);
-
-
-
   return (
     <SidebarContext.Provider value={{
+      projectTags,
+      projectTagsError,
+      projectTagsLoading,
+      refreshProjectTags,
       currentMeeting,
       setCurrentMeeting,
       sidebarItems,

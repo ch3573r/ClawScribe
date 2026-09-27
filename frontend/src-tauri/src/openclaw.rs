@@ -24,6 +24,9 @@ const DEFAULT_SOURCE: &str = "ClawScribe";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenClawConfig {
+    #[serde(skip)]
+    pub destination_problem: Option<String>,
+    pub allow_unencrypted: bool,
     pub enabled: bool,
     pub endpoint: String,
     pub model_endpoint: String,
@@ -35,6 +38,8 @@ pub struct OpenClawConfig {
 impl Default for OpenClawConfig {
     fn default() -> Self {
         Self {
+            destination_problem: None,
+            allow_unencrypted: false,
             enabled: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             model_endpoint: DEFAULT_MODEL_ENDPOINT.to_string(),
@@ -47,6 +52,8 @@ impl Default for OpenClawConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawConfigStatus {
+    pub destination_problem: Option<String>,
+    pub allow_unencrypted: bool,
     pub enabled: bool,
     pub configured: bool,
     pub ready: bool,
@@ -94,9 +101,12 @@ pub async fn get_openclaw_config_status<R: Runtime>(
     let endpoint_configured = !config.endpoint.trim().is_empty();
     let source_configured = !config.source.trim().is_empty();
     let configured = endpoint_configured && source_configured && bearer_token_configured;
-    let ready = config.enabled && configured;
+    let destination_error = config.destination_problem.clone();
+    let ready = config.enabled && configured && destination_error.is_none();
 
     Ok(OpenClawConfigStatus {
+        destination_problem: destination_error.clone(),
+        allow_unencrypted: config.allow_unencrypted,
         enabled: config.enabled,
         configured,
         ready,
@@ -104,12 +114,16 @@ pub async fn get_openclaw_config_status<R: Runtime>(
         endpoint: config.endpoint,
         model_endpoint: config.model_endpoint,
         source: config.source,
-        status_message: openclaw_status_message(
-            config.enabled,
-            endpoint_configured,
-            source_configured,
-            bearer_token_configured,
-        ),
+        status_message: destination_error
+            .map(|error| format!("Settings need attention: {error}"))
+            .unwrap_or_else(|| {
+                openclaw_status_message(
+                    config.enabled,
+                    endpoint_configured,
+                    source_configured,
+                    bearer_token_configured,
+                )
+            }),
         config_path: config_path.to_string_lossy().to_string(),
         last_status_path: last_status_path.to_string_lossy().to_string(),
         include_audio_path: config.include_audio_path,
@@ -130,11 +144,22 @@ pub async fn save_openclaw_config<R: Runtime>(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
+    save_config_at(&path, config, |value| {
+        crate::credentials::seal("openclaw/bearer-token", value)
+    })
+}
+
+fn save_config_at(
+    path: &Path,
+    config: OpenClawConfig,
+    protect: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
     let mut config = normalize_config(config);
+    validate_endpoints(&config)?;
     if config.bearer_token.is_empty() {
-        config.bearer_token = load_config_unlocked(&app)?.bearer_token;
+        config.bearer_token = load_config_from_path(path)?.bearer_token;
     }
-    config.bearer_token = crate::credentials::seal("openclaw/bearer-token", &config.bearer_token)?;
+    config.bearer_token = protect(&config.bearer_token)?;
     write_config_atomically(&path, &config)
 }
 
@@ -277,6 +302,7 @@ async fn submit_folder_with_config(
         });
     }
 
+    validate_endpoints(&config)?;
     if config.endpoint.trim().is_empty() || config.bearer_token.trim().is_empty() {
         let status = submission_status(
             "not_configured",
@@ -366,7 +392,12 @@ async fn submit_folder_with_config(
         });
     }
 
-    let client = reqwest::Client::new();
+    let client = crate::openai::secret_destination::secret_client(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)),
+        &config.endpoint,
+        config.allow_unencrypted,
+    )
+    .await?;
     let response = match client
         .post(config.endpoint.trim())
         .bearer_auth(config.bearer_token.trim())
@@ -401,7 +432,7 @@ async fn submit_folder_with_config(
     };
 
     let status = response.status();
-    let response_text = response.text().await.unwrap_or_default();
+    let response_text = bounded_response(response).await;
 
     if status.is_success() {
         write_submitted_marker(
@@ -465,9 +496,30 @@ pub(crate) fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConf
 
 fn load_config_unlocked<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
     let path = config_path(app)?;
+    load_config_from_path(&path)
+}
+
+fn load_config_from_path(path: &Path) -> Result<OpenClawConfig, String> {
     let mut config = match fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => {
-            serde_json::from_str::<OpenClawConfig>(&content).map_err(|e| e.to_string())?
+            let mut value: Value =
+                serde_json::from_str(&content).map_err(|_| "Invalid OpenClaw configuration")?;
+            let migrated = crate::openai::secret_destination::migrate_http_opt_in(
+                &mut value,
+                &["endpoint", "model_endpoint"],
+            )?;
+            let mut config: OpenClawConfig =
+                serde_json::from_value(value).map_err(|_| "Invalid OpenClaw configuration")?;
+            if migrated {
+                if !config.bearer_token.is_empty()
+                    && !crate::credentials::is_protected(&config.bearer_token)
+                {
+                    config.bearer_token =
+                        crate::credentials::seal("openclaw/bearer-token", &config.bearer_token)?;
+                }
+                write_config_atomically(&path, &config)?;
+            }
+            config
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenClawConfig::default(),
         _ => {
@@ -514,7 +566,9 @@ fn load_config_unlocked<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig
         );
     }
 
-    Ok(normalize_config(config))
+    let mut config = normalize_config(config);
+    config.destination_problem = validate_endpoints(&config).err();
+    Ok(config)
 }
 
 fn write_config_atomically(path: &Path, config: &OpenClawConfig) -> Result<(), String> {
@@ -532,6 +586,18 @@ fn write_config_atomically(path: &Path, config: &OpenClawConfig) -> Result<(), S
         let _ = fs::remove_file(temp);
     }
     result.map_err(|_| "Could not save protected provider settings".into())
+}
+
+fn validate_endpoints(config: &OpenClawConfig) -> Result<(), String> {
+    for endpoint in [&config.endpoint, &config.model_endpoint] {
+        if !endpoint.trim().is_empty() {
+            crate::openai::secret_destination::validate_secret_destination(
+                endpoint,
+                config.allow_unencrypted,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn normalize_config(mut config: OpenClawConfig) -> OpenClawConfig {
@@ -955,6 +1021,38 @@ fn pending_marker_is_stale(path: &Path) -> Result<bool, String> {
         > PENDING_STALE_SECONDS)
 }
 
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+fn submit_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not build OpenClaw client".into())
+}
+
+async fn bounded_response(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_RESPONSE_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                bytes.extend_from_slice(&chunk[..chunk.len().min(MAX_RESPONSE_BYTES - bytes.len())])
+            }
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn marker_response(response: &str) -> &str {
+    let mut end = response.len().min(MAX_RESPONSE_BYTES);
+    while !response.is_char_boundary(end) {
+        end -= 1;
+    }
+    &response[..end]
+}
+
 fn write_submitted_marker(
     folder: &Path,
     status_code: u16,
@@ -966,7 +1064,7 @@ fn write_submitted_marker(
         "schema": "openclaw.meetily-submission.v1",
         "submitted_at": Utc::now().to_rfc3339(),
         "status_code": status_code,
-        "response": response,
+        "response": marker_response(response),
         "endpoint": config.endpoint,
         "source": config.source,
         "idempotency_key": idempotency_key
@@ -1007,4 +1105,100 @@ fn write_marker(path: PathBuf, marker: &Value) -> Result<(), String> {
     }
     let content = serde_json::to_string_pretty(marker).map_err(|e| e.to_string())?;
     fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn rejected_legacy_config_loads_and_https_repair_preserves_token() {
+        use base64::Engine;
+        let protect = |value: &str| -> Result<String, String> {
+            let encrypted = crate::exports::token_store::protect_bytes(
+                format!("openclaw/bearer-token\0{value}").as_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "clawscribe:secret:v1:dpapi:{}",
+                base64::engine::general_purpose::STANDARD.encode(encrypted)
+            ))
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("openclaw.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "endpoint": "http://openclaw.example.com", "enabled": true,
+                "bearer_token": protect("test-token").unwrap()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+        assert!(loaded
+            .destination_problem
+            .as_deref()
+            .unwrap()
+            .contains("HTTPS"));
+        assert_eq!(loaded.bearer_token, "test-token");
+        assert!(crate::openai::secret_destination::secret_client(
+            reqwest::Client::builder(),
+            &loaded.endpoint,
+            loaded.allow_unencrypted,
+        )
+        .await
+        .is_err());
+        let repaired = OpenClawConfig {
+            endpoint: "https://openclaw.example.com".into(),
+            bearer_token: String::new(),
+            ..loaded
+        };
+        save_config_at(&path, repaired, protect).unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+        assert!(loaded.destination_problem.is_none());
+        assert_eq!(loaded.bearer_token, "test-token");
+        let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["allow_unencrypted"], false);
+        assert!(persisted.get("destination_problem").is_none());
+        assert!(crate::credentials::is_protected(
+            persisted["bearer_token"].as_str().unwrap()
+        ));
+    }
+    #[tokio::test]
+    async fn submit_client_times_out_stalled_responses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let error = submit_client(std::time::Duration::from_millis(50))
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout());
+        server.abort();
+    }
+    #[test]
+    fn submitted_marker_caps_oversized_utf8_response() {
+        let folder = tempfile::tempdir().unwrap();
+        let response = "€".repeat(MAX_RESPONSE_BYTES);
+        write_submitted_marker(
+            folder.path(),
+            200,
+            &response,
+            &OpenClawConfig::default(),
+            None,
+        )
+        .unwrap();
+        let marker: Value =
+            serde_json::from_slice(&fs::read(folder.path().join(SUBMITTED_MARKER)).unwrap())
+                .unwrap();
+        let stored = marker["response"].as_str().unwrap();
+        assert!(stored.len() <= MAX_RESPONSE_BYTES);
+        assert!(response.starts_with(stored));
+    }
 }

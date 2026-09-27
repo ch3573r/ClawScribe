@@ -184,33 +184,46 @@ impl SettingsRepository {
         base_url: Option<&str>,
         endpoint: Option<&str>,
         region: Option<&str>,
+        allow_unencrypted: bool,
     ) -> std::result::Result<(), sqlx::Error> {
         match provider {
             "cloud-whisper" => {
+                crate::openai::secret_destination::validate_secret_destination(
+                    base_url.unwrap_or("https://api.openai.com/v1"),
+                    allow_unencrypted,
+                )
+                .map_err(sqlx::Error::Protocol)?;
                 sqlx::query(
                     r#"
-                    INSERT INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl)
-                    VALUES ('1', 'cloud-whisper', 'whisper-1', $1)
+                    INSERT INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl, cloudWhisperAllowUnencrypted)
+                    VALUES ('1', 'cloud-whisper', 'whisper-1', $1, $2)
                     ON CONFLICT(id) DO UPDATE SET
-                        cloudWhisperBaseUrl = $1
+                        cloudWhisperBaseUrl = $1, cloudWhisperAllowUnencrypted = $2
                     "#,
                 )
                 .bind(base_url)
+                .bind(allow_unencrypted)
                 .execute(pool)
                 .await?;
             }
             "mai-transcribe" => {
+                crate::openai::secret_destination::validate_secret_destination(
+                    endpoint.unwrap_or(""),
+                    allow_unencrypted,
+                )
+                .map_err(sqlx::Error::Protocol)?;
                 sqlx::query(
                     r#"
-                    INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion)
-                    VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', $1, $2)
+                    INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion, maiTranscribeAllowUnencrypted)
+                    VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', $1, $2, $3)
                     ON CONFLICT(id) DO UPDATE SET
                         maiTranscribeEndpoint = $1,
-                        maiTranscribeRegion = $2
+                        maiTranscribeRegion = $2, maiTranscribeAllowUnencrypted = $3
                     "#,
                 )
                 .bind(endpoint)
                 .bind(region)
+                .bind(allow_unencrypted)
                 .execute(pool)
                 .await?;
             }
@@ -349,7 +362,29 @@ impl SettingsRepository {
             Some(record) => {
                 let config_json: Option<String> = record.get("customOpenAIConfig");
 
-                if let Some(json) = config_json {
+                if let Some(mut json) = config_json {
+                    let mut value: serde_json::Value =
+                        serde_json::from_str(&json).map_err(|_| {
+                            sqlx::Error::Protocol("Invalid provider configuration".into())
+                        })?;
+                    let migrated = crate::openai::secret_destination::migrate_http_opt_in(
+                        &mut value,
+                        &["endpoint"],
+                    )
+                    .map_err(sqlx::Error::Protocol)?;
+                    if migrated {
+                        let updated = serde_json::to_string(&value).map_err(|_| {
+                            sqlx::Error::Protocol("Invalid provider configuration".into())
+                        })?;
+                        let changed = sqlx::query("UPDATE settings SET customOpenAIConfig = ? WHERE id = '1' AND customOpenAIConfig = ?")
+                            .bind(&updated).bind(&json).execute(pool).await?;
+                        if changed.rows_affected() != 1 {
+                            return Err(sqlx::Error::Protocol(
+                                "Provider settings changed; retry".into(),
+                            ));
+                        }
+                        json = updated;
+                    }
                     // Parse JSON into CustomOpenAIConfig
                     let mut config: CustomOpenAIConfig =
                         serde_json::from_str(&json).map_err(|e| {
@@ -389,6 +424,12 @@ impl SettingsRepository {
                             .await?,
                         );
                     }
+                    config.destination_problem =
+                        crate::openai::secret_destination::validate_secret_destination(
+                            &config.endpoint,
+                            config.allow_unencrypted,
+                        )
+                        .err();
                     Ok(Some(config))
                 } else {
                     Ok(None)
@@ -412,6 +453,7 @@ impl SettingsRepository {
         config: &CustomOpenAIConfig,
     ) -> std::result::Result<(), sqlx::Error> {
         let mut persisted = config.clone();
+        persisted.destination_problem = None;
         if let Some(value) = &config.api_key {
             persisted.api_key = Some(
                 crate::credentials::seal_async("summary/custom-openai".into(), value.clone())

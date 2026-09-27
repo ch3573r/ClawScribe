@@ -13,7 +13,10 @@ const ACCOUNT_NAME: &str = "default";
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfluenceConnectionStatus {
+    pub base_url: Option<String>,
+    pub destination_problem: Option<String>,
     pub token_configured: bool,
+    pub allow_unencrypted: bool,
     pub reachable: bool,
     pub user_display_name: Option<String>,
     pub message: String,
@@ -84,18 +87,98 @@ fn credential_entry() -> Result<keyring::Entry, ConfluenceError> {
         .map_err(|e| ConfluenceError::Keyring(e.to_string()))
 }
 
-fn save_pat_to_keyring(pat: &str) -> Result<(), ConfluenceError> {
+#[derive(Serialize, Deserialize)]
+struct BoundPat {
+    #[serde(skip)]
+    destination_problem: Option<String>,
+    base_url: String,
+    pat: String,
+    #[serde(default)]
+    allow_unencrypted: bool,
+}
+
+impl BoundPat {
+    fn token_for(&self, requested: &str) -> Result<&str, ConfluenceError> {
+        crate::openai::secret_destination::validate_secret_destination(
+            requested,
+            self.allow_unencrypted,
+        )
+        .map_err(ConfluenceError::InvalidInput)?;
+        self.check_origin(requested)?;
+        Ok(&self.pat)
+    }
+
+    fn check_origin(&self, requested: &str) -> Result<(), ConfluenceError> {
+        let saved = url::Url::parse(&normalize_base_url(&self.base_url)?).map_err(|_| {
+            ConfluenceError::InvalidInput("Invalid saved Confluence destination".into())
+        })?;
+        let requested = url::Url::parse(&normalize_base_url(requested)?)
+            .map_err(|_| ConfluenceError::InvalidInput("Invalid Confluence destination".into()))?;
+        if saved.origin() != requested.origin() {
+            return Err(ConfluenceError::InvalidInput("Confluence destination changed. Save a PAT for this destination before connecting.".into()));
+        }
+        Ok(())
+    }
+}
+
+fn save_pat_to_keyring(
+    pat: &str,
+    base_url: &str,
+    allow_unencrypted: bool,
+) -> Result<(), ConfluenceError> {
+    crate::openai::secret_destination::validate_secret_destination(base_url, allow_unencrypted)
+        .map_err(ConfluenceError::InvalidInput)?;
+    let credential = BoundPat {
+        destination_problem: None,
+        allow_unencrypted,
+        base_url: normalize_base_url(base_url)?,
+        pat: pat.into(),
+    };
+    persist_binding(&credential)
+}
+
+// Migration preserves the existing binding, including endpoints needing repair.
+fn persist_binding(credential: &BoundPat) -> Result<(), ConfluenceError> {
+    let value = serde_json::to_string(credential).map_err(|_| {
+        ConfluenceError::InvalidInput("Could not serialize Confluence credentials".into())
+    })?;
     credential_entry()?
-        .set_password(pat)
+        .set_password(&value)
         .map_err(|e| ConfluenceError::Keyring(e.to_string()))
 }
 
-fn load_pat_from_keyring() -> Result<Option<String>, ConfluenceError> {
+fn load_pat_from_keyring() -> Result<Option<BoundPat>, ConfluenceError> {
     match credential_entry()?.get_password() {
-        Ok(value) => Ok(Some(value)),
+        Ok(value) => {
+            let (credential, migrated) = parse_binding(&value)?;
+            if migrated {
+                persist_binding(&credential)?;
+            }
+            Ok(Some(credential))
+        }
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(ConfluenceError::Keyring(e.to_string())),
     }
+}
+
+fn parse_binding(value: &str) -> Result<(BoundPat, bool), ConfluenceError> {
+    let mut parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| {
+        ConfluenceError::InvalidInput(
+            "Save your Confluence PAT again to bind it to this destination.".into(),
+        )
+    })?;
+    let migrated =
+        crate::openai::secret_destination::migrate_http_opt_in(&mut parsed, &["base_url"])
+            .map_err(ConfluenceError::InvalidInput)?;
+    let mut credential: BoundPat = serde_json::from_value(parsed)
+        .map_err(|_| ConfluenceError::InvalidInput("Invalid saved Confluence binding".into()))?;
+    credential.destination_problem =
+        crate::openai::secret_destination::validate_secret_destination(
+            &credential.base_url,
+            credential.allow_unencrypted,
+        )
+        .err();
+    Ok((credential, migrated))
 }
 
 fn delete_pat_from_keyring() -> Result<(), ConfluenceError> {
@@ -112,9 +195,15 @@ fn normalize_base_url(raw: &str) -> Result<String, ConfluenceError> {
             "Confluence base URL is required.".into(),
         ));
     }
-    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| ConfluenceError::InvalidInput("Enter a valid Confluence base URL.".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return Err(ConfluenceError::InvalidInput(
-            "Confluence base URL must start with http:// or https://.".into(),
+            "Use an HTTP or HTTPS URL without embedded credentials.".into(),
         ));
     }
     let without_rest = trimmed.trim_end_matches("/rest/api");
@@ -125,11 +214,13 @@ fn api_url(base_url: &str, path: &str) -> Result<String, ConfluenceError> {
     Ok(format!("{}{}", normalize_base_url(base_url)?, path))
 }
 
-fn http_client() -> Result<reqwest::Client, ConfluenceError> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| ConfluenceError::Network(e.to_string()))
+async fn http_client(base_url: &str, allow_unencrypted: bool) -> Result<reqwest::Client, String> {
+    crate::openai::secret_destination::secret_client(
+        reqwest::Client::builder().timeout(Duration::from_secs(30)),
+        base_url,
+        allow_unencrypted,
+    )
+    .await
 }
 
 fn truncate_error_body(body: &str) -> String {
@@ -158,12 +249,54 @@ async fn response_text_or_error(resp: reqwest::Response) -> Result<String, Confl
 }
 
 #[tauri::command]
-pub fn confluence_save_pat(pat: String) -> Result<(), String> {
+pub fn confluence_save_pat(
+    pat: String,
+    base_url: String,
+    allow_unencrypted: Option<bool>,
+) -> Result<(), String> {
     let pat = pat.trim();
     if pat.is_empty() {
         return Err("Confluence PAT must not be empty.".to_string());
     }
-    save_pat_to_keyring(pat).map_err(|e| e.to_string())
+    save_pat_to_keyring(pat, &base_url, allow_unencrypted.unwrap_or(false))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn confluence_settings_status(base_url: String) -> Result<ConfluenceConnectionStatus, String> {
+    let binding = load_pat_from_keyring().map_err(|e| e.to_string())?;
+    Ok(settings_status(binding.as_ref(), &base_url))
+}
+
+fn settings_status(binding: Option<&BoundPat>, base_url: &str) -> ConfluenceConnectionStatus {
+    let mut status = ConfluenceConnectionStatus {
+        base_url: binding.map(|binding| binding.base_url.clone()),
+        destination_problem: None,
+        token_configured: binding.is_some(),
+        allow_unencrypted: false,
+        reachable: false,
+        user_display_name: None,
+        message: "No Confluence PAT is saved.".into(),
+    };
+    if let Some(binding) = binding {
+        let base_url = if base_url.trim().is_empty() {
+            &binding.base_url
+        } else {
+            base_url
+        };
+        status.destination_problem = binding
+            .token_for(base_url)
+            .err()
+            .map(|error| error.to_string());
+        // A changed destination must not inherit another server's opt-in.
+        status.allow_unencrypted =
+            binding.check_origin(base_url).is_ok() && binding.allow_unencrypted;
+        status.message = match binding.token_for(base_url) {
+            Ok(_) => "PAT saved. Test the connection to check availability.".into(),
+            Err(error) => format!("Settings need attention: {error}"),
+        };
+    }
+    status
 }
 
 #[tauri::command]
@@ -175,20 +308,29 @@ pub fn confluence_clear_pat() -> Result<(), String> {
 pub async fn confluence_connection_status(
     base_url: String,
 ) -> Result<ConfluenceConnectionStatus, String> {
-    let token = match load_pat_from_keyring().map_err(|e| e.to_string())? {
-        Some(t) => t,
-        None => {
-            return Ok(ConfluenceConnectionStatus {
-                token_configured: false,
-                reachable: false,
-                user_display_name: None,
-                message: "No Confluence PAT is saved.".to_string(),
-            });
-        }
+    let binding = load_pat_from_keyring().map_err(|e| e.to_string())?;
+    let mut status = settings_status(binding.as_ref(), &base_url);
+    let Some(token) = binding else {
+        return Ok(status);
     };
+    match check_connection(&token, &base_url).await {
+        Ok(display) => {
+            status.reachable = true;
+            status.user_display_name = display.clone();
+            status.message = display
+                .map(|name| format!("Connected as {name}."))
+                .unwrap_or_else(|| "Connected to Confluence.".into());
+        }
+        Err(error) => status.message = error,
+    }
+    Ok(status)
+}
 
+async fn check_connection(token: &BoundPat, base_url: &str) -> Result<Option<String>, String> {
+    let allow_unencrypted = token.allow_unencrypted;
+    let token = token.token_for(&base_url).map_err(|e| e.to_string())?;
     let url = api_url(&base_url, "/rest/api/user/current").map_err(|e| e.to_string())?;
-    let http = http_client().map_err(|e| e.to_string())?;
+    let http = http_client(&base_url, allow_unencrypted).await?;
     let text = response_text_or_error(
         http.get(url)
             .bearer_auth(token)
@@ -209,14 +351,7 @@ pub async fn confluence_connection_status(
         .or(user.user_key)
         .filter(|s| !s.trim().is_empty());
 
-    Ok(ConfluenceConnectionStatus {
-        token_configured: true,
-        reachable: true,
-        user_display_name: display.clone(),
-        message: display
-            .map(|name| format!("Connected as {name}."))
-            .unwrap_or_else(|| "Connected to Confluence.".to_string()),
-    })
+    Ok(display)
 }
 
 #[tauri::command]
@@ -264,8 +399,10 @@ pub async fn confluence_export_page(
         payload["ancestors"] = serde_json::json!([{ "id": parent }]);
     }
 
+    let allow_unencrypted = token.allow_unencrypted;
+    let token = token.token_for(&base_url).map_err(|e| e.to_string())?;
     let url = api_url(&base_url, "/rest/api/content").map_err(|e| e.to_string())?;
-    let http = http_client().map_err(|e| e.to_string())?;
+    let http = http_client(&base_url, allow_unencrypted).await?;
     let text = response_text_or_error(
         http.post(url)
             .bearer_auth(token)
@@ -300,6 +437,69 @@ pub async fn confluence_export_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pat_is_bound_to_saved_origin() {
+        let saved = BoundPat {
+            destination_problem: None,
+            base_url: "https://confluence.example.com/wiki".into(),
+            pat: "test-pat".into(),
+            allow_unencrypted: false,
+        };
+        assert!(saved
+            .token_for("https://confluence.example.com/wiki")
+            .is_ok());
+        for destination in [
+            "https://other.example.com",
+            "https://confluence.example.com:444",
+            "http://confluence.example.com",
+        ] {
+            assert!(saved.token_for(destination).is_err());
+        }
+        assert!(normalize_base_url("http://127.0.0.1/wiki").is_ok());
+        assert!(normalize_base_url("http://[::1]/wiki").is_ok());
+    }
+
+    #[test]
+    fn settings_remain_readable_when_destination_needs_repair() {
+        let legacy =
+            serde_json::json!({"base_url": "http://confluence.example.com", "pat": "test-pat"});
+        let (saved, migrated) = parse_binding(&legacy.to_string()).unwrap();
+        assert!(migrated);
+        assert!(saved
+            .destination_problem
+            .as_deref()
+            .unwrap()
+            .contains("HTTPS"));
+        let status = settings_status(Some(&saved), &saved.base_url);
+        assert!(status.token_configured);
+        assert!(!status.reachable);
+        assert!(status.message.contains("Settings need attention"));
+        assert!(status.destination_problem.is_some());
+        assert!(saved.token_for(&saved.base_url).is_err());
+        assert!(save_pat_to_keyring("test-pat", &saved.base_url, true).is_err());
+    }
+
+    #[test]
+    fn settings_return_saved_opt_in_only_for_the_bound_origin() {
+        let saved = BoundPat {
+            destination_problem: None,
+            base_url: "http://wiki.local".into(),
+            pat: "test-pat".into(),
+            allow_unencrypted: true,
+        };
+        let status = settings_status(Some(&saved), "http://wiki.local/rest/api");
+        assert!(status.allow_unencrypted);
+        assert!(!status.reachable);
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["allowUnencrypted"], true);
+        assert_eq!(json["baseUrl"], "http://wiki.local");
+        let reopened = settings_status(Some(&saved), "");
+        assert_eq!(reopened.base_url.as_deref(), Some("http://wiki.local"));
+        assert!(reopened.allow_unencrypted);
+        assert!(!settings_status(Some(&saved), "http://other.local").allow_unencrypted);
+        assert!(!settings_status(None, "http://wiki.local").allow_unencrypted);
+    }
 
     #[test]
     fn normalize_base_url_strips_rest_suffix_and_slashes() {

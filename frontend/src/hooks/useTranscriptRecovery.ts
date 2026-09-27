@@ -25,7 +25,7 @@ export interface UseTranscriptRecoveryReturn {
   isLoading: boolean;
   isRecovering: boolean;
   checkForRecoverableTranscripts: () => Promise<void>;
-  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string }>;
+  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
   loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
@@ -107,7 +107,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   /**
    * Recover a meeting from IndexedDB
    */
-  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string }> => {
+  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }> => {
     setIsRecovering(true);
     try {
       // 1. Load meeting metadata
@@ -117,10 +117,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }
 
       // 2. Load all transcripts
-      const transcripts = await loadMeetingTranscripts(meetingId);
-      if (transcripts.length === 0) {
-        throw new Error('No transcripts found for this meeting');
-      }
+      // A failed IndexedDB read is different from a deliberately empty transcript.
+      const transcripts = await indexedDBService.getTranscripts(meetingId);
+      transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
 
       // 3. Check for folder path
       let folderPath = metadata.folderPath;
@@ -161,6 +160,14 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         };
       }
 
+      // Audio-only recordings have no transcript by design. Recover the audio
+      // first, and keep IndexedDB plus all originals if nothing was recovered.
+      const audioRecovered = Boolean(audioRecoveryStatus?.audio_file_path) &&
+        (audioRecoveryStatus?.status === 'success' || audioRecoveryStatus?.status === 'partial');
+      if (transcripts.length === 0 && !audioRecovered) {
+        throw new Error('No audio could be recovered yet. Keep the recording folder and retry recovery; a transcript is not required.');
+      }
+
       // 5. Convert StoredTranscripts to the format expected by storageService
       const formattedTranscripts = transcripts.map((t, index) => ({
         id: t.id?.toString() || `${Date.now()}-${index}`,
@@ -181,7 +188,12 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       const saveResponse = await storageService.saveMeeting(
         metadata.title,
         formattedTranscripts,
-        folderPath ?? null
+        folderPath ?? null,
+        {
+          audio_save_failed: audioRecoveryStatus?.status === 'failed',
+          transcription_incomplete: transcripts.length > 0,
+          capture_incomplete: audioRecoveryStatus?.status === 'partial',
+        },
       );
 
       const savedMeetingId = saveResponse.meeting_id;
@@ -199,8 +211,17 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       await indexedDBService.markMeetingSaved(meetingId);
 
 
-      // 8. Clean up checkpoint files
-      if (folderPath) {
+      if (folderPath && audioRecovered) {
+        try {
+          await invoke('release_recovered_capture', { meetingFolder: folderPath });
+        } catch {
+          console.warn('Meeting saved; recovery originals retained because cleanup could not finish');
+        }
+      }
+
+      // 8. Only remove legacy checkpoints once all their audio was recovered.
+      // Failed/partial recovery must retain originals for another attempt.
+      if (folderPath && audioRecovered && audioRecoveryStatus?.status === 'success') {
         try {
           await invoke('cleanup_checkpoints', { meetingFolder: folderPath });
         } catch (error) {
@@ -215,7 +236,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       return {
         success: true,
         audioRecoveryStatus,
-        meetingId: savedMeetingId
+        meetingId: savedMeetingId,
+        transcriptCount: transcripts.length,
       };
     } catch (error) {
       console.error('Failed to recover meeting:', error);
@@ -223,7 +245,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     } finally {
       setIsRecovering(false);
     }
-  }, [loadMeetingTranscripts]);
+  }, []);
 
   /**
    * Delete a recoverable meeting

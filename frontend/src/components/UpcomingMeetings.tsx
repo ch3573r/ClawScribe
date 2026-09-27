@@ -31,6 +31,12 @@ export function UpcomingMeetings() {
 
   const refresh = useCallback(async (cancelled: () => boolean) => {
     try {
+      const connection = await microsoftExportService.connectionStatus();
+      if (cancelled()) return;
+      if (connection.state !== "connected" || connection.unavailableExports?.includes("Calendar lookup")) {
+        setEvents([]);
+        return;
+      }
       const now = new Date();
       const end = new Date(now);
       end.setDate(now.getDate() + 7);
