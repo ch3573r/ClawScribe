@@ -616,6 +616,22 @@ async fn import_manifest(
                 .map_err(failure)?;
         }
     }
+    for (index, incomplete) in &manifest.incomplete_audio {
+        if !incomplete.recovery_files_excluded {
+            continue;
+        }
+        let meeting_id = manifest.tables["meetings"]
+            .get(*index)
+            .and_then(|row| row.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("Invalid incomplete meeting reference.")?;
+        if selected.contains(meeting_id) {
+            // Preserve archived outcome flags, including when this column was absent.
+            sqlx::query("INSERT INTO recording_outcomes (meeting_id, recovery_files_elsewhere) VALUES (?, 1)
+                         ON CONFLICT(meeting_id) DO UPDATE SET recovery_files_elsewhere = 1")
+                .bind(meeting_id).execute(&mut *tx).await.map_err(failure)?;
+        }
+    }
     // Delete skipped meetings' extracted files before committing any rows or
     // keeping the stage. Cleanup failure rolls back the complete import.
     let unused: Vec<usize> = manifest
@@ -1213,6 +1229,67 @@ mod tests {
             assert!(super::super::context::read(&pool, "review-test")
                 .await
                 .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_recovery_location_preserves_flags_and_accepts_legacy_archives() {
+        // Metadata can be absent in old archives, explicitly false, or true.
+        for excluded in [None, Some(false), Some(true)] {
+            for archived_outcome in [false, true] {
+                let pool = crate::database::transcript_edits::tests::fixture().await;
+                if archived_outcome {
+                    sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('review-test', 1, 1)")
+                        .execute(&pool).await.unwrap();
+                }
+                let (mut manifest, _) = snapshot(&pool).await.unwrap();
+                // Exercise archives from before the new outcome column existed.
+                for outcome in manifest.tables.get_mut("recording_outcomes").unwrap() {
+                    outcome.remove("recovery_files_elsewhere");
+                }
+                if let Some(excluded) = excluded {
+                    manifest.incomplete_audio.insert(
+                        0,
+                        IncompleteAudio {
+                            recovery_files_excluded: excluded,
+                            audio_unavailable: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+                let root = tempfile::tempdir().unwrap();
+                let archive = root.path().join("recovery.zip");
+                // Construct the archive directly so backup detection cannot replace the metadata.
+                let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+                zip.start_file("manifest.json", SimpleFileOptions::default())
+                    .unwrap();
+                let mut json = serde_json::to_value(&manifest).unwrap();
+                if excluded.is_none() {
+                    json.as_object_mut().unwrap().remove("incomplete_audio");
+                }
+                zip.write_all(&serde_json::to_vec(&json).unwrap()).unwrap();
+                zip.finish().unwrap();
+                sqlx::query("DELETE FROM meetings")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+                import_manifest(&pool, manifest, stage).await.unwrap();
+                let outcome: Option<crate::audio::outcome::RecordingOutcome> = sqlx::query_as(
+                    "SELECT * FROM recording_outcomes WHERE meeting_id = 'review-test'",
+                )
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                if archived_outcome || excluded == Some(true) {
+                    let outcome = outcome.unwrap();
+                    assert_eq!(outcome.recovery_files_elsewhere, excluded == Some(true));
+                    assert_eq!(outcome.audio_save_failed, archived_outcome);
+                    assert_eq!(outcome.transcription_incomplete, archived_outcome);
+                } else {
+                    assert!(outcome.is_none());
+                }
+            }
         }
     }
 

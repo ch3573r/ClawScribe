@@ -31,6 +31,13 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
             .map_err(|e| format!("Failed to initialize database manager: {}", e))?;
 
         let pool = db_manager.pool().clone();
+        // Finish bookmark cleanup before publishing the database to recording commands.
+        if crate::library::cleanup_orphaned_bookmarks(&pool)
+            .await
+            .is_err()
+        {
+            log::warn!("Could not clean abandoned recording bookmarks");
+        }
         tauri::async_runtime::spawn(async move {
             crate::summary::codex_provider::cleanup_orphaned_runs(&pool).await;
         });

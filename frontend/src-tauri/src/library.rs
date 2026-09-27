@@ -36,6 +36,29 @@ pub(crate) async fn attach_bookmarks(pool: &SqlitePool) -> Result<(), sqlx::Erro
     Ok(())
 }
 
+pub(crate) async fn cleanup_orphaned_bookmarks(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    if crate::audio::recording_commands::is_recording().await {
+        return Ok(());
+    }
+    let candidates: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, folder_path FROM meeting_bookmarks WHERE meeting_id IS NULL AND folder_path IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path)",
+    ).fetch_all(pool).await?;
+    for (id, folder) in candidates {
+        // An inaccessible folder is not evidence that recovery data is gone.
+        if !matches!(tokio::fs::try_exists(&folder).await, Ok(false)) {
+            continue;
+        }
+        if crate::audio::recording_commands::is_recording().await {
+            return Ok(());
+        }
+        sqlx::query("DELETE FROM meeting_bookmarks WHERE id = ? AND folder_path = ? AND meeting_id IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path)")
+            .bind(id).bind(folder).execute(pool).await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_meeting_tags(app: AppHandle) -> Result<Vec<MeetingTag>, String> {
     sqlx::query_as("SELECT meeting_id, tag FROM meeting_tags ORDER BY tag COLLATE NOCASE")
@@ -409,6 +432,46 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0);
         }
+    }
+
+    #[tokio::test]
+    async fn orphaned_bookmarks_preserve_recoverable_and_saved_recordings() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let recoverable = root.path().join("recoverable");
+        std::fs::create_dir(&recoverable).unwrap();
+        let saved = root.path().join("saved-but-unavailable");
+        sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'review-test'")
+            .bind(saved.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, folder, owner) in [
+            ("gone", root.path().join("gone"), None),
+            ("recoverable", recoverable, None),
+            ("saved", saved, None),
+            (
+                "attached",
+                root.path().join("attached-but-unavailable"),
+                Some("review-test"),
+            ),
+        ] {
+            sqlx::query("INSERT INTO meeting_bookmarks (id, meeting_id, folder_path, seconds, label) VALUES (?, ?, ?, 1, 'Synthetic bookmark')")
+                .bind(id).bind(owner).bind(folder.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        }
+        cleanup_orphaned_bookmarks(&pool).await.unwrap();
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM meeting_bookmarks ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, ["attached", "recoverable", "saved"]);
+        attach_bookmarks(&pool).await.unwrap();
+        let owner: String =
+            sqlx::query_scalar("SELECT meeting_id FROM meeting_bookmarks WHERE id = 'saved'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(owner, "review-test");
     }
 
     #[tokio::test]

@@ -2,7 +2,47 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness, deferred, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import ts from 'typescript';
+
+test('recording waits five minutes for detection and reports that timeout did not start recording', async () => {
+  let now = 0;
+  let action;
+  let loading;
+  let failure;
+  let cancellations = 0;
+  let retries = 0;
+  let dismissed = false;
+  const mocks = {
+    '@tauri-apps/api/core': { invoke: async command => {
+      if (command === 'active_speaker_diarization_command') return 'synthetic-meeting';
+      cancellations++;
+    } },
+    sonner: { toast: {
+      error: (_message, options) => { if (options.action) action = options.action; else failure = options.description; },
+      loading: message => { loading = message; return 1; },
+      dismiss: () => { dismissed = true; },
+    } },
+  };
+  const source = fs.readFileSync(new URL('../../src/lib/speakerDetectionCancellation.ts', import.meta.url), 'utf8');
+  const exports = {};
+  vm.runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText, {
+    exports, require: name => mocks[name], Date: { now: () => now },
+    setTimeout: (resolve, milliseconds) => { now += milliseconds; resolve(); },
+  });
+  await exports.offerSpeakerDetectionCancellation('Speaker detection is running', async () => { retries++; });
+  await action.onClick();
+  assert.equal(now, 300000);
+  assert.equal(loading, 'Stopping speaker detection. On long meetings the current step can take a few minutes.');
+  assert.match(failure, /Speaker detection is still finishing its current step\. Recording did not start\. Try again in a moment\./);
+  assert.equal(cancellations, 1);
+  assert.equal(retries, 0);
+  assert.equal(dismissed, true);
+});
 
 test('recording retry cancels detection once and waits for its slot to be released', async () => {
   const calls = [];

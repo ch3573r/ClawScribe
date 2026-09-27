@@ -13,12 +13,12 @@ export async function offerSpeakerDetectionCancellation(error: unknown, retry: (
       onClick: async () => {
         if (pending) return;
         pending = true;
-        const notice = toast.loading('Cancelling speaker detection after the current speech step…');
+        const notice = toast.loading('Stopping speaker detection. On long meetings the current step can take a few minutes.');
         try {
           await invoke('cancel_speaker_diarization_command', { meetingId });
-          const deadline = Date.now() + 60000;
+          const deadline = Date.now() + 5 * 60 * 1000;
           while (await invoke<string | null>('active_speaker_diarization_command') === meetingId) {
-            if (Date.now() >= deadline) throw new Error('Speaker detection is still finishing its current step. Try recording again shortly.');
+            if (Date.now() >= deadline) throw new Error('Speaker detection is still finishing its current step. Recording did not start. Try again in a moment.');
             await new Promise(resolve => setTimeout(resolve, 250));
           }
           await retry();
