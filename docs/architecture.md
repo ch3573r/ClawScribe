@@ -413,3 +413,7 @@ context. Deleting the meeting removes its context.
 Live-transcript IndexedDB copies are removed after SQLite save and library
 deletion. Startup cleanup runs once from the root layout and removes only aged
 saved copies; unsaved recovery data never expires automatically.
+
+Startup removes unattached live bookmarks only when their recording folder is
+gone and no saved meeting owns that folder. Existing recovery folders and
+attached bookmarks are retained, and cleanup skips active recordings.
