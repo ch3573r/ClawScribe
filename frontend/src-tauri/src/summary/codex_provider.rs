@@ -24,7 +24,7 @@ const CODEX_APP_SERVER_MISSING: &str =
     "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
 const CODEX_REAUTH_MESSAGE: &str =
-    "Codex app-server authentication is required. Sign in with ChatGPT again.";
+    "Codex app-server authentication is required. Sign in with ChatGPT again to store credentials securely.";
 const CODEX_OVERLOAD_CODE: i64 = -32001;
 const CODEX_MAX_OVERLOAD_RETRIES: usize = 3;
 
@@ -161,6 +161,33 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         cleanup_orphaned_runs_at(&pool, &root).await;
         assert!(scratch.exists());
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn isolated_config_enforces_keyring_once_and_preserves_legacy_auth_until_signin() {
+        let temp = tempfile::tempdir().unwrap();
+        prepare_isolated_codex_home(temp.path(), "test-model").unwrap();
+        let path = temp.path().join("config.toml");
+        let fresh = fs::read_to_string(&path).unwrap();
+        assert!(fresh.contains("cli_auth_credentials_store = \"keyring\""));
+        fs::write(&path, "# Keep this comment\nmodel = \"test-model\"\ncli_auth_credentials_store = \"file\"\n[features]\nshell_tool = false\n").unwrap();
+        fs::write(
+            temp.path().join("auth.json"),
+            "synthetic legacy credential placeholder",
+        )
+        .unwrap();
+        prepare_isolated_codex_home(temp.path(), "other-model").unwrap();
+        let once = fs::read_to_string(&path).unwrap();
+        prepare_isolated_codex_home(temp.path(), "other-model").unwrap();
+        assert_eq!(once, fs::read_to_string(&path).unwrap());
+        assert_eq!(once.matches("cli_auth_credentials_store").count(), 1);
+        assert!(
+            once.contains("# Keep this comment") && once.contains("[features]\nshell_tool = false")
+        );
+        remove_legacy_auth_after_keyring_signin(temp.path(), false);
+        assert!(temp.path().join("auth.json").exists());
+        remove_legacy_auth_after_keyring_signin(temp.path(), true);
+        assert!(!temp.path().join("auth.json").exists());
     }
 
     #[test]
@@ -1753,17 +1780,48 @@ fn expand_windows_style_appdata(value: &String) -> PathBuf {
 }
 
 fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
-    fs::create_dir_all(home).map_err(|e| format!("Failed to create isolated CODEX_HOME: {e}"))?;
-    let config_path = home.join("config.toml");
-    if !config_path.exists() {
-        let config = format!(
-            "# ClawScribe-owned Codex profile. Do not paste secrets here.\nmodel = \"{}\"\nsandbox_mode = \"read-only\"\napproval_policy = \"never\"\n",
-            model.replace('"', "")
-        );
-        fs::write(&config_path, config)
-            .map_err(|e| format!("Failed to write isolated Codex config.toml: {e}"))?;
+    fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile")?;
+    let path = home.join("config.toml");
+    let existing = if path.exists() {
+        fs::read_to_string(&path).map_err(|_| "Failed to read isolated Codex configuration")?
+    } else {
+        format!("# ClawScribe-owned Codex profile. Do not paste secrets here.\nmodel = \"{}\"\nsandbox_mode = \"read-only\"\napproval_policy = \"never\"\n", model.replace('"', ""))
+    };
+    let mut root = true;
+    let mut lines = Vec::new();
+    for line in existing.lines() {
+        if line.trim_start().starts_with('[') {
+            root = false;
+        }
+        if root
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "cli_auth_credentials_store")
+        {
+            continue;
+        }
+        lines.push(line);
+    }
+    // A root key must precede tables; preserve every unrelated setting and comment.
+    let config = format!(
+        "cli_auth_credentials_store = \"keyring\"\n{}\n",
+        lines.join("\n")
+    );
+    if config != existing {
+        fs::write(&path, config)
+            .map_err(|_| "Failed to update isolated Codex credential storage")?;
     }
     Ok(())
+}
+
+fn remove_legacy_auth_after_keyring_signin(home: &Path, authenticated: bool) {
+    if authenticated {
+        if let Err(error) = fs::remove_file(home.join("auth.json")) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Could not remove obsolete Codex credential file");
+            }
+        }
+    }
 }
 
 fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
@@ -1936,6 +1994,7 @@ struct AppServerSession {
     overload_retries: usize,
     cwd: PathBuf,
     _scratch: Option<tempfile::TempDir>,
+    codex_home: Option<PathBuf>,
 }
 
 impl AppServerSession {
@@ -2007,6 +2066,7 @@ impl AppServerSession {
             overload_retries: 0,
             cwd,
             _scratch: scratch,
+            codex_home: provider.codex_home.clone(),
         };
         session.initialize().await?;
         Ok(session)
@@ -2021,7 +2081,17 @@ impl AppServerSession {
 
     async fn account_read(&mut self) -> Result<CodexAccountState, String> {
         let value = self.request("account/read", serde_json::json!({})).await?;
-        Ok(parse_account_state(&value))
+        let account = parse_account_state(&value);
+        if let Some(home) = &self.codex_home {
+            remove_legacy_auth_after_keyring_signin(
+                home,
+                value
+                    .get("account")
+                    .is_some_and(|account| !account.is_null())
+                    && !account.is_unauthenticated(),
+            );
+        }
+        Ok(account)
     }
 
     async fn require_authenticated(&mut self) -> Result<(), String> {
@@ -2232,6 +2302,7 @@ impl AppServerSession {
                     let message = self.read_message().await?;
                     if let Some(method) = message.get("method").and_then(Value::as_str) {
                         if matches!(method, "account/login/completed" | "account/updated") {
+                            let _ = self.account_read().await?;
                             return Ok::<(), String>(());
                         }
                     }
