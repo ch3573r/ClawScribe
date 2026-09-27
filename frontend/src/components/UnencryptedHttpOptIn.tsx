@@ -1,9 +1,10 @@
 import { needsHttpOptIn, secretDestinationError } from '@/lib/secretDestination';
 
-export function UnencryptedHttpOptIn({ urls, checked, onChange }: {
+export function UnencryptedHttpOptIn({ urls, checked, onChange, destinationProblem }: {
   urls: string[]; checked: boolean; onChange: (checked: boolean) => void;
+  destinationProblem?: string | null;
 }) {
-  const error = urls.map(url => secretDestinationError(url, checked)).find(Boolean);
+  const error = destinationProblem || urls.map(url => secretDestinationError(url, checked)).find(Boolean);
   const needsOptIn = urls.some(needsHttpOptIn);
   if (!needsOptIn && !error) return null;
   return <div className="space-y-1 text-sm">

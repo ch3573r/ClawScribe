@@ -13,6 +13,7 @@ const ACCOUNT_NAME: &str = "default";
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfluenceConnectionStatus {
+    pub destination_problem: Option<String>,
     pub token_configured: bool,
     pub allow_unencrypted: bool,
     pub reachable: bool,
@@ -87,6 +88,8 @@ fn credential_entry() -> Result<keyring::Entry, ConfluenceError> {
 
 #[derive(Serialize, Deserialize)]
 struct BoundPat {
+    #[serde(skip)]
+    destination_problem: Option<String>,
     base_url: String,
     pat: String,
     #[serde(default)]
@@ -125,6 +128,7 @@ fn save_pat_to_keyring(
     crate::openai::secret_destination::validate_secret_destination(base_url, allow_unencrypted)
         .map_err(ConfluenceError::InvalidInput)?;
     let credential = BoundPat {
+        destination_problem: None,
         allow_unencrypted,
         base_url: normalize_base_url(base_url)?,
         pat: pat.into(),
@@ -145,17 +149,7 @@ fn persist_binding(credential: &BoundPat) -> Result<(), ConfluenceError> {
 fn load_pat_from_keyring() -> Result<Option<BoundPat>, ConfluenceError> {
     match credential_entry()?.get_password() {
         Ok(value) => {
-            let mut parsed: serde_json::Value = serde_json::from_str(&value).map_err(|_| {
-                ConfluenceError::InvalidInput(
-                    "Save your Confluence PAT again to bind it to this destination.".into(),
-                )
-            })?;
-            let migrated =
-                crate::openai::secret_destination::migrate_http_opt_in(&mut parsed, &["base_url"])
-                    .map_err(ConfluenceError::InvalidInput)?;
-            let credential: BoundPat = serde_json::from_value(parsed).map_err(|_| {
-                ConfluenceError::InvalidInput("Invalid saved Confluence binding".into())
-            })?;
+            let (credential, migrated) = parse_binding(&value)?;
             if migrated {
                 persist_binding(&credential)?;
             }
@@ -164,6 +158,26 @@ fn load_pat_from_keyring() -> Result<Option<BoundPat>, ConfluenceError> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(ConfluenceError::Keyring(e.to_string())),
     }
+}
+
+fn parse_binding(value: &str) -> Result<(BoundPat, bool), ConfluenceError> {
+    let mut parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| {
+        ConfluenceError::InvalidInput(
+            "Save your Confluence PAT again to bind it to this destination.".into(),
+        )
+    })?;
+    let migrated =
+        crate::openai::secret_destination::migrate_http_opt_in(&mut parsed, &["base_url"])
+            .map_err(ConfluenceError::InvalidInput)?;
+    let mut credential: BoundPat = serde_json::from_value(parsed)
+        .map_err(|_| ConfluenceError::InvalidInput("Invalid saved Confluence binding".into()))?;
+    credential.destination_problem =
+        crate::openai::secret_destination::validate_secret_destination(
+            &credential.base_url,
+            credential.allow_unencrypted,
+        )
+        .err();
+    Ok((credential, migrated))
 }
 
 fn delete_pat_from_keyring() -> Result<(), ConfluenceError> {
@@ -255,6 +269,7 @@ pub fn confluence_settings_status(base_url: String) -> Result<ConfluenceConnecti
 
 fn settings_status(binding: Option<&BoundPat>, base_url: &str) -> ConfluenceConnectionStatus {
     let mut status = ConfluenceConnectionStatus {
+        destination_problem: None,
         token_configured: binding.is_some(),
         allow_unencrypted: false,
         reachable: false,
@@ -262,6 +277,10 @@ fn settings_status(binding: Option<&BoundPat>, base_url: &str) -> ConfluenceConn
         message: "No Confluence PAT is saved.".into(),
     };
     if let Some(binding) = binding {
+        status.destination_problem = binding
+            .token_for(base_url)
+            .err()
+            .map(|error| error.to_string());
         // A changed destination must not inherit another server's opt-in.
         status.allow_unencrypted =
             binding.check_origin(base_url).is_ok() && binding.allow_unencrypted;
@@ -415,6 +434,7 @@ mod tests {
     #[test]
     fn pat_is_bound_to_saved_origin() {
         let saved = BoundPat {
+            destination_problem: None,
             base_url: "https://confluence.example.com/wiki".into(),
             pat: "test-pat".into(),
             allow_unencrypted: false,
@@ -435,14 +455,20 @@ mod tests {
 
     #[test]
     fn settings_remain_readable_when_destination_needs_repair() {
-        let mut legacy =
+        let legacy =
             serde_json::json!({"base_url": "http://confluence.example.com", "pat": "test-pat"});
-        crate::openai::secret_destination::migrate_http_opt_in(&mut legacy, &["base_url"]).unwrap();
-        let saved: BoundPat = serde_json::from_value(legacy).unwrap();
+        let (saved, migrated) = parse_binding(&legacy.to_string()).unwrap();
+        assert!(migrated);
+        assert!(saved
+            .destination_problem
+            .as_deref()
+            .unwrap()
+            .contains("HTTPS"));
         let status = settings_status(Some(&saved), &saved.base_url);
         assert!(status.token_configured);
         assert!(!status.reachable);
         assert!(status.message.contains("Settings need attention"));
+        assert!(status.destination_problem.is_some());
         assert!(saved.token_for(&saved.base_url).is_err());
         assert!(save_pat_to_keyring("test-pat", &saved.base_url, true).is_err());
     }
@@ -450,6 +476,7 @@ mod tests {
     #[test]
     fn settings_return_saved_opt_in_only_for_the_bound_origin() {
         let saved = BoundPat {
+            destination_problem: None,
             base_url: "http://wiki.local".into(),
             pat: "test-pat".into(),
             allow_unencrypted: true,

@@ -89,6 +89,7 @@ interface OpenAIAuthStatus {
 }
 
 interface OpenClawConfigStatus {
+  destination_problem: string | null;
   allow_unencrypted: boolean;
   enabled: boolean;
   configured: boolean;
@@ -251,6 +252,7 @@ export function ModelSettingsModal({
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
 
   // Custom OpenAI state
+  const [customDestinationProblem, setCustomDestinationProblem] = useState<string | null>(null);
   const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(false);
   const [openClawAllowUnencrypted, setOpenClawAllowUnencrypted] = useState(false);
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
@@ -459,6 +461,7 @@ export function ModelSettingsModal({
                 setCustomOpenAIEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                 setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                 setCustomAllowUnencrypted(customConfig.allow_unencrypted ?? false);
+                setCustomDestinationProblem(customConfig.destination_problem ?? null);
                 setCustomOpenAIApiKey(customConfig.apiKey || '');
                 setCustomMaxTokens(customConfig.maxTokens?.toString() || '');
                 setCustomContextWindow(customConfig.contextWindow?.toString() || '8192');
@@ -1340,6 +1343,7 @@ export function ModelSettingsModal({
                       setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                       setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                       setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
+                      setCustomDestinationProblem(config.destination_problem ?? null);
                       setCustomOpenAIApiKey(config.apiKey || '');
                       setCustomMaxTokens(config.maxTokens?.toString() || '');
       setCustomContextWindow(config.contextWindow?.toString() || '8192');
@@ -1455,7 +1459,7 @@ export function ModelSettingsModal({
               <Input
                 id="custom-endpoint"
                 value={customOpenAIEndpoint}
-                onChange={(e) => setCustomOpenAIEndpoint(e.target.value)}
+                onChange={(e) => { setCustomOpenAIEndpoint(e.target.value); setCustomDestinationProblem(null); }}
                 placeholder={DEFAULT_OPENAI_COMPATIBLE_ENDPOINT}
                 className="mt-1"
               />
@@ -1465,7 +1469,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <UnencryptedHttpOptIn urls={[customOpenAIEndpoint]} checked={customAllowUnencrypted} onChange={setCustomAllowUnencrypted} />
+              <UnencryptedHttpOptIn destinationProblem={customDestinationProblem} urls={[customOpenAIEndpoint]} checked={customAllowUnencrypted} onChange={value => { setCustomAllowUnencrypted(value); setCustomDestinationProblem(null); }} />
               <Label htmlFor="custom-model">Model Name *</Label>
               <Input
                 id="custom-model"
@@ -1880,7 +1884,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <UnencryptedHttpOptIn urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
+              <UnencryptedHttpOptIn destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null} urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
               <Label htmlFor="openclaw-bearer-token">Bearer Token *</Label>
               <Input
                 id="openclaw-bearer-token"

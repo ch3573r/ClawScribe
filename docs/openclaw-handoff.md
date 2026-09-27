@@ -143,6 +143,8 @@ Before each HTTP request, all resolved addresses must
 be loopback or private, and the connection uses that checked resolution without
 redirects or a proxy. Existing private HTTP configurations migrate to opted-in
 on their first load; explicit choices are preserved thereafter.
+Rejected saved endpoints return a `destination_problem` alongside their settings.
+Correct the endpoint and save; an empty token field retains the existing token.
 
 The OpenClaw `allow_unencrypted` JSON flag covers both handoff and model
 endpoints. Custom OpenAI configuration has its own `allow_unencrypted` flag.

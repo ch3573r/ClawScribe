@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface ConfluenceConnectionStatus {
+  destinationProblem?: string | null;
   tokenConfigured: boolean;
   allowUnencrypted: boolean;
   reachable: boolean;

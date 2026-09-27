@@ -133,6 +133,49 @@ pub(crate) async fn secret_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn legacy_custom_config_loads_with_problem_and_cannot_send() {
+        use crate::database::repositories::setting::SettingsRepository;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE settings (id TEXT PRIMARY KEY, customOpenAIConfig TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let legacy =
+            serde_json::json!({"endpoint":"http://model.example.com", "model":"test-model"});
+        sqlx::query("INSERT INTO settings VALUES ('1', ?)")
+            .bind(legacy.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let config = SettingsRepository::get_custom_openai_config(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(config
+            .destination_problem
+            .as_deref()
+            .unwrap()
+            .contains("HTTPS"));
+        assert!(secret_client(
+            reqwest::Client::builder(),
+            &config.endpoint,
+            config.allow_unencrypted
+        )
+        .await
+        .is_err());
+        let persisted: String = sqlx::query_scalar("SELECT customOpenAIConfig FROM settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let persisted: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(persisted["allow_unencrypted"], false);
+        assert!(persisted.get("destination_problem").is_none());
+    }
     #[test]
     fn destination_policy_and_legacy_migration() {
         assert!(validate_secret_destination("http://public.example.com", true).is_err());

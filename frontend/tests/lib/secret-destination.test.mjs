@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
+import { renderToStaticMarkup } from 'react-dom/server';
 const { needsHttpOptIn, secretDestinationError } = loadTsModule('src/lib/secretDestination.ts');
+const { UnencryptedHttpOptIn } = loadTsModule('src/components/UnencryptedHttpOptIn.tsx');
+
+test('endpoint settings display the problem returned by the backend', () => {
+  const html = renderToStaticMarkup(UnencryptedHttpOptIn({
+    urls: ['http://public.example.com'], checked: false, onChange() {},
+    destinationProblem: 'Use HTTPS to repair the saved endpoint.',
+  }));
+  assert.match(html, /Settings need attention: Use HTTPS to repair the saved endpoint/);
+});
 test('HTTP opt-in appears only for private network destinations', () => {
   for (const url of ['http://openclaw.local:8765', 'http://gateway', 'http://model.lan', 'http://wiki.internal', 'http://server.home.arpa', 'http://[fd00::1]']) {
     assert.equal(needsHttpOptIn(url), true, url);

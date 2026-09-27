@@ -1543,7 +1543,7 @@ function ConfluencePanel() {
                   className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
-              <UnencryptedHttpOptIn urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
+              <UnencryptedHttpOptIn destinationProblem={status?.destinationProblem} urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
                 httpOptionRevision.current += 1;
                 setAllowUnencrypted(value);
               }} />

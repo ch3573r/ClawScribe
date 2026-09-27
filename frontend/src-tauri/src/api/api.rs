@@ -1630,6 +1630,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     }
 
     let config = CustomOpenAIConfig {
+        destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint: endpoint.trim().to_string(),
         api_key: api_key.filter(|k| !k.trim().is_empty()),
@@ -1711,6 +1712,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     )?;
 
     let config = CustomOpenAIConfig {
+        destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint,
         api_key,
@@ -1754,6 +1756,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config = CustomOpenAIConfig {
+        destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint,
         api_key,

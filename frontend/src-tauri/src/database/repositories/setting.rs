@@ -411,6 +411,12 @@ impl SettingsRepository {
                             .await?,
                         );
                     }
+                    config.destination_problem =
+                        crate::openai::secret_destination::validate_secret_destination(
+                            &config.endpoint,
+                            config.allow_unencrypted,
+                        )
+                        .err();
                     Ok(Some(config))
                 } else {
                     Ok(None)
@@ -434,6 +440,7 @@ impl SettingsRepository {
         config: &CustomOpenAIConfig,
     ) -> std::result::Result<(), sqlx::Error> {
         let mut persisted = config.clone();
+        persisted.destination_problem = None;
         if let Some(value) = &config.api_key {
             persisted.api_key = Some(
                 crate::credentials::seal_async("summary/custom-openai".into(), value.clone())

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 /// Stored as JSON in the database and used for connecting to any OpenAI-compatible API server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomOpenAIConfig {
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub destination_problem: Option<String>,
     #[serde(default)]
     pub allow_unencrypted: bool,
     /// Base URL of the OpenAI-compatible API endpoint (e.g., "http://localhost:8000/v1")

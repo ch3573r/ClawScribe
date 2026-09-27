@@ -626,6 +626,7 @@ impl SummaryService {
                     config_from_openai_api_key(Some(final_api_key.clone()), model_name.clone())
                 }
                 LLMProvider::OpenClaw => config_from_custom_openai(CustomOpenAIConfig {
+                    destination_problem: None,
                     allow_unencrypted,
                     endpoint: custom_openai_endpoint.clone().unwrap_or_default(),
                     api_key: Some(final_api_key.clone()),

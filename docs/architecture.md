@@ -242,6 +242,8 @@ requests validate and pin DNS results and disable redirects and proxies. Public
 HTTP destinations are rejected on save/send even with the opt-in. Rejected saved
 settings remain editable and show an attention message. Tailscale's shared address
 range and MagicDNS names are accepted as local, with the same DNS pinning checks.
+Settings responses carry `destination_problem` (camelCase for Confluence); this
+diagnostic is recomputed on load and is not saved as configuration.
 Confluence credentials include their saved origin and cannot be reused against a
 different origin; older unbound PATs must be saved again before use.
 

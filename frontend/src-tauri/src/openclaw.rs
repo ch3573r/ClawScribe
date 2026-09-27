@@ -24,6 +24,8 @@ const DEFAULT_SOURCE: &str = "ClawScribe";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenClawConfig {
+    #[serde(skip)]
+    pub destination_problem: Option<String>,
     pub allow_unencrypted: bool,
     pub enabled: bool,
     pub endpoint: String,
@@ -36,6 +38,7 @@ pub struct OpenClawConfig {
 impl Default for OpenClawConfig {
     fn default() -> Self {
         Self {
+            destination_problem: None,
             allow_unencrypted: false,
             enabled: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
@@ -49,6 +52,7 @@ impl Default for OpenClawConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawConfigStatus {
+    pub destination_problem: Option<String>,
     pub allow_unencrypted: bool,
     pub enabled: bool,
     pub configured: bool,
@@ -97,10 +101,11 @@ pub async fn get_openclaw_config_status<R: Runtime>(
     let endpoint_configured = !config.endpoint.trim().is_empty();
     let source_configured = !config.source.trim().is_empty();
     let configured = endpoint_configured && source_configured && bearer_token_configured;
-    let destination_error = validate_endpoints(&config).err();
+    let destination_error = config.destination_problem.clone();
     let ready = config.enabled && configured && destination_error.is_none();
 
     Ok(OpenClawConfigStatus {
+        destination_problem: destination_error.clone(),
         allow_unencrypted: config.allow_unencrypted,
         enabled: config.enabled,
         configured,
@@ -139,12 +144,22 @@ pub async fn save_openclaw_config<R: Runtime>(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
+    save_config_at(&path, config, |value| {
+        crate::credentials::seal("openclaw/bearer-token", value)
+    })
+}
+
+fn save_config_at(
+    path: &Path,
+    config: OpenClawConfig,
+    protect: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
     let mut config = normalize_config(config);
     validate_endpoints(&config)?;
     if config.bearer_token.is_empty() {
-        config.bearer_token = load_config_unlocked(&app)?.bearer_token;
+        config.bearer_token = load_config_from_path(path)?.bearer_token;
     }
-    config.bearer_token = crate::credentials::seal("openclaw/bearer-token", &config.bearer_token)?;
+    config.bearer_token = protect(&config.bearer_token)?;
     write_config_atomically(&path, &config)
 }
 
@@ -481,6 +496,10 @@ pub(crate) fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConf
 
 fn load_config_unlocked<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
     let path = config_path(app)?;
+    load_config_from_path(&path)
+}
+
+fn load_config_from_path(path: &Path) -> Result<OpenClawConfig, String> {
     let mut config = match fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => {
             let mut value: Value =
@@ -547,7 +566,9 @@ fn load_config_unlocked<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig
         );
     }
 
-    Ok(normalize_config(config))
+    let mut config = normalize_config(config);
+    config.destination_problem = validate_endpoints(&config).err();
+    Ok(config)
 }
 
 fn write_config_atomically(path: &Path, config: &OpenClawConfig) -> Result<(), String> {
@@ -1089,6 +1110,61 @@ fn write_marker(path: PathBuf, marker: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn rejected_legacy_config_loads_and_https_repair_preserves_token() {
+        use base64::Engine;
+        let protect = |value: &str| -> Result<String, String> {
+            let encrypted = crate::exports::token_store::protect_bytes(
+                format!("openclaw/bearer-token\0{value}").as_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "clawscribe:secret:v1:dpapi:{}",
+                base64::engine::general_purpose::STANDARD.encode(encrypted)
+            ))
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("openclaw.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "endpoint": "http://openclaw.example.com", "enabled": true,
+                "bearer_token": protect("test-token").unwrap()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+        assert!(loaded
+            .destination_problem
+            .as_deref()
+            .unwrap()
+            .contains("HTTPS"));
+        assert_eq!(loaded.bearer_token, "test-token");
+        assert!(crate::openai::secret_destination::secret_client(
+            reqwest::Client::builder(),
+            &loaded.endpoint,
+            loaded.allow_unencrypted,
+        )
+        .await
+        .is_err());
+        let repaired = OpenClawConfig {
+            endpoint: "https://openclaw.example.com".into(),
+            bearer_token: String::new(),
+            ..loaded
+        };
+        save_config_at(&path, repaired, protect).unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+        assert!(loaded.destination_problem.is_none());
+        assert_eq!(loaded.bearer_token, "test-token");
+        let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["allow_unencrypted"], false);
+        assert!(persisted.get("destination_problem").is_none());
+        assert!(crate::credentials::is_protected(
+            persisted["bearer_token"].as_str().unwrap()
+        ));
+    }
     #[tokio::test]
     async fn submit_client_times_out_stalled_responses() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
