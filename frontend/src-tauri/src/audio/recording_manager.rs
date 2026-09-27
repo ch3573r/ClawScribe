@@ -498,6 +498,10 @@ impl RecordingManager {
             .set_transcription_info(provider, model, source_language);
     }
 
+    pub fn transcription_provider(&self) -> Option<&str> {
+        self.recording_saver.transcription_provider()
+    }
+
     /// Add a structured transcript segment to be saved later
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);

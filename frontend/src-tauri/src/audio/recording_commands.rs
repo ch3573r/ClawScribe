@@ -700,19 +700,6 @@ pub async fn stop_recording<R: Runtime>(
     let _stop_state = StopState;
     crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
 
-    let device_names = RECORDING_MANAGER
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|manager| {
-            let state = manager.get_state();
-            (
-                state.get_microphone_device().map(|d| d.name.clone()),
-                state.get_system_device().map(|d| d.name.clone()),
-            )
-        })
-        .unwrap_or_default();
-
     // Emit shutdown progress to frontend
     let _ = app.emit(
         "recording-shutdown-progress",
@@ -902,35 +889,21 @@ pub async fn stop_recording<R: Runtime>(
 
         info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
 
-        // Determine which provider was used and unload the appropriate model (with timeout)
-        let config = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
-            crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
-        )
-        .await
-        {
-            Ok(Ok(Some(config))) => {
-                if crate::audio::transcription::cloud::is_cloud_provider(Some(
-                    config.provider.as_str(),
-                )) {
-                    Some("parakeet".to_string())
+        // Use the session's provider snapshot; stopping never loads credentials or
+        // settings that may have changed since recording started.
+        let config = manager_for_cleanup
+            .as_ref()
+            .and_then(|manager| manager.transcription_provider())
+            .map(|provider| {
+                if crate::audio::transcription::cloud::is_cloud_provider(Some(provider)) {
+                    "parakeet"
                 } else {
-                    Some(config.provider)
+                    provider
                 }
-            }
-            Ok(Ok(None)) => None,
-            Ok(Err(_e)) => {
-                warn!("⚠️ Failed to get transcript config");
-                None
-            }
-            Err(_) => {
-                warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
-                None
-            }
-        };
+            });
 
         if tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            match config.as_deref() {
+            match config {
                 Some("parakeet") => {
                     info!("🦜 Unloading Parakeet model...");
                     let engine_clone = {
@@ -1017,128 +990,6 @@ pub async fn stop_recording<R: Runtime>(
         .is_err()
         {
             warn!("Speech engine still finishing a native call; model retained until it returns");
-        }
-    }
-
-    // Step 3.5: Track meeting ended analytics with privacy-safe metadata
-    // Extract all data from manager BEFORE any async operations to avoid Send issues
-    let analytics_data = if let Some(ref manager) = manager_for_cleanup {
-        let state = manager.get_state();
-        let stats = state.get_stats();
-
-        Some((
-            manager.get_recording_duration(),
-            manager.get_active_recording_duration().unwrap_or(0.0),
-            manager.get_total_pause_duration(),
-            manager.get_transcript_segments().len() as u64,
-            state.has_fatal_error(),
-            device_names.0,
-            device_names.1,
-            stats.chunks_processed,
-        ))
-    } else {
-        None
-    };
-
-    // Now perform async analytics tracking without holding manager reference
-    if let Some((
-        total_duration,
-        active_duration,
-        pause_duration,
-        transcript_segments_count,
-        had_fatal_error,
-        mic_device_name,
-        sys_device_name,
-        chunks_processed,
-    )) = analytics_data
-    {
-        info!("📊 Collecting analytics for meeting end");
-
-        // Helper function to classify device type from device name (privacy-safe)
-        fn classify_device_type(device_name: &str) -> &'static str {
-            let name_lower = device_name.to_lowercase();
-            // Check for Bluetooth keywords
-            if name_lower.contains("bluetooth")
-                || name_lower.contains("airpods")
-                || name_lower.contains("beats")
-                || name_lower.contains("headphones")
-                || name_lower.contains("bt ")
-                || name_lower.contains("wireless")
-            {
-                "Bluetooth"
-            } else {
-                "Wired"
-            }
-        }
-
-        // Get transcription model info (already loaded above for model unload)
-        let transcription_config = if !transcribes {
-            Some(("audio_only".to_string(), "none".to_string()))
-        } else {
-            match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
-                .await
-            {
-                Ok(Some(config)) => {
-                    if crate::audio::transcription::cloud::is_cloud_provider(Some(
-                        config.provider.as_str(),
-                    )) {
-                        Some((
-                            "parakeet".to_string(),
-                            crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                        ))
-                    } else {
-                        Some((config.provider, config.model))
-                    }
-                }
-                _ => None,
-            }
-        };
-
-        let (transcription_provider, transcription_model) =
-            transcription_config.unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-
-        // Get summary model info from API
-        let summary_config =
-            match crate::api::api::api_get_model_config(app.clone(), app.clone().state(), None)
-                .await
-            {
-                Ok(Some(config)) => Some((config.provider, config.model)),
-                _ => None,
-            };
-
-        let (summary_provider, summary_model) =
-            summary_config.unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-
-        // Classify device types (privacy-safe)
-        let microphone_device_type = mic_device_name
-            .as_ref()
-            .map(|name| classify_device_type(name))
-            .unwrap_or("Unknown");
-
-        let system_audio_device_type = sys_device_name
-            .as_ref()
-            .map(|name| classify_device_type(name))
-            .unwrap_or("Unknown");
-
-        // Track meeting ended event with privacy-safe data
-        match crate::analytics::commands::track_meeting_ended(
-            transcription_provider.clone(),
-            transcription_model.clone(),
-            summary_provider.clone(),
-            summary_model.clone(),
-            total_duration,
-            active_duration,
-            pause_duration,
-            microphone_device_type.to_string(),
-            system_audio_device_type.to_string(),
-            chunks_processed,
-            transcript_segments_count,
-            had_fatal_error,
-        )
-        .await
-        {
-            Ok(_) => info!("✅ Analytics tracked successfully for meeting end"),
-            Err(_e) => warn!("⚠️ Failed to track analytics"),
         }
     }
 

@@ -50,6 +50,10 @@ recordings and migration paths continue to work.
 
 ## Data Boundaries
 
+The backend contains no analytics client or analytics commands. Frontend analytics
+calls remain inert compatibility stubs; recording stop does not read provider
+credentials or copy transcripts for telemetry.
+
 SQLite connections explicitly enable WAL, normal synchronous mode, foreign keys
 and a five-second busy timeout. Legacy database transfers checkpoint first and
 use a consistent SQLite snapshot so committed WAL data is retained.
