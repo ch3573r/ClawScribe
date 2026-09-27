@@ -322,15 +322,23 @@ pub fn find_existing_audio_file(folder: &Path) -> Result<PathBuf> {
     Err(anyhow!("No audio file found in: {}", folder.display()))
 }
 
+/// Shared with spool release: validate the exact recovery selected for playback.
+pub(super) fn find_valid_recovered_audio_file(folder: &Path) -> Option<PathBuf> {
+    for name in ["audio-recovered.mp4", "audio-recovered.wav"] {
+        let path = folder.join(name);
+        if validate_recoverable_audio_file(&path).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Find an audio file, recovering it from checkpoints first when the final file is missing.
 pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
     // Recovery originals are deliberately retained. Reuse the completed result;
     // an explicit Recover action can rebuild it if originals are later changed.
-    for name in ["audio-recovered.mp4", "audio-recovered.wav"] {
-        let path = folder.join(name);
-        if validate_recoverable_audio_file(&path).is_ok() {
-            return Ok(path);
-        }
+    if let Some(path) = find_valid_recovered_audio_file(folder) {
+        return Ok(path);
     }
     if super::recording_commands::is_recording().await {
         return find_existing_audio_file(folder);

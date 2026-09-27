@@ -124,7 +124,10 @@ the permanent capture-gap flag. Unreadable saved status is treated as unknown;
 retained capture and database warnings still preserve gaps, and committed
 retranscription rewrites the status file. After library save or committed retranscription,
 fully readable recovered spools are released only after audio validation, a
-presentation-duration check against all retained samples, and saved outcome status. Frontend release requests require a canonical registered meeting
+presentation-duration check against all retained samples, and saved outcome status.
+The check uses the same preferred recovery file as playback/retranscription; a
+longer alternate file cannot authorize cleanup. Publishing a recovered format
+removes the superseded recovery format only after the new file is safely written. Frontend release requests require a canonical registered meeting
 folder; incomplete chunks retain their originals.
 Shared stop ownership suppresses duplicate completion
 events, and a SQLite write reservation protects the folder lookup and insert

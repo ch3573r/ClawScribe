@@ -210,6 +210,7 @@ fn recover_with_encoder(
             let _ = fs::remove_file(&staged);
             return Err(error);
         }
+        remove_superseded_recovery(&folder.join("audio-recovered.wav"))?;
         let partial = encoded_gaps
             || spool.join(".incomplete").exists()
             || paths.iter().enumerate().any(|(index, path)| {
@@ -290,6 +291,7 @@ fn recover_with_encoder(
         writer.get_ref().sync_all()?;
         drop(writer);
         fs::rename(&staged, &output)?;
+        remove_superseded_recovery(&folder.join("audio-recovered.mp4"))?;
         Ok(AudioRecoveryStatus {
             status: if partial { "partial" } else { "success" }.into(),
             chunk_count: count,
@@ -303,6 +305,15 @@ fn recover_with_encoder(
         let _ = fs::remove_file(staged);
     }
     result
+}
+
+// Called only after the replacement format has been published and flushed.
+fn remove_superseded_recovery(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 // Packet presentation timestamps exclude AAC encoder priming; packet durations
@@ -404,14 +415,14 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
                 .checked_add(chunk.data.len() as u64)
                 .ok_or("Capture length is invalid")?;
         }
-        // A full decode verifies the published recovery before originals are removed.
-        if !["audio-recovered.mp4", "audio-recovered.wav"]
-            .iter()
-            .any(|name| {
-                super::incremental_saver::validate_recoverable_temp_audio_file(&folder.join(name))
-                    .is_ok()
-                    && recovered_covers_samples(&folder.join(name), samples, rate.unwrap())
-            })
+        // A longer alternate file must not authorize removing originals while a
+        // shorter preferred recovery is still what playback/retranscription selects.
+        let Some(selected) = super::incremental_saver::find_valid_recovered_audio_file(&folder)
+        else {
+            return Ok(());
+        };
+        if super::incremental_saver::validate_recoverable_temp_audio_file(&selected).is_err()
+            || !recovered_covers_samples(&selected, samples, rate.unwrap())
         {
             return Ok(());
         }
@@ -484,6 +495,63 @@ mod tests {
         release_recovered_capture(root.path()).await.unwrap();
         assert!(!damaged.exists());
     }
+    #[tokio::test]
+    async fn wav_recovery_replaces_stale_mp4_and_cleanup_checks_selected_file() {
+        let root = tempfile::tempdir().unwrap();
+        let (sender, _, _) =
+            super::super::transcription::queue::recording_audio_queue(root.path()).unwrap();
+        for id in 0..2 {
+            sender
+                .send(AudioChunk {
+                    data: vec![0.05; 4800],
+                    sample_rate: 48000,
+                    timestamp: id as f64 / 10.0,
+                    chunk_id: id,
+                    device_type: DeviceType::System,
+                })
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        let mp4 = root.path().join("audio-recovered.mp4");
+        super::super::encode::encode_single_audio(
+            bytemuck::cast_slice(&vec![0.05f32; 4800]),
+            48000,
+            1,
+            &mp4,
+        )
+        .unwrap();
+        let stale = fs::read(&mp4).unwrap();
+        let status = recover_with_encoder(root.path(), true, |_, _| {
+            Err(anyhow::anyhow!("Synthetic encoder failure"))
+        })
+        .unwrap();
+        let wav = root.path().join("audio-recovered.wav");
+        assert!(!mp4.exists());
+        assert_eq!(PathBuf::from(status.audio_file_path.unwrap()), wav);
+        assert_eq!(
+            super::super::incremental_saver::find_or_recover_audio_file(root.path())
+                .await
+                .unwrap(),
+            wav
+        );
+        // Reproduce a folder from an older version with both recovery formats.
+        fs::write(&mp4, &stale).unwrap();
+        release_recovered_capture(root.path()).await.unwrap();
+        assert!(root.path().join(".audio-spool").exists());
+        assert_eq!(
+            super::super::incremental_saver::find_or_recover_audio_file(root.path())
+                .await
+                .unwrap(),
+            mp4
+        );
+        recover_inner(root.path(), false).unwrap();
+        release_recovered_capture(root.path()).await.unwrap();
+        assert!(!root.path().join(".audio-spool").exists());
+        assert!(!mp4.exists());
+        assert!(wav.exists());
+    }
+
     #[test]
     fn aac_padding_does_not_cover_missing_capture_samples() {
         let root = tempfile::tempdir().unwrap();
