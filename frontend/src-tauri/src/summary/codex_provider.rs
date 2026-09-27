@@ -67,7 +67,12 @@ const send = m => process.stdout.write(JSON.stringify(m)+'\n');
 readline.createInterface({input:process.stdin}).on('line', line => {
  const m=JSON.parse(line);
  if(m.method==='initialize') send({id:m.id,result:{}});
+ if(m.method==='config/read') {
+   assert.equal(m.params.cwd,process.cwd());
+   send({id:m.id,result:{config:{mcp_servers:fs.existsSync('mcp-configured') ? {example:{command:'example'}} : {}}}});
+ }
  if(m.method==='thread/start') {
+   assert(!fs.existsSync('mcp-configured'));
    assert.equal(m.params.approvalPolicy,'never'); assert.equal(m.params.sandbox,'read-only');
    assert.equal(m.params.config['features.shell_tool'],false);
    assert.equal(m.params.config['features.unified_exec'],false);
@@ -132,6 +137,24 @@ readline.createInterface({input:process.stdin}).on('line', line => {
                 "safe answer"
             );
             assert!(temp.path().join("verified").exists());
+            if mode == CodexHomeMode::ExistingUserCodexSession {
+                fs::write(temp.path().join("mcp-configured"), "configured").unwrap();
+                assert!(session
+                    .process_raw_prompt("test-model", "Do not run tools")
+                    .await
+                    .unwrap_err()
+                    .contains("isolated profile"));
+                assert!(session
+                    .process_turn(
+                        "test-model",
+                        "synthetic transcript",
+                        None,
+                        serde_json::json!({})
+                    )
+                    .await
+                    .unwrap_err()
+                    .contains("MCP servers"));
+            }
             session.take_stderr().await;
         }
     }
@@ -2181,6 +2204,26 @@ impl AppServerSession {
         })
     }
 
+    async fn check_existing_session_mcp(&mut self) -> Result<(), String> {
+        if self.codex_home.is_some() {
+            return Ok(());
+        }
+        // rust-v0.157.0 recursively merges config tables: mcp_servers={} does
+        // not remove inherited entries. Inspect the effective config for this
+        // same cwd and refuse before thread/start instead of exposing tools.
+        let response = self.request_with_overload_retry(
+            "config/read",
+            serde_json::json!({"cwd": self.cwd, "includeLayers": false}),
+        ).await.map_err(|_| "Could not check existing Codex session tools. Use the ClawScribe isolated profile for summaries.".to_string())?;
+        let config = response.get("config").and_then(Value::as_object)
+            .ok_or("Could not check existing Codex session tools. Use the ClawScribe isolated profile for summaries.")?;
+        match config.get("mcp_servers") {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::Object(servers)) if servers.is_empty() => Ok(()),
+            _ => Err("The existing Codex session configures MCP servers. Use the ClawScribe isolated profile for summaries so external tools are not exposed.".into()),
+        }
+    }
+
     async fn process_turn(
         &mut self,
         model: &str,
@@ -2188,6 +2231,7 @@ impl AppServerSession {
         custom_prompt: Option<&str>,
         metadata: Value,
     ) -> Result<String, String> {
+        self.check_existing_session_mcp().await?;
         let thread_response = self
             .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
@@ -2228,6 +2272,7 @@ impl AppServerSession {
     /// model's text output. Same thread/start + overload-retry handling as
     /// `process_turn`.
     async fn process_raw_prompt(&mut self, model: &str, prompt: &str) -> Result<String, String> {
+        self.check_existing_session_mcp().await?;
         let thread_response = self
             .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
