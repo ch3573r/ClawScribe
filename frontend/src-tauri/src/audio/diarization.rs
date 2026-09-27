@@ -1,6 +1,4 @@
-use crate::api::{
-    TranscriptSegment as ApiTranscriptSegment, TranscriptWord, TranscriptWordTimestampSource,
-};
+use crate::api::{TranscriptWord, TranscriptWordTimestampSource};
 use crate::audio::decoder::decode_audio_file;
 use crate::state::AppState;
 use crate::summary::language_detection::detect_summary_language;
@@ -1851,6 +1849,7 @@ pub struct SpeakerDiarizationComplete {
     pub meeting_id: String,
     pub speaker_count: usize,
     pub updated_segments: usize,
+    pub file_warning: bool,
     pub duration_seconds: f64,
     pub processing_seconds: f64,
     pub provider: String,
@@ -2373,27 +2372,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     );
 
     let mapped_segments = attempt.mapped_segments;
-    let updated_segments =
+    let (updated_segments, file_warning) =
         save_diarization_labels(&pool, &meeting_id, &stored_segments, &mapped_segments).await?;
-
-    let fallback_timestamp = stored_segments[0].timestamp.as_str();
-    let transcript_file_segments: Vec<ApiTranscriptSegment> = mapped_segments
-        .iter()
-        .map(|mapped| ApiTranscriptSegment {
-            id: mapped.id.clone(),
-            text: mapped.text.clone(),
-            timestamp: mapped
-                .timestamp
-                .clone()
-                .unwrap_or_else(|| fallback_timestamp.to_string()),
-            audio_start_time: mapped.audio_start_time,
-            audio_end_time: mapped.audio_end_time,
-            duration: mapped.duration,
-            speaker: mapped.speaker.clone(),
-            word_timestamps: mapped.word_timestamps.clone(),
-        })
-        .collect();
-    super::common::write_transcripts_json(&folder_path, &transcript_file_segments)?;
 
     let speaker_count = transcript_speaker_count(&mapped_segments);
     let turn_count = attempt.turns.len();
@@ -2416,6 +2396,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         meeting_id,
         speaker_count,
         updated_segments,
+        file_warning,
         duration_seconds: sample_count as f64 / f64::from(DIARIZATION_SAMPLE_RATE),
         processing_seconds: run_started.elapsed().as_secs_f64(),
         provider: attempt.provider.to_string(),
@@ -2437,7 +2418,7 @@ async fn save_diarization_labels(
     meeting_id: &str,
     stored_segments: &[StoredTranscriptSegment],
     mapped_segments: &[TranscriptSegment],
-) -> Result<usize> {
+) -> Result<(usize, bool)> {
     begin_diarization_save(meeting_id)?;
     let mut tx = pool.begin().await?;
     let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
@@ -2498,8 +2479,15 @@ async fn save_diarization_labels(
             .execute(&mut *tx)
             .await?;
     }
+    sqlx::query("INSERT OR IGNORE INTO transcript_file_sync (meeting_id) VALUES (?)")
+        .bind(meeting_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok(updated_segments)
+    let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id)
+        .await
+        .is_err();
+    Ok((updated_segments, file_warning))
 }
 
 async fn run_diarization_mapping_attempt<R: Runtime>(
@@ -4394,6 +4382,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_labels_succeed_even_when_the_file_mirror_needs_retry() {
+        let (pool, stored, mapped) = label_save_fixture().await;
+        let directory = tempfile::tempdir().unwrap();
+        let missing_folder = directory.path().join("unavailable");
+        sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'review-test'")
+            .bind(missing_folder.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (updated, warning) = save_diarization_labels(&pool, "review-test", &stored, &mapped)
+            .await
+            .unwrap();
+        assert_eq!(updated, 2);
+        assert!(warning);
+        let labels: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE speaker = 'Speaker 1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(labels, 2);
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transcript_file_sync WHERE meeting_id = 'review-test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1);
+        std::fs::create_dir(&missing_folder).unwrap();
+        crate::database::transcript_edits::sync_file(&pool, "review-test")
+            .await
+            .unwrap();
+        assert!(missing_folder.join("transcripts.json").is_file());
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    #[tokio::test]
     async fn speaker_detection_can_restore_the_exact_previous_rows() {
         let (pool, mut stored, mapped) = label_save_fixture().await;
         sqlx::query("UPDATE transcripts SET speaker = 'Original speaker', original_transcript = 'Original draft' WHERE id = 'a'").execute(&pool).await.unwrap();
@@ -4450,7 +4478,8 @@ mod tests {
         assert_eq!(
             save_diarization_labels(&pool, "review-test", &stored, &mapped)
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
             2
         );
         let rows: Vec<StoredTranscriptSegment> =

@@ -238,3 +238,6 @@ recording is blocked by detection, its error offers **Cancel speaker detection a
 Speaker detection decodes and resamples through the streaming batch decoder.
 Only the 16 kHz mono signal is held in full; the original-rate audio is not
 retained in memory.
+If the recording-folder transcript copy cannot be updated after labels are saved,
+the app reports success with a pending file warning. **Retry file update** writes
+the saved database transcript when the folder is available again.

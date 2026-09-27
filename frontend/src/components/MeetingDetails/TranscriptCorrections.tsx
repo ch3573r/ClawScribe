@@ -32,9 +32,10 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     currentMeeting.current = meetingId;
     setState({ can_undo: false, pending_file_sync: false, has_edits: false, can_restore_previous: false });
     void refresh().catch(() => setError('Could not load correction history. Reopen the meeting to retry.'));
+    const diarization = listen<{meeting_id: string}>('speaker-diarization-complete', event => { if (event.payload.meeting_id === meetingId) void refresh().catch(() => {}); });
     const retranscription = listen<{meeting_id: string}>('retranscription-complete', event => { if (event.payload.meeting_id === meetingId) void refresh().catch(() => {}); });
     const subscription = listen<{meeting_id: string}>('transcript-text-edited', event => { if (event.payload.meeting_id === meetingId) void refresh().catch(() => {}); });
-    return () => { currentMeeting.current = ''; void retranscription.then(unlisten => unlisten()).catch(() => {}); void subscription.then(unlisten => unlisten()).catch(() => {}); };
+    return () => { currentMeeting.current = ''; void diarization.then(unlisten => unlisten()).catch(() => {}); void retranscription.then(unlisten => unlisten()).catch(() => {}); void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [meetingId, refresh]);
 
   const completed = async (result: EditResult) => {

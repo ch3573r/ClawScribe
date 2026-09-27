@@ -33,6 +33,7 @@ export interface SpeakerDiarizationComplete {
   meeting_id: string;
   speaker_count: number;
   updated_segments: number;
+  file_warning: boolean;
   duration_seconds: number;
   processing_seconds: number;
   provider: string;
@@ -128,6 +129,7 @@ export function SpeakerDiarizationDialog({
         </DialogHeader>
 
         <div className="min-w-0 space-y-4 py-4">
+          {result?.file_warning && <p role="alert" className="text-sm text-amber-600 dark:text-amber-400">Speaker labels are saved. The recording-folder copy needs updating; use Retry file update below the transcript.</p>}
           {isProcessing && (
             <div className="space-y-2">
               <div className="relative">

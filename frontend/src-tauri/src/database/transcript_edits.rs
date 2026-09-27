@@ -255,7 +255,7 @@ pub(crate) async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result
 
 // A failed file mirror never rolls back a committed correction or reports it as
 // unsaved. The UI offers a retry; summaries and Graph exports read SQLite.
-async fn sync_file(pool: &SqlitePool, meeting: &str) -> Result<(), String> {
+pub(crate) async fn sync_file(pool: &SqlitePool, meeting: &str) -> Result<(), String> {
     let folder: Option<String> =
         sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
             .bind(meeting)
