@@ -465,6 +465,7 @@ for line in sys.stdin:
         let provider = provider_with_fake(&temp, "ok");
         let result = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-1".to_string(),
                 meeting_title: Some("Runtime".to_string()),
                 transcript: "[00:01] Bundle Codex.".to_string(),
@@ -524,6 +525,7 @@ for line in sys.stdin:
         let provider = provider_with_fake(&temp, "auth-failure");
         let err = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-auth".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
@@ -1095,7 +1097,8 @@ impl CodexAppServerProvider {
                 return Err(redact_secrets(&e));
             }
         };
-        let structured_output = parse_meeting_output(&raw_output)?;
+        let structured_output =
+            super::sources::expand_output(parse_meeting_output(&raw_output)?, &request.sources)?;
         let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
         let follow_up = render_follow_up_email(&structured_output.follow_up_email);
         let output_dir = request.output_dir.unwrap_or_else(|| scratch_dir.clone());
@@ -1157,6 +1160,7 @@ impl CodexAppServerProvider {
 
 #[derive(Debug, Clone)]
 pub struct CodexMeetingProcessRequest {
+    pub sources: Vec<crate::summary::sources::SummarySource>,
     pub meeting_id: String,
     pub meeting_title: Option<String>,
     pub transcript: String,
@@ -1310,6 +1314,7 @@ pub async fn codex_process_meeting<R: Runtime>(
     let provider = provider_from_app(&app)?;
     provider
         .process_meeting(CodexMeetingProcessRequest {
+            sources: Vec::new(),
             meeting_id,
             meeting_title: Some(meeting.title),
             transcript,
@@ -3253,6 +3258,7 @@ exit 2
         let output_dir = temp.path().join("meeting");
         let result = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-1".to_string(),
                 meeting_title: Some("Codex Standup".to_string()),
                 transcript: "[00:01] We will use Codex.".to_string(),
@@ -3274,6 +3280,7 @@ exit 2
         let provider = provider_with_fake_scenario(&temp, "invalid-json");
         let err = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-2".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
@@ -3292,6 +3299,7 @@ exit 2
         let provider = provider_with_fake_scenario(&temp, "exec-nonzero");
         let err = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-3".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),

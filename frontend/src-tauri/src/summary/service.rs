@@ -630,6 +630,7 @@ impl SummaryService {
                     openai_provider
                         .process_meeting(
                             OpenAICompatibleMeetingProcessRequest {
+                                sources: summary_sources.clone(),
                                 meeting_id: meeting_id.clone(),
                                 meeting_title,
                                 transcript: text.clone(),
@@ -725,6 +726,7 @@ impl SummaryService {
                     super::llm_client::with_cancellation(
                         Some(cancellation_token),
                         codex_provider.process_meeting(CodexMeetingProcessRequest {
+                            sources: summary_sources.clone(),
                             meeting_id: meeting_id.clone(),
                             meeting_title,
                             transcript: text.clone(),

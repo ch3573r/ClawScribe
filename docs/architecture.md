@@ -172,6 +172,13 @@ pagination. Source identity checks establish which passage was cited, not whethe
 the passage entails the model's claim. Legacy summaries remain readable without
 references; regeneration requests sources.
 
+Generation groups consecutive rows into passages of roughly 45 seconds or 800
+characters and labels each with a short source tag. Before persistence, known
+tags become the existing source links using server-owned timestamps; unknown
+tags are removed. Passage references retain all transcript IDs and a combined
+fingerprint. Resolution still supports older single-row references and marks a
+passage stale if any included row changes.
+
 Transcript pages use indexed `(meeting_id, audio_start_time, id)` ordering and
 read the count and rows in one database snapshot. The UI fetches metadata and the
 first page concurrently; navigation and refetches invalidate earlier responses,
