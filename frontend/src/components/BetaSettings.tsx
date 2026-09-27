@@ -65,7 +65,7 @@ export function BetaSettings() {
     }
   };
 
-  const cloudTranscription = useCloudTranscription();
+  const { enabled: cloudTranscription, loaded: cloudTranscriptionLoaded } = useCloudTranscription();
   const [cloudConsentOpen, setCloudConsentOpen] = useState(false);
   const onToggleCloudTranscription = (checked: boolean) => {
     if (checked) {
@@ -178,6 +178,7 @@ export function BetaSettings() {
           <div className="ml-6">
             <Switch
               checked={cloudTranscription}
+              disabled={!cloudTranscriptionLoaded}
               onCheckedChange={onToggleCloudTranscription}
             />
           </div>

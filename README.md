@@ -95,7 +95,11 @@ them through phrase matching. Nemotron's **Auto** language follows the system
 locale; select the spoken language explicitly when it differs. Parakeet's Auto
 selection does not label an unknown language as English.
 
-Cloud transcription requires explicit opt-in. Hosted Whisper can provide word
+Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
+when the opt-in is off. The
+settings explain which local engine and model live recordings use. Cloud APIs
+apply to Import and Enhance (whole-file), while live recordings stay on-device.
+Hosted Whisper can provide word
 timestamps; MAI has sentence-level timing and may use approximate local VAD-row
 alignment, not fabricated word timestamps. The implemented OpenAI-hosted upload
 limit is 25 MB; the implemented MAI limit is 300 MB. MAI uploads use WAV, MP3, or

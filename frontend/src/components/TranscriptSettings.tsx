@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
@@ -53,8 +54,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [maiEndpoint, setMaiEndpoint] = useState<string>(transcriptModelConfig.endpoint || '');
     const [maiRegion, setMaiRegion] = useState<string>(transcriptModelConfig.region || '');
     const [isTestingProvider, setIsTestingProvider] = useState<boolean>(false);
-    const cloudTranscriptionEnabled = useCloudTranscription();
+    const router = useRouter();
+    const { enabled: cloudTranscriptionEnabled, loaded: cloudTranscriptionLoaded } = useCloudTranscription();
     const isCloudProvider = uiProvider === 'cloud-whisper' || uiProvider === 'mai-transcribe';
+    const localEngineNames = { localWhisper: 'Whisper', parakeet: 'Parakeet', nemotron: 'Nemotron' };
+    const savedLocalProvider = transcriptModelConfig.provider as keyof typeof localEngineNames;
+    const liveEngine = localEngineNames[savedLocalProvider];
+    // The live backend maps saved cloud providers to this default Parakeet model.
+    const liveEngineLabel = liveEngine
+        ? `${liveEngine} (${transcriptModelConfig.model})`
+        : 'Parakeet (parakeet-tdt-0.6b-v3-int8)';
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -74,12 +83,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         setMaiEndpoint(transcriptModelConfig.endpoint || '');
         setMaiRegion(transcriptModelConfig.region || '');
     }, [transcriptModelConfig]);
-
-    useEffect(() => {
-        if (!cloudTranscriptionEnabled && isCloudProvider) {
-            setUiProvider('parakeet');
-        }
-    }, [cloudTranscriptionEnabled, isCloudProvider]);
 
     const fetchApiKey = async (provider: string) => {
         try {
@@ -288,11 +291,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         <SelectItem value="localWhisper">Whisper &middot; highest accuracy</SelectItem>
                                         <SelectItem value="nemotron">Nemotron &middot; streaming, multilingual (beta)</SelectItem>
                                     </SelectGroup>
-                                    {cloudTranscriptionEnabled && (
+                                    {(cloudTranscriptionEnabled || isCloudProvider) && (
                                         <SelectGroup>
                                             <SelectLabel>Cloud APIs</SelectLabel>
-                                            <SelectItem value="cloud-whisper">Hosted Whisper &middot; OpenAI-compatible</SelectItem>
-                                            <SelectItem value="mai-transcribe">MAI-Transcribe &middot; Azure Speech</SelectItem>
+                                            <SelectItem value="cloud-whisper" disabled={!cloudTranscriptionEnabled}>Hosted Whisper &middot; OpenAI-compatible</SelectItem>
+                                            <SelectItem value="mai-transcribe" disabled={!cloudTranscriptionEnabled}>MAI-Transcribe &middot; Azure Speech</SelectItem>
                                         </SelectGroup>
                                     )}
                                 </SelectContent>
@@ -319,6 +322,15 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
                         </div>
                     </div>
+
+                    {isCloudProvider && <p className="text-sm text-muted-foreground">Used for Import and Enhance (whole-file). Live recordings always transcribe on this device with {liveEngineLabel}.</p>}
+                    {isCloudProvider && cloudTranscriptionLoaded && !cloudTranscriptionEnabled && <div role="status" className="space-y-2 rounded-md border p-3 text-sm">
+                        <p>Cloud transcription is turned off in Beta settings, so Import and Enhance use this device&apos;s engine. Your {uiProvider === 'mai-transcribe' ? 'Microsoft AI' : 'Cloud Whisper'} settings are kept.</p>
+                        <Button variant="outline" onClick={() => {
+                            router.push('/settings?tab=beta');
+                            window.dispatchEvent(new CustomEvent('open-settings-tab', { detail: 'beta' }));
+                        }}>Open Beta settings</Button>
+                    </div>}
 
                     {uiProvider === 'localWhisper' && (
                         <div className="mt-6 space-y-4">
