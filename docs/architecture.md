@@ -210,6 +210,11 @@ HTTP 408, 429, 500, 502, 503, 504 or 529. Backoff is cancellable, honors
 Retry-After up to 60 seconds, and never restarts a full response timeout.
 Provider error messages are bounded and redact credentials and input echoes.
 
+Codex output documents and their processing log live in the meeting folder.
+Temporary prompt/transcript run files are removed on success, failure or
+cancellation. Meeting deletion removes legacy run files, and startup retries
+orphan cleanup without blocking local recording.
+
 Codex summary and chat threads use an ephemeral scratch working directory,
 read-only sandbox, no approval escalation, and disabled shell tools. Every turn
 reapplies the sandbox and approval policy; unexpected server approval requests

@@ -136,6 +136,33 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         }
     }
 
+    #[tokio::test]
+    async fn scratch_cleanup_keeps_outputs_and_removes_deleted_meeting_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runs");
+        let scratch = root.join("review-test");
+        let output = temp.path().join("meeting");
+        fs::create_dir_all(&scratch).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        {
+            let _run = RunScratch(scratch.clone());
+            fs::write(scratch.join("transcript.md"), "synthetic transcript").unwrap();
+            fs::write(output.join("meeting-notes.md"), "generated output").unwrap();
+        }
+        assert!(!scratch.exists());
+        assert!(output.join("meeting-notes.md").exists());
+        fs::create_dir_all(&scratch).unwrap();
+        remove_meeting_runs_at(&root, "review-test").await;
+        assert!(!scratch.exists());
+        fs::create_dir_all(&scratch).unwrap();
+        let orphan = root.join("deleted-meeting");
+        fs::create_dir_all(&orphan).unwrap();
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        cleanup_orphaned_runs_at(&pool, &root).await;
+        assert!(scratch.exists());
+        assert!(!orphan.exists());
+    }
+
     #[test]
     fn bundled_app_server_runtime_is_discovered() {
         let temp = tempfile::tempdir().unwrap();
@@ -565,13 +592,9 @@ for line in sys.stdin:
             result.structured_output.action_items[0].task,
             "Ship bundled Codex runtime"
         );
-        let log = fs::read_to_string(
-            temp.path()
-                .join("runs")
-                .join("meeting-1")
-                .join("processing-log.json"),
-        )
-        .unwrap();
+        let log =
+            fs::read_to_string(temp.path().join("meeting").join("processing-log.json")).unwrap();
+        assert!(!temp.path().join("runs").join("meeting-1").exists());
         assert!(!log.contains("Bundle Codex"));
         assert!(!log.contains("secret-token-value"));
     }
@@ -616,7 +639,7 @@ for line in sys.stdin:
                 meeting_title: None,
                 transcript: "hello".to_string(),
                 custom_prompt: None,
-                output_dir: None,
+                output_dir: Some(temp.path().join("meeting")),
                 scratch_root: Some(temp.path().join("runs")),
             })
             .await
@@ -1127,6 +1150,14 @@ impl CodexAppServerProvider {
         fs::create_dir_all(&scratch_dir)
             .map_err(|e| format!("Failed to create Codex run folder: {e}"))?;
 
+        let _scratch_cleanup = RunScratch(scratch_dir.clone());
+        let output_dir = request
+            .output_dir
+            .clone()
+            .ok_or("Meeting output folder is unavailable. Reopen the meeting and try again.")?;
+        if output_dir.starts_with(&scratch_dir) {
+            return Err("Meeting output folder must be separate from scratch data".into());
+        }
         let transcript_path = scratch_dir.join("transcript.md");
         let metadata_path = scratch_dir.join("metadata.json");
         let schema_path = scratch_dir.join("output-schema.json");
@@ -1169,7 +1200,10 @@ impl CodexAppServerProvider {
             )
             .await
         {
-            Ok(output) => output,
+            Ok(output) => {
+                let _ = session.take_stderr().await;
+                output
+            }
             Err(e) => {
                 let status = CodexCommandStatus {
                     success: false,
@@ -1187,7 +1221,6 @@ impl CodexAppServerProvider {
             super::sources::expand_output(parse_meeting_output(&raw_output)?, &request.sources)?;
         let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
         let follow_up = render_follow_up_email(&structured_output.follow_up_email);
-        let output_dir = request.output_dir.unwrap_or_else(|| scratch_dir.clone());
         fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create Codex output folder: {e}"))?;
         let final_output_path = output_dir.join("meeting-output.json");
@@ -1217,14 +1250,14 @@ impl CodexAppServerProvider {
             message: "Codex app-server meeting processing succeeded.".to_string(),
         };
         write_safe_events(&events_path, &status)?;
-        write_processing_log(&scratch_dir, &status, started.elapsed(), "completed")?;
+        write_processing_log(&output_dir, &status, started.elapsed(), "completed")?;
         Ok(CodexProcessingResult {
             meeting_id: request.meeting_id,
             scratch_dir: scratch_dir.to_string_lossy().to_string(),
             output_json_path: final_output_path.to_string_lossy().to_string(),
             notes_markdown_path: notes_path.to_string_lossy().to_string(),
             follow_up_email_path: follow_up_path.to_string_lossy().to_string(),
-            processing_log_path: scratch_dir
+            processing_log_path: output_dir
                 .join("processing-log.json")
                 .to_string_lossy()
                 .to_string(),
@@ -1377,13 +1410,6 @@ pub async fn codex_process_meeting<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to load meeting: {e}"))?
             .ok_or_else(|| format!("Meeting not found: {meeting_id}"))?;
-    let metadata =
-        crate::database::repositories::meeting::MeetingsRepository::get_meeting_metadata(
-            pool,
-            &meeting_id,
-        )
-        .await
-        .map_err(|e| format!("Failed to load meeting metadata: {e}"))?;
     let transcript = meeting
         .transcripts
         .iter()
@@ -1396,7 +1422,7 @@ pub async fn codex_process_meeting<R: Runtime>(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let output_dir = metadata.and_then(|m| m.folder_path.map(PathBuf::from));
+    let output_dir = Some(ensure_meeting_output_dir(state.db_manager.pool(), &meeting_id).await?);
     let provider = provider_from_app(&app)?;
     provider
         .process_meeting(CodexMeetingProcessRequest {
@@ -1611,6 +1637,96 @@ fn default_isolated_codex_home() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join("ClawScribe")
         .join("codex")
+}
+
+/// A run owns only its meeting-scoped scratch directory, including on cancellation.
+struct RunScratch(PathBuf);
+impl Drop for RunScratch {
+    fn drop(&mut self) {
+        if fs::remove_dir_all(&self.0).is_err() {
+            // Windows may hold the cwd until the cancelled child finishes exiting.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let path = self.0.clone();
+                runtime.spawn(async move {
+                    for _ in 0..10 {
+                        sleep(Duration::from_millis(200)).await;
+                        if tokio::fs::remove_dir_all(&path).await.is_ok() || !path.exists() {
+                            return;
+                        }
+                    }
+                    log::warn!("Could not remove Codex scratch files after child exit");
+                });
+            }
+        }
+    }
+}
+
+pub(crate) async fn ensure_meeting_output_dir(
+    pool: &sqlx::SqlitePool,
+    meeting: &str,
+) -> Result<PathBuf, String> {
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| "Could not read meeting output folder")?;
+    if let Some(folder) = folder.filter(|path| !path.trim().is_empty()) {
+        return Ok(PathBuf::from(folder));
+    }
+    let folder = crate::audio::get_default_recordings_folder()
+        .join(format!("meeting-{}", sanitize_path_segment(meeting)));
+    tokio::fs::create_dir_all(&folder)
+        .await
+        .map_err(|_| "Could not create meeting output folder")?;
+    sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = ?")
+        .bind(folder.to_string_lossy().as_ref())
+        .bind(meeting)
+        .execute(pool)
+        .await
+        .map_err(|_| "Could not save meeting output folder")?;
+    Ok(folder)
+}
+
+pub(crate) async fn remove_meeting_runs(meeting: &str) {
+    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await;
+}
+
+async fn remove_meeting_runs_at(root: &Path, meeting: &str) {
+    let path = root.join(sanitize_path_segment(meeting));
+    if let Err(error) = tokio::fs::remove_dir_all(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("Could not remove Codex scratch folder; startup cleanup will retry");
+        }
+    }
+}
+
+pub(crate) async fn cleanup_orphaned_runs(pool: &sqlx::SqlitePool) {
+    cleanup_orphaned_runs_at(pool, &default_codex_runs_root()).await;
+}
+
+async fn cleanup_orphaned_runs_at(pool: &sqlx::SqlitePool, root: &Path) {
+    let Ok(ids) = sqlx::query_scalar::<_, String>("SELECT id FROM meetings")
+        .fetch_all(pool)
+        .await
+    else {
+        return;
+    };
+    let live: std::collections::HashSet<_> =
+        ids.iter().map(|id| sanitize_path_segment(id)).collect();
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry
+            .file_type()
+            .await
+            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            && !live.contains(&entry.file_name().to_string_lossy().to_string())
+        {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
+    }
 }
 
 fn default_codex_runs_root() -> PathBuf {
@@ -3075,6 +3191,9 @@ pub fn redact_secrets(value: &str) -> String {
 }
 
 fn sanitize_path_segment(value: &str) -> String {
+    if matches!(value, "" | "." | "..") {
+        return "_".into();
+    }
     value
         .chars()
         .map(|c| {

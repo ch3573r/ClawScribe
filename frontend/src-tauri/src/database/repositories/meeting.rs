@@ -29,6 +29,7 @@ impl MeetingsRepository {
             Ok(success) => {
                 if success {
                     transaction.commit().await?;
+                    crate::summary::codex_provider::remove_meeting_runs(meeting_id).await;
                     info!(
                         "Successfully deleted meeting {} and all associated data",
                         meeting_id

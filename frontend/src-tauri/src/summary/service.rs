@@ -723,19 +723,31 @@ impl SummaryService {
 
             let result = match provider_from_app(&_app) {
                 Ok(codex_provider) => {
-                    super::llm_client::with_cancellation(
-                        Some(cancellation_token),
-                        codex_provider.process_meeting(CodexMeetingProcessRequest {
-                            sources: summary_sources.clone(),
-                            meeting_id: meeting_id.clone(),
-                            meeting_title,
-                            transcript: text.clone(),
-                            custom_prompt: Some(custom_prompt.clone()),
-                            output_dir,
-                            scratch_root: None,
-                        }),
-                    )
-                    .await
+                    let output_dir = match output_dir {
+                        Some(path) => Ok(path),
+                        None => {
+                            super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id)
+                                .await
+                        }
+                    };
+                    match output_dir {
+                        Err(error) => Err(error),
+                        Ok(output_dir) => {
+                            super::llm_client::with_cancellation(
+                                Some(cancellation_token),
+                                codex_provider.process_meeting(CodexMeetingProcessRequest {
+                                    sources: summary_sources.clone(),
+                                    meeting_id: meeting_id.clone(),
+                                    meeting_title,
+                                    transcript: text.clone(),
+                                    custom_prompt: Some(custom_prompt.clone()),
+                                    output_dir: Some(output_dir),
+                                    scratch_root: None,
+                                }),
+                            )
+                            .await
+                        }
+                    }
                 }
                 Err(e) => Err(e),
             };
