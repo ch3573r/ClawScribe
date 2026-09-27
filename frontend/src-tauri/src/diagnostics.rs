@@ -140,7 +140,7 @@ pub async fn get_diagnostics_snapshot<R: Runtime>(
         }
     };
 
-    let teams = Some(get_teams_detection_status(None));
+    let teams = Some(get_teams_detection_status(None, false));
     let openclaw = match get_openclaw_config_status(app.clone()).await {
         Ok(status) => Some(status),
         Err(error) => {

@@ -108,6 +108,7 @@ try {
         "library::",
         "database::repositories::meeting::tests",
         "database::manager::tests",
+        "teams_detection::tests",
         "credentials::tests",
         "exports::",
         "openclaw::tests",

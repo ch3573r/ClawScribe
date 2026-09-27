@@ -136,11 +136,17 @@ pub fn get_teams_detection_config() -> TeamsDetectionConfig {
 }
 
 #[tauri::command]
-pub fn get_teams_detection_status(config: Option<TeamsDetectionConfig>) -> TeamsDetectionStatus {
-    detect_teams_meeting(config.unwrap_or_default())
+pub fn get_teams_detection_status(
+    config: Option<TeamsDetectionConfig>,
+    include_diagnostics: bool,
+) -> TeamsDetectionStatus {
+    detect_teams_meeting(config.unwrap_or_default(), include_diagnostics)
 }
 
-fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
+fn detect_teams_meeting(
+    config: TeamsDetectionConfig,
+    include_diagnostics: bool,
+) -> TeamsDetectionStatus {
     let threshold = normalize_threshold(config.confidence_threshold);
 
     if !cfg!(target_os = "windows") {
@@ -197,7 +203,7 @@ fn detect_teams_meeting(config: TeamsDetectionConfig) -> TeamsDetectionStatus {
 
     let processes = list_processes();
     let windows = list_relevant_windows(config.max_window_title_samples, &processes);
-    evaluate_snapshots(config, threshold, &processes, &windows)
+    evaluate_snapshots(config, threshold, &processes, &windows, include_diagnostics)
 }
 
 fn evaluate_snapshots(
@@ -205,6 +211,7 @@ fn evaluate_snapshots(
     threshold: f32,
     processes: &[ProcessSnapshot],
     windows: &[WindowSnapshot],
+    include_diagnostics: bool,
 ) -> TeamsDetectionStatus {
     let teams_processes: Vec<&ProcessSnapshot> = processes
         .iter()
@@ -391,21 +398,23 @@ fn evaluate_snapshots(
     }));
     // Surface every scanned window (even non-matching) so the settings panel can
     // show the real meeting-window title when detection misses.
-    candidates.extend(windows.iter().map(|window| {
-        let process_name = window
-            .pid
-            .and_then(|pid| process_for_pid(processes, pid))
-            .map(|process| process.name.clone());
-        TeamsDetectionCandidate {
-            source: "scanned-window".to_string(),
-            process_id: window.pid,
-            process_name,
-            window_title: Some(window.title.clone()),
-            is_foreground: window.is_foreground,
-            is_minimized: window.is_minimized,
-            confidence: 0.0,
-        }
-    }));
+    if include_diagnostics {
+        candidates.extend(windows.iter().map(|window| {
+            let process_name = window
+                .pid
+                .and_then(|pid| process_for_pid(processes, pid))
+                .map(|process| process.name.clone());
+            TeamsDetectionCandidate {
+                source: "scanned-window".to_string(),
+                process_id: window.pid,
+                process_name,
+                window_title: Some(window.title.clone()),
+                is_foreground: window.is_foreground,
+                is_minimized: window.is_minimized,
+                confidence: 0.0,
+            }
+        }));
+    }
     let status = detection_state(detected, confidence, threshold, title_requirement_met);
     let diagnostics = TeamsDetectionDiagnostics {
         process_count: processes.len(),
@@ -980,6 +989,34 @@ mod tests {
     }
 
     #[test]
+    fn background_status_omits_unmatched_browser_titles() {
+        let processes = vec![process(42, "msedge.exe")];
+        let windows = vec![foreground_window(Some(42), "Synthetic unrelated page")];
+        for diagnostics in [false, true] {
+            let status = evaluate_snapshots(
+                TeamsDetectionConfig::default(),
+                DEFAULT_CONFIDENCE_THRESHOLD,
+                &processes,
+                &windows,
+                diagnostics,
+            );
+            assert_eq!(
+                status
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.source == "scanned-window"),
+                diagnostics
+            );
+            if !diagnostics {
+                assert!(status
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.window_title.is_none()));
+            }
+        }
+    }
+
+    #[test]
     fn confidence_detects_desktop_meeting_window() {
         let config = TeamsDetectionConfig::default();
         let processes = vec![process(42, "ms-teams.exe")];
@@ -988,7 +1025,13 @@ mod tests {
             "Weekly sync | Microsoft Teams Meeting",
         )];
 
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+        let status = evaluate_snapshots(
+            config,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+            &processes,
+            &windows,
+            false,
+        );
 
         assert!(status.detected);
         assert_eq!(status.status, TeamsDetectionState::Detected);
@@ -1010,7 +1053,8 @@ mod tests {
         let config = TeamsDetectionConfig::default();
         let processes = vec![process(42, "ms-teams.exe")];
 
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &[]);
+        let status =
+            evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &[], false);
 
         assert!(!status.detected);
         assert_eq!(status.status, TeamsDetectionState::Possible);
@@ -1030,7 +1074,13 @@ mod tests {
             "teams.microsoft.com - Customer call - Microsoft Teams",
         )];
 
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+        let status = evaluate_snapshots(
+            config,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+            &processes,
+            &windows,
+            false,
+        );
 
         assert!(status.detected);
         assert_eq!(status.status, TeamsDetectionState::Detected);
@@ -1050,7 +1100,13 @@ mod tests {
         let processes = vec![process(99, "chrome.exe")];
         let windows = vec![window(Some(99), "New tab - Google Chrome")];
 
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+        let status = evaluate_snapshots(
+            config,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+            &processes,
+            &windows,
+            false,
+        );
 
         assert!(!status.detected);
         assert_eq!(status.status, TeamsDetectionState::Possible);
@@ -1100,7 +1156,13 @@ mod tests {
             ),
         ];
 
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+        let status = evaluate_snapshots(
+            config,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+            &processes,
+            &windows,
+            false,
+        );
 
         assert!(status.detected, "confidence {}", status.confidence);
         assert_eq!(status.diagnostics.meeting_title_count, 1);
@@ -1164,7 +1226,13 @@ mod tests {
             "Jane Doe | Rismondo | a@b.net | Microsoft Teams",
         )];
 
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &processes, &windows);
+        let status = evaluate_snapshots(
+            config,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+            &processes,
+            &windows,
+            false,
+        );
 
         assert!(!status.detected);
         assert_eq!(status.diagnostics.meeting_title_count, 0);
@@ -1197,7 +1265,7 @@ mod tests {
     #[test]
     fn no_signals_reports_not_detected() {
         let config = TeamsDetectionConfig::default();
-        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &[], &[]);
+        let status = evaluate_snapshots(config, DEFAULT_CONFIDENCE_THRESHOLD, &[], &[], false);
 
         assert!(!status.detected);
         assert_eq!(status.status, TeamsDetectionState::NotDetected);

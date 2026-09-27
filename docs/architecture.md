@@ -50,6 +50,9 @@ recordings and migration paths continue to work.
 
 ## Data Boundaries
 
+Background Teams detection returns matching candidates only. Unmatched browser
+window titles are returned only when the settings diagnostics panel requests them.
+
 - Transcription is local unless a user explicitly selects a cloud transcription
   provider.
 - Hosted Whisper uses OpenAI-compatible file transcription. The official
