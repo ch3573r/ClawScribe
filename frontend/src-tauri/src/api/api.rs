@@ -1035,7 +1035,7 @@ pub async fn api_delete_meeting<R: Runtime>(
     auth_token: Option<String>,
     delete_files: bool,
 ) -> Result<serde_json::Value, String> {
-    let _job = crate::audio::inference::claim_job()?;
+    let _job = claim_meeting_deletion_job(delete_files)?;
     use tauri::Manager;
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Deleting local meeting");
@@ -1049,6 +1049,8 @@ pub async fn api_delete_meeting<R: Runtime>(
             .map_err(|_| "Could not read the meeting folder")?
             .flatten();
     let mut roots = Vec::new();
+    roots.push(crate::audio::recording_preferences::get_default_recordings_folder());
+    roots.push(crate::audio::recording_preferences::get_legacy_default_recordings_folder());
     if let Ok(preferences) =
         crate::audio::recording_preferences::load_recording_preferences(&app).await
     {
@@ -1130,6 +1132,44 @@ pub async fn api_delete_meeting<R: Runtime>(
             log_error!("Error deleting meeting");
             Err(format!("Failed to delete meeting: {}", e))
         }
+    }
+}
+
+fn claim_meeting_deletion_job(
+    delete_files: bool,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, String> {
+    if !delete_files {
+        return Ok(None);
+    }
+    crate::audio::inference::claim_job().map(Some).map_err(|_| {
+        "Recording files can't be deleted while a recording or transcription runs. Uncheck 'Also delete the recording files' or try again when it finishes.".into()
+    })
+}
+
+#[cfg(test)]
+mod meeting_deletion_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn database_only_deletion_is_allowed_during_inference() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let _busy = crate::audio::inference::claim_job().unwrap();
+        let error = claim_meeting_deletion_job(true).unwrap_err();
+        assert!(error.contains("Uncheck 'Also delete the recording files'"));
+        assert!(MeetingsRepository::get_meeting(&pool, "review-test")
+            .await
+            .unwrap()
+            .is_some());
+        let _job = claim_meeting_deletion_job(false).unwrap();
+        assert!(MeetingsRepository::delete_meeting(&pool, "review-test")
+            .await
+            .unwrap());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
     }
 }
 

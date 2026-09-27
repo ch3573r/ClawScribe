@@ -84,7 +84,7 @@ pub fn get_default_recordings_folder() -> PathBuf {
     platform_recordings_folder(DEFAULT_RECORDINGS_FOLDER_NAME)
 }
 
-fn get_legacy_default_recordings_folder() -> PathBuf {
+pub(crate) fn get_legacy_default_recordings_folder() -> PathBuf {
     platform_recordings_folder(LEGACY_RECORDINGS_FOLDER_NAME)
 }
 

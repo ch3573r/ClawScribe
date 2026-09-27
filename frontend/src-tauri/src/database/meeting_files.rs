@@ -2,15 +2,7 @@
 use std::path::{Path, PathBuf};
 
 fn is_link(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0 // Includes junctions/reparse points.
-    }
-    #[cfg(not(windows))]
-    {
-        metadata.file_type().is_symlink()
-    }
+    metadata.file_type().is_symlink()
 }
 
 pub(crate) fn remove_recording_folder(
@@ -66,6 +58,45 @@ pub(crate) fn remove_recording_folder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previous_default_root_remains_allowed_after_save_folder_changes() {
+        let base = tempfile::tempdir().unwrap();
+        let default = base.path().join("default");
+        let current = base.path().join("current");
+        let folder = default.join("meeting");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir(&current).unwrap();
+        std::fs::write(folder.join("metadata.json"), b"{}").unwrap();
+        remove_recording_folder(&folder, &[current, default], &[]).unwrap();
+        assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_and_junction_ancestor_are_refused() {
+        use std::os::windows::process::CommandExt;
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("original");
+        let folder = target.join("meeting");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("metadata.json"), b"{}").unwrap();
+        std::fs::write(target.join("metadata.json"), b"{}").unwrap();
+        let junction = base.path().join("junction");
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let roots = [base.path().to_path_buf()];
+        assert!(remove_recording_folder(&junction, &roots, &[]).is_err());
+        assert!(remove_recording_folder(&junction.join("meeting"), &roots, &[]).is_err());
+        assert!(folder.join("metadata.json").exists());
+        std::fs::remove_dir(&junction).unwrap();
+    }
 
     #[test]
     fn only_unshared_marked_recordings_inside_an_allowed_root_are_removed() {
