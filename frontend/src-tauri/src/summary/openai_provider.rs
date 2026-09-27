@@ -3,7 +3,7 @@ use crate::summary::codex_provider::{
     render_follow_up_email, render_meeting_notes_markdown, CodexCommandStatus, MeetingNotesOutput,
 };
 use crate::summary::CustomOpenAIConfig;
-use reqwest::{header, Client, StatusCode};
+use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -676,7 +676,7 @@ fn is_structured_output_unsupported_error(error: &str) -> bool {
         || lower.contains("json_schema")
         || lower.contains("unsupported")
         || lower.contains("invalid request")
-        || lower.contains(&StatusCode::BAD_REQUEST.as_u16().to_string())
+        || lower.contains("http 400")
 }
 
 fn write_processing_log_at(
@@ -715,6 +715,16 @@ fn truncate_for_log(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_message_is_not_a_structured_output_error() {
+        assert!(!is_structured_output_unsupported_error(
+            "Summary provider HTTP 429: limit of 400 requests per minute"
+        ));
+        assert!(is_structured_output_unsupported_error(
+            "Summary provider HTTP 400: Bad request"
+        ));
+    }
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
