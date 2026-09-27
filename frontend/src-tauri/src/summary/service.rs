@@ -101,6 +101,52 @@ async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str)
     }
 }
 
+const SUMMARY_SAVE_FAILED: &str =
+    "The summary was generated but could not be saved. Generate it again.";
+
+async fn retry_save<S, SF, F, FF, E>(mut save: S, fail: F) -> Result<(), String>
+where
+    S: FnMut() -> SF,
+    SF: std::future::Future<Output = Result<(), E>>,
+    F: FnOnce() -> FF,
+    FF: std::future::Future<Output = Result<(), E>>,
+{
+    for attempt in 0..3 {
+        if save().await.is_ok() {
+            return Ok(());
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(100 * (1 << attempt))).await;
+        }
+    }
+    if fail().await.is_err() {
+        error!("Could not persist summary save failure status");
+    }
+    Err(SUMMARY_SAVE_FAILED.into())
+}
+
+async fn save_completed_with_retry(
+    pool: &SqlitePool,
+    meeting: &str,
+    result: serde_json::Value,
+    chunks: i64,
+    duration: f64,
+) -> Result<(), String> {
+    retry_save(
+        || {
+            SummaryProcessesRepository::update_process_completed(
+                pool,
+                meeting,
+                result.clone(),
+                chunks,
+                duration,
+            )
+        },
+        || SummaryProcessesRepository::update_process_failed(pool, meeting, SUMMARY_SAVE_FAILED),
+    )
+    .await
+}
+
 const ENGLISH_CACHE_FIELD: &str = "english_cache";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -692,14 +738,9 @@ impl SummaryService {
                         }
                     });
                     super::sources::attach(&mut result_json, &summary_sources);
-                    if let Err(e) = SummaryProcessesRepository::update_process_completed(
-                        &pool,
-                        &meeting_id,
-                        result_json,
-                        1,
-                        duration,
-                    )
-                    .await
+                    if let Err(e) =
+                        save_completed_with_retry(&pool, &meeting_id, result_json, 1, duration)
+                            .await
                     {
                         error!(
                             "Failed to save OpenAI-compatible process for {}: {}",
@@ -802,14 +843,9 @@ impl SummaryService {
                         }
                     });
                     super::sources::attach(&mut result_json, &summary_sources);
-                    if let Err(e) = SummaryProcessesRepository::update_process_completed(
-                        &pool,
-                        &meeting_id,
-                        result_json,
-                        1,
-                        duration,
-                    )
-                    .await
+                    if let Err(e) =
+                        save_completed_with_retry(&pool, &meeting_id, result_json, 1, duration)
+                            .await
                     {
                         error!("Failed to save Codex process for {}: {}", meeting_id, e);
                     }
@@ -923,14 +959,9 @@ impl SummaryService {
 
                 super::sources::attach(&mut result_json, &summary_sources);
                 // Update database with completed status
-                if let Err(e) = SummaryProcessesRepository::update_process_completed(
-                    &pool,
-                    &meeting_id,
-                    result_json,
-                    num_chunks,
-                    duration,
-                )
-                .await
+                if let Err(e) =
+                    save_completed_with_retry(&pool, &meeting_id, result_json, num_chunks, duration)
+                        .await
                 {
                     error!("Failed to save completed process for {}: {}", meeting_id, e);
                 } else {
@@ -1395,6 +1426,41 @@ mod generated_title_tests {
                     .await
                     .unwrap();
             assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod save_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[tokio::test]
+    async fn transient_save_succeeds_and_persistent_failure_is_terminal() {
+        for succeeds in [true, false] {
+            let attempts = AtomicUsize::new(0);
+            let failed = AtomicUsize::new(0);
+            let result = retry_save(
+                || async {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if succeeds && attempt == 2 {
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                },
+                || async {
+                    failed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 3);
+            assert_eq!(failed.load(Ordering::SeqCst), usize::from(!succeeds));
+            if succeeds {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err(), SUMMARY_SAVE_FAILED);
+            }
         }
     }
 }
