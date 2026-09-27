@@ -1172,6 +1172,51 @@ mod tests {
         assert!(allowed_file("exports.json"));
     }
     #[tokio::test]
+    async fn context_round_trip_accepts_older_archives_and_is_deleted_with_the_meeting() {
+        for legacy in [false, true] {
+            let pool = crate::database::transcript_edits::tests::fixture().await;
+            super::super::context::write(&pool, "review-test", "Synthetic summary context", false)
+                .await
+                .unwrap();
+            let (mut manifest, folders) = snapshot(&pool).await.unwrap();
+            if legacy {
+                for meeting in manifest.tables.get_mut("meetings").unwrap() {
+                    meeting.remove("summary_context");
+                }
+            }
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("context.zip");
+            write_archive(&archive, manifest, folders).unwrap();
+            sqlx::query("DELETE FROM meetings")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(super::super::context::read(&pool, "review-test")
+                .await
+                .is_err());
+            let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+            import_manifest(&pool, manifest, stage).await.unwrap();
+            assert_eq!(
+                super::super::context::read(&pool, "review-test")
+                    .await
+                    .unwrap(),
+                if legacy {
+                    ""
+                } else {
+                    "Synthetic summary context"
+                }
+            );
+            sqlx::query("DELETE FROM meetings")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(super::super::context::read(&pool, "review-test")
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn round_trip_is_additive_and_excludes_credentials() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let folder = tempfile::tempdir().unwrap();

@@ -66,22 +66,29 @@ export default function PageContent({
 
   // State — "Add context" is persisted per meeting so it survives reopening and
   // is applied on every generate/regenerate.
-  const [customPrompt, setCustomPrompt] = useState<string>(() =>
-    getMeetingContext(meeting.id),
-  );
-  // Reload the stored context when switching meetings without a remount.
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [contextLoading, setContextLoading] = useState(true);
+  const contextMeeting = useRef(meeting.id);
+  contextMeeting.current = meeting.id;
   useEffect(() => {
-    setCustomPrompt(getMeetingContext(meeting.id));
+    let active = true;
+    setCustomPrompt('');
+    setContextLoading(true);
+    void getMeetingContext(meeting.id).then(context => {
+      if (active) setCustomPrompt(context);
+    }).catch(() => {
+      if (active) toast.error('Could not load meeting context. Reopen the meeting to retry.');
+    }).finally(() => { if (active) setContextLoading(false); });
+    return () => { active = false; };
   }, [meeting.id]);
-  // Persist edits against the current meeting (only on user change, so switching
-  // meetings can't cross-write the previous meeting's text).
-  const handlePromptChange = useCallback(
-    (value: string) => {
-      setCustomPrompt(value);
-      setMeetingContext(meeting.id, value);
-    },
-    [meeting.id],
-  );
+  const handlePromptChange = useCallback((value: string): void => {
+    setCustomPrompt(value);
+    void setMeetingContext(meeting.id, value).catch(() => {
+      if (contextMeeting.current === meeting.id) toast.error('Could not save meeting context', {
+        action: { label: 'Retry', onClick: () => handlePromptChange(value) },
+      });
+    });
+  }, [meeting.id]);
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
@@ -281,6 +288,7 @@ export default function PageContent({
           transcripts={meetingData.transcripts}
           customPrompt={customPrompt}
           onPromptChange={handlePromptChange}
+          contextLoading={contextLoading}
           onCopyTranscript={copyOperations.handleCopyTranscript}
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}

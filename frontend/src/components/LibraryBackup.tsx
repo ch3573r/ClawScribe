@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { flushMeetingContexts } from '@/lib/meetingContext';
 import type { LibraryArchiveReport } from '@/lib/library';
 
 export function LibraryBackup() {
@@ -25,6 +26,7 @@ export function LibraryBackup() {
       const path = restore ? await open({ filters, multiple: false, directory: false }) : await save({ filters, defaultPath: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
       if (!path) return;
       setResult(null);
+      if (!restore) await flushMeetingContexts();
       const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path });
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;

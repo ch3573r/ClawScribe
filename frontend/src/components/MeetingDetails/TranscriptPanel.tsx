@@ -11,6 +11,7 @@ interface TranscriptPanelProps {
   focusedSource?: { id: string; request: number };
   transcripts: Transcript[];
   customPrompt: string;
+  contextLoading?: boolean;
   onPromptChange: (value: string) => void;
   onCopyTranscript: () => void;
   onOpenMeetingFolder: () => Promise<void>;
@@ -41,6 +42,7 @@ export function TranscriptPanel({
   focusedSource,
   transcripts,
   customPrompt,
+  contextLoading = false,
   onPromptChange,
   onCopyTranscript,
   onOpenMeetingFolder,
@@ -142,6 +144,8 @@ export function TranscriptPanel({
           <textarea
             placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
             className="min-h-[80px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+            disabled={contextLoading}
+            aria-busy={contextLoading}
             value={customPrompt}
             onChange={(e) => onPromptChange(e.target.value)}
           />

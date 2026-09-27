@@ -403,3 +403,9 @@ A generated replacement removes that marker and retains one `previous_result` wi
 its timestamp. Restore atomically swaps current and previous results when generation
 is idle. These columns are independent of `result_backup`, whose failure and
 interruption recovery behavior is unchanged.
+
+Per-meeting summary context is stored in `meetings.summary_context`. Startup
+migrates legacy browser-storage values without replacing existing database
+context and removes each legacy value only after persistence succeeds. Library
+archives include the column; older archives omit it and restore with empty
+context. Deleting the meeting removes its context.

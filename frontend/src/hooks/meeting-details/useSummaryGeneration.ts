@@ -493,8 +493,12 @@ export function useSummaryGeneration({
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
     // Fall back to the meeting's persisted "Add context" if no context was
     // passed, so every entry point uses it consistently.
-    const effectiveContext = customPrompt.trim() ? customPrompt : getMeetingContext(meeting.id);
-    customPrompt = withCalendarContext(effectiveContext);
+    try {
+      customPrompt = withCalendarContext(customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id));
+    } catch {
+      toast.error('Could not load meeting context. Try generating again.');
+      return;
+    }
     // Check if model config is still loading
     if (isModelConfigLoading) {
       console.log('⏳ Model configuration is still loading, please wait...');
@@ -661,7 +665,12 @@ export function useSummaryGeneration({
   const handleRegenerateSummary = useCallback(async (customPrompt: string = '') => {
     // Same fallback as generation: use the persisted per-meeting context when a
     // caller (e.g. a regenerate button) doesn't pass one.
-    customPrompt = withCalendarContext(customPrompt.trim() ? customPrompt : getMeetingContext(meeting.id));
+    try {
+      customPrompt = withCalendarContext(customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id));
+    } catch {
+      toast.error('Could not load meeting context. Try generating again.');
+      return;
+    }
     const allTranscripts = await fetchAllTranscripts(meeting.id);
 
     if (!allTranscripts.length) {

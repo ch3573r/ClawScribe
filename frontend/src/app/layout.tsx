@@ -13,6 +13,7 @@ import {
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
+import { migrateLegacyMeetingContexts } from '@/lib/meetingContext'
 import { flushMeetingDrafts, flushSummaryEditsBeforeExit } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
@@ -116,6 +117,10 @@ export default function RootLayout({
       });
     });
     return () => { void close.then(unlisten => unlisten()); void quit.then(unlisten => unlisten()); };
+  }, []);
+
+  useEffect(() => {
+    void migrateLegacyMeetingContexts().catch(() => toast.error('Could not migrate meeting context. Existing context is retained for retry.'));
   }, []);
 
   // Import audio state

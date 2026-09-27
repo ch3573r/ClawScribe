@@ -1,5 +1,6 @@
 //! Local meeting organization and document export. No provider connection required.
 pub mod backup;
+pub mod context;
 
 use crate::state::AppState;
 use serde::Serialize;

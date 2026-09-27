@@ -696,6 +696,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            library::context::get_meeting_context,
+            library::context::set_meeting_context,
             library::list_meeting_tags,
             library::set_meeting_tags,
             library::list_meeting_bookmarks,
