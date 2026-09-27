@@ -83,6 +83,10 @@ imports/retranscription to temporary PCM on disk, uses one continuous VAD state,
 and reads one bounded speech segment for inference. Preparation needs temporary
 disk capacity; it does not retain a full decoded meeting in RAM.
 
+Imports own their newly created folder until the meeting database transaction
+commits. Failed or cancelled imports remove that copy; the source file is kept.
+Cancellation reports the same status during decoding, cloud and local inference.
+
 Whisper, Parakeet, and Nemotron model construction also runs behind the native
 permit on a blocking worker. Model switches release name-read guards before
 unloading the previous model. Nemotron resolves language at the engine boundary

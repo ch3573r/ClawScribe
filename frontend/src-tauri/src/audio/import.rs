@@ -52,6 +52,41 @@ impl Drop for ImportGuard {
     }
 }
 
+/// Owns only the newly created import directory, until its database commit.
+struct ImportFolderGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl ImportFolderGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+}
+
+impl Drop for ImportFolderGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Could not remove uncommitted import files");
+                }
+            }
+        }
+    }
+}
+
+fn import_error(error: anyhow::Error, cancelled: bool) -> anyhow::Error {
+    if cancelled {
+        anyhow!("Import cancelled")
+    } else {
+        error
+    }
+}
+
 /// VAD redemption time in milliseconds. Keep this close to the live pipeline so
 /// import rows do not bridge normal speaker handoffs into long multi-speaker
 /// transcript rows that diarization then has to split after the fact.
@@ -262,7 +297,9 @@ pub async fn start_import<R: Runtime>(
     let use_parakeet = provider.as_deref() == Some("parakeet")
         || super::transcription::cloud::is_cloud_provider(provider.as_deref());
     let use_nemotron = provider.as_deref() == Some("nemotron");
-    let result = run_import(app.clone(), source_path, title, language, model, provider).await;
+    let result = run_import(app.clone(), source_path, title, language, model, provider)
+        .await
+        .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
@@ -332,6 +369,7 @@ async fn run_import<R: Runtime>(
         }
     };
     let meeting_folder = create_meeting_folder(&base_folder, &title)?;
+    let mut folder_guard = ImportFolderGuard::new(meeting_folder.clone());
 
     // Copy audio file to meeting folder
     emit_progress(&app, "copying", 10, "Copying audio file...");
@@ -353,8 +391,6 @@ async fn run_import<R: Runtime>(
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        // Cleanup: remove the meeting folder
-        let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
 
@@ -406,7 +442,7 @@ async fn run_import<R: Runtime>(
                         super::common::transcription_source_language_hint(language.as_deref());
                     return save_import_transcripts(
                         &app,
-                        &meeting_folder,
+                        &mut folder_guard,
                         &title,
                         &dest_filename,
                         duration_seconds,
@@ -510,7 +546,6 @@ async fn run_import<R: Runtime>(
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
 
@@ -587,7 +622,6 @@ async fn run_import<R: Runtime>(
     for (i, segment) in processable_segments.iter().enumerate() {
         let segment = segment.load().await?;
         if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-            let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(anyhow!("Import cancelled"));
         }
 
@@ -698,7 +732,6 @@ async fn run_import<R: Runtime>(
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
 
@@ -726,7 +759,7 @@ async fn run_import<R: Runtime>(
 
     save_import_transcripts(
         &app,
-        &meeting_folder,
+        &mut folder_guard,
         &title,
         &dest_filename,
         duration_seconds,
@@ -776,7 +809,7 @@ async fn prepare_cloud_import_timing_grid<R: Runtime>(
 
 async fn save_import_transcripts<R: Runtime>(
     app: &AppHandle<R>,
-    meeting_folder: &Path,
+    folder_guard: &mut ImportFolderGuard,
     title: &str,
     dest_filename: &str,
     duration_seconds: f64,
@@ -785,6 +818,10 @@ async fn save_import_transcripts<R: Runtime>(
     used_model: &str,
     transcription_source_language: Option<&str>,
 ) -> Result<ImportResult> {
+    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Import cancelled"));
+    }
+    let meeting_folder = folder_guard.path.as_path();
     emit_progress(app, "saving", 85, "Creating meeting...");
 
     // Create transcript segments, then stitch obvious VAD fragments so imported
@@ -803,6 +840,7 @@ async fn save_import_transcripts<R: Runtime>(
         meeting_folder.to_string_lossy().to_string(),
     )
     .await?;
+    folder_guard.committed = true;
 
     // Write transcripts.json and metadata.json to the meeting folder
     emit_progress(app, "saving", 90, "Writing transcript files...");
@@ -1231,6 +1269,46 @@ mod tests {
     use super::super::common::create_transcript_segments;
     use super::*;
     use crate::audio::common::split_segment_at_silence;
+
+    #[test]
+    fn failed_or_cancelled_import_removes_only_its_owned_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.wav");
+        std::fs::write(&source, b"source audio").unwrap();
+        for cancelled in [false, true] {
+            let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+            let result: Result<()> = (|| {
+                let _guard = ImportFolderGuard::new(folder.clone());
+                std::fs::copy(&source, folder.join("audio.wav"))?;
+                // A segment failure propagates through the same guard as decode,
+                // cloud, engine initialization and database failures.
+                Err(anyhow!("Engine failed on segment 2"))
+            })();
+            let error = import_error(result.unwrap_err(), cancelled);
+            assert_eq!(
+                error.to_string(),
+                if cancelled {
+                    "Import cancelled"
+                } else {
+                    "Engine failed on segment 2"
+                }
+            );
+            assert!(!folder.exists());
+            assert!(source.exists());
+        }
+    }
+
+    #[test]
+    fn committed_import_keeps_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+        {
+            let mut guard = ImportFolderGuard::new(folder.clone());
+            std::fs::write(folder.join("audio.wav"), b"saved audio").unwrap();
+            guard.committed = true;
+        }
+        assert!(folder.join("audio.wav").exists());
+    }
 
     fn write_test_wav(path: &Path) {
         let sample_rate = 16_000u32;
