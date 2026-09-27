@@ -229,3 +229,5 @@ for the checks needed before recommending a build for everyday meetings.
 Speaker detection temporarily blocks transcript corrections, undo, restore and
 speaker renames for that meeting. Before saving labels it verifies the transcript
 has not changed; if it has, the existing edits are kept and detection must be run again.
+The previous transcript, including its speaker labels, is kept so **Restore previous
+transcript** can undo speaker detection.

@@ -2388,6 +2388,14 @@ async fn save_diarization_labels(
     }
     let updated_segments = count_changed_transcript_segments(stored_segments, mapped_segments);
     if updated_segments > 0 {
+        let previous: Vec<crate::database::models::Transcript> =
+            sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY id")
+                .bind(meeting_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES (?, ?, ?, ?)")
+            .bind(Uuid::new_v4().to_string()).bind(meeting_id).bind(Utc::now().to_rfc3339())
+            .bind(serde_json::to_string(&previous)?).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
             .bind(&meeting_id)
             .execute(&mut *tx)
@@ -4237,6 +4245,36 @@ mod tests {
             })
             .collect();
         (pool, stored, mapped)
+    }
+
+    #[tokio::test]
+    async fn speaker_detection_can_restore_the_exact_previous_rows() {
+        let (pool, mut stored, mapped) = label_save_fixture().await;
+        sqlx::query("UPDATE transcripts SET speaker = 'Original speaker', original_transcript = 'Original draft' WHERE id = 'a'").execute(&pool).await.unwrap();
+        stored[0].speaker = Some("Original speaker".into());
+        let before: Vec<crate::database::models::Transcript> =
+            sqlx::query_as("SELECT * FROM transcripts ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        save_diarization_labels(&pool, "review-test", &stored, &mapped)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::database::transcript_edits::restore_previous(&pool, "review-test")
+                .await
+                .unwrap(),
+            2
+        );
+        let after: Vec<crate::database::models::Transcript> =
+            sqlx::query_as("SELECT * FROM transcripts ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap()
+        );
     }
 
     #[tokio::test]

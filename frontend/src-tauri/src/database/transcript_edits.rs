@@ -201,7 +201,7 @@ async fn undo(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
     Ok(changes.len())
 }
 
-async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
+pub(crate) async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
     let mut tx = pool.begin().await.map_err(error)?;
     assert_editable(&mut tx, meeting).await?;
     let json: Option<String> = sqlx::query_scalar("SELECT transcripts_json FROM transcript_revisions WHERE meeting_id = ? ORDER BY rowid DESC LIMIT 1")
