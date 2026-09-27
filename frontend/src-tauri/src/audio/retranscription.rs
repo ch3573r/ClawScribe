@@ -429,47 +429,53 @@ async fn run_retranscription<R: Runtime>(
         }
 
         // Transcribe this segment
-        let (text, conf, word_timestamps) = if use_nemotron {
-            let engine = nemotron_engine.as_ref().unwrap();
-            let text = super::batch_audio::cancel_aware(
-                engine.transcribe_audio(segment.samples, language.clone()),
-                &RETRANSCRIPTION_CANCELLED,
-            )
-            .await
-            .map_err(|e| anyhow!("Nemotron transcription failed on segment {}: {}", i, e))?;
-            (text, None, None)
-        } else if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let result = super::batch_audio::cancel_aware(
-                engine.transcribe_audio_timestamped(segment.samples),
-                &RETRANSCRIPTION_CANCELLED,
-            )
-            .await
-            .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            let text = result.text;
-            let word_timestamps = transcript_words_from_token_timestamps(
-                &text,
-                &result.tokens,
-                &result.timestamps,
-                segment.start_timestamp_ms / 1000.0,
-                segment.end_timestamp_ms / 1000.0,
-                None,
-                None,
-            );
-            (text, None, word_timestamps)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, partial) = super::batch_audio::cancel_aware(
-                engine.transcribe_audio_with_confidence(segment.samples, language.clone()),
-                &RETRANSCRIPTION_CANCELLED,
-            )
-            .await
-            .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            if partial {
-                return Err(anyhow!("The speech engine returned incomplete text. Existing audio and transcripts were preserved; retry transcription."));
-            }
-            (text, conf, None)
-        };
+        let segment_result =
+            super::batch_audio::retry_segment(&RETRANSCRIPTION_CANCELLED, || async {
+                let value = if use_nemotron {
+                    let engine = nemotron_engine.as_ref().unwrap();
+                    let text = engine
+                        .transcribe_audio(segment.samples.clone(), language.clone())
+                        .await
+                        .map_err(|e| {
+                            anyhow!("Nemotron transcription failed on segment {}: {}", i, e)
+                        })?;
+                    (text, None, None)
+                } else if use_parakeet {
+                    let engine = parakeet_engine.as_ref().unwrap();
+                    let result = engine
+                        .transcribe_audio_timestamped(segment.samples.clone())
+                        .await
+                        .map_err(|e| {
+                            anyhow!("Parakeet transcription failed on segment {}: {}", i, e)
+                        })?;
+                    let text = result.text;
+                    let word_timestamps = transcript_words_from_token_timestamps(
+                        &text,
+                        &result.tokens,
+                        &result.timestamps,
+                        segment.start_timestamp_ms / 1000.0,
+                        segment.end_timestamp_ms / 1000.0,
+                        None,
+                        None,
+                    );
+                    (text, None, word_timestamps)
+                } else {
+                    let engine = whisper_engine.as_ref().unwrap();
+                    let (text, conf, partial) = engine
+                        .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                        .await
+                        .map_err(|e| {
+                            anyhow!("Whisper transcription failed on segment {}: {}", i, e)
+                        })?;
+                    if partial {
+                        return Err(anyhow!("The speech engine returned incomplete text"));
+                    }
+                    (text, conf, None)
+                };
+                Ok(value)
+            })
+            .await;
+        let (text, conf, word_timestamps) = segment_result?;
 
         // Skip empty transcripts
         let trimmed = text.trim();

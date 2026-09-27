@@ -86,6 +86,9 @@ disk capacity; it does not retain a full decoded meeting in RAM.
 Imports own their newly created folder until the meeting database transaction
 commits. Failed or cancelled imports remove that copy; the source file is kept.
 Cancellation reports the same status during decoding, cloud and local inference.
+Batch inference retries each failed segment once. Imports retain successful text
+and mark persistent failures as incomplete with a segment-count warning.
+Retranscription replaces the transcript only when every segment succeeds.
 
 Whisper, Parakeet, and Nemotron model construction also runs behind the native
 permit on a blocking worker. Model switches release name-read guards before

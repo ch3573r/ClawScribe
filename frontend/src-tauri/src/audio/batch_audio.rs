@@ -7,6 +7,24 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// A transient engine error gets one fresh attempt. Cancellation never retries.
+pub(crate) async fn retry_segment<T, F, Fut>(
+    cancelled: &'static AtomicBool,
+    mut transcribe: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for attempt in 0..2 {
+        let result = cancel_aware(transcribe(), cancelled).await;
+        if result.is_ok() || cancelled.load(Ordering::Acquire) || attempt == 1 {
+            return result;
+        }
+    }
+    unreachable!()
+}
+
 pub(crate) async fn cancel_aware<T>(
     work: impl std::future::Future<Output = Result<T>>,
     cancelled: &'static AtomicBool,
@@ -181,6 +199,31 @@ pub(crate) async fn prepare(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn segment_retry_recovers_transient_failure_and_stops_after_two_attempts() {
+        static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let calls = std::cell::Cell::new(0);
+        let value = super::retry_segment(&CANCELLED, || {
+            calls.set(calls.get() + 1);
+            std::future::ready(if calls.get() == 1 {
+                Err(anyhow::anyhow!("temporary engine failure"))
+            } else {
+                Ok("recovered")
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, "recovered");
+        assert_eq!(calls.get(), 2);
+        calls.set(0);
+        let result: anyhow::Result<()> = super::retry_segment(&CANCELLED, || {
+            calls.set(calls.get() + 1);
+            std::future::ready(Err(anyhow::anyhow!("persistent engine failure")))
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 2);
+    }
     use super::*;
 
     #[tokio::test]
