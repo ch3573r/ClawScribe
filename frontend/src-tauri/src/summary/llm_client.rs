@@ -294,48 +294,35 @@ pub async fn generate_summary(
         model_name
     );
 
-    with_cancellation(cancellation_token, async {
-        let checked_client;
-        let client = if matches!(
-            provider,
-            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
-        ) {
-            checked_client = crate::openai::secret_destination::secret_client(
-                Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
-                &api_url,
-                allow_unencrypted,
-            )
-            .await?;
-            &checked_client
-        } else {
-            client
-        };
-        let response = client
-            .post(api_url)
-            .headers(headers)
-            .json(&request_body)
-            .timeout(REQUEST_TIMEOUT_DURATION)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    format!(
-                        "LLM request timed out after {} seconds",
-                        REQUEST_TIMEOUT_DURATION.as_secs()
-                    )
-                } else {
-                    format!("Failed to send request to LLM: {}", error.without_url())
-                }
-            })?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "LLM API request failed with HTTP {}. Check provider settings and retry.",
-                response.status().as_u16()
-            ));
-        }
-        parse_response(provider, read_response_json(response).await?)
-    })
-    .await
+    let response = super::http_retry::send(
+        || async {
+            let checked_client;
+            let client = if matches!(
+                provider,
+                LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
+            ) {
+                checked_client = crate::openai::secret_destination::secret_client(
+                    Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
+                    &api_url,
+                    allow_unencrypted,
+                )
+                .await?;
+                &checked_client
+            } else {
+                client
+            };
+            Ok(client
+                .post(&api_url)
+                .headers(headers.clone())
+                .json(&request_body)
+                .timeout(REQUEST_TIMEOUT_DURATION))
+        },
+        cancellation_token,
+        api_key,
+        &[system_prompt, user_prompt],
+    )
+    .await?;
+    parse_response(provider, response)
 }
 
 /// Cancellation covers the entire operation, including a response body that may

@@ -432,24 +432,17 @@ impl OpenAICompatibleProcessingProvider {
             response_format,
         };
 
-        super::llm_client::with_cancellation(cancellation_token, async {
-            let request = self.build_request(&body).await?;
-            let response = request
-                .send()
-                .await
-                .map_err(|error| request_error_message(error, self.config.timeout_seconds))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "OpenAI-compatible API request failed with HTTP {}",
-                    response.status().as_u16()
-                ));
-            }
-            super::llm_client::parse_response(
-                &super::llm_client::LLMProvider::OpenAICompatible,
-                super::llm_client::read_response_json(response).await?,
-            )
-        })
-        .await
+        let response = super::http_retry::send(
+            || self.build_request(&body),
+            cancellation_token,
+            self.config.api_key.as_deref().unwrap_or_default(),
+            &[system_prompt, user_prompt],
+        )
+        .await?;
+        super::llm_client::parse_response(
+            &super::llm_client::LLMProvider::OpenAICompatible,
+            response,
+        )
     }
 
     pub(crate) async fn send_text_prompt(
@@ -687,17 +680,6 @@ fn is_structured_output_unsupported_error(error: &str) -> bool {
         || lower.contains("unsupported")
         || lower.contains("invalid request")
         || lower.contains(&StatusCode::BAD_REQUEST.as_u16().to_string())
-}
-
-fn request_error_message(error: reqwest::Error, timeout_seconds: u64) -> String {
-    if error.is_timeout() {
-        format!("OpenAI-compatible request timed out after {timeout_seconds} seconds")
-    } else {
-        format!(
-            "Failed to send OpenAI-compatible request: {}",
-            error.without_url()
-        )
-    }
 }
 
 fn write_processing_log_at(

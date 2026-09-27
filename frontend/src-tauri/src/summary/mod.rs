@@ -47,6 +47,7 @@ pub mod chat_commands;
 mod chunking;
 pub mod codex_provider;
 pub mod commands;
+mod http_retry;
 pub(crate) mod language_detection;
 pub mod llm_client;
 pub(crate) mod metadata;
