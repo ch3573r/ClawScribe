@@ -234,7 +234,10 @@ and unavailable exports are shown in Settings; only “Request missing permissio
 opens a consent flow. A declined request retains the session. Without offline
 access, sign-in lasts only for the current app run. Export commands check their
 required permissions before Graph calls. If a permission is missing, one token
-refresh checks for newly approved scopes before reporting it unavailable.
+refresh checks for newly approved scopes before reporting it unavailable. Missing
+permissions trigger at most one forced refresh per scope per hour; signing in or
+requesting missing permissions resets that limit. Calendar views skip calendar
+requests when connection status reports Calendar lookup unavailable.
 
 Credential-bearing integration endpoints require HTTPS, loopback HTTP, or an explicit
 private-network HTTP opt-in. Legacy private HTTP settings migrate on load. HTTP

@@ -1,5 +1,9 @@
 //! Tauri-managed state for the Microsoft Graph connection.
 
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
 
 use crate::exports::auth::MicrosoftAuthConfig;
@@ -13,6 +17,7 @@ pub struct MicrosoftAuthState {
 pub(crate) struct MicrosoftAuthInner {
     pub config: MicrosoftAuthConfig,
     pub generation: u64,
+    pub scope_refreshes: HashMap<String, Instant>,
     pub http: reqwest::Client,
     pub connection_state: MicrosoftConnectionState,
     pub pending_device_code: Option<String>,
@@ -65,6 +70,7 @@ impl MicrosoftAuthState {
             inner: RwLock::new(MicrosoftAuthInner {
                 config,
                 generation: 0,
+                scope_refreshes: HashMap::new(),
                 http,
                 connection_state,
                 pending_device_code: None,
@@ -79,6 +85,26 @@ impl MicrosoftAuthState {
 }
 
 impl MicrosoftAuthInner {
+    pub fn begin_auth_attempt(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.scope_refreshes.clear();
+    }
+
+    /// Reserve under the write lock before awaiting a refresh so concurrent
+    /// callers cannot repeatedly refresh for the same missing permission.
+    pub fn reserve_scope_refresh(&mut self, scope: &str, now: Instant) -> bool {
+        let scope = scope.to_ascii_lowercase();
+        if self
+            .scope_refreshes
+            .get(&scope)
+            .is_some_and(|last| now.saturating_duration_since(*last) < Duration::from_secs(3600))
+        {
+            return false;
+        }
+        self.scope_refreshes.insert(scope, now);
+        true
+    }
+
     // Call under the write lock: sign-out cannot interleave persistence and memory.
     pub fn accept_refreshed_token(
         &mut self,
@@ -121,7 +147,7 @@ impl MicrosoftAuthInner {
         &mut self,
         delete: impl FnOnce() -> Result<(), token_store::TokenStoreError>,
     ) -> Result<(), String> {
-        self.generation = self.generation.wrapping_add(1);
+        self.begin_auth_attempt();
         if let Some(cancel) = self.sign_in_cancel.take() {
             cancel.cancel();
         }
@@ -188,6 +214,7 @@ mod tests {
         let state = Arc::new(RwLock::new(MicrosoftAuthInner {
             config: MicrosoftAuthConfig::default(),
             generation: 0,
+            scope_refreshes: HashMap::new(),
             http: reqwest::Client::new(),
             connection_state: MicrosoftConnectionState::Connected,
             pending_device_code: None,
@@ -243,6 +270,7 @@ mod tests {
         let mut state = MicrosoftAuthInner {
             config: MicrosoftAuthConfig::default(),
             generation: 0,
+            scope_refreshes: HashMap::new(),
             http: reqwest::Client::new(),
             connection_state: MicrosoftConnectionState::Connected,
             pending_device_code: None,

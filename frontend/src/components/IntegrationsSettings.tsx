@@ -2084,11 +2084,12 @@ const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
 function CalendarPanel() {
   const ms = useMicrosoftExport();
   const isConnected = ms.connection.state === "connected";
+  const calendarAvailable = isConnected && !ms.connection.unavailableExports?.includes("Calendar lookup");
   const [usedForNext, setUsedForNext] = useState(false);
   const [attendeeIncluded, setAttendeeIncluded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    if (!isConnected) return;
+    if (!calendarAvailable) return;
     let cancelled = false;
     const refresh = () => {
       if (!cancelled) void ms.loadCalendar();
@@ -2106,11 +2107,13 @@ function CalendarPanel() {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [isConnected, ms.loadCalendar]);
+  }, [calendarAvailable, ms.loadCalendar]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
   const detail = isConnected
-    ? "Your current/next meeting and upcoming events, with invited attendees."
+    ? calendarAvailable
+      ? "Your current/next meeting and upcoming events, with invited attendees."
+      : "Calendar permission is unavailable. Request missing permissions in Microsoft settings above."
     : "Sign in with Microsoft above to see your calendar.";
   const current = ms.currentMeeting;
 
@@ -2137,7 +2140,7 @@ function CalendarPanel() {
       detail={detail}
       showBadge={!isConnected}
     >
-      {isConnected && (
+      {calendarAvailable && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">

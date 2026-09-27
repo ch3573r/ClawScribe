@@ -201,6 +201,12 @@ export function useMicrosoftExport() {
   const loadCalendar = useCallback(async () => {
     setLoadingCalendar(true);
     try {
+      const status = await microsoftExportService.connectionStatus();
+      if (status.state !== "connected" || status.unavailableExports?.includes("Calendar lookup")) {
+        setCalendarEvents([]);
+        setCurrentMeeting(null);
+        return;
+      }
       const now = new Date();
       const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
       const [events, current] = await Promise.all([

@@ -112,7 +112,7 @@ pub async fn microsoft_sign_in<R: Runtime>(
             cancel = super::ms_auth_state::begin_sign_in(&mut inner.connection_state)?;
         }
         inner.sign_in_cancel = Some(cancel.clone());
-        inner.generation = inner.generation.wrapping_add(1);
+        inner.begin_auth_attempt();
         generation = inner.generation;
         config = inner.config.clone();
         http = inner.http.clone();
@@ -177,7 +177,7 @@ pub async fn microsoft_sign_in<R: Runtime>(
                         log::warn!("Could not persist Microsoft session");
                     }
                     // A refresh started while consent was open must not overwrite this grant.
-                    inner.generation = inner.generation.wrapping_add(1);
+                    inner.begin_auth_attempt();
                     inner.connection_state = MicrosoftConnectionState::Connected;
                     inner.sign_in_cancel = None;
                     inner.pending_device_code = None;
@@ -363,9 +363,9 @@ where
     F: FnOnce(reqwest::Client, auth::MicrosoftAuthConfig, token_store::StoredToken, bool) -> Fut,
     Fut: std::future::Future<Output = Result<token_store::StoredToken, String>>,
 {
-    let (config, http, current, generation);
+    let (config, http, current, generation, missing_scope);
     {
-        let inner = state.inner.read().await;
+        let mut inner = state.inner.write().await;
         if inner.connection_state != MicrosoftConnectionState::Connected {
             return Err("Microsoft is not connected".into());
         }
@@ -376,12 +376,13 @@ where
             .current_token
             .clone()
             .ok_or("Microsoft is not connected")?;
-    }
-
-    let missing_scope = super::permissions::require_scope(&current, required_scope).err();
-    if current.refresh_token.is_none() {
+        missing_scope = super::permissions::require_scope(&current, required_scope).err();
         if let Some(error) = missing_scope.as_ref() {
-            return Err(error.clone());
+            if current.refresh_token.is_none()
+                || !inner.reserve_scope_refresh(required_scope, std::time::Instant::now())
+            {
+                return Err(error.clone());
+            }
         }
     }
     let stored = refresh(http, config, current, missing_scope.is_some())
@@ -1226,6 +1227,7 @@ mod export_history_tests {
             inner: tokio::sync::RwLock::new(super::super::ms_auth_state::MicrosoftAuthInner {
                 config: auth::MicrosoftAuthConfig::default(),
                 generation: 1,
+                scope_refreshes: Default::default(),
                 http,
                 connection_state: MicrosoftConnectionState::Connected,
                 pending_device_code: None,
@@ -1342,6 +1344,85 @@ mod export_history_tests {
     }
 
     #[tokio::test]
+    async fn missing_calendar_scope_refreshes_once_until_consent_or_cooldown() {
+        let state = partial_session(reqwest::Client::new());
+        let refreshes = std::cell::Cell::new(0);
+        for attempt in 0..7 {
+            if attempt == 3 {
+                // Both sign-in and Request missing permissions use this reset.
+                state.inner.write().await.begin_auth_attempt();
+            }
+            if attempt == 6 {
+                state.inner.write().await.scope_refreshes.insert(
+                    "calendars.read".into(),
+                    std::time::Instant::now() - std::time::Duration::from_secs(3600),
+                );
+            }
+            let error = get_token_and_context_with(
+                &state,
+                "Calendars.Read",
+                |_, _, token, force| {
+                    assert!(force);
+                    refreshes.set(refreshes.get() + 1);
+                    std::future::ready(Ok(token))
+                },
+                |_| panic!("unchanged credentials must not persist"),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "Permission not granted: Calendars.Read");
+            assert_eq!(
+                refreshes.get(),
+                if attempt < 3 {
+                    1
+                } else if attempt < 6 {
+                    2
+                } else {
+                    3
+                }
+            );
+        }
+        // A different missing scope can still be checked in the same session.
+        get_token_and_context_with(
+            &state,
+            "Tasks.ReadWrite",
+            |_, _, mut token, force| {
+                assert!(force);
+                token.granted_scopes.push_str(" Tasks.ReadWrite");
+                std::future::ready(Ok(token))
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_missing_scope_calls_share_one_refresh_reservation() {
+        let state = partial_session(reqwest::Client::new());
+        let error = get_token_and_context_with(
+            &state,
+            "Calendars.Read",
+            |_, _, token, _| async {
+                let second = get_token_and_context_with(
+                    &state,
+                    "Calendars.Read",
+                    |_, _, _, _| async { panic!("concurrent call must not refresh") },
+                    |_| panic!("concurrent call must not persist"),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(second, "Permission not granted: Calendars.Read");
+                Ok(token)
+            },
+            |_| panic!("unchanged credentials must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Permission not granted: Calendars.Read");
+    }
+
+    #[tokio::test]
     async fn permission_refresh_failure_keeps_existing_session() {
         let state = partial_session(reqwest::Client::new());
         let error = get_token_and_context_with(
@@ -1356,6 +1437,15 @@ mod export_history_tests {
         .await
         .unwrap_err();
         assert!(error.contains("Permission not granted: Tasks.ReadWrite"));
+        let repeated = get_token_and_context_with(
+            &state,
+            "Tasks.ReadWrite",
+            |_, _, _, _| async { panic!("failed network refresh must also respect the cooldown") },
+            |_| panic!("failed refresh must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(repeated, "Permission not granted: Tasks.ReadWrite");
         let inner = state.inner.read().await;
         assert_eq!(inner.connection_state, MicrosoftConnectionState::Connected);
         assert_eq!(
