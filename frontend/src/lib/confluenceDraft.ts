@@ -29,7 +29,7 @@ export function buildConfluenceDraftMarkdown({
   summaryMarkdown,
 }: ConfluenceDraftInput): string {
   const title = meetingTitle.trim() || "Untitled meeting";
-  const body = summaryMarkdown.trim();
+  const body = summaryMarkdown.replace(/\[([^\]\n]*)\]\(#clawscribe-source-[0-9a-f]+\)/g, "($1)").trim();
   return [
     `# ${title}`,
     "",

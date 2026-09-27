@@ -29,7 +29,6 @@ impl MeetingsRepository {
             Ok(success) => {
                 if success {
                     transaction.commit().await?;
-                    crate::summary::codex_provider::remove_meeting_runs(meeting_id).await;
                     info!(
                         "Successfully deleted meeting {} and all associated data",
                         meeting_id
@@ -238,6 +237,27 @@ impl MeetingsRepository {
             .execute(&mut *transaction)
             .await?;
 
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn update_generated_meeting_name(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        current: &str,
+        title: &str,
+    ) -> Result<bool, SqlxError> {
+        let mut transaction = pool.begin().await?;
+        let updated = sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ?")
+            .bind(title).bind(meeting_id).bind(current).execute(&mut *transaction).await?;
+        if updated.rows_affected() == 0 {
+            return Ok(false);
+        }
+        sqlx::query("UPDATE transcript_chunks SET meeting_name = ? WHERE meeting_id = ?")
+            .bind(title)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(true)
     }

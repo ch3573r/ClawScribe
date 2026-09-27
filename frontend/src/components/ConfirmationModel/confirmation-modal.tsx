@@ -5,9 +5,10 @@ interface ConfirmationModalProps {
   onCancel: () => void;
   text: string;
   isOpen: boolean;
+  children?: React.ReactNode;
 }
 
-export function ConfirmationModal({ onConfirm, onCancel, text, isOpen }: ConfirmationModalProps) {
+export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children }: ConfirmationModalProps) {
   if (!isOpen) return null;
 
   return (
@@ -15,6 +16,7 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen }: Confirm
       <div className="bg-card rounded-lg p-6 max-w-md w-full mx-4">
         <h2 className="text-xl font-semibold mb-4">Confirm Delete</h2>
         <p className="text-muted-foreground mb-6">{text}</p>
+        {children}
         <div className="flex justify-end space-x-4">
           <button
             onClick={onCancel}

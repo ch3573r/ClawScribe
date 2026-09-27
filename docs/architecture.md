@@ -50,6 +50,25 @@ recordings and migration paths continue to work.
 
 ## Data Boundaries
 
+The backend contains no analytics client or analytics commands. Frontend analytics
+calls remain inert compatibility stubs; recording stop does not read provider
+credentials or copy transcripts for telemetry.
+Recording, summary status and notification logs omit meeting names and
+notification contents. Summary diagnostics use the meeting ID instead.
+
+SQLite connections explicitly enable WAL, normal synchronous mode, foreign keys
+and a five-second busy timeout. Legacy database transfers checkpoint first and
+use a consistent SQLite snapshot so committed WAL data is retained.
+Before pending migrations, startup writes a consistent database snapshot under
+the app-data backups folder and retains the newest two. Fresh databases with no
+user tables do not create an empty snapshot. After successful migrations, each
+startup removes snapshots older than 14 days, limiting retention of deleted
+meeting data. A backup failure warns
+without blocking startup; already-applied migrations do not create another copy.
+
+Background Teams detection returns matching candidates only. Unmatched browser
+window titles are returned only when the settings diagnostics panel requests them.
+
 - Transcription is local unless a user explicitly selects a cloud transcription
   provider.
 - Hosted Whisper uses OpenAI-compatible file transcription. The official
@@ -82,6 +101,13 @@ cannot free a model that native code still uses. `audio/batch_audio.rs` normaliz
 imports/retranscription to temporary PCM on disk, uses one continuous VAD state,
 and reads one bounded speech segment for inference. Preparation needs temporary
 disk capacity; it does not retain a full decoded meeting in RAM.
+
+Imports own their newly created folder until the meeting database transaction
+commits. Failed or cancelled imports remove that copy; the source file is kept.
+Cancellation reports the same status during decoding, cloud and local inference.
+Batch inference retries each failed segment once. Imports retain successful text
+and mark persistent failures as incomplete with a segment-count warning.
+Retranscription replaces the transcript only when every segment succeeds.
 
 Whisper, Parakeet, and Nemotron model construction also runs behind the native
 permit on a blocking worker. Model switches release name-read guards before
@@ -162,6 +188,12 @@ and visible retry preserve corrections if the atomic `transcripts.json` mirror
 cannot be written. Existing migrations are immutable; the correction schema is
 added by a new migration.
 
+Retranscription warns when it will replace corrections. Restore previous
+transcript swaps the current rows with the latest archived revision, preserving
+every original ID and field. It archives the replaced version, retires old edit
+batches, and queues the file mirror in one transaction. Active summaries block
+restoration; regenerated notes are needed to refresh source links.
+
 `summary/sources.rs` prepares summaries from the complete saved transcript and
 annotates passages with stable content-derived source links. Reduction prompts
 retain links alongside their facts. Completed results store the cited source
@@ -215,10 +247,25 @@ and SHA-256 hashes. Transfers resume from `.partial` files and verify integrity
 before promotion to the final filename. Readiness caches successful verification
 for an unchanged file; a complete verified model needs no network request.
 
+Speech and speaker-detection downloads use the immutable revisions, exact sizes
+and SHA-256 hashes in `speech-model-pins.json`. The shared transfer verifies before
+publishing a file. Existing files are hashed on a blocking worker; verification
+receipts cache unchanged size, modification time and expected hash across starts.
+Changed or mismatched files require verification or re-download before loading.
+The default Parakeet v3 Hugging Face mirror is byte-identical to the previous
+four-file download. SmoothQuant retains the original export filenames from the
+last pinned revision before upstream reorganized those files.
+
 Codex output documents and their processing log live in the meeting folder.
 Temporary prompt/transcript run files are removed on success, failure or
 cancellation. Meeting deletion removes legacy run files, and startup retries
 orphan cleanup without blocking local recording.
+
+Meeting deletion defaults to removing recording files after the database commit.
+Deletion requires an unshared, marked ClawScribe folder within the configured
+recordings or restored-recordings root, with no links or junctions in its path.
+Users can retain recording files. Export ledgers and temporary Codex runs are
+removed either way; any retained folder is reported without undoing database deletion.
 
 Codex summary and chat threads use an ephemeral scratch working directory,
 read-only sandbox, no approval escalation, and disabled shell tools. Every turn
@@ -232,10 +279,14 @@ Saving a generated summary retries three times with short delays. A persistent
 save failure marks the run failed with a regeneration message.
 
 Summary cancellation follows the job token rather than provider error wording.
+Startup marks unfinished summary rows failed with an interruption message and
+restores the previous saved result, allowing transcript corrections again.
 
 Starting a recording cancels Built-in AI summary jobs before stopping the helper,
 with a recording-specific message and the previous summary retained. Other
 providers continue independently.
+Import, retranscription and speaker detection use the same cancellation path
+with an operation-specific explanation before reclaiming the local helper.
 
 The local helper serializes model switches and requests under one exchange lock.
 Cancelling a queued request leaves the current generation intact; cancelling the

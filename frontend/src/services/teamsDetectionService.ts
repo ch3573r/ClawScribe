@@ -87,9 +87,10 @@ export class TeamsDetectionService {
     return invoke<TeamsDetectionConfig>('get_teams_detection_config');
   }
 
-  async getStatus(config?: TeamsDetectionConfig): Promise<TeamsDetectionStatus> {
+  async getStatus(config?: TeamsDetectionConfig, includeDiagnostics = false): Promise<TeamsDetectionStatus> {
     return invoke<TeamsDetectionStatus>('get_teams_detection_status', {
       config: config ?? null,
+      includeDiagnostics,
     });
   }
 }

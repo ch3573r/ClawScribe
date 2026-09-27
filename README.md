@@ -43,6 +43,15 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 
 ## Capture And Transcription
 
+Meeting deletion can also remove its recording folder, including audio,
+transcript copies, metadata, and generated documents. The option is on by
+default; folders outside the configured storage locations or shared with another
+meeting are kept and reported.
+
+Downloaded speech and speaker-detection models are pinned and checked with
+SHA-256 before use. A damaged or incomplete model requires re-download; verified,
+unchanged files reuse their integrity check across app restarts.
+
 - Microphone and system-audio capture from the local Windows session.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.

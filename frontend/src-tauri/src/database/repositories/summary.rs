@@ -200,6 +200,13 @@ impl SummaryProcessesRepository {
         Ok(())
     }
 
+    pub(crate) async fn fail_interrupted_processes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        let now = Utc::now();
+        sqlx::query("UPDATE summary_processes SET status = 'failed', error = 'Summary generation was interrupted when ClawScribe closed', updated_at = ?, end_time = ?, result = COALESCE(result_backup, result), result_backup = NULL, result_backup_timestamp = NULL WHERE LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating')")
+            .bind(now).bind(now).execute(pool).await?;
+        Ok(())
+    }
+
     pub async fn update_process_cancelled(
         pool: &SqlitePool,
         meeting_id: &str,

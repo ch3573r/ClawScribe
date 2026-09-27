@@ -1,6 +1,8 @@
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 use tauri::Manager;
 
 #[derive(Clone)]
@@ -19,7 +21,7 @@ impl DatabaseManager {
         if !Path::new(tauri_db_path).exists() {
             if Path::new(backend_db_path).exists() {
                 log::info!("Migrating the legacy local database");
-                fs::copy(backend_db_path, tauri_db_path).map_err(|e| sqlx::Error::Io(e))?;
+                snapshot_database(Path::new(backend_db_path), Path::new(tauri_db_path)).await?;
             } else {
                 log::info!("Creating the local database");
                 Sqlite::create_database(tauri_db_path).await?;
@@ -36,12 +38,22 @@ impl DatabaseManager {
                     Ok(())
                 })
             })
-            .connect(tauri_db_path)
+            .connect_with(connection_options(Path::new(tauri_db_path)))
             .await?;
 
         let migrator = sqlx::migrate!("./migrations");
+        if backup_before_migrations(&pool, Path::new(tauri_db_path), &migrator)
+            .await
+            .is_err()
+        {
+            log::warn!("Could not create the pre-migration database backup; continuing startup");
+        }
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
+        if prune_expired_snapshots(Path::new(tauri_db_path)).is_err() {
+            log::warn!("Could not remove expired pre-migration database backups");
+        }
+        crate::database::repositories::summary::SummaryProcessesRepository::fail_interrupted_processes(&pool).await?;
         crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
         // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -176,7 +188,7 @@ impl DatabaseManager {
         let target_legacy_path = app_data_dir.join("meeting_minutes.db");
         log::info!("Copying legacy database to current storage");
 
-        fs::copy(legacy_db_path, &target_legacy_path).map_err(|e| sqlx::Error::Io(e))?;
+        snapshot_database(Path::new(legacy_db_path), &target_legacy_path).await?;
 
         // Now use the standard initialization which will detect and migrate the legacy db
         Self::new_from_app_handle(app_handle).await
@@ -232,6 +244,141 @@ impl DatabaseManager {
     }
 }
 
+fn connection_options(path: &Path) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .foreign_keys(true)
+}
+
+async fn backup_before_migrations(
+    pool: &SqlitePool,
+    database: &Path,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let ledger: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if ledger == 0 {
+        let user_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if user_tables == 0 {
+            return Ok(());
+        }
+    }
+    let applied: Vec<i64> = if ledger > 0 {
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(pool)
+            .await?
+    } else {
+        Vec::new()
+    };
+    if migrator
+        .iter()
+        .all(|migration| applied.contains(&migration.version))
+    {
+        return Ok(());
+    }
+    let root = database.parent().unwrap_or(Path::new(".")).join("backups");
+    fs::create_dir_all(&root).map_err(sqlx::Error::Io)?;
+    let old_version = applied.iter().max().copied().unwrap_or(0);
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%9f");
+    let target = root.join(format!("meeting_minutes-{old_version}-{stamp}.sqlite"));
+    if let Err(error) = sqlx::query("VACUUM INTO ?")
+        .bind(target.to_string_lossy().as_ref())
+        .execute(pool)
+        .await
+    {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    // Only prune our snapshots, after publishing a successful replacement.
+    let pattern = regex::Regex::new(r"^meeting_minutes-\d+-\d{8}T\d{15}\.sqlite$")
+        .expect("snapshot filename pattern");
+    let mut backups = fs::read_dir(&root)
+        .map_err(sqlx::Error::Io)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| pattern.is_match(&entry.file_name().to_string_lossy()))
+        .filter_map(|entry| {
+            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            Some((metadata.modified().ok()?, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    backups.sort_by(|a, b| b.cmp(a));
+    for (_, path) in backups.into_iter().skip(2) {
+        fs::remove_file(path).map_err(sqlx::Error::Io)?;
+    }
+    Ok(())
+}
+
+fn prune_expired_snapshots(database: &Path) -> std::io::Result<()> {
+    let root = database.parent().unwrap_or(Path::new(".")).join("backups");
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let pattern = regex::Regex::new(r"^meeting_minutes-\d+-\d{8}T\d{15}\.sqlite$")
+        .expect("snapshot filename pattern");
+    for entry in entries {
+        let entry = entry?;
+        if !pattern.is_match(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata
+                .modified()?
+                .elapsed()
+                .is_ok_and(|age| age > Duration::from_secs(14 * 24 * 60 * 60))
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// A SQLite snapshot includes committed WAL pages even when another reader
+/// prevents a complete checkpoint. Never copy only the main database file.
+async fn snapshot_database(source: &Path, target: &Path) -> Result<()> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(source)
+                .busy_timeout(Duration::from_secs(5)),
+        )
+        .await?;
+    let result = async {
+        sqlx::query("PRAGMA wal_checkpoint(FULL)")
+            .execute(&pool)
+            .await?;
+        let staged = tempfile::NamedTempFile::new_in(target.parent().unwrap_or(Path::new(".")))
+            .map_err(sqlx::Error::Io)?
+            .into_temp_path();
+        sqlx::query("VACUUM INTO ?")
+            .bind(staged.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await?;
+        std::fs::rename(&staged, target).map_err(sqlx::Error::Io)?;
+        Ok(())
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
 /// SHA-384 checksums of the migration SQL under both line-ending
 /// conventions, matching how SQLx hashes migration files at compile time.
 fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
@@ -249,6 +396,128 @@ fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha384};
+
+    #[tokio::test]
+    async fn startup_prunes_expired_snapshots_and_preserves_recent_and_unowned_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting_minutes.sqlite");
+        let legacy = dir.path().join("missing.db");
+        let manager = DatabaseManager::new(database.to_str().unwrap(), legacy.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.pool.close().await;
+        let backups = dir.path().join("backups");
+        assert!(!backups.exists());
+        fs::create_dir(&backups).unwrap();
+        let old = backups.join("meeting_minutes-1-20260101T000000000000000.sqlite");
+        let recent = backups.join("meeting_minutes-2-20260102T000000000000000.sqlite");
+        let unowned = backups.join("manual.sqlite");
+        for file in [&old, &recent, &unowned] {
+            fs::write(file, b"snapshot").unwrap();
+        }
+        let expired = std::time::SystemTime::now() - Duration::from_secs(15 * 24 * 60 * 60);
+        for file in [&old, &unowned] {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(expired))
+                .unwrap();
+        }
+        let manager = DatabaseManager::new(database.to_str().unwrap(), legacy.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(!old.exists());
+        assert!(recent.exists());
+        assert!(unowned.exists());
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn snapshots_only_for_pending_migrations_keep_the_newest_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting.sqlite");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(connection_options(&path).create_if_missing(true))
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        backup_before_migrations(&pool, &path, &migrator)
+            .await
+            .unwrap();
+        assert!(
+            !dir.path().join("backups").exists(),
+            "fresh databases need no snapshot"
+        );
+        sqlx::query("CREATE TABLE legacy_data (value TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        backup_before_migrations(&pool, &path, &migrator)
+            .await
+            .unwrap();
+        migrator.run(&pool).await.unwrap();
+        let backup_dir = dir.path().join("backups");
+        assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 1);
+        backup_before_migrations(&pool, &path, &migrator)
+            .await
+            .unwrap();
+        assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 1);
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)").execute(&pool).await.unwrap();
+        for _ in 0..3 {
+            backup_before_migrations(&pool, &path, &migrator)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 2);
+        for entry in fs::read_dir(&backup_dir).unwrap() {
+            let snapshot = SqlitePool::connect(entry.unwrap().path().to_str().unwrap())
+                .await
+                .unwrap();
+            let valid: String = sqlx::query_scalar("PRAGMA integrity_check")
+                .fetch_one(&snapshot)
+                .await
+                .unwrap();
+            assert_eq!(valid, "ok");
+            snapshot.close().await;
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn fresh_database_uses_wal_and_snapshot_includes_uncheckpointed_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting.sqlite");
+        let db = DatabaseManager::new(
+            path.to_str().unwrap(),
+            dir.path().join("missing.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('wal-test', 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").execute(db.pool()).await.unwrap();
+        let target = dir.path().join("copy.sqlite");
+        snapshot_database(&path, &target).await.unwrap();
+        let copy = SqlitePool::connect(target.to_str().unwrap()).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'wal-test'")
+            .fetch_one(&copy)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        copy.close().await;
+        db.cleanup().await.unwrap();
+    }
 
     #[tokio::test]
     async fn failed_open_preserves_committed_wal_data() {

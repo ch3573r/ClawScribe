@@ -9,14 +9,12 @@ use crate::nemotron_engine::model::NemotronModel;
 use crate::parakeet_engine::parakeet_engine::{DownloadProgress, ModelStatus};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::fs;
-use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
-use tokio::time::timeout;
 
 /// A downloadable Nemotron export. Two ship: fp16 (default, CPU-capable) and
 /// int8 (smaller, GPU-only). They share the streaming RNN-T interface but differ
@@ -24,12 +22,10 @@ use tokio::time::timeout;
 pub struct NemotronVariant {
     pub id: &'static str,
     base_url: &'static str,
-    /// Files to download with exact sizes (for resume/skip + a min-size sanity
-    /// check). Each fp16 .onnx has a sibling .onnx.data; the int8 encoder is a
-    /// single inline file with no .data.
+    /// Files to download with exact sizes; SHA-256 pins live in the shared manifest.
+    /// Each fp16 .onnx has a sibling .onnx.data; the int8 encoder is a single
+    /// inline file with no .data.
     files: &'static [(&'static str, u64)],
-    /// Files that must exist (and clear a min size) for the model to be Available.
-    required: &'static [(&'static str, u64)],
     pub size_mb: u32,
     speed: &'static str,
     description: &'static str,
@@ -42,7 +38,7 @@ pub struct NemotronVariant {
 
 const FP16: NemotronVariant = NemotronVariant {
     id: "nemotron-streaming-0.6b-fp16",
-    base_url: "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-FP16/resolve/main",
+    base_url: "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-FP16/resolve/76daabfd0aaf5ec6ef1e6640eae3b364af6c9970",
     files: &[
         ("encoder.onnx", 22_131_503),
         ("encoder.onnx.data", 1_236_396_032),
@@ -54,14 +50,6 @@ const FP16: NemotronVariant = NemotronVariant {
         ("config.json", 602),
         ("languages.json", 2_020),
     ],
-    required: &[
-        ("encoder.onnx", 10_000_000),
-        ("encoder.onnx.data", 1_100_000_000),
-        ("decoder.onnx.data", 25_000_000),
-        ("joint.onnx.data", 15_000_000),
-        ("vocab.json", 50_000),
-        ("languages.json", 500),
-    ],
     size_mb: 1310,
     speed: "Streaming (FP16)",
     description:
@@ -71,7 +59,7 @@ const FP16: NemotronVariant = NemotronVariant {
 
 const INT8: NemotronVariant = NemotronVariant {
     id: "nemotron-streaming-0.6b-int8",
-    base_url: "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main",
+    base_url: "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/1ce4daedd303e01d4e603634a72c28562f1a6855",
     files: &[
         ("encoder.onnx", 657_558_932),
         ("decoder.onnx", 4_345),
@@ -81,13 +69,6 @@ const INT8: NemotronVariant = NemotronVariant {
         ("vocab.json", 236_127),
         ("config.json", 602),
         ("languages.json", 2_020),
-    ],
-    required: &[
-        ("encoder.onnx", 500_000_000),
-        ("decoder.onnx.data", 50_000_000),
-        ("joint.onnx.data", 30_000_000),
-        ("vocab.json", 50_000),
-        ("languages.json", 500),
     ],
     size_mb: 755,
     speed: "Streaming (INT8, GPU-only)",
@@ -126,8 +107,18 @@ pub struct NemotronEngine {
     current_model: Arc<RwLock<Option<NemotronModel>>>,
     current_model_name: Arc<RwLock<Option<String>>>,
     pub(crate) available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
-    cancel_download_flag: Arc<RwLock<Option<String>>>,
-    pub(crate) active_downloads: Arc<RwLock<HashSet<String>>>,
+    active_downloads: crate::model_download::Downloads,
+}
+
+async fn verify_variant(variant: &NemotronVariant, folder: &std::path::Path) -> Result<()> {
+    for (filename, _) in variant.files {
+        crate::model_download::verify_pinned_file(
+            &folder.join(filename),
+            &format!("{}/{filename}", variant.base_url),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 impl NemotronEngine {
@@ -159,13 +150,11 @@ impl NemotronEngine {
             current_model: Arc::new(RwLock::new(None)),
             current_model_name: Arc::new(RwLock::new(None)),
             available_models: Arc::new(RwLock::new(HashMap::new())),
-            cancel_download_flag: Arc::new(RwLock::new(None)),
-            active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            active_downloads: crate::model_download::Downloads::default(),
         })
     }
 
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
-        let active = self.active_downloads.read().await;
         let mut infos = Vec::with_capacity(VARIANTS.len());
 
         for v in VARIANTS {
@@ -178,16 +167,17 @@ impl NemotronEngine {
                 continue;
             }
             let model_path = self.models_dir.join(v.id);
-            let status = if active.contains(v.id) {
+            let status = if self.active_downloads.is_active(v.id) {
                 ModelStatus::Downloading { progress: 0 }
-            } else if model_path.exists()
-                && v.required.iter().all(|(file, min)| {
-                    std::fs::metadata(model_path.join(file))
-                        .map(|m| m.len() >= *min)
-                        .unwrap_or(false)
-                })
-            {
-                ModelStatus::Available
+            } else if model_path.exists() {
+                if verify_variant(v, &model_path).await.is_ok() {
+                    ModelStatus::Available
+                } else {
+                    ModelStatus::Corrupted {
+                        file_size: 0,
+                        expected_min_size: v.files.iter().map(|(_, size)| *size).sum(),
+                    }
+                }
             } else {
                 ModelStatus::Missing
             };
@@ -212,6 +202,8 @@ impl NemotronEngine {
     }
 
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
+        let variant = variant_for(model_name).ok_or_else(|| anyhow!("Unknown Nemotron model"))?;
+        verify_variant(variant, &self.models_dir.join(model_name)).await?;
         let path = {
             let models = self.available_models.read().await;
             let info = models
@@ -297,206 +289,59 @@ impl NemotronEngine {
     }
 
     pub async fn cancel_download(&self, model_name: &str) {
-        *self.cancel_download_flag.write().await = Some(model_name.to_string());
+        if self.active_downloads.cancel(model_name).await.is_err() {
+            log::warn!("Nemotron download cancellation is still pending");
+        }
     }
 
-    /// Download the model from HuggingFace with resume, per-chunk timeout,
-    /// cancellation, and weighted progress. Ported from ParakeetEngine.
     pub async fn download_model_detailed(
         &self,
         model_name: &str,
-        progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
+        mut progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
-        let variant = variant_for(model_name)
-            .ok_or_else(|| anyhow!("Unknown Nemotron model {}", model_name))?;
-        {
-            let active = self.active_downloads.read().await;
-            if active.contains(model_name) {
-                return Err(anyhow!("Download already in progress for {}", model_name));
-            }
-        }
-        self.active_downloads
-            .write()
-            .await
-            .insert(model_name.to_string());
-        *self.cancel_download_flag.write().await = None;
-
-        // Ensure catalog is populated.
-        if self.available_models.read().await.is_empty() {
-            let _ = self.discover_models().await;
-        }
+        let variant = variant_for(model_name).ok_or_else(|| anyhow!("Unknown Nemotron model"))?;
+        let reservation = self.active_downloads.start(model_name)?;
         let model_dir = self.models_dir.join(model_name);
-        if !model_dir.exists() {
-            if let Err(e) = fs::create_dir_all(&model_dir).await {
-                self.active_downloads.write().await.remove(model_name);
-                return Err(anyhow!("Failed to create model directory: {}", e));
-            }
-        }
-        {
-            let mut models = self.available_models.write().await;
-            if let Some(m) = models.get_mut(model_name) {
-                m.status = ModelStatus::Downloading { progress: 0 };
-            }
-        }
-
-        let client = reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(1)
-            .timeout(Duration::from_secs(3600))
-            .connect_timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
-
-        let total_size_bytes: u64 = variant.files.iter().map(|(_, s)| *s).sum();
-        let mut already: u64 = 0;
-        for (filename, expected) in variant.files {
-            if let Ok(m) = fs::metadata(model_dir.join(filename)).await {
-                already += m.len().min(*expected);
-            }
-        }
-        let mut total_downloaded = already;
-        let start_time = Instant::now();
-        let mut last_report = Instant::now();
-        let mut last_pct: u8 = 0;
-
-        for (filename, expected_size) in variant.files.iter() {
-            let file_url = format!("{}/{}", variant.base_url, filename);
-            let file_path = model_dir.join(filename);
-            let existing_size: u64 = fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
-
-            // Skip files that already look complete (1% tolerance).
-            if *expected_size > 0 && existing_size >= (*expected_size as f64 * 0.99) as u64 {
-                continue;
-            }
-
-            let mut request = client.get(&file_url);
-            if existing_size > 0 {
-                request = request.header("Range", format!("bytes={}-", existing_size));
-            }
-            let response = request
-                .send()
-                .await
-                .map_err(|e| anyhow!("Failed to start download for {}: {}", filename, e))?;
-
-            let resuming = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-            if !response.status().is_success() && !resuming {
-                self.active_downloads.write().await.remove(model_name);
-                return Err(anyhow!(
-                    "Download failed for {} with status: {}",
-                    filename,
-                    response.status()
-                ));
-            }
-
-            let file = if resuming {
-                fs::OpenOptions::new().append(true).open(&file_path).await
-            } else {
-                fs::File::create(&file_path).await
-            }
-            .map_err(|e| anyhow!("Failed to open {}: {}", filename, e))?;
-            let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
-
-            use futures_util::StreamExt;
-            let mut stream = response.bytes_stream();
-            if !resuming && existing_size > 0 {
-                // Server ignored Range; we overwrote, so drop the stale count.
-                total_downloaded =
-                    total_downloaded.saturating_sub(existing_size.min(*expected_size));
-            }
-
-            loop {
-                if self.cancel_download_flag.read().await.as_deref() == Some(model_name) {
-                    let _ = writer.flush().await;
-                    self.active_downloads.write().await.remove(model_name);
-                    return Err(anyhow!("Download cancelled by user"));
-                }
-                match timeout(Duration::from_secs(30), stream.next()).await {
-                    Err(_) => {
-                        let _ = writer.flush().await;
-                        self.active_downloads.write().await.remove(model_name);
-                        self.mark_missing(model_name).await;
-                        return Err(anyhow!("Download timeout — no data for 30s"));
-                    }
-                    Ok(None) => break,
-                    Ok(Some(Ok(chunk))) => {
-                        writer
-                            .write_all(&chunk)
-                            .await
-                            .map_err(|e| anyhow!("Write failed for {}: {}", filename, e))?;
-                        total_downloaded += chunk.len() as u64;
-
-                        if last_report.elapsed() >= Duration::from_millis(250) {
-                            let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
-                            let speed = (total_downloaded.saturating_sub(already)) as f64
-                                / 1_048_576.0
-                                / elapsed;
-                            let prog =
-                                DownloadProgress::new(total_downloaded, total_size_bytes, speed);
-                            if prog.percent != last_pct {
-                                last_pct = prog.percent;
-                                if let Some(cb) = &progress_callback {
-                                    cb(prog);
-                                }
-                                self.set_progress(model_name, last_pct).await;
-                            }
-                            last_report = Instant::now();
+        let operation = async {
+            fs::create_dir_all(&model_dir).await?;
+            let client = crate::model_download::client()?;
+            let total: u64 = variant.files.iter().map(|(_, size)| *size).sum();
+            let start = Instant::now();
+            let mut completed = 0;
+            for (filename, _) in variant.files {
+                let bytes = crate::model_download::download_file(
+                    &client,
+                    &format!("{}/{filename}", variant.base_url),
+                    &model_dir.join(filename),
+                    reservation.token(),
+                    |bytes, _| {
+                        if let Some(callback) = progress_callback.as_mut() {
+                            let mut progress = DownloadProgress::new(
+                                completed + bytes,
+                                total,
+                                bytes as f64
+                                    / 1_048_576.0
+                                    / start.elapsed().as_secs_f64().max(0.001),
+                            );
+                            progress.percent = progress.percent.min(99);
+                            callback(progress);
                         }
-                    }
-                    Ok(Some(Err(e))) => {
-                        let _ = writer.flush().await;
-                        self.active_downloads.write().await.remove(model_name);
-                        self.mark_missing(model_name).await;
-                        return Err(anyhow!("Download error for {}: {}", filename, e));
-                    }
-                }
+                    },
+                )
+                .await?;
+                completed += bytes;
             }
-            writer
-                .flush()
-                .await
-                .map_err(|e| anyhow!("Flush failed for {}: {}", filename, e))?;
-
-            // Sanity-check the downloaded file: a Git-LFS pointer or an HTML
-            // error page is tiny (a few KB) where we expect MB/GB. Reject it so a
-            // flaky CDN response doesn't masquerade as a "downloaded" model.
-            if *expected_size > 1_000_000 {
-                let got = fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
-                if got < *expected_size / 2 {
-                    let _ = fs::remove_file(&file_path).await;
-                    self.active_downloads.write().await.remove(model_name);
-                    self.mark_missing(model_name).await;
-                    return Err(anyhow!(
-                        "Downloaded {} is too small ({} bytes, expected ~{}): likely a CDN error or LFS pointer, not the real file",
-                        filename, got, expected_size
-                    ));
-                }
-            }
+            verify_variant(variant, &model_dir).await
         }
-
-        self.active_downloads.write().await.remove(model_name);
-        // Re-validate so status flips to Available.
+        .await;
+        drop(reservation);
         let _ = self.discover_models().await;
-        if let Some(cb) = &progress_callback {
-            cb(DownloadProgress::new(
-                total_size_bytes,
-                total_size_bytes,
-                0.0,
-            ));
+        if operation.is_ok() {
+            if let Some(callback) = progress_callback {
+                let total = variant.files.iter().map(|(_, size)| *size).sum();
+                callback(DownloadProgress::new(total, total, 0.0));
+            }
         }
-        log::info!("Nemotron model {} download complete", model_name);
-        Ok(())
-    }
-
-    async fn set_progress(&self, model_name: &str, pct: u8) {
-        let mut models = self.available_models.write().await;
-        if let Some(m) = models.get_mut(model_name) {
-            m.status = ModelStatus::Downloading { progress: pct };
-        }
-    }
-
-    async fn mark_missing(&self, model_name: &str) {
-        let mut models = self.available_models.write().await;
-        if let Some(m) = models.get_mut(model_name) {
-            m.status = ModelStatus::Missing;
-        }
+        operation
     }
 }

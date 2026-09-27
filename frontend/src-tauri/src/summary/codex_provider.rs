@@ -67,7 +67,12 @@ const send = m => process.stdout.write(JSON.stringify(m)+'\n');
 readline.createInterface({input:process.stdin}).on('line', line => {
  const m=JSON.parse(line);
  if(m.method==='initialize') send({id:m.id,result:{}});
+ if(m.method==='config/read') {
+   assert.equal(m.params.cwd,process.cwd());
+   send({id:m.id,result:{config:{mcp_servers:fs.existsSync('mcp-configured') ? {example:{command:'example'}} : {}}}});
+ }
  if(m.method==='thread/start') {
+   assert(!fs.existsSync('mcp-configured'));
    assert.equal(m.params.approvalPolicy,'never'); assert.equal(m.params.sandbox,'read-only');
    assert.equal(m.params.config['features.shell_tool'],false);
    assert.equal(m.params.config['features.unified_exec'],false);
@@ -132,6 +137,24 @@ readline.createInterface({input:process.stdin}).on('line', line => {
                 "safe answer"
             );
             assert!(temp.path().join("verified").exists());
+            if mode == CodexHomeMode::ExistingUserCodexSession {
+                fs::write(temp.path().join("mcp-configured"), "configured").unwrap();
+                assert!(session
+                    .process_raw_prompt("test-model", "Do not run tools")
+                    .await
+                    .unwrap_err()
+                    .contains("isolated profile"));
+                assert!(session
+                    .process_turn(
+                        "test-model",
+                        "synthetic transcript",
+                        None,
+                        serde_json::json!({})
+                    )
+                    .await
+                    .unwrap_err()
+                    .contains("MCP servers"));
+            }
             session.take_stderr().await;
         }
     }
@@ -161,6 +184,40 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         cleanup_orphaned_runs_at(&pool, &root).await;
         assert!(scratch.exists());
         assert!(!orphan.exists());
+    }
+
+    #[tokio::test]
+    async fn folderless_output_storage_preserves_audio_metadata_and_is_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("UPDATE meetings SET folder_path = NULL WHERE id = 'review-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let output = ensure_meeting_output_dir(&pool, "review-test", temp.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            output,
+            temp.path().join("meeting-outputs").join("review-test")
+        );
+        fs::write(output.join("meeting-notes.md"), "Synthetic summary").unwrap();
+        let folder: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(folder.is_none());
+        crate::database::repositories::meeting::MeetingsRepository::delete_meeting(
+            &pool,
+            "review-test",
+        )
+        .await
+        .unwrap();
+        assert!(remove_meeting_outputs(temp.path(), "review-test")
+            .await
+            .is_none());
+        assert!(!output.exists());
     }
 
     #[test]
@@ -618,14 +675,22 @@ for line in sys.stdin:
     async fn fake_app_server_processing_turn_returns_valid_meeting_json() {
         let temp = tempfile::tempdir().unwrap();
         let provider = provider_with_fake(&temp, "ok");
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("UPDATE meetings SET folder_path = NULL WHERE id = 'review-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let output = ensure_meeting_output_dir(&pool, "review-test", temp.path())
+            .await
+            .unwrap();
         let result = provider
             .process_meeting(CodexMeetingProcessRequest {
                 sources: Vec::new(),
-                meeting_id: "meeting-1".to_string(),
+                meeting_id: "review-test".to_string(),
                 meeting_title: Some("Runtime".to_string()),
                 transcript: "[00:01] Bundle Codex.".to_string(),
                 custom_prompt: None,
-                output_dir: Some(temp.path().join("meeting")),
+                output_dir: Some(output.clone()),
                 scratch_root: Some(temp.path().join("runs")),
             })
             .await
@@ -634,9 +699,15 @@ for line in sys.stdin:
             result.structured_output.action_items[0].task,
             "Ship bundled Codex runtime"
         );
-        let log =
-            fs::read_to_string(temp.path().join("meeting").join("processing-log.json")).unwrap();
-        assert!(!temp.path().join("runs").join("meeting-1").exists());
+        let log = fs::read_to_string(output.join("processing-log.json")).unwrap();
+        assert!(!temp.path().join("runs").join("review-test").exists());
+        let folder: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(folder.is_none());
+        assert!(output.starts_with(temp.path().join("meeting-outputs")));
         assert!(!log.contains("Bundle Codex"));
         assert!(!log.contains("secret-token-value"));
     }
@@ -1465,7 +1536,12 @@ pub async fn codex_process_meeting<R: Runtime>(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let output_dir = Some(ensure_meeting_output_dir(state.db_manager.pool(), &meeting_id).await?);
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Could not locate meeting output storage")?;
+    let output_dir =
+        Some(ensure_meeting_output_dir(state.db_manager.pool(), &meeting_id, &data).await?);
     let provider = provider_from_app(&app)?;
     provider
         .process_meeting(CodexMeetingProcessRequest {
@@ -1713,6 +1789,7 @@ impl Drop for RunScratch {
 pub(crate) async fn ensure_meeting_output_dir(
     pool: &sqlx::SqlitePool,
     meeting: &str,
+    app_data: &Path,
 ) -> Result<PathBuf, String> {
     let folder: Option<String> =
         sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
@@ -1723,31 +1800,40 @@ pub(crate) async fn ensure_meeting_output_dir(
     if let Some(folder) = folder.filter(|path| !path.trim().is_empty()) {
         return Ok(PathBuf::from(folder));
     }
-    let folder = crate::audio::get_default_recordings_folder()
-        .join(format!("meeting-{}", sanitize_path_segment(meeting)));
+    let folder = meeting_outputs_dir(app_data, meeting);
     tokio::fs::create_dir_all(&folder)
         .await
         .map_err(|_| "Could not create meeting output folder")?;
-    sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = ?")
-        .bind(folder.to_string_lossy().as_ref())
-        .bind(meeting)
-        .execute(pool)
-        .await
-        .map_err(|_| "Could not save meeting output folder")?;
     Ok(folder)
 }
 
-pub(crate) async fn remove_meeting_runs(meeting: &str) {
-    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await;
+pub(crate) fn meeting_outputs_dir(app_data: &Path, meeting: &str) -> PathBuf {
+    app_data
+        .join("meeting-outputs")
+        .join(sanitize_path_segment(meeting))
 }
 
-async fn remove_meeting_runs_at(root: &Path, meeting: &str) {
+pub(crate) async fn remove_meeting_outputs(app_data: &Path, meeting: &str) -> Option<String> {
+    match tokio::fs::remove_dir_all(meeting_outputs_dir(app_data, meeting)).await {
+        Ok(()) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some("Generated meeting outputs could not be removed".into()),
+    }
+}
+
+pub(crate) async fn remove_meeting_runs(meeting: &str) -> Option<String> {
+    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await
+}
+
+async fn remove_meeting_runs_at(root: &Path, meeting: &str) -> Option<String> {
     let path = root.join(sanitize_path_segment(meeting));
-    if let Err(error) = tokio::fs::remove_dir_all(path).await {
+    if let Err(error) = tokio::fs::remove_dir_all(&path).await {
         if error.kind() != std::io::ErrorKind::NotFound {
             log::warn!("Could not remove Codex scratch folder; startup cleanup will retry");
+            return Some(format!("Codex run folder kept: {}", path.display()));
         }
     }
+    None
 }
 
 pub(crate) async fn cleanup_orphaned_runs(pool: &sqlx::SqlitePool) {
@@ -2179,6 +2265,26 @@ impl AppServerSession {
         })
     }
 
+    async fn check_existing_session_mcp(&mut self) -> Result<(), String> {
+        if self.codex_home.is_some() {
+            return Ok(());
+        }
+        // rust-v0.157.0 recursively merges config tables: mcp_servers={} does
+        // not remove inherited entries. Inspect the effective config for this
+        // same cwd and refuse before thread/start instead of exposing tools.
+        let response = self.request_with_overload_retry(
+            "config/read",
+            serde_json::json!({"cwd": self.cwd, "includeLayers": false}),
+        ).await.map_err(|_| "Could not check existing Codex session tools. Use the ClawScribe isolated profile for summaries.".to_string())?;
+        let config = response.get("config").and_then(Value::as_object)
+            .ok_or("Could not check existing Codex session tools. Use the ClawScribe isolated profile for summaries.")?;
+        match config.get("mcp_servers") {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::Object(servers)) if servers.is_empty() => Ok(()),
+            _ => Err("The existing Codex session configures MCP servers. Use the ClawScribe isolated profile for summaries so external tools are not exposed.".into()),
+        }
+    }
+
     async fn process_turn(
         &mut self,
         model: &str,
@@ -2186,6 +2292,7 @@ impl AppServerSession {
         custom_prompt: Option<&str>,
         metadata: Value,
     ) -> Result<String, String> {
+        self.check_existing_session_mcp().await?;
         let thread_response = self
             .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
@@ -2226,6 +2333,7 @@ impl AppServerSession {
     /// model's text output. Same thread/start + overload-retry handling as
     /// `process_turn`.
     async fn process_raw_prompt(&mut self, model: &str, prompt: &str) -> Result<String, String> {
+        self.check_existing_session_mcp().await?;
         let thread_response = self
             .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;

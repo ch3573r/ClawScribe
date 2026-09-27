@@ -1902,7 +1902,7 @@ function TeamsDetectionPanel() {
     setIsCheckingTeams(true);
     setTeamsError(null);
     try {
-      setTeamsStatus(await teamsDetectionService.getStatus());
+      setTeamsStatus(await teamsDetectionService.getStatus(undefined, true));
     } catch (error) {
       setTeamsError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1918,7 +1918,7 @@ function TeamsDetectionPanel() {
     let cancelled = false;
     const id = window.setInterval(async () => {
       try {
-        const status = await teamsDetectionService.getStatus();
+        const status = await teamsDetectionService.getStatus(undefined, true);
         if (!cancelled) {
           setTeamsStatus(status);
           setTeamsError(null);

@@ -1029,22 +1029,107 @@ pub async fn api_delete_api_key<R: Runtime>(
 
 #[tauri::command]
 pub async fn api_delete_meeting<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     auth_token: Option<String>,
+    delete_files: bool,
 ) -> Result<serde_json::Value, String> {
+    let _job = claim_meeting_deletion_job(delete_files)?;
+    use tauri::Manager;
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Deleting local meeting");
 
     let pool = state.db_manager.pool();
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(&meeting_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "Could not read the meeting folder")?
+            .flatten();
+    let mut roots = Vec::new();
+    roots.push(crate::audio::recording_preferences::get_default_recordings_folder());
+    roots.push(crate::audio::recording_preferences::get_legacy_default_recordings_folder());
+    if let Ok(preferences) =
+        crate::audio::recording_preferences::load_recording_preferences(&app).await
+    {
+        roots.push(preferences.save_folder);
+    }
+    if let Ok(data) = app.path().app_data_dir() {
+        roots.push(data.join("restored-recordings"));
+    }
 
     match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
         Ok(true) => {
+            let mut warnings = Vec::new();
+            match app.path().app_data_dir() {
+                Ok(data) => {
+                    if let Some(warning) =
+                        crate::summary::codex_provider::remove_meeting_outputs(&data, &meeting_id)
+                            .await
+                    {
+                        warnings.push(warning);
+                    }
+                }
+                Err(_) => warnings.push("Could not locate generated meeting outputs".into()),
+            }
+            if let Some(warning) =
+                crate::summary::codex_provider::remove_meeting_runs(&meeting_id).await
+            {
+                warnings.push(warning);
+            }
+            match crate::exports::commands::export_ledger_dir(&app, &meeting_id) {
+                Ok(ledger) => {
+                    if let Err(error) = tokio::fs::remove_dir_all(&ledger).await {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            warnings
+                                .push(format!("Export history folder kept: {}", ledger.display()));
+                        }
+                    }
+                }
+                Err(_) => warnings.push("Could not locate the export history folder".into()),
+            }
+            if delete_files {
+                if let Some(folder) = folder {
+                    let other_folders = sqlx::query_scalar::<_, String>(
+                        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL",
+                    )
+                    .fetch_all(pool)
+                    .await;
+                    match other_folders {
+                        Ok(others) => {
+                            let retained = format!(
+                                "Recording folder kept: {folder} (cleanup could not finish)"
+                            );
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::database::meeting_files::remove_recording_folder(
+                                    std::path::Path::new(&folder),
+                                    &roots,
+                                    &others
+                                        .into_iter()
+                                        .map(std::path::PathBuf::from)
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .await;
+                            match result {
+                                Ok(Ok(())) => {}
+                                Ok(Err(warning)) => warnings.push(warning),
+                                Err(_) => warnings.push(retained),
+                            }
+                        }
+                        Err(_) => warnings.push(format!(
+                            "Recording folder kept: {folder} (could not check shared use)"
+                        )),
+                    }
+                }
+            }
             log_info!("Successfully deleted meeting {}", meeting_id);
             Ok(serde_json::json!({
                 "status": "success",
-                "message": "Meeting deleted successfully"
+                "message": "Meeting deleted successfully",
+                "warnings": warnings
             }))
         }
         Ok(false) => {
@@ -1058,6 +1143,44 @@ pub async fn api_delete_meeting<R: Runtime>(
             log_error!("Error deleting meeting");
             Err(format!("Failed to delete meeting: {}", e))
         }
+    }
+}
+
+fn claim_meeting_deletion_job(
+    delete_files: bool,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, String> {
+    if !delete_files {
+        return Ok(None);
+    }
+    crate::audio::inference::claim_job().map(Some).map_err(|_| {
+        "Recording files can't be deleted while a recording or transcription runs. Uncheck 'Also delete the recording files' or try again when it finishes.".into()
+    })
+}
+
+#[cfg(test)]
+mod meeting_deletion_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn database_only_deletion_is_allowed_during_inference() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let _busy = crate::audio::inference::claim_job().unwrap();
+        let error = claim_meeting_deletion_job(true).unwrap_err();
+        assert!(error.contains("Uncheck 'Also delete the recording files'"));
+        assert!(MeetingsRepository::get_meeting(&pool, "review-test")
+            .await
+            .unwrap()
+            .is_some());
+        let _job = claim_meeting_deletion_job(false).unwrap();
+        assert!(MeetingsRepository::delete_meeting(&pool, "review-test")
+            .await
+            .unwrap());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
     }
 }
 

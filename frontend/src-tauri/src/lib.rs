@@ -38,7 +38,6 @@ pub(crate) use perf_trace;
 // Re-export async logging macros for external use (removed due to macro conflicts)
 
 // Declare audio module
-pub mod analytics;
 pub mod anthropic;
 pub mod api;
 pub mod audio;
@@ -95,13 +94,7 @@ async fn start_recording<R: Runtime>(
     system_device_name: Option<String>,
     meeting_name: Option<String>,
 ) -> Result<(), String> {
-    log_info!("🔥 CALLED start_recording with meeting: {:?}", meeting_name);
-    log_info!(
-        "📋 Backend received parameters - mic: {:?}, system: {:?}, meeting: {:?}",
-        mic_device_name,
-        system_device_name,
-        meeting_name
-    );
+    log_info!("Recording start requested");
 
     if is_recording().await {
         return Err("Recording already in progress".to_string());
@@ -240,10 +233,7 @@ async fn resolve_meeting_audio_file(
     .map_err(|e| format!("Failed to verify meeting folder: {}", e))?;
 
     if !canonical_folder_is_registered(&folder, saved_meeting_folders.iter().map(String::as_str)) {
-        log::warn!(
-            "Refusing to resolve audio from unregistered meeting folder: {}",
-            folder.display()
-        );
+        log::warn!("Refusing to resolve audio from an unregistered meeting folder");
         return Ok(None);
     }
 
@@ -398,8 +388,6 @@ async fn is_audio_level_monitoring() -> bool {
     audio::simple_level_monitor::is_monitoring()
 }
 
-// Analytics commands are now handled by analytics::commands module
-
 // Whisper commands are now handled by whisper_engine::commands module
 
 #[tauri::command]
@@ -431,8 +419,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     system_device_name: Option<String>,
     meeting_name: Option<String>,
 ) -> Result<(), String> {
-    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}",
-             mic_device_name, system_device_name, meeting_name);
+    log_info!("Recording start requested");
 
     // Clone meeting_name for notification use later
     let meeting_name_for_notification = meeting_name.clone();
@@ -440,20 +427,12 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Call the recording module functions that support meeting names
     let recording_result = match (mic_device_name.clone(), system_device_name.clone()) {
         (None, None) => {
-            log_info!(
-                "No devices specified, starting with defaults and meeting: {:?}",
-                meeting_name
-            );
+            log_info!("Starting recording with default devices");
             audio::recording_commands::start_recording_with_meeting_name(app.clone(), meeting_name)
                 .await
         }
         _ => {
-            log_info!(
-                "Starting with specified devices: mic={:?}, system={:?}, meeting={:?}",
-                mic_device_name,
-                system_device_name,
-                meeting_name
-            );
+            log_info!("Starting recording with selected devices");
             audio::recording_commands::start_recording_with_devices_and_meeting(
                 app.clone(),
                 mic_device_name,
@@ -732,31 +711,6 @@ pub fn run() {
             audio::outcome::get_recording_outcome,
             resolve_meeting_audio_file,
             save_transcript,
-            analytics::commands::init_analytics,
-            analytics::commands::disable_analytics,
-            analytics::commands::track_event,
-            analytics::commands::identify_user,
-            analytics::commands::track_meeting_started,
-            analytics::commands::track_recording_started,
-            analytics::commands::track_recording_stopped,
-            analytics::commands::track_meeting_deleted,
-            analytics::commands::track_settings_changed,
-            analytics::commands::track_feature_used,
-            analytics::commands::is_analytics_enabled,
-            analytics::commands::start_analytics_session,
-            analytics::commands::end_analytics_session,
-            analytics::commands::track_daily_active_user,
-            analytics::commands::track_user_first_launch,
-            analytics::commands::is_analytics_session_active,
-            analytics::commands::track_summary_generation_started,
-            analytics::commands::track_summary_generation_completed,
-            analytics::commands::track_summary_regenerated,
-            analytics::commands::track_model_changed,
-            analytics::commands::track_custom_prompt_used,
-            analytics::commands::track_meeting_ended,
-            analytics::commands::track_analytics_enabled,
-            analytics::commands::track_analytics_disabled,
-            analytics::commands::track_analytics_transparency_viewed,
             whisper_engine::commands::whisper_init,
             whisper_engine::commands::whisper_get_acceleration_status,
             whisper_engine::commands::whisper_get_available_models,
@@ -934,6 +888,7 @@ pub fn run() {
             database::transcript_edits::api_preview_transcript_replace,
             database::transcript_edits::api_replace_transcript_text,
             database::transcript_edits::api_undo_transcript_edit,
+            database::transcript_edits::api_restore_previous_transcript,
             database::transcript_edits::api_sync_transcript_file,
             summary::sources::api_get_summary_sources,
             summary::sources::api_resolve_summary_source,

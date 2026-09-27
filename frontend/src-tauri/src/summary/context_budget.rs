@@ -8,6 +8,7 @@ use super::llm_client::LLMProvider;
 pub(crate) struct ModelBudget {
     pub context_tokens: usize,
     pub output_tokens: usize,
+    pub reasoning: bool,
 }
 
 /// Deliberately small family table; unknown cloud models get 32K, never an
@@ -25,7 +26,8 @@ pub(crate) fn resolve(
         .to_ascii_lowercase();
     let known_cloud = if name.starts_with("gpt-4.1") {
         1_047_576
-    } else if name.starts_with("gpt-4o") {
+    } else if name.starts_with("gpt-4o") || super::openai_provider::is_openai_reasoning_model(model)
+    {
         128_000
     } else if name.starts_with("llama-3.3") || name.starts_with("llama-3.1") {
         131_072
@@ -42,19 +44,31 @@ pub(crate) fn resolve(
             .unwrap_or(8192)
             .min(16_384),
         LLMProvider::Codex => 32_768,
+        LLMProvider::OpenAICompatible
+            if super::openai_provider::is_openai_reasoning_model(model) =>
+        {
+            context.unwrap_or(known_cloud)
+        }
         LLMProvider::CustomOpenAI | LLMProvider::OpenClaw | LLMProvider::OpenAICompatible => {
             context.unwrap_or(DEFAULT_CONTEXT_TOKENS)
         }
         _ => context.unwrap_or(known_cloud),
     };
-    let output_tokens = output.unwrap_or(match provider {
-        LLMProvider::Claude => 16_000,
-        LLMProvider::BuiltInAI | LLMProvider::Codex => 4096,
-        _ => DEFAULT_OUTPUT_TOKENS,
+    let reasoning = super::openai_provider::is_openai_reasoning_model(model)
+        || *provider == LLMProvider::Claude;
+    let output_tokens = output.unwrap_or(if reasoning {
+        16_000
+    } else {
+        match provider {
+            LLMProvider::Claude => 16_000,
+            LLMProvider::BuiltInAI | LLMProvider::Codex => 4096,
+            _ => DEFAULT_OUTPUT_TOKENS,
+        }
     });
     ModelBudget {
         context_tokens,
         output_tokens,
+        reasoning,
     }
 }
 
@@ -71,7 +85,9 @@ impl ModelBudget {
     }
     pub fn extraction(self) -> Self {
         Self {
-            output_tokens: self.output_tokens.min(1024),
+            output_tokens: self
+                .output_tokens
+                .min(if self.reasoning { 8_000 } else { 1024 }),
             ..self
         }
     }
@@ -166,6 +182,8 @@ mod tests {
     fn real_bundled_prompts_fit_and_sixty_kb_has_bounded_piece_counts() {
         let cases = [
             (LLMProvider::OpenAI, "gpt-4o", None),
+            (LLMProvider::OpenAI, "gpt-5.6-sol", None),
+            (LLMProvider::OpenAICompatible, "gpt-6-sol", None),
             (LLMProvider::OpenClaw, "configured-model", None),
             (LLMProvider::CustomOpenAI, "configured-model", None),
             (LLMProvider::Claude, "claude-sonnet", None),
@@ -219,6 +237,11 @@ mod tests {
                         + 1024
                 };
                 let limits = resolve(provider, model, *context, None);
+                if super::super::openai_provider::is_openai_reasoning_model(model) {
+                    assert_eq!(limits.context_tokens, 128_000);
+                    assert_eq!(limits.output_tokens, 16_000);
+                    assert_eq!(limits.extraction().output_tokens, 8_000);
+                }
                 let budget = limits.input(provider, model, overhead).unwrap();
                 let pieces = if 60_000 <= budget {
                     1

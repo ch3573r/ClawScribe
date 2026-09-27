@@ -16,7 +16,7 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
                     .max(0) as u64
             })
     })?;
-    Some(Duration::from_secs(seconds.min(60)))
+    Some(Duration::from_secs(seconds))
 }
 
 fn safe_message(value: &Value, secret: &str, prompts: &[&str]) -> Option<String> {
@@ -52,7 +52,11 @@ fn safe_message(value: &Value, secret: &str, prompts: &[&str]) -> Option<String>
     Some(message.chars().take(300).collect())
 }
 
-async fn error_message(mut response: reqwest::Response, secret: &str, prompts: &[&str]) -> String {
+async fn error_message(
+    mut response: reqwest::Response,
+    secret: &str,
+    prompts: &[&str],
+) -> (String, bool) {
     let status = response.status().as_u16();
     let mut body = Vec::new();
     while let Ok(Some(chunk)) = response.chunk().await {
@@ -61,15 +65,22 @@ async fn error_message(mut response: reqwest::Response, secret: &str, prompts: &
         }
         body.extend_from_slice(&chunk);
     }
-    let detail = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|value| safe_message(&value, secret, prompts));
-    match detail {
+    let value = serde_json::from_slice::<Value>(&body).ok();
+    let quota_exhausted = value.as_ref().is_some_and(|value| {
+        ["/error/code", "/error/type"]
+            .iter()
+            .any(|path| value.pointer(path).and_then(Value::as_str) == Some("insufficient_quota"))
+    });
+    let detail = value
+        .as_ref()
+        .and_then(|value| safe_message(value, secret, prompts));
+    let message = match detail {
         Some(message) if !message.is_empty() => {
             format!("Summary provider HTTP {status}: {message}")
         }
         _ => format!("Summary provider HTTP {status}. Check provider settings and retry."),
-    }
+    };
+    (message, quota_exhausted)
 }
 
 pub(crate) async fn send<F, Fut>(
@@ -94,9 +105,13 @@ where
                         408 | 429 | 500 | 502 | 503 | 504 | 529
                     );
                     let delay = retry_after(response.headers());
+                    if let Some(delay) = delay.filter(|delay| delay.as_secs() > 60) {
+                        return Err(format!("Summary provider is rate-limited; it asks to retry in about {} minutes.", delay.as_secs().div_ceil(60)));
+                    }
+                    let (error, quota_exhausted) = error_message(response, secret, prompts).await;
                     (
-                        error_message(response, secret, prompts).await,
-                        retryable,
+                        error,
+                        retryable && !quota_exhausted,
                         delay,
                     )
                 }
@@ -104,7 +119,7 @@ where
                     // A full response timeout must not restart a costly generation.
                     let retryable = error.is_connect() && !error.is_timeout();
                     let message = if error.is_timeout() {
-                        "Summary provider request timed out"
+                        "Summary provider request timed out. For slow or local models, increase Timeout in provider settings."
                     } else {
                         "Could not connect to the summary provider"
                     };
@@ -153,6 +168,32 @@ mod tests {
 
     fn response(status: u16, headers: &str, body: &str) -> String {
         format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}", body.len())
+    }
+
+    #[tokio::test]
+    async fn quota_and_long_retry_delays_do_not_retry() {
+        for field in ["code", "type"] {
+            let body = serde_json::json!({"error": {field: "insufficient_quota", "message": "Quota exhausted"}}).to_string();
+            let (url, count) =
+                server(vec![response(429, "", &body), response(200, "", "{}")]).await;
+            let client = reqwest::Client::new();
+            assert!(send(|| async { Ok(client.get(&url)) }, None, "", &[])
+                .await
+                .unwrap_err()
+                .contains("Quota exhausted"));
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+        let (url, count) = server(vec![
+            response(429, "Retry-After: 3600\r\n", "{}"),
+            response(200, "", "{}"),
+        ])
+        .await;
+        let client = reqwest::Client::new();
+        let error = send(|| async { Ok(client.get(&url)) }, None, "", &[])
+            .await
+            .unwrap_err();
+        assert!(error.contains("60 minutes"));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -227,6 +268,6 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        assert_eq!(retry_after(&headers), Some(Duration::from_secs(60)));
+        assert!(retry_after(&headers).unwrap() > Duration::from_secs(60));
     }
 }

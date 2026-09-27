@@ -141,6 +141,19 @@ impl From<std::io::Error> for ParakeetEngineError {
     }
 }
 
+fn parakeet_base_url(model_name: &str) -> &'static str {
+    if model_name.contains("smoothquant") {
+        "https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-smoothquant-onnx/resolve/2748538802098c611cf00e7c9a959a1515f695f7"
+    } else if model_name.contains("-fp16") {
+        "https://huggingface.co/grikdotnet/parakeet-tdt-0.6b-fp16/resolve/dc9871ec5ad84a420940077e76e8741b3609bf8b"
+    } else if model_name.contains("-v2-") {
+        "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85"
+    } else {
+        // Default to v3 for v3 models
+        "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+    }
+}
+
 pub struct ParakeetEngine {
     models_dir: PathBuf,
     current_model: Arc<RwLock<Option<ParakeetModel>>>,
@@ -374,6 +387,15 @@ impl ParakeetEngine {
 
         // Validate each file exists AND has sufficient size
         for (filename, min_size) in expected_sizes {
+            let model_name = model_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("Invalid model folder"))?;
+            crate::model_download::verify_pinned_file(
+                &model_dir.join(filename),
+                &format!("{}/{filename}", parakeet_base_url(model_name)),
+            )
+            .await?;
             let file_path = model_dir.join(filename);
             if !file_path.exists() {
                 return Err(anyhow!("{} not found", filename));
@@ -434,6 +456,7 @@ impl ParakeetEngine {
                 }
 
                 log::info!("Loading Parakeet model: {}", model_name);
+                self.validate_model_directory(&model_info.path).await?;
 
                 // Load model based on precision/quantization type.
                 let precision_suffix = model_info.quantization.model_suffix();
@@ -638,16 +661,7 @@ impl ParakeetEngine {
             model.status = ModelStatus::Downloading { progress: 0 };
         }
         // Source URL for Parakeet models (variant-specific).
-        let base_url = if model_name.contains("smoothquant") {
-            "https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-smoothquant-onnx/resolve/main"
-        } else if model_name.contains("-fp16") {
-            "https://huggingface.co/grikdotnet/parakeet-tdt-0.6b-fp16/resolve/main"
-        } else if model_name.contains("-v2-") {
-            "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main"
-        } else {
-            // Default to v3 for v3 models
-            "https://meetily.towardsgeneralintelligence.com/models/parakeet-tdt-0.6b-v3-onnx"
-        };
+        let base_url = parakeet_base_url(model_name);
 
         // Determine which files to download based on quantization
         let files_to_download = match model_info.quantization {

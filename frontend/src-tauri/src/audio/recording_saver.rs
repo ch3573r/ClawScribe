@@ -116,6 +116,11 @@ impl RecordingSaver {
         self.mode = mode;
     }
 
+    /// Provider captured for this recording, without loading saved credentials.
+    pub fn transcription_provider(&self) -> Option<&str> {
+        self.transcription_provider.as_deref()
+    }
+
     /// Record which transcription engine + model this recording uses. Set before
     /// the meeting folder is initialized so it lands in metadata.json.
     pub fn set_transcription_info(

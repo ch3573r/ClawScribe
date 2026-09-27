@@ -52,6 +52,41 @@ impl Drop for ImportGuard {
     }
 }
 
+/// Owns only the newly created import directory, until its database commit.
+struct ImportFolderGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl ImportFolderGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+}
+
+impl Drop for ImportFolderGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Could not remove uncommitted import files");
+                }
+            }
+        }
+    }
+}
+
+fn import_error(error: anyhow::Error, cancelled: bool) -> anyhow::Error {
+    if cancelled {
+        anyhow!("Import cancelled")
+    } else {
+        error
+    }
+}
+
 /// VAD redemption time in milliseconds. Keep this close to the live pipeline so
 /// import rows do not bridge normal speaker handoffs into long multi-speaker
 /// transcript rows that diarization then has to split after the fact.
@@ -251,7 +286,11 @@ pub async fn start_import<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<ImportResult> {
-    let _job = super::inference::claim_job().map_err(anyhow::Error::msg)?;
+    let _job = super::inference::claim_job_preempting_local_summary(
+        "Local summary stopped because import started. Generate it again afterwards.",
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
@@ -262,7 +301,9 @@ pub async fn start_import<R: Runtime>(
     let use_parakeet = provider.as_deref() == Some("parakeet")
         || super::transcription::cloud::is_cloud_provider(provider.as_deref());
     let use_nemotron = provider.as_deref() == Some("nemotron");
-    let result = run_import(app.clone(), source_path, title, language, model, provider).await;
+    let result = run_import(app.clone(), source_path, title, language, model, provider)
+        .await
+        .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
@@ -332,6 +373,7 @@ async fn run_import<R: Runtime>(
         }
     };
     let meeting_folder = create_meeting_folder(&base_folder, &title)?;
+    let mut folder_guard = ImportFolderGuard::new(meeting_folder.clone());
 
     // Copy audio file to meeting folder
     emit_progress(&app, "copying", 10, "Copying audio file...");
@@ -353,8 +395,6 @@ async fn run_import<R: Runtime>(
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        // Cleanup: remove the meeting folder
-        let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
 
@@ -406,7 +446,7 @@ async fn run_import<R: Runtime>(
                         super::common::transcription_source_language_hint(language.as_deref());
                     return save_import_transcripts(
                         &app,
-                        &meeting_folder,
+                        &mut folder_guard,
                         &title,
                         &dest_filename,
                         duration_seconds,
@@ -414,6 +454,7 @@ async fn run_import<R: Runtime>(
                         &outcome.provider,
                         &outcome.model,
                         source_language.as_deref(),
+                        0,
                     )
                     .await;
                 }
@@ -510,7 +551,6 @@ async fn run_import<R: Runtime>(
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
 
@@ -581,13 +621,14 @@ async fn run_import<R: Runtime>(
 
     // Process each speech segment
     let mut all_transcripts: Vec<TranscribedSegment> = Vec::new();
+    let mut failed_segments = 0usize;
+    let mut consecutive_failures = 0usize;
     let mut total_confidence = 0.0f32;
     let mut confidence_count = 0usize;
 
     for (i, segment) in processable_segments.iter().enumerate() {
         let segment = segment.load().await?;
         if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-            let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(anyhow!("Import cancelled"));
         }
 
@@ -616,46 +657,60 @@ async fn run_import<R: Runtime>(
         }
 
         // Transcribe
-        let (text, conf, word_timestamps) = if use_nemotron {
-            let engine = nemotron_engine.as_ref().unwrap();
-            let text = super::batch_audio::cancel_aware(
-                engine.transcribe_audio(segment.samples, language.clone()),
-                &IMPORT_CANCELLED,
-            )
-            .await
-            .map_err(|e| anyhow!("Nemotron transcription failed on segment {}: {}", i, e))?;
-            (text, None, None)
-        } else if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let result = super::batch_audio::cancel_aware(
-                engine.transcribe_audio_timestamped(segment.samples),
-                &IMPORT_CANCELLED,
-            )
-            .await
-            .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            let text = result.text;
-            let word_timestamps = transcript_words_from_token_timestamps(
-                &text,
-                &result.tokens,
-                &result.timestamps,
-                segment.start_timestamp_ms / 1000.0,
-                segment.end_timestamp_ms / 1000.0,
-                None,
-                None,
-            );
-            (text, None, word_timestamps)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, partial) = super::batch_audio::cancel_aware(
-                engine.transcribe_audio_with_confidence(segment.samples, language.clone()),
-                &IMPORT_CANCELLED,
-            )
-            .await
-            .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            if partial {
-                return Err(anyhow!("The speech engine returned incomplete text. Existing audio and transcripts were preserved; retry transcription."));
-            }
-            (text, conf, None)
+        let segment_result = super::batch_audio::retry_segment(&IMPORT_CANCELLED, || async {
+            let value = if use_nemotron {
+                let engine = nemotron_engine.as_ref().unwrap();
+                let text = engine
+                    .transcribe_audio(segment.samples.clone(), language.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow!("Nemotron transcription failed on segment {}: {}", i, e)
+                    })?;
+                (text, None, None)
+            } else if use_parakeet {
+                let engine = parakeet_engine.as_ref().unwrap();
+                let result = engine
+                    .transcribe_audio_timestamped(segment.samples.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow!("Parakeet transcription failed on segment {}: {}", i, e)
+                    })?;
+                let text = result.text;
+                let word_timestamps = transcript_words_from_token_timestamps(
+                    &text,
+                    &result.tokens,
+                    &result.timestamps,
+                    segment.start_timestamp_ms / 1000.0,
+                    segment.end_timestamp_ms / 1000.0,
+                    None,
+                    None,
+                );
+                (text, None, word_timestamps)
+            } else {
+                let engine = whisper_engine.as_ref().unwrap();
+                let (text, conf, partial) = engine
+                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                    .await
+                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+                if partial {
+                    return Err(anyhow!("The speech engine returned incomplete text"));
+                }
+                (text, conf, None)
+            };
+            Ok(value)
+        })
+        .await;
+        if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+            return Err(anyhow!("Import cancelled"));
+        }
+        let Some((text, conf, word_timestamps)) = accept_import_segment(
+            segment_result,
+            i + 1,
+            &mut consecutive_failures,
+            &mut failed_segments,
+        )?
+        else {
+            continue;
         };
 
         let trimmed = text.trim();
@@ -698,7 +753,6 @@ async fn run_import<R: Runtime>(
 
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }
 
@@ -726,7 +780,7 @@ async fn run_import<R: Runtime>(
 
     save_import_transcripts(
         &app,
-        &meeting_folder,
+        &mut folder_guard,
         &title,
         &dest_filename,
         duration_seconds,
@@ -734,6 +788,7 @@ async fn run_import<R: Runtime>(
         used_provider,
         &used_model,
         source_language.as_deref(),
+        failed_segments,
     )
     .await
 }
@@ -776,7 +831,7 @@ async fn prepare_cloud_import_timing_grid<R: Runtime>(
 
 async fn save_import_transcripts<R: Runtime>(
     app: &AppHandle<R>,
-    meeting_folder: &Path,
+    folder_guard: &mut ImportFolderGuard,
     title: &str,
     dest_filename: &str,
     duration_seconds: f64,
@@ -784,7 +839,12 @@ async fn save_import_transcripts<R: Runtime>(
     used_provider: &str,
     used_model: &str,
     transcription_source_language: Option<&str>,
+    failed_segments: usize,
 ) -> Result<ImportResult> {
+    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Import cancelled"));
+    }
+    let meeting_folder = folder_guard.path.as_path();
     emit_progress(app, "saving", 85, "Creating meeting...");
 
     // Create transcript segments, then stitch obvious VAD fragments so imported
@@ -801,8 +861,23 @@ async fn save_import_transcripts<R: Runtime>(
         title,
         &segments,
         meeting_folder.to_string_lossy().to_string(),
+        failed_segments > 0,
     )
     .await?;
+    folder_guard.committed = true;
+    if failed_segments > 0 {
+        let outcome = super::outcome::RecordingOutcome {
+            transcription_incomplete: true,
+            ..Default::default()
+        };
+        if outcome.write(meeting_folder).is_err() {
+            warn!("Could not mirror import transcription status");
+        }
+        let _ = app.emit("import-warning", ImportWarning {
+            warning: format!("Imported with incomplete transcription: {failed_segments} segments failed after retry."),
+            details: Some("The audio was saved. You can retry transcription from the meeting.".into()),
+        });
+    }
 
     // Write transcripts.json and metadata.json to the meeting folder
     emit_progress(app, "saving", 90, "Writing transcript files...");
@@ -853,6 +928,7 @@ async fn create_meeting_with_transcripts(
     title: &str,
     segments: &[TranscriptSegment],
     folder_path: String,
+    transcription_incomplete: bool,
 ) -> Result<String> {
     let meeting_id = format!("meeting-{}", Uuid::new_v4());
     let now = chrono::Utc::now();
@@ -904,6 +980,11 @@ async fn create_meeting_with_transcripts(
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
+    }
+
+    if transcription_incomplete {
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES (?, 0, 1)")
+            .bind(&meeting_id).execute(&mut *tx).await?;
     }
 
     tx.commit()
@@ -1226,11 +1307,166 @@ pub async fn is_import_in_progress_command() -> bool {
     is_import_in_progress()
 }
 
+fn accept_import_segment<T>(
+    result: Result<T>,
+    segment: usize,
+    consecutive: &mut usize,
+    failed: &mut usize,
+) -> Result<Option<T>> {
+    match result {
+        Ok(value) => {
+            *consecutive = 0;
+            Ok(Some(value))
+        }
+        Err(error) => {
+            *consecutive += 1;
+            *failed += 1;
+            // Engine errors contain failure diagnostics, never successful text.
+            warn!(
+                "Import segment {} failed after retry: {}",
+                segment,
+                crate::summary::codex_provider::redact_secrets(&error.to_string())
+            );
+            if *consecutive >= 3 {
+                Err(error)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::common::create_transcript_segments;
     use super::*;
     use crate::audio::common::split_segment_at_silence;
+
+    #[tokio::test]
+    async fn three_consecutive_engine_failures_abort_and_remove_the_import() {
+        static CANCELLED: AtomicBool = AtomicBool::new(false);
+        let root = tempfile::tempdir().unwrap();
+        let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+        let mut calls = 0;
+        let result: Result<()> = async {
+            let _guard = ImportFolderGuard::new(folder.clone());
+            std::fs::write(folder.join("audio.wav"), b"synthetic audio")?;
+            let mut consecutive = 0;
+            let mut failed = 0;
+            for index in 1..=10 {
+                let result: Result<()> =
+                    super::super::batch_audio::retry_segment(&CANCELLED, || {
+                        calls += 1;
+                        async move { Err(anyhow!("Engine unavailable on segment {index}")) }
+                    })
+                    .await;
+                accept_import_segment(result, index, &mut consecutive, &mut failed)?;
+            }
+            Ok(())
+        }
+        .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Engine unavailable on segment 3"
+        );
+        assert_eq!(calls, 6);
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn failed_or_cancelled_import_removes_only_its_owned_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.wav");
+        std::fs::write(&source, b"source audio").unwrap();
+        for cancelled in [false, true] {
+            let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+            let result: Result<()> = (|| {
+                let _guard = ImportFolderGuard::new(folder.clone());
+                std::fs::copy(&source, folder.join("audio.wav"))?;
+                // A segment failure propagates through the same guard as decode,
+                // cloud, engine initialization and database failures.
+                Err(anyhow!("Engine failed on segment 2"))
+            })();
+            let error = import_error(result.unwrap_err(), cancelled);
+            assert_eq!(
+                error.to_string(),
+                if cancelled {
+                    "Import cancelled"
+                } else {
+                    "Engine failed on segment 2"
+                }
+            );
+            assert!(!folder.exists());
+            assert!(source.exists());
+        }
+    }
+
+    #[test]
+    fn committed_import_keeps_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+        {
+            let mut guard = ImportFolderGuard::new(folder.clone());
+            std::fs::write(folder.join("audio.wav"), b"saved audio").unwrap();
+            guard.committed = true;
+        }
+        assert!(folder.join("audio.wav").exists());
+    }
+
+    #[tokio::test]
+    async fn persistent_segment_failure_saves_an_incomplete_import() {
+        static CANCELLED: AtomicBool = AtomicBool::new(false);
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut kept = Vec::new();
+        let mut failed = 0;
+        let mut consecutive = 0;
+        for index in 0..3 {
+            let result = super::super::batch_audio::retry_segment(&CANCELLED, || async {
+                if index == 1 {
+                    Err(anyhow!("engine failure"))
+                } else {
+                    Ok((
+                        "kept".to_string(),
+                        index as f64 * 1000.0,
+                        (index + 1) as f64 * 1000.0,
+                    ))
+                }
+            })
+            .await;
+            if let Some(segment) =
+                accept_import_segment(result, index + 1, &mut consecutive, &mut failed).unwrap()
+            {
+                kept.push(segment);
+            }
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let id = create_meeting_with_transcripts(
+            &pool,
+            "Import",
+            &create_transcript_segments(&kept),
+            folder.path().to_string_lossy().into(),
+            failed > 0,
+        )
+        .await
+        .unwrap();
+        let incomplete: bool = sqlx::query_scalar(
+            "SELECT transcription_incomplete FROM recording_outcomes WHERE meeting_id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(incomplete);
+        assert_eq!(count, 2);
+        assert_eq!(failed, 1);
+    }
 
     fn write_test_wav(path: &Path) {
         let sample_rate = 16_000u32;
@@ -1528,6 +1764,7 @@ mod tests {
             "Speaker Persistence",
             &segments,
             "C:\\recordings\\speaker-persistence".to_string(),
+            false,
         )
         .await
         .unwrap();
