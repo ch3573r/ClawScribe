@@ -196,6 +196,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     let mode = super::recording_mode::load(&app)?;
     let job = super::inference::claim_job()?;
+    crate::summary::SummaryService::cancel_local_summaries_for_recording();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
@@ -489,6 +490,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     let mode = super::recording_mode::load(&app)?;
     let job = super::inference::claim_job()?;
+    crate::summary::SummaryService::cancel_local_summaries_for_recording();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 

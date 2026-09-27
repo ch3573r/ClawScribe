@@ -233,6 +233,10 @@ save failure marks the run failed with a regeneration message.
 
 Summary cancellation follows the job token rather than provider error wording.
 
+Starting a recording cancels Built-in AI summary jobs before stopping the helper,
+with a recording-specific message and the previous summary retained. Other
+providers continue independently.
+
 Summary and chat budgets resolve provider/model context and output tokens together.
 GPT-4o uses 128,000 context tokens, GPT-4.1 uses 1,047,576, Llama 3.1/3.3 uses
 131,072, and Claude uses a conservative 200,000; unknown cloud models use 32,768.

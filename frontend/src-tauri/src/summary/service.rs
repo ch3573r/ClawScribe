@@ -31,8 +31,16 @@ pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> =
     Lazy::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
 
 // Global registry for cancellation tokens (thread-safe)
-static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> =
+static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, ActiveSummaryJob>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+const RECORDING_INTERRUPTED_SUMMARY: &str =
+    "Local summary stopped because a recording started. Generate it again afterwards.";
+struct ActiveSummaryJob {
+    token: CancellationToken,
+    builtin: bool,
+    reason: Option<&'static str>,
+}
 
 /// Holds one generation slot from command acceptance through persistence.
 /// Early returns and cancelled futures always remove their registered token.
@@ -154,7 +162,15 @@ async fn finish_provider_error(
     error: &str,
 ) {
     let result = if token.is_cancelled() {
-        SummaryProcessesRepository::update_process_cancelled(pool, meeting).await
+        {
+            let reason = CANCELLATION_REGISTRY
+                .lock()
+                .ok()
+                .and_then(|jobs| jobs.get(meeting).and_then(|job| job.reason))
+                .unwrap_or("Generation was cancelled by user");
+            SummaryProcessesRepository::update_process_cancelled_with_reason(pool, meeting, reason)
+                .await
+        }
     } else {
         SummaryProcessesRepository::update_process_failed(pool, meeting, error).await
     };
@@ -303,7 +319,7 @@ fn extract_cached_english_markdown(
 pub struct SummaryService;
 
 impl SummaryService {
-    pub(crate) fn register_job(meeting_id: &str) -> Result<SummaryJob, String> {
+    pub(crate) fn register_job(meeting_id: &str, provider: &str) -> Result<SummaryJob, String> {
         let mut registry = CANCELLATION_REGISTRY
             .lock()
             .map_err(|_| "Could not lock summary jobs")?;
@@ -311,19 +327,35 @@ impl SummaryService {
             return Err("This meeting already has a summary in progress. Wait for it to finish or cancel it.".into());
         }
         let token = CancellationToken::new();
-        registry.insert(meeting_id.to_string(), token.clone());
+        registry.insert(
+            meeting_id.to_string(),
+            ActiveSummaryJob {
+                token: token.clone(),
+                builtin: LLMProvider::from_str(provider) == Ok(LLMProvider::BuiltInAI),
+                reason: None,
+            },
+        );
         Ok(SummaryJob {
             meeting_id: meeting_id.to_string(),
             token,
         })
     }
 
+    pub fn cancel_local_summaries_for_recording() {
+        if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
+            for job in registry.values_mut().filter(|job| job.builtin) {
+                job.reason = Some(RECORDING_INTERRUPTED_SUMMARY);
+                job.token.cancel();
+            }
+        }
+    }
+
     /// Cancels the summary generation for a meeting
     pub fn cancel_summary(meeting_id: &str) -> bool {
         if let Ok(registry) = CANCELLATION_REGISTRY.lock() {
-            if let Some(token) = registry.get(meeting_id) {
+            if let Some(job) = registry.get(meeting_id) {
                 info!("Cancelling summary generation for meeting: {}", meeting_id);
-                token.cancel();
+                job.token.cancel();
                 return true;
             }
         }
@@ -996,14 +1028,14 @@ mod tests {
     #[test]
     fn summary_job_guards_reject_duplicates_and_release_early_failures() {
         let meeting = "summary-job-guard-test";
-        let job = SummaryService::register_job(meeting).unwrap();
-        assert!(SummaryService::register_job(meeting).is_err());
+        let job = SummaryService::register_job(meeting, "openai").unwrap();
+        assert!(SummaryService::register_job(meeting, "openai").is_err());
         assert!(SummaryService::cancel_summary(meeting));
         assert!(job.token.is_cancelled());
-        assert!(SummaryService::register_job(meeting).is_err());
+        assert!(SummaryService::register_job(meeting, "openai").is_err());
         drop(job);
         assert!(!SummaryService::cancel_summary(meeting));
-        let next = SummaryService::register_job(meeting).unwrap();
+        let next = SummaryService::register_job(meeting, "openai").unwrap();
         assert!(!next.token.is_cancelled());
     }
 
@@ -1470,5 +1502,35 @@ mod cancellation_status_tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.status, "cancelled");
+    }
+}
+
+#[cfg(test)]
+mod recording_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn recording_cancels_only_local_jobs_with_an_actionable_reason() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let cloud = SummaryService::register_job("recording-test-cloud", "openai").unwrap();
+        SummaryService::cancel_local_summaries_for_recording();
+        assert!(local.token.is_cancelled());
+        assert!(!cloud.token.is_cancelled());
+        finish_provider_error(
+            &pool,
+            "review-test",
+            &local.token,
+            "process may have crashed",
+        )
+        .await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.error.as_deref(), Some(RECORDING_INTERRUPTED_SUMMARY));
     }
 }
