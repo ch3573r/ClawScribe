@@ -42,6 +42,7 @@ impl DatabaseManager {
         let migrator = sqlx::migrate!("./migrations");
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
+        crate::database::repositories::summary::SummaryProcessesRepository::fail_interrupted_processes(&pool).await?;
         crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
         // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")

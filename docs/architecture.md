@@ -254,6 +254,8 @@ Saving a generated summary retries three times with short delays. A persistent
 save failure marks the run failed with a regeneration message.
 
 Summary cancellation follows the job token rather than provider error wording.
+Startup marks unfinished summary rows failed with an interruption message and
+restores the previous saved result, allowing transcript corrections again.
 
 Starting a recording cancels Built-in AI summary jobs before stopping the helper,
 with a recording-specific message and the previous summary retained. Other

@@ -503,6 +503,29 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_summary_restores_saved_result_and_unblocks_corrections() {
+        let pool = fixture().await;
+        for status in ["pending", "processing", "summarizing", "regenerating"] {
+            sqlx::query("INSERT OR REPLACE INTO summary_processes (meeting_id, status, created_at, updated_at, result, result_backup) VALUES ('review-test', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'partial', 'saved summary')")
+                .bind(status).execute(&pool).await.unwrap();
+            crate::database::repositories::summary::SummaryProcessesRepository::fail_interrupted_processes(&pool).await.unwrap();
+            let row: (String, String, String, Option<String>) = sqlx::query_as("SELECT status, error, result, result_backup FROM summary_processes WHERE meeting_id = 'review-test'").fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                row,
+                (
+                    "failed".into(),
+                    "Summary generation was interrupted when ClawScribe closed".into(),
+                    "saved summary".into(),
+                    None
+                )
+            );
+            assert_editable(&mut pool.acquire().await.unwrap(), "review-test")
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn replacement_is_literal_case_insensitive_and_undo_restores_original_alignment() {
         let pool = fixture().await;
         let (preview, changes) = replacement_plan(
