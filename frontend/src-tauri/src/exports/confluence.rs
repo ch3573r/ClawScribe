@@ -14,6 +14,7 @@ const ACCOUNT_NAME: &str = "default";
 #[serde(rename_all = "camelCase")]
 pub struct ConfluenceConnectionStatus {
     pub token_configured: bool,
+    pub allow_unencrypted: bool,
     pub reachable: bool,
     pub user_display_name: Option<String>,
     pub message: String,
@@ -99,6 +100,11 @@ impl BoundPat {
             self.allow_unencrypted,
         )
         .map_err(ConfluenceError::InvalidInput)?;
+        self.check_origin(requested)?;
+        Ok(&self.pat)
+    }
+
+    fn check_origin(&self, requested: &str) -> Result<(), ConfluenceError> {
         let saved = url::Url::parse(&normalize_base_url(&self.base_url)?).map_err(|_| {
             ConfluenceError::InvalidInput("Invalid saved Confluence destination".into())
         })?;
@@ -107,7 +113,7 @@ impl BoundPat {
         if saved.origin() != requested.origin() {
             return Err(ConfluenceError::InvalidInput("Confluence destination changed. Save a PAT for this destination before connecting.".into()));
         }
-        Ok(&self.pat)
+        Ok(())
     }
 }
 
@@ -123,7 +129,12 @@ fn save_pat_to_keyring(
         base_url: normalize_base_url(base_url)?,
         pat: pat.into(),
     };
-    let value = serde_json::to_string(&credential).map_err(|_| {
+    persist_binding(&credential)
+}
+
+// Migration preserves the existing binding, including endpoints needing repair.
+fn persist_binding(credential: &BoundPat) -> Result<(), ConfluenceError> {
+    let value = serde_json::to_string(credential).map_err(|_| {
         ConfluenceError::InvalidInput("Could not serialize Confluence credentials".into())
     })?;
     credential_entry()?
@@ -146,11 +157,7 @@ fn load_pat_from_keyring() -> Result<Option<BoundPat>, ConfluenceError> {
                 ConfluenceError::InvalidInput("Invalid saved Confluence binding".into())
             })?;
             if migrated {
-                save_pat_to_keyring(
-                    &credential.pat,
-                    &credential.base_url,
-                    credential.allow_unencrypted,
-                )?;
+                persist_binding(&credential)?;
             }
             Ok(Some(credential))
         }
@@ -173,8 +180,17 @@ fn normalize_base_url(raw: &str) -> Result<String, ConfluenceError> {
             "Confluence base URL is required.".into(),
         ));
     }
-    crate::openai::secret_destination::validate_secret_destination(trimmed, true)
-        .map_err(ConfluenceError::InvalidInput)?;
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| ConfluenceError::InvalidInput("Enter a valid Confluence base URL.".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(ConfluenceError::InvalidInput(
+            "Use an HTTP or HTTPS URL without embedded credentials.".into(),
+        ));
+    }
     let without_rest = trimmed.trim_end_matches("/rest/api");
     Ok(without_rest.to_string())
 }
@@ -232,12 +248,29 @@ pub fn confluence_save_pat(
 }
 
 #[tauri::command]
-pub fn confluence_http_opt_in(base_url: String) -> Result<bool, String> {
-    let Some(binding) = load_pat_from_keyring().map_err(|e| e.to_string())? else {
-        return Ok(false);
+pub fn confluence_settings_status(base_url: String) -> Result<ConfluenceConnectionStatus, String> {
+    let binding = load_pat_from_keyring().map_err(|e| e.to_string())?;
+    Ok(settings_status(binding.as_ref(), &base_url))
+}
+
+fn settings_status(binding: Option<&BoundPat>, base_url: &str) -> ConfluenceConnectionStatus {
+    let mut status = ConfluenceConnectionStatus {
+        token_configured: binding.is_some(),
+        allow_unencrypted: false,
+        reachable: false,
+        user_display_name: None,
+        message: "No Confluence PAT is saved.".into(),
     };
-    binding.token_for(&base_url).map_err(|e| e.to_string())?;
-    Ok(binding.allow_unencrypted)
+    if let Some(binding) = binding {
+        // A changed destination must not inherit another server's opt-in.
+        status.allow_unencrypted =
+            binding.check_origin(base_url).is_ok() && binding.allow_unencrypted;
+        status.message = match binding.token_for(base_url) {
+            Ok(_) => "PAT saved. Test the connection to check availability.".into(),
+            Err(error) => format!("Settings need attention: {error}"),
+        };
+    }
+    status
 }
 
 #[tauri::command]
@@ -249,18 +282,25 @@ pub fn confluence_clear_pat() -> Result<(), String> {
 pub async fn confluence_connection_status(
     base_url: String,
 ) -> Result<ConfluenceConnectionStatus, String> {
-    let token = match load_pat_from_keyring().map_err(|e| e.to_string())? {
-        Some(t) => t,
-        None => {
-            return Ok(ConfluenceConnectionStatus {
-                token_configured: false,
-                reachable: false,
-                user_display_name: None,
-                message: "No Confluence PAT is saved.".to_string(),
-            });
-        }
+    let binding = load_pat_from_keyring().map_err(|e| e.to_string())?;
+    let mut status = settings_status(binding.as_ref(), &base_url);
+    let Some(token) = binding else {
+        return Ok(status);
     };
+    match check_connection(&token, &base_url).await {
+        Ok(display) => {
+            status.reachable = true;
+            status.user_display_name = display.clone();
+            status.message = display
+                .map(|name| format!("Connected as {name}."))
+                .unwrap_or_else(|| "Connected to Confluence.".into());
+        }
+        Err(error) => status.message = error,
+    }
+    Ok(status)
+}
 
+async fn check_connection(token: &BoundPat, base_url: &str) -> Result<Option<String>, String> {
     let allow_unencrypted = token.allow_unencrypted;
     let token = token.token_for(&base_url).map_err(|e| e.to_string())?;
     let url = api_url(&base_url, "/rest/api/user/current").map_err(|e| e.to_string())?;
@@ -285,14 +325,7 @@ pub async fn confluence_connection_status(
         .or(user.user_key)
         .filter(|s| !s.trim().is_empty());
 
-    Ok(ConfluenceConnectionStatus {
-        token_configured: true,
-        reachable: true,
-        user_display_name: display.clone(),
-        message: display
-            .map(|name| format!("Connected as {name}."))
-            .unwrap_or_else(|| "Connected to Confluence.".to_string()),
-    })
+    Ok(display)
 }
 
 #[tauri::command]
@@ -398,6 +431,36 @@ mod tests {
         }
         assert!(normalize_base_url("http://127.0.0.1/wiki").is_ok());
         assert!(normalize_base_url("http://[::1]/wiki").is_ok());
+    }
+
+    #[test]
+    fn settings_remain_readable_when_destination_needs_repair() {
+        let mut legacy =
+            serde_json::json!({"base_url": "http://confluence.example.com", "pat": "test-pat"});
+        crate::openai::secret_destination::migrate_http_opt_in(&mut legacy, &["base_url"]).unwrap();
+        let saved: BoundPat = serde_json::from_value(legacy).unwrap();
+        let status = settings_status(Some(&saved), &saved.base_url);
+        assert!(status.token_configured);
+        assert!(!status.reachable);
+        assert!(status.message.contains("Settings need attention"));
+        assert!(saved.token_for(&saved.base_url).is_err());
+        assert!(save_pat_to_keyring("test-pat", &saved.base_url, true).is_err());
+    }
+
+    #[test]
+    fn settings_return_saved_opt_in_only_for_the_bound_origin() {
+        let saved = BoundPat {
+            base_url: "http://wiki.local".into(),
+            pat: "test-pat".into(),
+            allow_unencrypted: true,
+        };
+        let status = settings_status(Some(&saved), "http://wiki.local/rest/api");
+        assert!(status.allow_unencrypted);
+        assert!(!status.reachable);
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["allowUnencrypted"], true);
+        assert!(!settings_status(Some(&saved), "http://other.local").allow_unencrypted);
+        assert!(!settings_status(None, "http://wiki.local").allow_unencrypted);
     }
 
     #[test]

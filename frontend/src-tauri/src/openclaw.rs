@@ -97,7 +97,8 @@ pub async fn get_openclaw_config_status<R: Runtime>(
     let endpoint_configured = !config.endpoint.trim().is_empty();
     let source_configured = !config.source.trim().is_empty();
     let configured = endpoint_configured && source_configured && bearer_token_configured;
-    let ready = config.enabled && configured;
+    let destination_error = validate_endpoints(&config).err();
+    let ready = config.enabled && configured && destination_error.is_none();
 
     Ok(OpenClawConfigStatus {
         allow_unencrypted: config.allow_unencrypted,
@@ -108,12 +109,16 @@ pub async fn get_openclaw_config_status<R: Runtime>(
         endpoint: config.endpoint,
         model_endpoint: config.model_endpoint,
         source: config.source,
-        status_message: openclaw_status_message(
-            config.enabled,
-            endpoint_configured,
-            source_configured,
-            bearer_token_configured,
-        ),
+        status_message: destination_error
+            .map(|error| format!("Settings need attention: {error}"))
+            .unwrap_or_else(|| {
+                openclaw_status_message(
+                    config.enabled,
+                    endpoint_configured,
+                    source_configured,
+                    bearer_token_configured,
+                )
+            }),
         config_path: config_path.to_string_lossy().to_string(),
         last_status_path: last_status_path.to_string_lossy().to_string(),
         include_audio_path: config.include_audio_path,

@@ -169,7 +169,9 @@ request compatibility.
 OpenClaw and custom OpenAI settings allow private-network HTTP only with
 **Allow unencrypted HTTP to this local-network server** enabled. The token/key
 is sent without encryption. Prefer HTTPS. Loopback HTTP needs no opt-in; public
-HTTP is always rejected. Before each HTTP request, all resolved addresses must
+HTTP is rejected on save/send; saved settings remain editable with a warning.
+Tailscale's `100.64.0.0/10` range and `.ts.net` names count as local destinations.
+Before each HTTP request, all resolved addresses must
 be loopback or private, and the connection uses that checked resolution without
 redirects or a proxy. Existing private HTTP configurations migrate to opted-in
 on their first load; explicit choices are preserved thereafter.

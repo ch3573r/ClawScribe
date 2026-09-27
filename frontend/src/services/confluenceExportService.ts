@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface ConfluenceConnectionStatus {
   tokenConfigured: boolean;
+  allowUnencrypted: boolean;
   reachable: boolean;
   userDisplayName: string | null;
   message: string;
@@ -20,8 +21,8 @@ export const confluenceExportService = {
     return invoke("confluence_save_pat", { pat, baseUrl, allowUnencrypted });
   },
 
-  httpOptIn(baseUrl: string): Promise<boolean> {
-    return invoke("confluence_http_opt_in", { baseUrl });
+  settingsStatus(baseUrl: string): Promise<ConfluenceConnectionStatus> {
+    return invoke("confluence_settings_status", { baseUrl });
   },
 
   clearPat(): Promise<void> {

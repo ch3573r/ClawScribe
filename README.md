@@ -147,7 +147,10 @@ check the destination before creating another page or task. See
 
 Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
 an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups
-retain access on upgrade; public HTTP destinations are rejected.
+retain access on upgrade. Tailscale addresses and MagicDNS names are supported.
+Public HTTP destinations are rejected on save/send; existing settings remain
+editable and explain what needs correction. Confluence remembers its HTTP choice
+for the saved server even while that server is offline.
 
 OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.

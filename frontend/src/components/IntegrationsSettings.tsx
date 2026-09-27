@@ -1249,6 +1249,7 @@ function ConfluencePanel() {
   const [spaceKey, setSpaceKey] = useState(saved.confluenceSpaceKey ?? "");
   const [parentId, setParentId] = useState(saved.confluenceParentId ?? "");
   const [allowUnencrypted, setAllowUnencrypted] = useState(false);
+  const httpOptionRevision = useRef(0);
   const [patInput, setPatInput] = useState("");
   const [status, setStatus] = useState<ConfluenceConnectionStatus | null>(null);
   const [busy, setBusy] = useState<"save" | "clear" | "test" | null>(null);
@@ -1256,9 +1257,22 @@ function ConfluencePanel() {
   const trimmedBaseUrl = baseUrl.trim();
   useEffect(() => {
     let active = true;
-    confluenceExportService.httpOptIn(trimmedBaseUrl).then(value => {
-      if (active) setAllowUnencrypted(value);
-    }).catch(() => { if (active) setAllowUnencrypted(false); });
+    const revision = ++httpOptionRevision.current;
+    setAllowUnencrypted(false);
+    confluenceExportService.settingsStatus(trimmedBaseUrl).then(value => {
+      if (active && revision === httpOptionRevision.current) {
+        setStatus(value);
+        setAllowUnencrypted(value.allowUnencrypted);
+      }
+    }).catch(error => {
+      if (active && revision === httpOptionRevision.current) setStatus({
+        tokenConfigured: false,
+        allowUnencrypted: false,
+        reachable: false,
+        userDisplayName: null,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
     return () => { active = false; };
   }, [trimmedBaseUrl]);
   const trimmedSpaceKey = spaceKey.trim();
@@ -1283,9 +1297,11 @@ function ConfluencePanel() {
   ]);
 
   const testConnection = useCallback(async () => {
+    const revision = ++httpOptionRevision.current;
     if (!trimmedBaseUrl) {
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: "Enter a Confluence base URL first.",
@@ -1295,10 +1311,15 @@ function ConfluencePanel() {
 
     setBusy("test");
     try {
-      setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
+      const value = await confluenceExportService.connectionStatus(trimmedBaseUrl);
+      if (revision === httpOptionRevision.current) {
+        setStatus(value);
+        setAllowUnencrypted(value.allowUnencrypted);
+      }
     } catch (e) {
       setStatus({
         tokenConfigured: true,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: e instanceof Error ? e.message : String(e),
@@ -1306,13 +1327,15 @@ function ConfluencePanel() {
     } finally {
       setBusy(null);
     }
-  }, [trimmedBaseUrl]);
+  }, [allowUnencrypted, trimmedBaseUrl]);
 
   const savePat = useCallback(async () => {
+    const revision = ++httpOptionRevision.current;
     const pat = patInput.trim();
     if (!pat) {
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: "Paste a Confluence personal access token first.",
@@ -1325,10 +1348,15 @@ function ConfluencePanel() {
       await confluenceExportService.savePat(pat, trimmedBaseUrl, allowUnencrypted);
       setPatInput("");
       if (trimmedBaseUrl) {
-        setStatus(await confluenceExportService.connectionStatus(trimmedBaseUrl));
+        const value = await confluenceExportService.connectionStatus(trimmedBaseUrl);
+        if (revision === httpOptionRevision.current) {
+          setStatus(value);
+          setAllowUnencrypted(value.allowUnencrypted);
+        }
       } else {
         setStatus({
           tokenConfigured: true,
+          allowUnencrypted,
           reachable: false,
           userDisplayName: null,
           message: "PAT saved. Add a base URL, then test the connection.",
@@ -1337,6 +1365,7 @@ function ConfluencePanel() {
     } catch (e) {
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: e instanceof Error ? e.message : String(e),
@@ -1347,12 +1376,15 @@ function ConfluencePanel() {
   }, [allowUnencrypted, patInput, trimmedBaseUrl]);
 
   const clearPat = useCallback(async () => {
+    httpOptionRevision.current += 1;
     setBusy("clear");
     try {
       await confluenceExportService.clearPat();
       setPatInput("");
+      setAllowUnencrypted(false);
       setStatus({
         tokenConfigured: false,
+        allowUnencrypted: false,
         reachable: false,
         userDisplayName: null,
         message: "Saved Confluence PAT cleared.",
@@ -1360,6 +1392,7 @@ function ConfluencePanel() {
     } catch (e) {
       setStatus({
         tokenConfigured: true,
+        allowUnencrypted,
         reachable: false,
         userDisplayName: null,
         message: e instanceof Error ? e.message : String(e),
@@ -1367,7 +1400,7 @@ function ConfluencePanel() {
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [allowUnencrypted]);
 
   const restDestinationConfigured = !!trimmedBaseUrl && !!trimmedSpaceKey;
   const restReady = restDestinationConfigured && !!status?.reachable;
@@ -1510,7 +1543,10 @@ function ConfluencePanel() {
                   className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
-              <UnencryptedHttpOptIn urls={[baseUrl]} checked={allowUnencrypted} onChange={setAllowUnencrypted} />
+              <UnencryptedHttpOptIn urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
+                httpOptionRevision.current += 1;
+                setAllowUnencrypted(value);
+              }} />
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Space key

@@ -4,7 +4,13 @@ use url::{Host, Url};
 
 fn local_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        IpAddr::V4(ip) => {
+            let [a, b, _, _] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || (a == 100 && (64..=127).contains(&b))
+        }
         IpAddr::V6(ip) => {
             ip.is_loopback()
                 || (ip.segments()[0] & 0xfe00 == 0xfc00)
@@ -26,7 +32,7 @@ pub(crate) fn needs_http_opt_in(value: &str) -> bool {
         Some(Host::Domain(host)) => {
             host != "localhost"
                 && (!host.contains('.')
-                    || [".local", ".lan", ".internal", ".home.arpa"]
+                    || [".local", ".lan", ".internal", ".home.arpa", ".ts.net"]
                         .iter()
                         .any(|suffix| host.ends_with(suffix)))
         }
@@ -59,6 +65,8 @@ pub(crate) fn validate_secret_destination(
 }
 
 /// Only absent flags migrate. Explicit false remains false on subsequent loads.
+/// Loading must remain possible so users can repair rejected destinations.
+/// Validate the destination when saving or sending, never during migration.
 pub(crate) fn migrate_http_opt_in(
     config: &mut serde_json::Value,
     endpoints: &[&str],
@@ -71,11 +79,6 @@ pub(crate) fn migrate_http_opt_in(
                 .iter()
                 .any(|key| config[*key].as_str().is_some_and(needs_http_opt_in))
         });
-    for key in endpoints {
-        if let Some(url) = config[*key].as_str().filter(|url| !url.is_empty()) {
-            validate_secret_destination(url, allow)?;
-        }
-    }
     let missing = config.get("allow_unencrypted").is_none();
     if missing {
         config["allow_unencrypted"] = allow.into();
@@ -142,11 +145,41 @@ mod tests {
         assert!(migrate_http_opt_in(&mut old, &["endpoint"]).unwrap());
         assert_eq!(old["allow_unencrypted"], true);
         old["allow_unencrypted"] = false.into();
-        assert!(migrate_http_opt_in(&mut old, &["endpoint"]).is_err());
+        assert!(!migrate_http_opt_in(&mut old, &["endpoint"]).unwrap());
+        assert_eq!(old["allow_unencrypted"], false);
         assert!(migrate_http_opt_in(
             &mut serde_json::json!({"endpoint":"http://public.example.com"}),
             &["endpoint"]
         )
+        .unwrap());
+    }
+    #[test]
+    fn tailscale_policy_checks_range_boundaries_and_dns() {
+        for url in [
+            "http://100.64.0.0",
+            "http://100.127.255.255",
+            "http://host.example.ts.net",
+        ] {
+            assert!(needs_http_opt_in(url));
+            assert!(validate_secret_destination(url, false).is_err());
+            assert!(validate_secret_destination(url, true).is_ok());
+            let mut old = serde_json::json!({"endpoint": url});
+            migrate_http_opt_in(&mut old, &["endpoint"]).unwrap();
+            assert_eq!(old["allow_unencrypted"], true);
+        }
+        for url in [
+            "http://100.63.255.255",
+            "http://100.128.0.0",
+            "http://ts.net",
+            "http://host.ts.net.example.com",
+        ] {
+            assert!(validate_secret_destination(url, true).is_err());
+        }
+        assert!(validate_addresses(&["100.64.0.1:80".parse().unwrap()]).is_ok());
+        assert!(validate_addresses(&[
+            "100.64.0.1:80".parse().unwrap(),
+            "203.0.113.1:80".parse().unwrap()
+        ])
         .is_err());
     }
     #[test]

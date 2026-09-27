@@ -337,6 +337,32 @@ async fn get_token_and_context(
     state: &MicrosoftAuthState,
     required_scope: &str,
 ) -> Result<(String, String, String), String> {
+    get_token_and_context_with(
+        state,
+        required_scope,
+        |http, config, current, force| async move {
+            let result = if force {
+                token_store::refresh_session_token(&http, &config, current).await
+            } else {
+                token_store::ensure_valid_token(&http, &config, Some(current)).await
+            };
+            result.map_err(|error| error.to_string())
+        },
+        token_store::save_token,
+    )
+    .await
+}
+
+async fn get_token_and_context_with<F, Fut>(
+    state: &MicrosoftAuthState,
+    required_scope: &str,
+    refresh: F,
+    persist: impl FnOnce(&token_store::StoredToken) -> Result<(), token_store::TokenStoreError>,
+) -> Result<(String, String, String), String>
+where
+    F: FnOnce(reqwest::Client, auth::MicrosoftAuthConfig, token_store::StoredToken, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<token_store::StoredToken, String>>,
+{
     let (config, http, current, generation);
     {
         let inner = state.inner.read().await;
@@ -346,24 +372,32 @@ async fn get_token_and_context(
         generation = inner.generation;
         config = inner.config.clone();
         http = inner.http.clone();
-        current = inner.current_token.clone();
-        super::permissions::require_scope(
-            current.as_ref().ok_or("Microsoft is not connected")?,
-            required_scope,
-        )?;
+        current = inner
+            .current_token
+            .clone()
+            .ok_or("Microsoft is not connected")?;
     }
 
-    let stored = token_store::ensure_valid_token(&http, &config, current)
+    let missing_scope = super::permissions::require_scope(&current, required_scope).err();
+    if current.refresh_token.is_none() {
+        if let Some(error) = missing_scope.as_ref() {
+            return Err(error.clone());
+        }
+    }
+    let stored = refresh(http, config, current, missing_scope.is_some())
         .await
-        .map_err(|e| e.to_string())?;
-
-    super::permissions::require_scope(&stored, required_scope)?;
+        .map_err(|error| match missing_scope {
+            Some(permission) => format!("{permission}. Could not refresh permissions: {error}"),
+            None => error,
+        })?;
 
     // Cache any refreshed token for the rest of the session.
     {
         let mut inner = state.inner.write().await;
-        inner.accept_refreshed_token(generation, stored.clone(), token_store::save_token)?;
+        inner.accept_refreshed_token(generation, stored.clone(), persist)?;
     }
+
+    super::permissions::require_scope(&stored, required_scope)?;
 
     Ok((stored.access_token, stored.tenant_id, stored.user_id))
 }
@@ -1205,7 +1239,7 @@ mod export_history_tests {
     }
 
     #[tokio::test]
-    async fn missing_export_scope_fails_without_even_refreshing() {
+    async fn missing_export_scope_without_refresh_token_fails_before_network() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let http = reqwest::Client::builder()
@@ -1216,6 +1250,14 @@ mod export_history_tests {
             .build()
             .unwrap();
         let state = partial_session(http);
+        state
+            .inner
+            .write()
+            .await
+            .current_token
+            .as_mut()
+            .unwrap()
+            .refresh_token = None;
         let error = get_token_and_context(&state, "Tasks.ReadWrite")
             .await
             .unwrap_err();
@@ -1224,6 +1266,126 @@ mod export_history_tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[tokio::test]
+    async fn missing_scope_refreshes_once_even_when_unexpired_and_caches_rotation() {
+        for approved in [true, false] {
+            let state = partial_session(reqwest::Client::new());
+            state
+                .inner
+                .write()
+                .await
+                .current_token
+                .as_mut()
+                .unwrap()
+                .expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+            let refreshes = std::cell::Cell::new(0);
+            let saves = std::cell::Cell::new(0);
+            let result = get_token_and_context_with(
+                &state,
+                "Tasks.ReadWrite",
+                |_, _, mut token, force| {
+                    assert!(force);
+                    assert!(token.is_access_token_valid());
+                    refreshes.set(refreshes.get() + 1);
+                    token.refresh_token = Some("test-rotated".into());
+                    if approved {
+                        token.granted_scopes.push_str(" Tasks.ReadWrite");
+                    }
+                    std::future::ready(Ok(token))
+                },
+                |_| {
+                    saves.set(saves.get() + 1);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(refreshes.get(), 1);
+            assert_eq!(saves.get(), 1);
+            if approved {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "Permission not granted: Tasks.ReadWrite"
+                );
+            }
+            assert_eq!(
+                state
+                    .inner
+                    .read()
+                    .await
+                    .current_token
+                    .as_ref()
+                    .unwrap()
+                    .refresh_token
+                    .as_deref(),
+                Some("test-rotated")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_refresh_failure_keeps_existing_session() {
+        let state = partial_session(reqwest::Client::new());
+        let error = get_token_and_context_with(
+            &state,
+            "Tasks.ReadWrite",
+            |_, _, _, force| {
+                assert!(force);
+                std::future::ready(Err("Refresh unavailable".into()))
+            },
+            |_| panic!("failed refresh must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Permission not granted: Tasks.ReadWrite"));
+        let inner = state.inner.read().await;
+        assert_eq!(inner.connection_state, MicrosoftConnectionState::Connected);
+        assert_eq!(
+            inner
+                .current_token
+                .as_ref()
+                .unwrap()
+                .refresh_token
+                .as_deref(),
+            Some("test-refresh")
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_refresh_does_not_cross_session_generations() {
+        let state = partial_session(reqwest::Client::new());
+        let error = get_token_and_context_with(
+            &state,
+            "Tasks.ReadWrite",
+            |_, _, mut token, _| async {
+                state.inner.write().await.generation += 1;
+                token.granted_scopes.push_str(" Tasks.ReadWrite");
+                Ok(token)
+            },
+            |_| panic!("stale refresh must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("session changed"));
+    }
+
+    #[tokio::test]
+    async fn approved_scope_uses_normal_expiry_check_without_forcing_refresh() {
+        let state = partial_session(reqwest::Client::new());
+        get_token_and_context_with(
+            &state,
+            "Notes.Create",
+            |_, _, token, force| {
+                assert!(!force);
+                std::future::ready(Ok(token))
+            },
+            |_| panic!("unchanged credentials must not persist"),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

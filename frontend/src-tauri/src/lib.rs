@@ -1052,7 +1052,7 @@ pub fn run() {
             exports::commands::export_selected_todo_tasks,
             exports::confluence::confluence_save_pat,
             exports::confluence::confluence_clear_pat,
-            exports::confluence::confluence_http_opt_in,
+            exports::confluence::confluence_settings_status,
             exports::confluence::confluence_connection_status,
             exports::confluence::confluence_export_page,
         ])

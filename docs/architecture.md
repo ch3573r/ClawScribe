@@ -233,12 +233,15 @@ Microsoft sign-in keeps partially granted sessions connected. Missing permission
 and unavailable exports are shown in Settings; only “Request missing permissions”
 opens a consent flow. A declined request retains the session. Without offline
 access, sign-in lasts only for the current app run. Export commands check their
-required permissions before refresh or Graph calls.
+required permissions before Graph calls. If a permission is missing, one token
+refresh checks for newly approved scopes before reporting it unavailable.
 
 Credential-bearing integration endpoints require HTTPS, loopback HTTP, or an explicit
 private-network HTTP opt-in. Legacy private HTTP settings migrate on load. HTTP
 requests validate and pin DNS results and disable redirects and proxies. Public
-HTTP destinations are rejected even with the opt-in.
+HTTP destinations are rejected on save/send even with the opt-in. Rejected saved
+settings remain editable and show an attention message. Tailscale's shared address
+range and MagicDNS names are accepted as local, with the same DNS pinning checks.
 Confluence credentials include their saved origin and cannot be reused against a
 different origin; older unbound PATs must be saved again before use.
 

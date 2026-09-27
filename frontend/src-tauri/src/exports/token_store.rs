@@ -357,6 +357,16 @@ pub async fn ensure_valid_token(
         return Ok(stored);
     }
 
+    refresh_session_token(http, config, stored).await
+}
+
+/// Refresh even an unexpired access token to discover newly approved scopes.
+/// The caller still owns generation checking and persistence.
+pub(super) async fn refresh_session_token(
+    http: &reqwest::Client,
+    config: &MicrosoftAuthConfig,
+    stored: StoredToken,
+) -> Result<StoredToken, MsAuthError> {
     let refresh = stored
         .refresh_token
         .as_deref()
