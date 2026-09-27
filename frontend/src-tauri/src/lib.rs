@@ -47,6 +47,7 @@ pub(crate) mod credentials;
 pub mod database;
 pub mod diagnostics;
 pub mod exports;
+mod external_url;
 pub mod groq;
 pub mod library;
 pub(crate) mod model_download;

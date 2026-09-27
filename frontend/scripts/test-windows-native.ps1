@@ -104,6 +104,7 @@ try {
         "audio::import::tests",
         "audio::diarization::tests",
         "api::",
+        "external_url::tests",
         "database::repositories::transcript::recording_save_tests",
         "whisper_engine::acceleration::tests",
         "database::transcript_edits::tests",
