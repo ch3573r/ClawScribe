@@ -147,6 +147,7 @@ export default function PageContent({
   };
 
   const summaryGeneration = useSummaryGeneration({
+    beforeGeneration: meetingData.flushPendingChanges,
     meeting,
     transcripts: meetingData.transcripts,
     modelConfig: modelConfig,
@@ -334,6 +335,11 @@ export default function PageContent({
           onSaveSummary={meetingData.handleSaveSummary}
           onSummaryChange={meetingData.handleSummaryChange}
           onDirtyChange={meetingData.setIsSummaryDirty}
+          onSummaryDraft={meetingData.handleSummaryDraft}
+          saveState={meetingData.saveState}
+          hasPreviousSummary={meetingData.hasPreviousSummary}
+          summaryRevision={meetingData.summaryRevision}
+          onRestorePrevious={meetingData.restorePreviousSummary}
           summaryError={summaryGeneration.summaryError}
           onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
           getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}

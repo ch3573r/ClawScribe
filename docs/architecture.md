@@ -383,3 +383,15 @@ load cannot prefer stale credentials over the encrypted fallback.
 
 Microsoft refreshes persist only changes to refresh tokens, account metadata,
 tenant, or granted scopes; access-token-only changes stay in memory.
+
+### Summary edits and previous version
+
+Meeting title and summary edits autosave after two seconds of inactivity. Pending
+revisions remain owned by a shared draft queue across navigation; leaving a meeting
+flushes that queue. Closing the window flushes edits, and quitting waits for pending
+writes. Failed writes retain the draft and offer retry. Summary generation blocks
+edit writes, and regeneration asks before replacing a result marked `user_edited_at`.
+A generated replacement removes that marker and retains one `previous_result` with
+its timestamp. Restore atomically swaps current and previous results when generation
+is idle. These columns are independent of `result_backup`, whose failure and
+interruption recovery behavior is unchanged.

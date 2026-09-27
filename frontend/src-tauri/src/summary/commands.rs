@@ -15,6 +15,28 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
 
+#[derive(Default)]
+pub struct SummaryEditsState {
+    pub pending: std::sync::atomic::AtomicBool,
+    pub exit_code: std::sync::Mutex<Option<i32>>,
+}
+
+#[tauri::command]
+pub fn api_set_summary_edits_pending(state: tauri::State<'_, SummaryEditsState>, pending: bool) {
+    state
+        .pending
+        .store(pending, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn api_finish_summary_edit_exit(app: AppHandle, state: tauri::State<'_, SummaryEditsState>) {
+    if !state.pending.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(code) = state.exit_code.lock().unwrap().take() {
+            app.exit(code);
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SummaryResponse {
     pub status: String,
@@ -25,6 +47,7 @@ pub struct SummaryResponse {
     pub end: Option<String>,
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
+    pub has_previous_result: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,7 +99,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
-    summary: serde_json::Value,
+    mut summary: serde_json::Value,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
@@ -86,6 +109,13 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     let pool = state.db_manager.pool();
 
     super::processor::validate_saved_summary(&summary)?;
+    summary
+        .as_object_mut()
+        .ok_or("Invalid summary format")?
+        .insert(
+            "user_edited_at".into(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
             log_info!("Summary saved successfully for meeting_id: {}", meeting_id);
@@ -105,6 +135,18 @@ pub async fn api_save_meeting_summary<R: Runtime>(
             Err(e.to_string())
         }
     }
+}
+
+#[tauri::command]
+pub async fn api_restore_previous_summary<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<SummaryResponse, String> {
+    SummaryProcessesRepository::restore_previous_summary(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    api_get_summary(app, state, meeting_id, None).await
 }
 
 /// Gets the per-meeting summary language override from metadata.json.
@@ -290,6 +332,7 @@ pub async fn api_get_summary<R: Runtime>(
             };
 
             let response = SummaryResponse {
+                has_previous_result: process.previous_result.is_some(),
                 status: status.clone(),
                 meeting_name,
                 meeting_id: meeting_id.clone(),
@@ -317,6 +360,7 @@ pub async fn api_get_summary<R: Runtime>(
             };
 
             Ok(SummaryResponse {
+                has_previous_result: false,
                 status: "idle".to_string(),
                 meeting_name,
                 meeting_id,

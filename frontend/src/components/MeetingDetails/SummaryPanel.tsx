@@ -25,7 +25,14 @@ import {
   SummaryLanguageStorage,
 } from '@/lib/summary-language-preferences';
 
+import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
+
 interface SummaryPanelProps {
+  saveState: SaveState;
+  hasPreviousSummary: boolean;
+  summaryRevision: number;
+  onRestorePrevious: () => Promise<void>;
+  onSummaryDraft: (draft: SummaryDraft, read: () => Promise<SummaryDraft>) => void;
   onRevealSource?: (source: ResolvedSummarySource) => Promise<void>;
   onPlaySource?: (seconds: number) => Promise<void>;
   meeting: {
@@ -74,6 +81,7 @@ type SummaryTextMatch = {
 };
 
 export function SummaryPanel({
+  saveState, hasPreviousSummary, summaryRevision, onRestorePrevious, onSummaryDraft,
   onRevealSource,
   onPlaySource,
   meeting,
@@ -381,6 +389,7 @@ export function SummaryPanel({
             {isEditingTitle ? (
               <input
                 value={meetingTitle}
+                disabled={isSummaryLoading}
                 onChange={(e) => onTitleChange(e.target.value)}
                 onBlur={onFinishEditTitle}
                 onKeyDown={(e) => {
@@ -451,6 +460,10 @@ export function SummaryPanel({
         </div>
       </div>
 
+      <div className="flex items-center gap-2 px-4 py-1 text-xs text-muted-foreground" role="status">
+        <span>{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}</span>
+        {hasPreviousSummary && <Button variant="ghost" size="sm" disabled={isSummaryLoading || isSaving} onClick={() => void onRestorePrevious()}>Restore previous summary</Button>}
+      </div>
       <TextReplaceDialog open={replaceOpen} onOpenChange={setReplaceOpen} title="summary"
         preview={async options => {
           if (!summaryRef.current) throw new Error('The summary is not ready.');
@@ -459,7 +472,7 @@ export function SummaryPanel({
         apply={async (options, token) => {
           if (!summaryRef.current) throw new Error('The summary is not ready.');
           summaryRef.current.replaceText(options, token);
-          toast.success('Summary text replaced', { description: 'Review your changes and select Save. Use Ctrl+Z in the editor to undo.' });
+          toast.success('Summary text replaced', { description: 'Changes save automatically. Use Ctrl+Z in the editor to undo.' });
         }} />
       {isFindOpen && aiSummary && !isSummaryLoading && (
         <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
@@ -624,6 +637,9 @@ export function SummaryPanel({
             <div className="mx-auto max-w-[72rem] rounded-xl bg-card p-4 text-foreground sm:p-8 shadow-sm ring-1 ring-black/10 dark:ring-white/10">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
               <BlockNoteSummaryView
+                key={`${meeting.id}:${summaryRevision}`}
+                saveState={saveState}
+                onDraftChange={onSummaryDraft}
                 ref={summaryRef}
                 summaryData={aiSummary}
                 onSave={onSaveSummary}

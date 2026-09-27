@@ -110,6 +110,7 @@ try {
         "database::transcript_edits::tests",
         "library::",
         "database::repositories::meeting::tests",
+        "database::repositories::summary::tests",
         "database::manager::tests",
         "teams_detection::tests",
         "database::meeting_files::tests",

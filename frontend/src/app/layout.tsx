@@ -13,6 +13,7 @@ import {
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
+import { flushMeetingDrafts } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { Toaster, toast } from 'sonner'
@@ -106,6 +107,14 @@ export default function RootLayout({
   const router = useRouter()
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [onboardingCompleted, setOnboardingCompleted] = useState(false)
+
+  useEffect(() => {
+    const close = listen('summary-flush-on-close', () => { void flushMeetingDrafts().catch(() => {}); });
+    const quit = listen('summary-flush-before-exit', () => {
+      void flushMeetingDrafts().then(() => invoke('api_finish_summary_edit_exit')).catch(() => {});
+    });
+    return () => { void close.then(unlisten => unlisten()); void quit.then(unlisten => unlisten()); };
+  }, []);
 
   // Import audio state
   const [showDropOverlay, setShowDropOverlay] = useState(false)
