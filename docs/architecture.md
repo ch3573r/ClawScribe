@@ -254,3 +254,6 @@ markers.
 
 A Microsoft token fallback save removes the older keychain entry so the next
 load cannot prefer stale credentials over the encrypted fallback.
+
+Microsoft refreshes persist only changes to refresh tokens, account metadata,
+tenant, or granted scopes; access-token-only changes stay in memory.

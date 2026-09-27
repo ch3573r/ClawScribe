@@ -91,7 +91,11 @@ impl MicrosoftAuthInner {
         {
             return Err("Microsoft session changed; sign in before exporting".into());
         }
-        if persist(&token).is_err() {
+        let changed = self
+            .current_token
+            .as_ref()
+            .is_none_or(|current| !current.same_persisted_fields(&token));
+        if changed && persist(&token).is_err() {
             log::warn!("Could not persist refreshed Microsoft session");
         }
         self.current_token = Some(token);
@@ -219,6 +223,71 @@ mod tests {
         assert!(refresh.await.unwrap().is_err());
         assert!(state.read().await.current_token.is_none());
         assert!(credentials.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn unchanged_exports_do_not_persist_but_rotated_refresh_token_does() {
+        let token = token_store::StoredToken::from_token_response(
+            &crate::exports::auth::TokenResponse {
+                access_token: "test-access".into(),
+                refresh_token: Some("test-refresh".into()),
+                expires_in: 3600,
+                token_type: "Bearer".into(),
+                scope: "User.Read Notes.Create".into(),
+            },
+            "test-user".into(),
+            "Test User".into(),
+            None,
+            "organizations".into(),
+        );
+        let mut state = MicrosoftAuthInner {
+            config: MicrosoftAuthConfig::default(),
+            generation: 0,
+            http: reqwest::Client::new(),
+            connection_state: MicrosoftConnectionState::Connected,
+            pending_device_code: None,
+            sign_in_cancel: None,
+            user_display_name: None,
+            user_email: None,
+            user_id: None,
+            current_token: Some(token.clone()),
+        };
+        let mut writes = 0;
+        let mut refreshed = token;
+        refreshed.access_token = "test-new-access".into();
+        refreshed.expires_at += chrono::Duration::hours(1);
+        for _ in 0..3 {
+            state
+                .accept_refreshed_token(0, refreshed.clone(), |_| {
+                    writes += 1;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(writes, 0);
+        refreshed.refresh_token = Some("test-new-refresh".into());
+        state
+            .accept_refreshed_token(0, refreshed.clone(), |_| {
+                writes += 1;
+                Ok(())
+            })
+            .unwrap();
+        state
+            .accept_refreshed_token(0, refreshed, |_| {
+                writes += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(writes, 1);
+        let mut changed_scope = state.current_token.clone().unwrap();
+        changed_scope.granted_scopes.push_str(" Tasks.ReadWrite");
+        state
+            .accept_refreshed_token(0, changed_scope, |_| {
+                writes += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(writes, 2);
     }
 
     #[test]

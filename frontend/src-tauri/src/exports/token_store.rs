@@ -48,6 +48,10 @@ impl StoredToken {
         }
     }
 
+    pub(super) fn same_persisted_fields(&self, other: &Self) -> bool {
+        PersistedToken::from_stored(self) == PersistedToken::from_stored(other)
+    }
+
     pub fn is_access_token_valid(&self) -> bool {
         Utc::now() + Duration::seconds(60) < self.expires_at
     }
@@ -76,7 +80,7 @@ impl std::fmt::Display for TokenStoreError {
 /// silently failed every keychain write and lost the sign-in on restart. Only
 /// the refresh token (plus metadata) is needed to restore a session; it is
 /// re-exchanged for an access token on first use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PersistedToken {
     refresh_token: Option<String>,
     user_id: String,
