@@ -1,3 +1,4 @@
+import { openExternal } from '@/lib/openExternal';
 import { useState, useCallback } from 'react';
 import { Transcript, Summary } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
@@ -530,7 +531,7 @@ export function useSummaryGeneration({
               duration: 7000,
               action: {
                 label: 'Download',
-                onClick: () => invokeTauri('open_external_url', { url: 'https://ollama.com/download' })
+                onClick: () => openExternal('https://ollama.com/download')
               }
             }
           );

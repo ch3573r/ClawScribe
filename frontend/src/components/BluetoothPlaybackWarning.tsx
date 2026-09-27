@@ -1,4 +1,5 @@
 "use client";
+import { openExternal } from '@/lib/openExternal';
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -82,7 +83,7 @@ export function BluetoothPlaybackWarning({
             <br />
             <a
               href="https://github.com/ch3573r/ClawScribe"
-              target="_blank"
+              onClick={event => { event.preventDefault(); void openExternal(event.currentTarget.href); }}
               rel="noopener noreferrer"
               className="underline hover:text-yellow-900 font-medium mt-2 inline-block"
             >

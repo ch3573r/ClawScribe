@@ -23,6 +23,7 @@ test('upcoming meetings skip calendar requests on mount, timer, focus and visibi
     const { UpcomingMeetings } = loadTsModule('src/components/UpcomingMeetings.tsx', {
       react: hooks.react,
       'lucide-react': {},
+      '@/lib/openExternal': { openExternal: async () => {} },
       '@/services/microsoftExportService': { microsoftExportService: {
         connectionStatus: async () => status,
         listCalendarEvents: async () => { reads++; return []; },

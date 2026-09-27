@@ -1,5 +1,6 @@
 "use client";
 
+import { openExternal } from '@/lib/openExternal';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import {
   Dialog,
@@ -223,7 +224,7 @@ export function SummaryGeneratorButtonGroup({
             duration: 7000,
             action: {
               label: 'Download',
-              onClick: () => invoke('open_external_url', { url: 'https://ollama.com/download' })
+              onClick: () => openExternal('https://ollama.com/download')
             }
           }
         );

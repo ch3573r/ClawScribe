@@ -1,3 +1,4 @@
+import { openExternal } from '@/lib/openExternal';
 import React, { useEffect, useState } from 'react';
 import { Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -99,7 +100,7 @@ export function SetupOverviewStep() {
           <div className="text-center">
             <a
               href="https://github.com/ch3573r/ClawScribe"
-              target="_blank"
+              onClick={event => { event.preventDefault(); void openExternal(event.currentTarget.href); }}
               rel="noopener noreferrer"
               className="text-xs text-muted-foreground hover:underline"
             >
