@@ -107,14 +107,20 @@ pub(crate) fn strip_source_links(markdown: &str) -> String {
 
 /// Resolve model tags using only server-owned identities and timestamps.
 pub(crate) fn expand_tags(text: &str, sources: &[SummarySource]) -> String {
-    static TAG: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\[S(\d+)(?:[^\]\r\n]*)\]").unwrap());
+    static TAG: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"\[S\d+(?:[ \t]+\d{1,2}:\d{2}(?::\d{2})?)?(?:[ \t]*[,;][ \t]*S\d+(?:[ \t]+\d{1,2}:\d{2}(?::\d{2})?)?)*\]").unwrap()
+    });
+    static ID: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"S(\d+)").unwrap());
     TAG.replace_all(text, |capture: &regex::Captures<'_>| {
-        capture[1]
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|n| sources.get(n))
+        ID.captures_iter(&capture[0])
+            .filter_map(|id| {
+                id[1]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
+                    .and_then(|n| sources.get(n))
+            })
             .map(|s| {
                 format!(
                     "[{}](#clawscribe-source-{})",
@@ -122,7 +128,8 @@ pub(crate) fn expand_tags(text: &str, sources: &[SummarySource]) -> String {
                     s.key
                 )
             })
-            .unwrap_or_default()
+            .collect::<Vec<_>>()
+            .join(" ")
     })
     .into_owned()
 }
@@ -298,6 +305,28 @@ pub async fn api_resolve_summary_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_tags_expand_every_known_id_and_preserve_normal_brackets() {
+        let sources: Vec<_> = (0..2)
+            .map(|n| SummarySource {
+                key: format!("abc{n}"),
+                transcript_id: n.to_string(),
+                transcript_ids: vec![],
+                fingerprint: String::new(),
+                timestamp: Some(n as f64 * 6.0),
+            })
+            .collect();
+        let expected = "[00:00:00](#clawscribe-source-abc0) [00:00:06](#clawscribe-source-abc1)";
+        assert_eq!(expand_tags("[S1, S2]", &sources), expected);
+        assert_eq!(
+            expand_tags("[S1 00:00:00; S2 00:00:06]", &sources),
+            expected
+        );
+        assert_eq!(expand_tags("[S3 bucket]", &sources), "[S3 bucket]");
+        assert_eq!(expand_tags("[S999]", &sources), "");
+        assert_eq!(expand_tags("[S1 S2]", &sources), "[S1 S2]");
+    }
 
     #[tokio::test]
     async fn passages_keep_annotation_small_and_expand_only_known_tags() {
