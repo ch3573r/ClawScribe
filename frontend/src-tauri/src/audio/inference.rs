@@ -19,6 +19,28 @@ pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     Ok(permit)
 }
 
+pub(crate) async fn claim_job_preempting_local_summary(
+    reason: &'static str,
+) -> Result<OwnedSemaphorePermit, String> {
+    let original = match claim_job() {
+        Ok(permit) => return Ok(permit),
+        Err(error) => error,
+    };
+    if !crate::summary::SummaryService::has_active_local_summary() {
+        return Err(original);
+    }
+    crate::summary::SummaryService::cancel_local_summaries(reason);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        JOBS.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) if NATIVE.available_permits() > 0 => Ok(permit),
+        _ => Err(original),
+    }
+}
+
 struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

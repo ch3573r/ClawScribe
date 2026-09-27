@@ -354,6 +354,12 @@ impl SummaryService {
         }
     }
 
+    pub(crate) fn has_active_local_summary() -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .is_ok_and(|jobs| jobs.values().any(|job| job.builtin))
+    }
+
     /// Cancels the summary generation for a meeting
     pub fn cancel_summary(meeting_id: &str) -> bool {
         if let Ok(registry) = CANCELLATION_REGISTRY.lock() {
@@ -1512,6 +1518,55 @@ mod cancellation_status_tests {
 #[cfg(test)]
 mod recording_cancellation_tests {
     use super::*;
+    #[tokio::test]
+    async fn preemption_waits_for_local_owner_and_persists_its_reason() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let held = crate::audio::inference::claim_job().unwrap();
+        let token = local.token.clone();
+        let release = tokio::spawn(async move {
+            token.cancelled().await;
+            drop(held);
+        });
+        let reason = "Local summary stopped because import started. Generate it again afterwards.";
+        let _next = crate::audio::inference::claim_job_preempting_local_summary(reason)
+            .await
+            .unwrap();
+        release.await.unwrap();
+        finish_provider_error(&pool, "review-test", &local.token, "cancelled").await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.error.as_deref(), Some(reason));
+    }
+
+    #[tokio::test]
+    async fn preemption_refuses_other_jobs_and_times_out_without_cancelling_cloud() {
+        let held = crate::audio::inference::claim_job().unwrap();
+        let cloud = SummaryService::register_job("preempt-cloud", "openai").unwrap();
+        let expected = crate::audio::inference::claim_job().unwrap_err();
+        let immediate = tokio::time::timeout(
+            Duration::from_millis(100),
+            crate::audio::inference::claim_job_preempting_local_summary("test interruption"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(immediate.unwrap_err(), expected);
+        let _local = SummaryService::register_job("preempt-stuck", "builtin-ai").unwrap();
+        assert_eq!(
+            crate::audio::inference::claim_job_preempting_local_summary("test interruption")
+                .await
+                .unwrap_err(),
+            expected
+        );
+        assert!(!cloud.token.is_cancelled());
+        drop(held);
+    }
     #[tokio::test]
     async fn import_cancels_local_summary_with_its_specific_reason() {
         let pool = crate::database::transcript_edits::tests::fixture().await;

@@ -1986,10 +1986,10 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     num_speakers: Option<i32>,
     preserve_existing_labels: Option<bool>,
 ) -> std::result::Result<SpeakerDiarizationComplete, String> {
-    let _job = super::inference::claim_job()?;
-    crate::summary::SummaryService::cancel_local_summaries(
+    let _job = super::inference::claim_job_preempting_local_summary(
         "Local summary stopped because speaker detection started. Generate it again afterwards.",
-    );
+    )
+    .await?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let guard = DiarizationRunGuard::acquire()?;
     let meeting_id_for_task = meeting_id.clone();

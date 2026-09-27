@@ -95,10 +95,11 @@ pub async fn start_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
-    let _job = super::inference::claim_job().map_err(anyhow::Error::msg)?;
-    crate::summary::SummaryService::cancel_local_summaries(
+    let _job = super::inference::claim_job_preempting_local_summary(
         "Local summary stopped because retranscription started. Generate it again afterwards.",
-    );
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
