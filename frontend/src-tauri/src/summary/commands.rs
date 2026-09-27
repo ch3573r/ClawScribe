@@ -15,28 +15,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
 
-#[derive(Default)]
-pub struct SummaryEditsState {
-    pub pending: std::sync::atomic::AtomicBool,
-    pub exit_code: std::sync::Mutex<Option<i32>>,
-}
-
-#[tauri::command]
-pub fn api_set_summary_edits_pending(state: tauri::State<'_, SummaryEditsState>, pending: bool) {
-    state
-        .pending
-        .store(pending, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[tauri::command]
-pub fn api_finish_summary_edit_exit(app: AppHandle, state: tauri::State<'_, SummaryEditsState>) {
-    if !state.pending.load(std::sync::atomic::Ordering::SeqCst) {
-        if let Some(code) = state.exit_code.lock().unwrap().take() {
-            app.exit(code);
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SummaryResponse {
     pub status: String,

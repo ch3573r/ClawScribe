@@ -389,7 +389,10 @@ tenant, or granted scopes; access-token-only changes stay in memory.
 Meeting title and summary edits autosave after two seconds of inactivity. Pending
 revisions remain owned by a shared draft queue across navigation; leaving a meeting
 flushes that queue. Closing the window flushes edits, and quitting waits for pending
-writes. Failed writes retain the draft and offer retry. Summary generation blocks
+writes for up to five seconds. A failed save or timeout opens one native dialog
+with Quit (discard pending edits) and Keep ClawScribe open. Choosing Keep preserves
+the drafts; stale callbacks cannot complete a later quit attempt. Failed writes
+retain the draft and offer retry. Summary generation blocks
 edit writes, and regeneration asks before replacing a result marked `user_edited_at`.
 A generated replacement removes that marker and retains one `previous_result` with
 its timestamp. Restore atomically swaps current and previous results when generation

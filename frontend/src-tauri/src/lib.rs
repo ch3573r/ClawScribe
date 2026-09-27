@@ -568,7 +568,7 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
-        .manage(summary::commands::SummaryEditsState::default())
+        .manage(summary::edit_exit::SummaryEditsState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
@@ -872,8 +872,9 @@ pub fn run() {
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
             summary::commands::api_restore_previous_summary,
-            summary::commands::api_set_summary_edits_pending,
-            summary::commands::api_finish_summary_edit_exit,
+            summary::edit_exit::api_set_summary_edits_pending,
+            summary::edit_exit::api_finish_summary_edit_exit,
+            summary::edit_exit::api_summary_edit_exit_failed,
             summary::commands::api_get_meeting_summary_language,
             summary::commands::api_save_meeting_summary_language,
             summary::commands::api_get_meeting_detected_summary_language,
@@ -1026,12 +1027,10 @@ pub fn run() {
                     tray::focus_main_window(_app_handle);
                 }
                 tauri::RunEvent::ExitRequested { code, api, .. } => {
-                    let edits = _app_handle.state::<summary::commands::SummaryEditsState>();
-                    if edits.pending.load(std::sync::atomic::Ordering::SeqCst) {
-                        api.prevent_exit();
-                        *edits.exit_code.lock().unwrap() = Some(code.unwrap_or(0));
+                    if summary::edit_exit::request_exit(_app_handle, code.unwrap_or(0), || {
+                        api.prevent_exit()
+                    }) {
                         tray::focus_main_window(_app_handle);
-                        let _ = _app_handle.emit("summary-flush-before-exit", ());
                     }
                 }
                 tauri::RunEvent::Exit => {
