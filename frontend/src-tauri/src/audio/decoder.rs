@@ -45,13 +45,13 @@ impl DecodedAudio {
     /// Performs mono conversion, normalization, and resampling. Large files
     /// (>5 min at 48kHz) use chunked sinc resampling to keep memory bounded
     /// while preserving audio quality for downstream VAD and transcription.
-    pub fn to_whisper_format(&self) -> Vec<f32> {
+    pub fn to_whisper_format(self) -> Vec<f32> {
         self.to_whisper_format_with_progress(None)
     }
 
     /// Convert decoded audio to Whisper format with optional progress callback
     pub fn to_whisper_format_with_progress(
-        &self,
+        self,
         progress_callback: Option<ProgressCallback>,
     ) -> Vec<f32> {
         // Step 1: Convert to mono if needed
@@ -63,7 +63,7 @@ impl DecodedAudio {
             );
             audio_to_mono(&self.samples, self.channels)
         } else {
-            self.samples.clone()
+            self.samples
         };
 
         // Step 1.5: Normalize samples to valid range (-1.0 to 1.0)
@@ -636,7 +636,13 @@ mod tests {
             duration_seconds: 0.0001875,
         };
 
+        let original_buffer = audio.samples.as_ptr();
         let result = audio.to_whisper_format();
+        assert_eq!(
+            result.as_ptr(),
+            original_buffer,
+            "Already-mono audio reuses its allocation"
+        );
         assert_eq!(result.len(), 3);
     }
 

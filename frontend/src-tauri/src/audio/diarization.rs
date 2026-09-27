@@ -2204,22 +2204,9 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         15,
         "Decoding meeting audio...",
     );
-    let decode_path = audio_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&decode_path))
-        .await
-        .map_err(|e| anyhow!("Audio decode task failed: {}", e))??;
-    check_diarization_cancelled(&meeting_id)?;
-
-    emit_progress(
-        &app,
-        &meeting_id,
-        "preparing_audio",
-        30,
-        "Preparing 16 kHz mono audio...",
-    );
-    let samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
-        .await
-        .map_err(|e| anyhow!("Audio preparation task failed: {}", e))?;
+    let samples =
+        super::batch_audio::prepare_diarization_samples(&audio_path, diarization_cancel_flag())
+            .await?;
     check_diarization_cancelled(&meeting_id)?;
     if samples.is_empty() {
         return Err(anyhow!("Meeting audio did not contain decodable samples"));

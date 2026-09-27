@@ -235,3 +235,6 @@ Cancel speaker detection from its dialog or the meeting toolbar, including after
 continuing in the background. Cancellation discards pending labels and waits for
 the current native speech step to finish before another recording can start. If
 recording is blocked by detection, its error offers **Cancel speaker detection and record**.
+Speaker detection decodes and resamples through the streaming batch decoder.
+Only the 16 kHz mono signal is held in full; the original-rate audio is not
+retained in memory.
