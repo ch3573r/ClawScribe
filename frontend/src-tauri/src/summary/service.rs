@@ -147,6 +147,22 @@ async fn save_completed_with_retry(
     .await
 }
 
+async fn finish_provider_error(
+    pool: &SqlitePool,
+    meeting: &str,
+    token: &CancellationToken,
+    error: &str,
+) {
+    let result = if token.is_cancelled() {
+        SummaryProcessesRepository::update_process_cancelled(pool, meeting).await
+    } else {
+        SummaryProcessesRepository::update_process_failed(pool, meeting, error).await
+    };
+    if result.is_err() {
+        error!("Could not save summary failure status");
+    }
+}
+
 const ENGLISH_CACHE_FIELD: &str = "english_cache";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -749,19 +765,7 @@ impl SummaryService {
                     }
                 }
                 Err(e) => {
-                    if e.contains("cancelled") {
-                        if let Err(db_err) =
-                            SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id)
-                                .await
-                        {
-                            error!(
-                                "Failed to update DB status to cancelled for {}: {}",
-                                meeting_id, db_err
-                            );
-                        }
-                    } else {
-                        Self::update_process_failed(&pool, &meeting_id, &e).await;
-                    }
+                    finish_provider_error(&pool, &meeting_id, cancellation_token, &e).await;
                 }
             }
             return;
@@ -851,19 +855,7 @@ impl SummaryService {
                     }
                 }
                 Err(e) => {
-                    if e.contains("cancelled") {
-                        if let Err(db_err) =
-                            SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id)
-                                .await
-                        {
-                            error!(
-                                "Failed to update DB status to cancelled for {}: {}",
-                                meeting_id, db_err
-                            );
-                        }
-                    } else {
-                        Self::update_process_failed(&pool, &meeting_id, &e).await;
-                    }
+                    finish_provider_error(&pool, &meeting_id, cancellation_token, &e).await;
                 }
             }
             return;
@@ -970,23 +962,7 @@ impl SummaryService {
             }
             Err(e) => {
                 // Check if error is due to cancellation
-                if e.contains("cancelled") {
-                    info!(
-                        "Summary generation was cancelled for meeting_id: {}",
-                        meeting_id
-                    );
-                    if let Err(db_err) =
-                        SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id)
-                            .await
-                    {
-                        error!(
-                            "Failed to update DB status to cancelled for {}: {}",
-                            meeting_id, db_err
-                        );
-                    }
-                } else {
-                    Self::update_process_failed(&pool, &meeting_id, &e).await;
-                }
+                finish_provider_error(&pool, &meeting_id, cancellation_token, &e).await;
             }
         }
     }
@@ -1462,5 +1438,37 @@ mod save_retry_tests {
                 assert_eq!(result.unwrap_err(), SUMMARY_SAVE_FAILED);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_status_tests {
+    use super::*;
+    #[tokio::test]
+    async fn provider_wording_cannot_impersonate_user_cancellation() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        finish_provider_error(
+            &pool,
+            "review-test",
+            &token,
+            "Provider cancelled its request",
+        )
+        .await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "failed");
+        token.cancel();
+        finish_provider_error(&pool, "review-test", &token, "Connection closed").await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
     }
 }
