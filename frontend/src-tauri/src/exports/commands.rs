@@ -293,7 +293,10 @@ pub async fn microsoft_connection_status(
 // gone for imported meetings), so re-exporting the same meeting skips
 // already-created OneNote pages / Planner tasks across sessions.
 
-fn export_ledger_dir<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> Result<PathBuf, String> {
+pub(crate) fn export_ledger_dir<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+) -> Result<PathBuf, String> {
     let base = app
         .path()
         .app_data_dir()

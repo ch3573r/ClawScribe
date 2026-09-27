@@ -1737,17 +1737,19 @@ pub(crate) async fn ensure_meeting_output_dir(
     Ok(folder)
 }
 
-pub(crate) async fn remove_meeting_runs(meeting: &str) {
-    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await;
+pub(crate) async fn remove_meeting_runs(meeting: &str) -> Option<String> {
+    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await
 }
 
-async fn remove_meeting_runs_at(root: &Path, meeting: &str) {
+async fn remove_meeting_runs_at(root: &Path, meeting: &str) -> Option<String> {
     let path = root.join(sanitize_path_segment(meeting));
-    if let Err(error) = tokio::fs::remove_dir_all(path).await {
+    if let Err(error) = tokio::fs::remove_dir_all(&path).await {
         if error.kind() != std::io::ErrorKind::NotFound {
             log::warn!("Could not remove Codex scratch folder; startup cleanup will retry");
+            return Some(format!("Codex run folder kept: {}", path.display()));
         }
     }
+    None
 }
 
 pub(crate) async fn cleanup_orphaned_runs(pool: &sqlx::SqlitePool) {

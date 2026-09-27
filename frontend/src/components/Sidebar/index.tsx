@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import {
   ArrowRight,
   File,
@@ -90,6 +90,8 @@ const Sidebar: React.FC = () => {
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
+  const [deleteFiles, setDeleteFiles] = useState(true);
+  const deletingMeeting = useRef(false);
   const [deleteModalState, setDeleteModalState] = useState<{
     isOpen: boolean;
     itemId: string | null;
@@ -189,6 +191,8 @@ const Sidebar: React.FC = () => {
   }, [sidebarItems, searchQuery, searchResults]);
 
   const handleDelete = async (itemId: string) => {
+    if (deletingMeeting.current) return;
+    deletingMeeting.current = true;
     console.log("Deleting item:", itemId);
     const payload = {
       meetingId: itemId,
@@ -196,8 +200,9 @@ const Sidebar: React.FC = () => {
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("api_delete_meeting", {
+      const result = await invoke<{ warnings: string[] }>("api_delete_meeting", {
         meetingId: itemId,
+        deleteFiles,
       });
       console.log("Meeting deleted successfully");
       const updatedMeetings = meetings.filter(
@@ -210,8 +215,10 @@ const Sidebar: React.FC = () => {
 
       // Show success toast
       toast.success("Meeting deleted successfully", {
-        description: "All associated data has been removed",
+        description: deleteFiles ? "The meeting was removed from your library." : "Recording files were kept.",
       });
+
+      for (const warning of result.warnings ?? []) toast.warning(warning, { duration: 15000 });
 
       // If deleting the active meeting, navigate to home
       if (currentMeeting?.id === itemId) {
@@ -223,6 +230,8 @@ const Sidebar: React.FC = () => {
       toast.error("Failed to delete meeting", {
         description: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      deletingMeeting.current = false;
     }
   };
 
@@ -520,6 +529,7 @@ const Sidebar: React.FC = () => {
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  setDeleteFiles(true);
                   setDeleteModalState({ isOpen: true, itemId: item.id });
                 }}
                 className="rounded-md p-1.5 text-muted-foreground hover:bg-red-500/10 hover:text-red-500"
@@ -759,10 +769,12 @@ const Sidebar: React.FC = () => {
       {/* Confirmation Modal for Delete */}
       <ConfirmationModal
         isOpen={deleteModalState.isOpen}
-        text="Are you sure you want to delete this meeting? This action cannot be undone."
+        text="Delete this meeting and its transcript, notes, export history, and temporary Codex files? This action cannot be undone."
         onConfirm={handleDeleteConfirm}
         onCancel={() => setDeleteModalState({ isOpen: false, itemId: null })}
-      />
+      >
+        <label className="mb-6 flex items-start gap-2 text-sm"><input type="checkbox" checked={deleteFiles} onChange={event => setDeleteFiles(event.target.checked)} className="mt-1 accent-primary" />Also delete the recording files (audio, transcript copy, metadata, and generated documents).</label>
+      </ConfirmationModal>
 
       {/* Edit Meeting Title Modal */}
       <Dialog

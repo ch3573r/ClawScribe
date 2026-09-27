@@ -236,6 +236,12 @@ Temporary prompt/transcript run files are removed on success, failure or
 cancellation. Meeting deletion removes legacy run files, and startup retries
 orphan cleanup without blocking local recording.
 
+Meeting deletion defaults to removing recording files after the database commit.
+Deletion requires an unshared, marked ClawScribe folder within the configured
+recordings or restored-recordings root, with no links or junctions in its path.
+Users can retain recording files. Export ledgers and temporary Codex runs are
+removed either way; any retained folder is reported without undoing database deletion.
+
 Codex summary and chat threads use an ephemeral scratch working directory,
 read-only sandbox, no approval escalation, and disabled shell tools. Every turn
 reapplies the sandbox and approval policy; unexpected server approval requests

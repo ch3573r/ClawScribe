@@ -1029,22 +1029,94 @@ pub async fn api_delete_api_key<R: Runtime>(
 
 #[tauri::command]
 pub async fn api_delete_meeting<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     auth_token: Option<String>,
+    delete_files: bool,
 ) -> Result<serde_json::Value, String> {
+    let _job = crate::audio::inference::claim_job()?;
+    use tauri::Manager;
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Deleting local meeting");
 
     let pool = state.db_manager.pool();
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(&meeting_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "Could not read the meeting folder")?
+            .flatten();
+    let mut roots = Vec::new();
+    if let Ok(preferences) =
+        crate::audio::recording_preferences::load_recording_preferences(&app).await
+    {
+        roots.push(preferences.save_folder);
+    }
+    if let Ok(data) = app.path().app_data_dir() {
+        roots.push(data.join("restored-recordings"));
+    }
 
     match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
         Ok(true) => {
+            let mut warnings = Vec::new();
+            if let Some(warning) =
+                crate::summary::codex_provider::remove_meeting_runs(&meeting_id).await
+            {
+                warnings.push(warning);
+            }
+            match crate::exports::commands::export_ledger_dir(&app, &meeting_id) {
+                Ok(ledger) => {
+                    if let Err(error) = tokio::fs::remove_dir_all(&ledger).await {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            warnings
+                                .push(format!("Export history folder kept: {}", ledger.display()));
+                        }
+                    }
+                }
+                Err(_) => warnings.push("Could not locate the export history folder".into()),
+            }
+            if delete_files {
+                if let Some(folder) = folder {
+                    let other_folders = sqlx::query_scalar::<_, String>(
+                        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL",
+                    )
+                    .fetch_all(pool)
+                    .await;
+                    match other_folders {
+                        Ok(others) => {
+                            let retained = format!(
+                                "Recording folder kept: {folder} (cleanup could not finish)"
+                            );
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::database::meeting_files::remove_recording_folder(
+                                    std::path::Path::new(&folder),
+                                    &roots,
+                                    &others
+                                        .into_iter()
+                                        .map(std::path::PathBuf::from)
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .await;
+                            match result {
+                                Ok(Ok(())) => {}
+                                Ok(Err(warning)) => warnings.push(warning),
+                                Err(_) => warnings.push(retained),
+                            }
+                        }
+                        Err(_) => warnings.push(format!(
+                            "Recording folder kept: {folder} (could not check shared use)"
+                        )),
+                    }
+                }
+            }
             log_info!("Successfully deleted meeting {}", meeting_id);
             Ok(serde_json::json!({
                 "status": "success",
-                "message": "Meeting deleted successfully"
+                "message": "Meeting deleted successfully",
+                "warnings": warnings
             }))
         }
         Ok(false) => {
