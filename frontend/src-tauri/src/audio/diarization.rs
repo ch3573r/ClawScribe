@@ -2444,6 +2444,10 @@ async fn save_diarization_labels(
             .execute(&mut *tx)
             .await?;
 
+        let originals: std::collections::HashMap<_, _> = previous
+            .iter()
+            .map(|row| (row.id.as_str(), row.original_transcript.as_deref()))
+            .collect();
         for mapped in mapped_segments {
             let word_timestamps_json = mapped
                 .word_timestamps
@@ -2452,8 +2456,8 @@ async fn save_diarization_labels(
                 .transpose()
                 .map_err(|e| anyhow!("Invalid word timestamps: {}", e))?;
             sqlx::query(
-                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json, original_transcript)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&mapped.id)
             .bind(&meeting_id)
@@ -2469,6 +2473,7 @@ async fn save_diarization_labels(
             .bind(mapped.duration)
             .bind(&mapped.speaker)
             .bind(word_timestamps_json)
+            .bind(originals.get(mapped.id.as_str()).copied().flatten())
             .execute(&mut *tx)
             .await?;
         }
@@ -4434,6 +4439,15 @@ mod tests {
         save_diarization_labels(&pool, "review-test", &stored, &mapped)
             .await
             .unwrap();
+        let original: Option<String> =
+            sqlx::query_scalar("SELECT original_transcript FROM transcripts WHERE id = 'a'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(original.as_deref(), Some("Original draft"));
+        let has_edits: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transcripts WHERE meeting_id = 'review-test' AND original_transcript IS NOT NULL AND transcript != original_transcript)")
+            .fetch_one(&pool).await.unwrap();
+        assert!(has_edits);
         assert_eq!(
             crate::database::transcript_edits::restore_previous(&pool, "review-test")
                 .await
@@ -4449,6 +4463,31 @@ mod tests {
             serde_json::to_value(before).unwrap(),
             serde_json::to_value(after).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn split_speaker_segments_do_not_inherit_original_text() {
+        let (pool, stored, mut mapped) = label_save_fixture().await;
+        sqlx::query("UPDATE transcripts SET original_transcript = 'Original draft' WHERE id = 'a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut second_piece = mapped[0].clone();
+        mapped[0].id = "a-split-1".into();
+        mapped[0].text = "First piece".into();
+        second_piece.id = "a-split-2".into();
+        second_piece.text = "Second piece".into();
+        mapped.push(second_piece);
+        save_diarization_labels(&pool, "review-test", &stored, &mapped)
+            .await
+            .unwrap();
+        let pieces: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT original_transcript FROM transcripts WHERE id LIKE 'a-split-%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pieces, vec![None, None]);
     }
 
     #[tokio::test]
