@@ -378,7 +378,7 @@ pub async fn api_process_transcript<R: Runtime>(
         }
     });
 
-    let job = SummaryService::register_job(&m_id)?;
+    let job = SummaryService::register_job(&m_id, &model)?;
 
     // Create or reset the process entry in the database
     SummaryProcessesRepository::create_or_reset_process(&pool, &m_id)

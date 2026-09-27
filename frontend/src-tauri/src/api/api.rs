@@ -1810,6 +1810,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     let result = provider
         .process_meeting(
             crate::summary::openai_provider::OpenAICompatibleMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "clawscribe-openai-compatible-test".to_string(),
                 meeting_title: Some("ClawScribe OpenAI-compatible test".to_string()),
                 transcript: "[00:00] Alice: We will send the release checklist today.\n[00:05] Bob: I will review the installer by tomorrow.".to_string(),

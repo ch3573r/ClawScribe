@@ -238,7 +238,7 @@ fn build_combine_summary_user_prompt(combined_text: &str) -> String {
     )
 }
 
-fn build_final_report_system_prompt(
+pub(crate) fn build_final_report_system_prompt(
     section_instructions: &str,
     clean_template_markdown: &str,
 ) -> String {
@@ -389,17 +389,20 @@ pub async fn generate_meeting_summary(
                 + custom_prompt.len()
                 + SUMMARY_GROUNDING_INSTRUCTION.len()
                 + 256;
-            let budget = super::context_budget::input_budget(
-                token_threshold,
-                max_tokens.unwrap_or(if provider == &LLMProvider::BuiltInAI {
-                    4096
-                } else {
-                    super::context_budget::DEFAULT_OUTPUT_TOKENS as u32
-                }) as usize,
-                overhead,
+            let limits = super::context_budget::resolve(
+                provider,
+                model_name,
+                Some(token_threshold),
+                max_tokens.map(|v| v as usize),
+            );
+            let budget = limits.input(provider, model_name, overhead)?;
+            let piece_budget = limits.extraction().input(
+                provider,
+                model_name,
+                super::context_budget::EXTRACT_FACTS.len() + 256,
             )?;
             let (content_to_summarize, successful_chunk_count) =
-                super::context_budget::reduce(text, budget, |chunk| async move {
+                super::context_budget::reduce(text, budget, piece_budget, |chunk| async move {
                     generate_summary(
                         client,
                         provider,
@@ -410,7 +413,7 @@ pub async fn generate_meeting_summary(
                         ollama_endpoint,
                         custom_openai_endpoint,
                         allow_unencrypted,
-                        max_tokens,
+                        Some(limits.extraction().output_tokens as u32),
                         temperature,
                         top_p,
                         app_data_dir,

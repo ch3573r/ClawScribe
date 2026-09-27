@@ -172,6 +172,13 @@ pagination. Source identity checks establish which passage was cited, not whethe
 the passage entails the model's claim. Legacy summaries remain readable without
 references; regeneration requests sources.
 
+Generation groups consecutive rows into passages of roughly 45 seconds or 800
+characters and labels each with a short source tag. Before persistence, known
+tags become the existing source links using server-owned timestamps; unknown
+tags are removed. Passage references retain all transcript IDs and a combined
+fingerprint. Resolution still supports older single-row references and marks a
+passage stale if any included row changes.
+
 Transcript pages use indexed `(meeting_id, audio_start_time, id)` ordering and
 read the count and rows in one database snapshot. The UI fetches metadata and the
 first page concurrently; navigation and refetches invalidate earlier responses,
@@ -197,6 +204,61 @@ lookup and requires a configured provider; it never installs a default cloud
 configuration. API summary response readers enforce an 8 MiB limit, reject
 reported output truncation, and keep cancellation active while reading the body.
 Chat and reviewed task polishing share provider configuration resolution.
+
+Summary HTTP providers make at most three attempts for connection failures and
+HTTP 408, 429, 500, 502, 503, 504 or 529. Backoff is cancellable, honors
+Retry-After up to 60 seconds, and never restarts a full response timeout.
+Provider error messages are bounded and redact credentials and input echoes.
+
+Built-in summary models use pinned Hugging Face revisions with exact byte sizes
+and SHA-256 hashes. Transfers resume from `.partial` files and verify integrity
+before promotion to the final filename. Readiness caches successful verification
+for an unchanged file; a complete verified model needs no network request.
+
+Codex output documents and their processing log live in the meeting folder.
+Temporary prompt/transcript run files are removed on success, failure or
+cancellation. Meeting deletion removes legacy run files, and startup retries
+orphan cleanup without blocking local recording.
+
+Codex summary and chat threads use an ephemeral scratch working directory,
+read-only sandbox, no approval escalation, and disabled shell tools. Every turn
+reapplies the sandbox and approval policy; unexpected server approval requests
+are declined. These overrides also cover legacy home-mode configurations.
+
+Generated headings replace only untouched recording titles or “New Meeting”.
+Regeneration preserves manual names and ignores template title placeholders.
+
+Saving a generated summary retries three times with short delays. A persistent
+save failure marks the run failed with a regeneration message.
+
+Summary cancellation follows the job token rather than provider error wording.
+
+Starting a recording cancels Built-in AI summary jobs before stopping the helper,
+with a recording-specific message and the previous summary retained. Other
+providers continue independently.
+
+The local helper serializes model switches and requests under one exchange lock.
+Cancelling a queued request leaves the current generation intact; cancelling the
+owner stops the helper before another request can acquire the lock.
+
+Release builds resolve the local summary helper only by exact packaged filenames
+beside the executable or in its resource directory. Environment overrides and
+workspace lookup are available only in debug builds.
+
+Summary and chat budgets resolve provider/model context and output tokens together.
+GPT-4o uses 128,000 context tokens, GPT-4.1 uses 1,047,576, Llama 3.1/3.3 uses
+131,072, and Claude uses a conservative 200,000; unknown cloud models use 32,768.
+These families also apply to namespaced OpenRouter IDs. See the
+[OpenAI model specifications](https://developers.openai.com/api/docs/models/gpt-4.1)
+and [Groq Llama specifications](https://console.groq.com/docs/model/llama-3.3-70b-versatile).
+Operator endpoints use their configured context or 8,192. Ollama metadata and
+the Built-in AI registry are capped at 16,384, with an 8,192 Ollama fallback;
+the local helper receives that same context. Codex retains 32,768.
+After reserving output tokens and 256 tokens, planning converts the remainder
+to three UTF-8 bytes per token and subtracts prompt overhead in bytes. Extraction
+pieces use their short prompt and at most 1,024 output tokens; the final report
+reserves its full template. Structured OpenAI requests carry the schema once,
+with an inline schema only for strict-JSON fallback.
 
 Summary status polling has one shared timer owner across meetings. Starting or
 finishing one poll keeps other meetings' polls alive; stopped or replaced requests

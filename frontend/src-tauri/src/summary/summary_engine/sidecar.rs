@@ -73,6 +73,61 @@ impl Drop for RequestGuard {
     }
 }
 
+fn bundled_helper_names() -> [String; 2] {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let platform = if cfg!(windows) {
+        "pc-windows-msvc"
+    } else if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        "unknown-linux-gnu"
+    };
+    [
+        format!("llama-helper{suffix}"),
+        format!("llama-helper-{}-{platform}{suffix}", std::env::consts::ARCH),
+    ]
+}
+
+fn resolve_helper_from(
+    debug: bool,
+    exe_dir: &std::path::Path,
+    resource_dir: &std::path::Path,
+    overrides: [Option<PathBuf>; 3],
+) -> Result<PathBuf> {
+    let names = bundled_helper_names();
+    if debug {
+        if let Some(path) = &overrides[0] {
+            if path.is_file() {
+                return Ok(path.clone());
+            }
+        }
+    }
+    let mut directories = vec![exe_dir.to_path_buf(), resource_dir.to_path_buf()];
+    if debug {
+        if let Some(path) = &overrides[1] {
+            directories.push(path.clone());
+        }
+        if let Some(manifest) = &overrides[2] {
+            directories.push(manifest.join("binaries"));
+            if let Some(root) = manifest.parent().and_then(|dir| dir.parent()) {
+                directories.push(root.join("target/release"));
+                directories.push(root.join("target/debug"));
+            }
+        }
+    }
+    for directory in directories {
+        for name in &names {
+            let path = directory.join(name);
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Bundled local summary engine is missing. Repair or reinstall ClawScribe."
+    ))
+}
+
 impl SidecarManager {
     /// Create a new sidecar manager
     pub fn new(_app_data_dir: PathBuf) -> Result<Self> {
@@ -105,218 +160,30 @@ impl SidecarManager {
         })
     }
 
-    /// Resolve the path to llama-helper binary
+    /// Production accepts only the exact packaged helper names in app-owned locations.
     fn resolve_helper_binary() -> Result<PathBuf> {
-        // 1. Check environment variable (dev mode or manual override)
-        if let Ok(env_path) = std::env::var("MEETILY_LLAMA_HELPER") {
-            if !env_path.is_empty() {
-                let path = PathBuf::from(env_path);
-                if path.exists() {
-                    log::info!(
-                        "Using llama-helper from MEETILY_LLAMA_HELPER: {}",
-                        path.display()
-                    );
-                    return Ok(path);
-                }
-            }
-        }
-
-        // In production, Tauri bundles the binary with target triple suffix
-        // 2. Check relative to current executable (most reliable for AppImage/bundled apps)
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                log::info!(
-                    "Searching for llama-helper relative to executable: {}",
-                    exe_dir.display()
-                );
-
-                // Get the target triple (same logic as before)
-                let target_triple = std::env::var("TARGET").unwrap_or_else(|_| {
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                    {
-                        "x86_64-unknown-linux-gnu".to_string()
-                    }
-                    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-                    {
-                        "aarch64-unknown-linux-gnu".to_string()
-                    }
-                    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-                    {
-                        "x86_64-apple-darwin".to_string()
-                    }
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                    {
-                        "aarch64-apple-darwin".to_string()
-                    }
-                    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-                    {
-                        "x86_64-pc-windows-msvc".to_string()
-                    }
-                    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-                    {
-                        "aarch64-pc-windows-msvc".to_string()
-                    }
-                    #[cfg(not(any(
-                        all(
-                            target_os = "linux",
-                            any(target_arch = "x86_64", target_arch = "aarch64")
-                        ),
-                        all(
-                            target_os = "macos",
-                            any(target_arch = "x86_64", target_arch = "aarch64")
-                        ),
-                        all(
-                            target_os = "windows",
-                            any(target_arch = "x86_64", target_arch = "aarch64")
-                        )
-                    )))]
-                    {
-                        "unknown".to_string()
-                    }
-                });
-
-                let binary_name = if cfg!(windows) {
-                    format!("llama-helper-{}.exe", target_triple)
-                } else {
-                    format!("llama-helper-{}", target_triple)
-                };
-
-                // Try exact match in exe dir
-                let bundled = exe_dir.join(&binary_name);
-                if bundled.exists() {
-                    log::info!(
-                        "Found exact match next to executable: {}",
-                        bundled.display()
-                    );
-                    return Ok(bundled);
-                }
-
-                // Fuzzy match in exe dir
-                log::info!("Attempting fuzzy match in exe dir: {}", exe_dir.display());
-                if let Ok(entries) = std::fs::read_dir(exe_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("llama-helper") && !name.ends_with(".d") {
-                                log::info!(
-                                    "Found fuzzy match next to executable: {}",
-                                    path.display()
-                                );
-                                return Ok(path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Check bundled resources (RESOURCE_DIR) - Fallback
-        if let Ok(resource_dir) = std::env::var("RESOURCE_DIR") {
-            log::info!(
-                "Searching for llama-helper in RESOURCE_DIR: {}",
-                resource_dir
-            );
-            let resource_path = PathBuf::from(&resource_dir);
-            // Get the target triple again (or we could have shared it, but code duplication is safer for this tool usage)
-            let target_triple = std::env::var("TARGET").unwrap_or_else(|_| {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                {
-                    "x86_64-unknown-linux-gnu".to_string()
-                }
-                // ... (abbreviated for brevity in thought, but must be full in tool)
-                #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-                {
-                    "aarch64-unknown-linux-gnu".to_string()
-                }
-                #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-                {
-                    "x86_64-apple-darwin".to_string()
-                }
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                {
-                    "aarch64-apple-darwin".to_string()
-                }
-                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-                {
-                    "x86_64-pc-windows-msvc".to_string()
-                }
-                #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-                {
-                    "aarch64-pc-windows-msvc".to_string()
-                }
-                #[cfg(not(any(
-                    all(
-                        target_os = "linux",
-                        any(target_arch = "x86_64", target_arch = "aarch64")
-                    ),
-                    all(
-                        target_os = "macos",
-                        any(target_arch = "x86_64", target_arch = "aarch64")
-                    ),
-                    all(
-                        target_os = "windows",
-                        any(target_arch = "x86_64", target_arch = "aarch64")
-                    )
-                )))]
-                {
-                    "unknown".to_string()
-                }
-            });
-
-            let binary_name = if cfg!(windows) {
-                format!("llama-helper-{}.exe", target_triple)
-            } else {
-                format!("llama-helper-{}", target_triple)
-            };
-
-            let bundled = resource_path.join(&binary_name);
-            if bundled.exists() {
-                log::info!("Found exact match in RESOURCE_DIR: {}", bundled.display());
-                return Ok(bundled);
-            }
-
-            // Fuzzy match in RESOURCE_DIR
-            if let Ok(entries) = std::fs::read_dir(&resource_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("llama-helper") && !name.ends_with(".d") {
-                            log::info!("Found fuzzy match in RESOURCE_DIR: {}", path.display());
-                            return Ok(path);
-                        }
-                    }
-                }
-            }
+        let exe = std::env::current_exe()?;
+        let exe_dir = exe
+            .parent()
+            .ok_or_else(|| anyhow!("Could not locate application directory"))?;
+        let resources = if cfg!(target_os = "macos") {
+            exe_dir.join("../Resources")
         } else {
-            log::warn!("RESOURCE_DIR environment variable not set");
-        }
-
-        // 3. Fallback for dev: try relative paths from workspace (no target triple in dev builds)
-        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let project_root = PathBuf::from(&manifest_dir)
-                .parent()
-                .and_then(|p| p.parent())
-                .ok_or_else(|| anyhow!("Failed to determine project root"))?
-                .to_path_buf();
-
-            let candidates = vec![
-                project_root.join("target/release/llama-helper"),
-                project_root.join("target/debug/llama-helper"),
-                project_root.join("target/release/llama-helper.exe"),
-                project_root.join("target/debug/llama-helper.exe"),
-            ];
-
-            for candidate in candidates {
-                if candidate.exists() {
-                    log::info!("Using dev llama-helper: {}", candidate.display());
-                    return Ok(candidate);
-                }
-            }
-        }
-
-        Err(anyhow!(
-            "llama-helper binary not found. Build with 'cd llama-helper && cargo build --release' or set MEETILY_LLAMA_HELPER env var."
-        ))
+            exe_dir.join("resources")
+        };
+        #[cfg(debug_assertions)]
+        let overrides = [
+            std::env::var_os("MEETILY_LLAMA_HELPER").map(PathBuf::from),
+            std::env::var_os("RESOURCE_DIR").map(PathBuf::from),
+            Some(
+                std::env::var_os("CARGO_MANIFEST_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+            ),
+        ];
+        #[cfg(not(debug_assertions))]
+        let overrides = [None, None, None];
+        resolve_helper_from(cfg!(debug_assertions), exe_dir, &resources, overrides)
     }
 
     /// Ensure sidecar is running, spawn if needed
@@ -417,12 +284,48 @@ impl SidecarManager {
         Ok(())
     }
 
-    /// Send a request to the sidecar and wait for response
+    /// Send a request to the sidecar and wait for response.
     pub async fn send_request(&self, request_json: String, timeout: Duration) -> Result<String> {
-        // Track active request
-        let _guard = RequestGuard::new(self.active_request_count.clone());
-        let _exchange = self.request_lock.lock().await;
+        self.send_request_cancellable(request_json, timeout, None, None)
+            .await
+    }
 
+    pub async fn send_request_cancellable(
+        &self,
+        request_json: String,
+        timeout: Duration,
+        model: Option<PathBuf>,
+        token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
+        let _guard = RequestGuard::new(self.active_request_count.clone());
+        let fallback_token = tokio_util::sync::CancellationToken::new();
+        let token = token.unwrap_or(&fallback_token);
+        // Waiting requests have no ownership of the helper and must never kill it.
+        let _exchange = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(anyhow!("Generation cancelled while queued")),
+            lock = self.request_lock.lock() => lock,
+        };
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => None,
+            result = async {
+                // Model switches and process startup belong to the exchange owner too.
+                if let Some(model) = model { self.ensure_running(model).await?; }
+                self.exchange_request(request_json, timeout).await
+            } => Some(result),
+        };
+        match result {
+            Some(result) => result,
+            None => {
+                // Keep the exchange guard until the cancelled worker has stopped.
+                self.shutdown().await?;
+                Err(anyhow!("Generation cancelled"))
+            }
+        }
+    }
+
+    async fn exchange_request(&self, request_json: String, timeout: Duration) -> Result<String> {
         // Write request to stdin
         {
             let mut stdin_lock = self.stdin_writer.lock().await;
@@ -811,6 +714,83 @@ mod protocol_tests {
     }
 
     #[tokio::test]
+    async fn queued_cancellation_leaves_the_running_exchange_intact() {
+        let (manager, mut stderr) = fake_sidecar(
+            r#"
+[Console]::In.ReadLine() | Out-Null
+[Console]::Error.WriteLine('ready')
+Start-Sleep -Milliseconds 700
+[Console]::Out.WriteLine('{"type":"response","text":"Running answer","error":null}')
+[Console]::In.ReadLine() | Out-Null
+"#,
+        )
+        .await;
+        let running = manager.clone();
+        let task = tokio::spawn(async move {
+            running
+                .send_request("{}".into(), Duration::from_secs(5))
+                .await
+        });
+        let mut ready = String::new();
+        stderr.read_line(&mut ready).await.unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        let queued_manager = manager.clone();
+        let queued_token = token.clone();
+        let queued = tokio::spawn(async move {
+            queued_manager
+                .send_request_cancellable(
+                    "{}".into(),
+                    Duration::from_secs(5),
+                    None,
+                    Some(&queued_token),
+                )
+                .await
+        });
+        while manager.active_request_count.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        token.cancel();
+        assert!(queued
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("queued"));
+        assert!(manager.is_healthy());
+        assert!(task.await.unwrap().unwrap().contains("Running answer"));
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_owner_stops_the_helper_before_unlocking() {
+        let (manager, mut stderr) = fake_sidecar("[Console]::In.ReadLine() | Out-Null; [Console]::Error.WriteLine('ready'); Start-Sleep -Seconds 60").await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let running = manager.clone();
+        let running_token = token.clone();
+        let task = tokio::spawn(async move {
+            running
+                .send_request_cancellable(
+                    "{}".into(),
+                    Duration::from_secs(60),
+                    None,
+                    Some(&running_token),
+                )
+                .await
+        });
+        let mut ready = String::new();
+        stderr.read_line(&mut ready).await.unwrap();
+        token.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(6), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!manager.is_healthy());
+        assert!(manager.request_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
     async fn health_check_and_generation_cannot_overlap_jsonl_exchanges() {
         let script = r#"
 $reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput())
@@ -890,5 +870,38 @@ Start-Sleep -Seconds 60
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(!manager.is_healthy());
         assert_eq!(manager.active_request_count.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+    #[test]
+    fn release_ignores_all_environment_candidates_and_rejects_fuzzy_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("app");
+        let resources = exe.join("resources");
+        let external = temp.path().join("external");
+        let manifest = temp.path().join("project/frontend/src-tauri");
+        for dir in [&exe, &resources, &external, &manifest.join("binaries")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let names = bundled_helper_names();
+        let override_file = external.join(&names[0]);
+        std::fs::write(&override_file, "synthetic executable placeholder").unwrap();
+        std::fs::write(manifest.join("binaries").join(&names[1]), "placeholder").unwrap();
+        std::fs::write(exe.join("llama-helper-untrusted.exe"), "placeholder").unwrap();
+        let overrides = [Some(override_file.clone()), Some(external), Some(manifest)];
+        assert!(resolve_helper_from(false, &exe, &resources, overrides.clone()).is_err());
+        assert_eq!(
+            resolve_helper_from(true, &exe, &resources, overrides.clone()).unwrap(),
+            override_file
+        );
+        let bundled = resources.join(&names[0]);
+        std::fs::write(&bundled, "placeholder").unwrap();
+        assert_eq!(
+            resolve_helper_from(false, &exe, &resources, overrides).unwrap(),
+            bundled
+        );
     }
 }

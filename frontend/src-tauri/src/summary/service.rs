@@ -31,8 +31,16 @@ pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> =
     Lazy::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
 
 // Global registry for cancellation tokens (thread-safe)
-static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> =
+static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, ActiveSummaryJob>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+const RECORDING_INTERRUPTED_SUMMARY: &str =
+    "Local summary stopped because a recording started. Generate it again afterwards.";
+struct ActiveSummaryJob {
+    token: CancellationToken,
+    builtin: bool,
+    reason: Option<&'static str>,
+}
 
 /// Holds one generation slot from command acceptance through persistence.
 /// Early returns and cancelled futures always remove their registered token.
@@ -70,6 +78,104 @@ fn strip_title_if_present(markdown: &str) -> String {
         strip_leading_title(markdown)
     } else {
         markdown.to_string()
+    }
+}
+
+fn is_default_meeting_title(title: &str) -> bool {
+    title == "New Meeting"
+        || regex::Regex::new(r"^Meeting \d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+            .unwrap()
+            .is_match(title)
+}
+
+async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str) {
+    let Some(title) = extract_meeting_name_from_markdown(markdown).filter(|title| {
+        !title.trim().is_empty() && !title.to_lowercase().contains("<add title here>")
+    }) else {
+        return;
+    };
+    let current = sqlx::query_scalar::<_, String>("SELECT title FROM meetings WHERE id = ?")
+        .bind(meeting)
+        .fetch_optional(pool)
+        .await;
+    if let Ok(Some(current)) = current {
+        if is_default_meeting_title(&current) {
+            // A rename while generation was in flight wins over the generated heading.
+            if sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ?")
+                .bind(title).bind(meeting).bind(current).execute(pool).await.is_err() {
+                warn!("Could not apply generated meeting title");
+            }
+        }
+    }
+}
+
+const SUMMARY_SAVE_FAILED: &str =
+    "The summary was generated but could not be saved. Generate it again.";
+
+async fn retry_save<S, SF, F, FF, E>(mut save: S, fail: F) -> Result<(), String>
+where
+    S: FnMut() -> SF,
+    SF: std::future::Future<Output = Result<(), E>>,
+    F: FnOnce() -> FF,
+    FF: std::future::Future<Output = Result<(), E>>,
+{
+    for attempt in 0..3 {
+        if save().await.is_ok() {
+            return Ok(());
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(100 * (1 << attempt))).await;
+        }
+    }
+    if fail().await.is_err() {
+        error!("Could not persist summary save failure status");
+    }
+    Err(SUMMARY_SAVE_FAILED.into())
+}
+
+async fn save_completed_with_retry(
+    pool: &SqlitePool,
+    meeting: &str,
+    result: serde_json::Value,
+    chunks: i64,
+    duration: f64,
+) -> Result<(), String> {
+    retry_save(
+        || {
+            SummaryProcessesRepository::update_process_completed(
+                pool,
+                meeting,
+                result.clone(),
+                chunks,
+                duration,
+            )
+        },
+        || SummaryProcessesRepository::update_process_failed(pool, meeting, SUMMARY_SAVE_FAILED),
+    )
+    .await
+}
+
+async fn finish_provider_error(
+    pool: &SqlitePool,
+    meeting: &str,
+    token: &CancellationToken,
+    error: &str,
+) {
+    let result = if token.is_cancelled() {
+        {
+            let reason = CANCELLATION_REGISTRY
+                .lock()
+                .ok()
+                .and_then(|jobs| jobs.get(meeting).and_then(|job| job.reason))
+                .unwrap_or("Generation was cancelled by user");
+            SummaryProcessesRepository::update_process_cancelled_with_reason(pool, meeting, reason)
+                .await
+        }
+    } else {
+        SummaryProcessesRepository::update_process_failed(pool, meeting, error).await
+    };
+    if result.is_err() {
+        error!("Could not save summary failure status");
     }
 }
 
@@ -213,7 +319,7 @@ fn extract_cached_english_markdown(
 pub struct SummaryService;
 
 impl SummaryService {
-    pub(crate) fn register_job(meeting_id: &str) -> Result<SummaryJob, String> {
+    pub(crate) fn register_job(meeting_id: &str, provider: &str) -> Result<SummaryJob, String> {
         let mut registry = CANCELLATION_REGISTRY
             .lock()
             .map_err(|_| "Could not lock summary jobs")?;
@@ -221,19 +327,35 @@ impl SummaryService {
             return Err("This meeting already has a summary in progress. Wait for it to finish or cancel it.".into());
         }
         let token = CancellationToken::new();
-        registry.insert(meeting_id.to_string(), token.clone());
+        registry.insert(
+            meeting_id.to_string(),
+            ActiveSummaryJob {
+                token: token.clone(),
+                builtin: LLMProvider::from_str(provider) == Ok(LLMProvider::BuiltInAI),
+                reason: None,
+            },
+        );
         Ok(SummaryJob {
             meeting_id: meeting_id.to_string(),
             token,
         })
     }
 
+    pub fn cancel_local_summaries_for_recording() {
+        if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
+            for job in registry.values_mut().filter(|job| job.builtin) {
+                job.reason = Some(RECORDING_INTERRUPTED_SUMMARY);
+                job.token.cancel();
+            }
+        }
+    }
+
     /// Cancels the summary generation for a meeting
     pub fn cancel_summary(meeting_id: &str) -> bool {
         if let Ok(registry) = CANCELLATION_REGISTRY.lock() {
-            if let Some(token) = registry.get(meeting_id) {
+            if let Some(job) = registry.get(meeting_id) {
                 info!("Cancelling summary generation for meeting: {}", meeting_id);
-                token.cancel();
+                job.token.cancel();
                 return true;
             }
         }
@@ -482,34 +604,17 @@ impl SummaryService {
             api_key
         };
 
-        // Dynamically fetch context size based on provider and model
-        let token_threshold = if provider == LLMProvider::Ollama {
-            super::context_budget::ollama_context(&model_name, ollama_endpoint.as_deref()).await
-        } else if provider == LLMProvider::BuiltInAI {
-            // Get model's context size from registry
-            use crate::summary::summary_engine::models;
-            let model = models::get_model_by_name(&model_name)
-                .ok_or_else(|| format!("Unknown model: {}", model_name));
-
-            match model {
-                Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.min(8192) as usize;
-                    info!(
-                        "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
-                        model_def.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!("{}, using default 2048", e);
-                    1748 // 2048 - 300 for overhead
-                }
-            }
+        let context_hint = if provider == LLMProvider::Ollama {
+            Some(
+                super::context_budget::ollama_context(&model_name, ollama_endpoint.as_deref())
+                    .await,
+            )
         } else {
-            // Unknown cloud endpoints also have finite context limits.
-            super::context_budget::DEFAULT_CONTEXT_TOKENS
+            None
         };
+        let token_threshold =
+            super::context_budget::resolve(&provider, &model_name, context_hint, None)
+                .context_tokens;
 
         // Get app data directory for BuiltInAI provider
         let app_data_dir = _app.path().app_data_dir().ok();
@@ -540,7 +645,7 @@ impl SummaryService {
                 .as_deref()
                 .or(detected_summary_language.as_deref())
                 .unwrap_or("en");
-            format!("{custom_prompt}\n\nPopulate notes_markdown with the complete meeting report in language {language}, using the exact section layout and instructions below. Include supplied source links with supported claims. Also populate all structured decision, risk, question, action and email fields for exports. Do not omit structured fields just because they are in the report.\n\n{}\n\n{}", template.to_markdown_structure(), template.to_section_instructions())
+            structured_provider_prompt(&custom_prompt, &template, language)
         } else {
             custom_prompt
         };
@@ -647,6 +752,7 @@ impl SummaryService {
                     openai_provider
                         .process_meeting(
                             OpenAICompatibleMeetingProcessRequest {
+                                sources: summary_sources.clone(),
                                 meeting_id: meeting_id.clone(),
                                 meeting_title,
                                 transcript: text.clone(),
@@ -668,6 +774,7 @@ impl SummaryService {
                         "✓ OpenAI-compatible provider processed meeting_id: {}. Duration: {:.2}s",
                         meeting_id, duration
                     );
+                    apply_generated_title(&pool, &meeting_id, &api_result.markdown).await;
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&api_result.markdown),
                         "structured_meeting_output": api_result.structured_output,
@@ -679,14 +786,9 @@ impl SummaryService {
                         }
                     });
                     super::sources::attach(&mut result_json, &summary_sources);
-                    if let Err(e) = SummaryProcessesRepository::update_process_completed(
-                        &pool,
-                        &meeting_id,
-                        result_json,
-                        1,
-                        duration,
-                    )
-                    .await
+                    if let Err(e) =
+                        save_completed_with_retry(&pool, &meeting_id, result_json, 1, duration)
+                            .await
                     {
                         error!(
                             "Failed to save OpenAI-compatible process for {}: {}",
@@ -695,19 +797,7 @@ impl SummaryService {
                     }
                 }
                 Err(e) => {
-                    if e.contains("cancelled") {
-                        if let Err(db_err) =
-                            SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id)
-                                .await
-                        {
-                            error!(
-                                "Failed to update DB status to cancelled for {}: {}",
-                                meeting_id, db_err
-                            );
-                        }
-                    } else {
-                        Self::update_process_failed(&pool, &meeting_id, &e).await;
-                    }
+                    finish_provider_error(&pool, &meeting_id, cancellation_token, &e).await;
                 }
             }
             return;
@@ -739,18 +829,31 @@ impl SummaryService {
 
             let result = match provider_from_app(&_app) {
                 Ok(codex_provider) => {
-                    super::llm_client::with_cancellation(
-                        Some(cancellation_token),
-                        codex_provider.process_meeting(CodexMeetingProcessRequest {
-                            meeting_id: meeting_id.clone(),
-                            meeting_title,
-                            transcript: text.clone(),
-                            custom_prompt: Some(custom_prompt.clone()),
-                            output_dir,
-                            scratch_root: None,
-                        }),
-                    )
-                    .await
+                    let output_dir = match output_dir {
+                        Some(path) => Ok(path),
+                        None => {
+                            super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id)
+                                .await
+                        }
+                    };
+                    match output_dir {
+                        Err(error) => Err(error),
+                        Ok(output_dir) => {
+                            super::llm_client::with_cancellation(
+                                Some(cancellation_token),
+                                codex_provider.process_meeting(CodexMeetingProcessRequest {
+                                    sources: summary_sources.clone(),
+                                    meeting_id: meeting_id.clone(),
+                                    meeting_title,
+                                    transcript: text.clone(),
+                                    custom_prompt: Some(custom_prompt.clone()),
+                                    output_dir: Some(output_dir),
+                                    scratch_root: None,
+                                }),
+                            )
+                            .await
+                        }
+                    }
                 }
                 Err(e) => Err(e),
             };
@@ -763,6 +866,7 @@ impl SummaryService {
                         "✓ Codex processed meeting_id: {}. Duration: {:.2}s",
                         meeting_id, duration
                     );
+                    apply_generated_title(&pool, &meeting_id, &codex_result.markdown).await;
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&codex_result.markdown),
                         "structured_meeting_output": codex_result.structured_output,
@@ -775,32 +879,15 @@ impl SummaryService {
                         }
                     });
                     super::sources::attach(&mut result_json, &summary_sources);
-                    if let Err(e) = SummaryProcessesRepository::update_process_completed(
-                        &pool,
-                        &meeting_id,
-                        result_json,
-                        1,
-                        duration,
-                    )
-                    .await
+                    if let Err(e) =
+                        save_completed_with_retry(&pool, &meeting_id, result_json, 1, duration)
+                            .await
                     {
                         error!("Failed to save Codex process for {}: {}", meeting_id, e);
                     }
                 }
                 Err(e) => {
-                    if e.contains("cancelled") {
-                        if let Err(db_err) =
-                            SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id)
-                                .await
-                        {
-                            error!(
-                                "Failed to update DB status to cancelled for {}: {}",
-                                meeting_id, db_err
-                            );
-                        }
-                    } else {
-                        Self::update_process_failed(&pool, &meeting_id, &e).await;
-                    }
+                    finish_provider_error(&pool, &meeting_id, cancellation_token, &e).await;
                 }
             }
             return;
@@ -885,18 +972,7 @@ impl SummaryService {
                 );
                 info!("Final markdown generated ({} chars)", final_markdown.len());
 
-                if let Some(name) =
-                    extract_meeting_name_from_markdown(&final_markdown).filter(|n| !n.is_empty())
-                {
-                    info!("Extracted a meeting title from the summary");
-                    if let Err(e) =
-                        MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name).await
-                    {
-                        error!("Failed to update meeting name for {}: {}", meeting_id, e);
-                    } else {
-                        info!("Successfully updated meeting name for {}", meeting_id);
-                    }
-                }
+                apply_generated_title(&pool, &meeting_id, &final_markdown).await;
 
                 let mut result_json = build_summary_result_json(
                     &final_markdown,
@@ -907,14 +983,9 @@ impl SummaryService {
 
                 super::sources::attach(&mut result_json, &summary_sources);
                 // Update database with completed status
-                if let Err(e) = SummaryProcessesRepository::update_process_completed(
-                    &pool,
-                    &meeting_id,
-                    result_json,
-                    num_chunks,
-                    duration,
-                )
-                .await
+                if let Err(e) =
+                    save_completed_with_retry(&pool, &meeting_id, result_json, num_chunks, duration)
+                        .await
                 {
                     error!("Failed to save completed process for {}: {}", meeting_id, e);
                 } else {
@@ -923,23 +994,7 @@ impl SummaryService {
             }
             Err(e) => {
                 // Check if error is due to cancellation
-                if e.contains("cancelled") {
-                    info!(
-                        "Summary generation was cancelled for meeting_id: {}",
-                        meeting_id
-                    );
-                    if let Err(db_err) =
-                        SummaryProcessesRepository::update_process_cancelled(&pool, &meeting_id)
-                            .await
-                    {
-                        error!(
-                            "Failed to update DB status to cancelled for {}: {}",
-                            meeting_id, db_err
-                        );
-                    }
-                } else {
-                    Self::update_process_failed(&pool, &meeting_id, &e).await;
-                }
+                finish_provider_error(&pool, &meeting_id, cancellation_token, &e).await;
             }
         }
     }
@@ -973,14 +1028,14 @@ mod tests {
     #[test]
     fn summary_job_guards_reject_duplicates_and_release_early_failures() {
         let meeting = "summary-job-guard-test";
-        let job = SummaryService::register_job(meeting).unwrap();
-        assert!(SummaryService::register_job(meeting).is_err());
+        let job = SummaryService::register_job(meeting, "openai").unwrap();
+        assert!(SummaryService::register_job(meeting, "openai").is_err());
         assert!(SummaryService::cancel_summary(meeting));
         assert!(job.token.is_cancelled());
-        assert!(SummaryService::register_job(meeting).is_err());
+        assert!(SummaryService::register_job(meeting, "openai").is_err());
         drop(job);
         assert!(!SummaryService::cancel_summary(meeting));
-        let next = SummaryService::register_job(meeting).unwrap();
+        let next = SummaryService::register_job(meeting, "openai").unwrap();
         assert!(!next.token.is_cancelled());
     }
 
@@ -1343,5 +1398,139 @@ mod tests {
     fn test_extract_cached_english_from_malformed_json_errors() {
         let raw = r#"{ not valid json"#;
         assert!(extract_cached_english_markdown(raw, &sample_cache_source(), Some("de")).is_err());
+    }
+}
+
+/// The exact structured-provider instructions used by generation and budget tests.
+pub(crate) fn structured_provider_prompt(
+    custom: &str,
+    template: &super::templates::Template,
+    language: &str,
+) -> String {
+    format!("{custom}\n\nPopulate notes_markdown with the complete meeting report in language {language}, using the exact section layout and instructions below. Include supplied source links with supported claims. Also populate all structured decision, risk, question, action and email fields for exports. Do not omit structured fields just because they are in the report.\n\n{}\n\n{}", template.to_markdown_structure(), template.to_section_instructions())
+}
+
+#[cfg(test)]
+mod generated_title_tests {
+    use super::*;
+    #[tokio::test]
+    async fn only_default_titles_are_replaced_and_placeholders_are_ignored() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for (existing, proposed, expected) in [
+            ("My chosen title", "New title", "My chosen title"),
+            ("New Meeting", "<Add Title here>", "New Meeting"),
+            ("New Meeting", "Planning", "Planning"),
+            ("Meeting 2026-01-02_03-04-05", "Planning", "Planning"),
+        ] {
+            sqlx::query("UPDATE meetings SET title = ? WHERE id = 'review-test'")
+                .bind(existing)
+                .execute(&pool)
+                .await
+                .unwrap();
+            apply_generated_title(&pool, "review-test", &format!("# {proposed}\nNotes")).await;
+            let actual: String =
+                sqlx::query_scalar("SELECT title FROM meetings WHERE id = 'review-test'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod save_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[tokio::test]
+    async fn transient_save_succeeds_and_persistent_failure_is_terminal() {
+        for succeeds in [true, false] {
+            let attempts = AtomicUsize::new(0);
+            let failed = AtomicUsize::new(0);
+            let result = retry_save(
+                || async {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if succeeds && attempt == 2 {
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                },
+                || async {
+                    failed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 3);
+            assert_eq!(failed.load(Ordering::SeqCst), usize::from(!succeeds));
+            if succeeds {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err(), SUMMARY_SAVE_FAILED);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_status_tests {
+    use super::*;
+    #[tokio::test]
+    async fn provider_wording_cannot_impersonate_user_cancellation() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        finish_provider_error(
+            &pool,
+            "review-test",
+            &token,
+            "Provider cancelled its request",
+        )
+        .await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "failed");
+        token.cancel();
+        finish_provider_error(&pool, "review-test", &token, "Connection closed").await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
+    }
+}
+
+#[cfg(test)]
+mod recording_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn recording_cancels_only_local_jobs_with_an_actionable_reason() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let cloud = SummaryService::register_job("recording-test-cloud", "openai").unwrap();
+        SummaryService::cancel_local_summaries_for_recording();
+        assert!(local.token.is_cancelled());
+        assert!(!cloud.token.is_cancelled());
+        finish_provider_error(
+            &pool,
+            "review-test",
+            &local.token,
+            "process may have crashed",
+        )
+        .await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.error.as_deref(), Some(RECORDING_INTERRUPTED_SUMMARY));
     }
 }

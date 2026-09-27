@@ -204,6 +204,19 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<(), sqlx::Error> {
+        Self::update_process_cancelled_with_reason(
+            pool,
+            meeting_id,
+            "Generation was cancelled by user",
+        )
+        .await
+    }
+
+    pub async fn update_process_cancelled_with_reason(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        reason: &str,
+    ) -> Result<(), sqlx::Error> {
         let now = Utc::now();
 
         // Restore from backup if it exists, otherwise keep current result
@@ -214,7 +227,7 @@ impl SummaryProcessesRepository {
                 status = 'cancelled',
                 updated_at = ?,
                 end_time = ?,
-                error = 'Generation was cancelled by user',
+                error = ?,
                 result = COALESCE(result_backup, result),
                 result_backup = NULL,
                 result_backup_timestamp = NULL
@@ -223,6 +236,7 @@ impl SummaryProcessesRepository {
         )
         .bind(now)
         .bind(now)
+        .bind(reason)
         .bind(meeting_id)
         .execute(pool)
         .await?;

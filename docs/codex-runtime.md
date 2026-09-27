@@ -69,3 +69,16 @@ The provider uses Codex app-server over stdio JSONL:
 
 Secrets, auth headers, token-looking values, and transcript content are redacted
 or omitted from debug logs by default.
+
+Summary threads and turns explicitly set their scratch working directory,
+read-only sandbox and `never` approval policy. Shell and unified execution are
+disabled through thread configuration; server approval requests are declined.
+The fields follow the pinned [0.157 thread protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json)
+and [turn protocol](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json).
+
+The isolated profile requires `cli_auth_credentials_store = "keyring"`, supported
+by the [pinned credential-storage implementation](https://github.com/openai/codex/blob/rust-v0.157.0/codex-rs/login/src/auth/storage.rs).
+Existing profiles receive this setting while retaining other configuration.
+Users with an older file-based sign-in sign in once again; the old `auth.json`
+is removed only after a keyring-backed account is available. Keyring failures
+do not fall back to plaintext.

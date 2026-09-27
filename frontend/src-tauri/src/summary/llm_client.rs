@@ -8,7 +8,6 @@ use tracing::info;
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 /// Current Claude models think adaptively by default, and thinking counts toward
 /// `max_tokens`; this cap leaves room for it while staying non-streaming.
-const CLAUDE_MAX_OUTPUT_TOKENS: u32 = 16_000;
 
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]
@@ -127,6 +126,7 @@ pub async fn generate_summary(
             model_name,
             system_prompt,
             user_prompt,
+            max_tokens,
             cancellation_token,
         )
         .await
@@ -227,7 +227,9 @@ pub async fn generate_summary(
     );
 
     // Build request body based on provider
-    let output_tokens = max_tokens.unwrap_or(super::context_budget::DEFAULT_OUTPUT_TOKENS as u32);
+    let output_tokens =
+        super::context_budget::resolve(provider, model_name, None, max_tokens.map(|v| v as usize))
+            .output_tokens as u32;
     let request_body = if provider == &LLMProvider::Ollama {
         let context = super::context_budget::ollama_context(model_name, ollama_endpoint).await;
         let budget = super::context_budget::input_budget(
@@ -278,7 +280,7 @@ pub async fn generate_summary(
         serde_json::json!(ClaudeRequest {
             system: system_prompt.to_string(),
             model: model_name.to_string(),
-            max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
+            max_tokens: output_tokens,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_prompt.to_string(),
@@ -292,48 +294,35 @@ pub async fn generate_summary(
         model_name
     );
 
-    with_cancellation(cancellation_token, async {
-        let checked_client;
-        let client = if matches!(
-            provider,
-            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
-        ) {
-            checked_client = crate::openai::secret_destination::secret_client(
-                Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
-                &api_url,
-                allow_unencrypted,
-            )
-            .await?;
-            &checked_client
-        } else {
-            client
-        };
-        let response = client
-            .post(api_url)
-            .headers(headers)
-            .json(&request_body)
-            .timeout(REQUEST_TIMEOUT_DURATION)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    format!(
-                        "LLM request timed out after {} seconds",
-                        REQUEST_TIMEOUT_DURATION.as_secs()
-                    )
-                } else {
-                    format!("Failed to send request to LLM: {}", error.without_url())
-                }
-            })?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "LLM API request failed with HTTP {}. Check provider settings and retry.",
-                response.status().as_u16()
-            ));
-        }
-        parse_response(provider, read_response_json(response).await?)
-    })
-    .await
+    let response = super::http_retry::send(
+        || async {
+            let checked_client;
+            let client = if matches!(
+                provider,
+                LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
+            ) {
+                checked_client = crate::openai::secret_destination::secret_client(
+                    Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
+                    &api_url,
+                    allow_unencrypted,
+                )
+                .await?;
+                &checked_client
+            } else {
+                client
+            };
+            Ok(client
+                .post(&api_url)
+                .headers(headers.clone())
+                .json(&request_body)
+                .timeout(REQUEST_TIMEOUT_DURATION))
+        },
+        cancellation_token,
+        api_key,
+        &[system_prompt, user_prompt],
+    )
+    .await?;
+    parse_response(provider, response)
 }
 
 /// Cancellation covers the entire operation, including a response body that may

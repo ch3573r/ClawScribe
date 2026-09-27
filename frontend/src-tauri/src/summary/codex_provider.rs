@@ -24,7 +24,7 @@ const CODEX_APP_SERVER_MISSING: &str =
     "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
 const CODEX_REAUTH_MESSAGE: &str =
-    "Codex app-server authentication is required. Sign in with ChatGPT again.";
+    "Codex app-server authentication is required. Sign in with ChatGPT again to store credentials securely.";
 const CODEX_OVERLOAD_CODE: i64 = -32001;
 const CODEX_MAX_OVERLOAD_RETRIES: usize = 3;
 
@@ -48,6 +48,161 @@ mod app_server_tests {
             perms.set_mode(0o755);
             fs::set_permissions(path, perms).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn fake_server_receives_restrictions_and_approval_decline_in_both_home_modes() {
+        for mode in [
+            CodexHomeMode::ClawscribeIsolated,
+            CodexHomeMode::ExistingUserCodexSession,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let script = temp.path().join("fake-server.cjs");
+            fs::write(&script, r#"
+const readline = require('readline');
+const assert = require('assert');
+const fs = require('fs');
+let turn;
+const send = m => process.stdout.write(JSON.stringify(m)+'\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+ const m=JSON.parse(line);
+ if(m.method==='initialize') send({id:m.id,result:{}});
+ if(m.method==='thread/start') {
+   assert.equal(m.params.approvalPolicy,'never'); assert.equal(m.params.sandbox,'read-only');
+   assert.equal(m.params.config['features.shell_tool'],false);
+   assert.equal(m.params.config['features.unified_exec'],false);
+   assert.equal(m.params.cwd,process.cwd());
+   send({id:m.id,result:{thread:{id:'thread-1'}}});
+ }
+ if(m.method==='turn/start') {
+   assert.equal(m.params.approvalPolicy,'never'); assert.equal(m.params.sandboxPolicy.type,'readOnly');
+   assert.equal(m.params.sandboxPolicy.networkAccess,false); assert.equal(m.params.cwd,process.cwd());
+   turn=m; send({id:900,method:'item/commandExecution/requestApproval',params:{}});
+ }
+ if(m.id===900) {
+   assert.equal(m.result.decision,'decline');
+   fs.writeFileSync('verified', 'restricted');
+   send({id:turn.id,result:{text:'safe answer'}});
+   send({method:'turn/completed',params:{status:'completed'}});
+ }
+});
+"#).unwrap();
+            let mut provider = CodexAppServerProvider::new(
+                CodexProviderConfig {
+                    codex_home_path: Some(
+                        temp.path().join("profile").to_string_lossy().to_string(),
+                    ),
+                    ..CodexProviderConfig::default()
+                },
+                script.clone(),
+            )
+            .unwrap();
+            provider.config.codex_home_mode = mode.clone();
+            if mode == CodexHomeMode::ExistingUserCodexSession {
+                provider.codex_home = None;
+            }
+            let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+            let node = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|dir| dir.join(node_name))
+                .find(|path| path.is_file())
+                .expect("Node.js is required for frontend and fake app-server tests");
+            let mut command = TokioCommand::new(node);
+            command.arg(&script);
+            let mut session =
+                AppServerSession::start_command(&provider, command, Some(temp.path()))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                session
+                    .process_raw_prompt("test-model", "Do not run commands")
+                    .await
+                    .unwrap(),
+                "safe answer"
+            );
+            assert_eq!(
+                session
+                    .process_turn(
+                        "test-model",
+                        "untrusted transcript",
+                        None,
+                        serde_json::json!({})
+                    )
+                    .await
+                    .unwrap(),
+                "safe answer"
+            );
+            assert!(temp.path().join("verified").exists());
+            session.take_stderr().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn scratch_cleanup_keeps_outputs_and_removes_deleted_meeting_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runs");
+        let scratch = root.join("review-test");
+        let output = temp.path().join("meeting");
+        fs::create_dir_all(&scratch).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        {
+            let _run = RunScratch(scratch.clone());
+            fs::write(scratch.join("transcript.md"), "synthetic transcript").unwrap();
+            fs::write(output.join("meeting-notes.md"), "generated output").unwrap();
+        }
+        assert!(!scratch.exists());
+        assert!(output.join("meeting-notes.md").exists());
+        fs::create_dir_all(&scratch).unwrap();
+        remove_meeting_runs_at(&root, "review-test").await;
+        assert!(!scratch.exists());
+        fs::create_dir_all(&scratch).unwrap();
+        let orphan = root.join("deleted-meeting");
+        fs::create_dir_all(&orphan).unwrap();
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        cleanup_orphaned_runs_at(&pool, &root).await;
+        assert!(scratch.exists());
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn isolated_config_enforces_keyring_once_and_preserves_legacy_auth_until_signin() {
+        let temp = tempfile::tempdir().unwrap();
+        prepare_isolated_codex_home(temp.path(), "test-model").unwrap();
+        let path = temp.path().join("config.toml");
+        let fresh = fs::read_to_string(&path).unwrap();
+        assert!(fresh.contains("cli_auth_credentials_store = \"keyring\""));
+        fs::write(&path, "# Keep this comment\nmodel = \"test-model\"\ncli_auth_credentials_store = \"file\"\n[features]\nshell_tool = false\n").unwrap();
+        fs::write(
+            temp.path().join("auth.json"),
+            "synthetic legacy credential placeholder",
+        )
+        .unwrap();
+        prepare_isolated_codex_home(temp.path(), "other-model").unwrap();
+        let once = fs::read_to_string(&path).unwrap();
+        prepare_isolated_codex_home(temp.path(), "other-model").unwrap();
+        assert_eq!(once, fs::read_to_string(&path).unwrap());
+        assert_eq!(once.matches("cli_auth_credentials_store").count(), 1);
+        assert!(
+            once.contains("# Keep this comment") && once.contains("[features]\nshell_tool = false")
+        );
+        remove_legacy_auth_after_keyring_signin(temp.path(), false);
+        assert!(temp.path().join("auth.json").exists());
+        remove_legacy_auth_after_keyring_signin(temp.path(), true);
+        assert!(!temp.path().join("auth.json").exists());
+    }
+
+    #[test]
+    fn scratch_cleanup_cannot_remove_a_replacement_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let meeting = temp.path().join("meeting");
+        let first = meeting.join("run-first");
+        let second = meeting.join("run-second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("transcript.md"), "synthetic replacement input").unwrap();
+        drop(RunScratch(first));
+        assert!(second.join("transcript.md").exists());
+        drop(RunScratch(second));
+        assert!(!meeting.exists());
     }
 
     #[test]
@@ -465,6 +620,7 @@ for line in sys.stdin:
         let provider = provider_with_fake(&temp, "ok");
         let result = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-1".to_string(),
                 meeting_title: Some("Runtime".to_string()),
                 transcript: "[00:01] Bundle Codex.".to_string(),
@@ -478,13 +634,9 @@ for line in sys.stdin:
             result.structured_output.action_items[0].task,
             "Ship bundled Codex runtime"
         );
-        let log = fs::read_to_string(
-            temp.path()
-                .join("runs")
-                .join("meeting-1")
-                .join("processing-log.json"),
-        )
-        .unwrap();
+        let log =
+            fs::read_to_string(temp.path().join("meeting").join("processing-log.json")).unwrap();
+        assert!(!temp.path().join("runs").join("meeting-1").exists());
         assert!(!log.contains("Bundle Codex"));
         assert!(!log.contains("secret-token-value"));
     }
@@ -524,11 +676,12 @@ for line in sys.stdin:
         let provider = provider_with_fake(&temp, "auth-failure");
         let err = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-auth".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
                 custom_prompt: None,
-                output_dir: None,
+                output_dir: Some(temp.path().join("meeting")),
                 scratch_root: Some(temp.path().join("runs")),
             })
             .await
@@ -1003,23 +1156,51 @@ impl CodexAppServerProvider {
             + output_schema_json().len()
             + request.custom_prompt.as_ref().map_or(0, String::len)
             + 1024;
-        let budget = super::context_budget::input_budget(32_768, 4096, overhead)?;
-        let (bounded_transcript, _) =
-            super::context_budget::reduce(&request.transcript, budget, |chunk| async move {
+        let limits = super::context_budget::resolve(
+            &super::llm_client::LLMProvider::Codex,
+            &self.config.model,
+            None,
+            None,
+        );
+        let budget = limits.input(
+            &super::llm_client::LLMProvider::Codex,
+            &self.config.model,
+            overhead,
+        )?;
+        let piece_budget = limits.extraction().input(
+            &super::llm_client::LLMProvider::Codex,
+            &self.config.model,
+            super::context_budget::EXTRACT_FACTS.len() + 256,
+        )?;
+        let (bounded_transcript, _) = super::context_budget::reduce(
+            &request.transcript,
+            budget,
+            piece_budget,
+            |chunk| async move {
                 self.run_text_prompt(&format!(
                     "{}\n\n<excerpt>{chunk}</excerpt>",
                     super::context_budget::EXTRACT_FACTS
                 ))
                 .await
-            })
-            .await?;
+            },
+        )
+        .await?;
         let scratch_dir = request
             .scratch_root
             .unwrap_or_else(default_codex_runs_root)
-            .join(sanitize_path_segment(&request.meeting_id));
+            .join(sanitize_path_segment(&request.meeting_id))
+            .join(format!("run-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir)
             .map_err(|e| format!("Failed to create Codex run folder: {e}"))?;
 
+        let _scratch_cleanup = RunScratch(scratch_dir.clone());
+        let output_dir = request
+            .output_dir
+            .clone()
+            .ok_or("Meeting output folder is unavailable. Reopen the meeting and try again.")?;
+        if output_dir.starts_with(&scratch_dir) {
+            return Err("Meeting output folder must be separate from scratch data".into());
+        }
         let transcript_path = scratch_dir.join("transcript.md");
         let metadata_path = scratch_dir.join("metadata.json");
         let schema_path = scratch_dir.join("output-schema.json");
@@ -1048,7 +1229,7 @@ impl CodexAppServerProvider {
             .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
         validate_codex_runtime_file(&self.app_server_binary)?;
         let started = std::time::Instant::now();
-        let mut session = AppServerSession::start(self).await?;
+        let mut session = AppServerSession::start_in(self, Some(&scratch_dir)).await?;
         session.require_authenticated().await?;
         let raw_output = match session
             .process_turn(
@@ -1062,7 +1243,10 @@ impl CodexAppServerProvider {
             )
             .await
         {
-            Ok(output) => output,
+            Ok(output) => {
+                let _ = session.take_stderr().await;
+                output
+            }
             Err(e) => {
                 let status = CodexCommandStatus {
                     success: false,
@@ -1076,10 +1260,10 @@ impl CodexAppServerProvider {
                 return Err(redact_secrets(&e));
             }
         };
-        let structured_output = parse_meeting_output(&raw_output)?;
+        let structured_output =
+            super::sources::expand_output(parse_meeting_output(&raw_output)?, &request.sources)?;
         let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
         let follow_up = render_follow_up_email(&structured_output.follow_up_email);
-        let output_dir = request.output_dir.unwrap_or_else(|| scratch_dir.clone());
         fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create Codex output folder: {e}"))?;
         let final_output_path = output_dir.join("meeting-output.json");
@@ -1109,14 +1293,14 @@ impl CodexAppServerProvider {
             message: "Codex app-server meeting processing succeeded.".to_string(),
         };
         write_safe_events(&events_path, &status)?;
-        write_processing_log(&scratch_dir, &status, started.elapsed(), "completed")?;
+        write_processing_log(&output_dir, &status, started.elapsed(), "completed")?;
         Ok(CodexProcessingResult {
             meeting_id: request.meeting_id,
             scratch_dir: scratch_dir.to_string_lossy().to_string(),
             output_json_path: final_output_path.to_string_lossy().to_string(),
             notes_markdown_path: notes_path.to_string_lossy().to_string(),
             follow_up_email_path: follow_up_path.to_string_lossy().to_string(),
-            processing_log_path: scratch_dir
+            processing_log_path: output_dir
                 .join("processing-log.json")
                 .to_string_lossy()
                 .to_string(),
@@ -1138,6 +1322,7 @@ impl CodexAppServerProvider {
 
 #[derive(Debug, Clone)]
 pub struct CodexMeetingProcessRequest {
+    pub sources: Vec<crate::summary::sources::SummarySource>,
     pub meeting_id: String,
     pub meeting_title: Option<String>,
     pub transcript: String,
@@ -1268,13 +1453,6 @@ pub async fn codex_process_meeting<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to load meeting: {e}"))?
             .ok_or_else(|| format!("Meeting not found: {meeting_id}"))?;
-    let metadata =
-        crate::database::repositories::meeting::MeetingsRepository::get_meeting_metadata(
-            pool,
-            &meeting_id,
-        )
-        .await
-        .map_err(|e| format!("Failed to load meeting metadata: {e}"))?;
     let transcript = meeting
         .transcripts
         .iter()
@@ -1287,10 +1465,11 @@ pub async fn codex_process_meeting<R: Runtime>(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let output_dir = metadata.and_then(|m| m.folder_path.map(PathBuf::from));
+    let output_dir = Some(ensure_meeting_output_dir(state.db_manager.pool(), &meeting_id).await?);
     let provider = provider_from_app(&app)?;
     provider
         .process_meeting(CodexMeetingProcessRequest {
+            sources: Vec::new(),
             meeting_id,
             meeting_title: Some(meeting.title),
             transcript,
@@ -1503,6 +1682,102 @@ fn default_isolated_codex_home() -> PathBuf {
         .join("codex")
 }
 
+/// A run owns only its meeting-scoped scratch directory, including on cancellation.
+struct RunScratch(PathBuf);
+impl Drop for RunScratch {
+    fn drop(&mut self) {
+        let parent = self.0.parent().map(Path::to_path_buf);
+        if fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+            if let Some(parent) = parent {
+                let _ = fs::remove_dir(parent);
+            }
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // Retry only this unique run, never a replacement run for the same meeting.
+            let path = self.0.clone();
+            runtime.spawn(async move {
+                for _ in 0..10 {
+                    sleep(Duration::from_millis(200)).await;
+                    if tokio::fs::remove_dir_all(&path).await.is_ok() || !path.exists() {
+                        if let Some(parent) = parent {
+                            let _ = tokio::fs::remove_dir(parent).await;
+                        }
+                        return;
+                    }
+                }
+                log::warn!("Could not remove Codex scratch files after child exit");
+            });
+        }
+    }
+}
+
+pub(crate) async fn ensure_meeting_output_dir(
+    pool: &sqlx::SqlitePool,
+    meeting: &str,
+) -> Result<PathBuf, String> {
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| "Could not read meeting output folder")?;
+    if let Some(folder) = folder.filter(|path| !path.trim().is_empty()) {
+        return Ok(PathBuf::from(folder));
+    }
+    let folder = crate::audio::get_default_recordings_folder()
+        .join(format!("meeting-{}", sanitize_path_segment(meeting)));
+    tokio::fs::create_dir_all(&folder)
+        .await
+        .map_err(|_| "Could not create meeting output folder")?;
+    sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = ?")
+        .bind(folder.to_string_lossy().as_ref())
+        .bind(meeting)
+        .execute(pool)
+        .await
+        .map_err(|_| "Could not save meeting output folder")?;
+    Ok(folder)
+}
+
+pub(crate) async fn remove_meeting_runs(meeting: &str) {
+    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await;
+}
+
+async fn remove_meeting_runs_at(root: &Path, meeting: &str) {
+    let path = root.join(sanitize_path_segment(meeting));
+    if let Err(error) = tokio::fs::remove_dir_all(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("Could not remove Codex scratch folder; startup cleanup will retry");
+        }
+    }
+}
+
+pub(crate) async fn cleanup_orphaned_runs(pool: &sqlx::SqlitePool) {
+    cleanup_orphaned_runs_at(pool, &default_codex_runs_root()).await;
+}
+
+async fn cleanup_orphaned_runs_at(pool: &sqlx::SqlitePool, root: &Path) {
+    let Ok(ids) = sqlx::query_scalar::<_, String>("SELECT id FROM meetings")
+        .fetch_all(pool)
+        .await
+    else {
+        return;
+    };
+    let live: std::collections::HashSet<_> =
+        ids.iter().map(|id| sanitize_path_segment(id)).collect();
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry
+            .file_type()
+            .await
+            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            && !live.contains(&entry.file_name().to_string_lossy().to_string())
+        {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
+    }
+}
+
 fn default_codex_runs_root() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::env::temp_dir())
@@ -1527,17 +1802,48 @@ fn expand_windows_style_appdata(value: &String) -> PathBuf {
 }
 
 fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
-    fs::create_dir_all(home).map_err(|e| format!("Failed to create isolated CODEX_HOME: {e}"))?;
-    let config_path = home.join("config.toml");
-    if !config_path.exists() {
-        let config = format!(
-            "# ClawScribe-owned Codex profile. Do not paste secrets here.\nmodel = \"{}\"\nsandbox_mode = \"read-only\"\napproval_policy = \"never\"\n",
-            model.replace('"', "")
-        );
-        fs::write(&config_path, config)
-            .map_err(|e| format!("Failed to write isolated Codex config.toml: {e}"))?;
+    fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile")?;
+    let path = home.join("config.toml");
+    let existing = if path.exists() {
+        fs::read_to_string(&path).map_err(|_| "Failed to read isolated Codex configuration")?
+    } else {
+        format!("# ClawScribe-owned Codex profile. Do not paste secrets here.\nmodel = \"{}\"\nsandbox_mode = \"read-only\"\napproval_policy = \"never\"\n", model.replace('"', ""))
+    };
+    let mut root = true;
+    let mut lines = Vec::new();
+    for line in existing.lines() {
+        if line.trim_start().starts_with('[') {
+            root = false;
+        }
+        if root
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "cli_auth_credentials_store")
+        {
+            continue;
+        }
+        lines.push(line);
+    }
+    // A root key must precede tables; preserve every unrelated setting and comment.
+    let config = format!(
+        "cli_auth_credentials_store = \"keyring\"\n{}\n",
+        lines.join("\n")
+    );
+    if config != existing {
+        fs::write(&path, config)
+            .map_err(|_| "Failed to update isolated Codex credential storage")?;
     }
     Ok(())
+}
+
+fn remove_legacy_auth_after_keyring_signin(home: &Path, authenticated: bool) {
+    if authenticated {
+        if let Err(error) = fs::remove_file(home.join("auth.json")) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Could not remove obsolete Codex credential file");
+            }
+        }
+    }
 }
 
 fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
@@ -1661,6 +1967,45 @@ impl CodexAccountState {
     }
 }
 
+// Pinned 0.157 ThreadStartParams / TurnStartParams. Apply independently of home mode.
+fn restricted_thread_params(model: &str, cwd: &Path) -> Value {
+    serde_json::json!({ "model": model, "cwd": cwd, "approvalPolicy": "never",
+        "sandbox": "read-only", "ephemeral": true,
+        "config": { "features.shell_tool": false, "features.unified_exec": false,
+            "features.apply_patch_freeform": false, "features.apps": false,
+            "features.multi_agent": false, "features.multi_agent_v2": false,
+            "features.js_repl": false, "features.code_mode": false,
+            "web_search": "disabled" } })
+}
+
+fn restrict_turn(request: &mut Value, cwd: &Path) {
+    request["params"]["cwd"] = serde_json::json!(cwd);
+    request["params"]["approvalPolicy"] = serde_json::json!("never");
+    request["params"]["sandboxPolicy"] =
+        serde_json::json!({"type": "readOnly", "networkAccess": false});
+}
+
+fn decline_server_request(message: &Value) -> Option<Value> {
+    let id = message.get("id")?;
+    let method = message.get("method")?.as_str()?;
+    let result = match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            serde_json::json!({"decision": "decline"})
+        }
+        "item/permissions/requestApproval" => {
+            serde_json::json!({"permissions": {}, "scope": "turn"})
+        }
+        "execCommandApproval" | "applyPatchApproval" => serde_json::json!({"decision": "denied"}),
+        "item/tool/requestUserInput" => serde_json::json!({"answers": {}}),
+        _ => {
+            return Some(
+                serde_json::json!({"id": id, "error": {"code": -32601, "message": "Tools are unavailable for meeting summaries"}}),
+            )
+        }
+    };
+    Some(serde_json::json!({"id": id, "result": result}))
+}
+
 struct AppServerSession {
     child: Child,
     stdin: ChildStdin,
@@ -1669,13 +2014,40 @@ struct AppServerSession {
     next_id: u64,
     timeout: Duration,
     overload_retries: usize,
+    cwd: PathBuf,
+    _scratch: Option<tempfile::TempDir>,
+    codex_home: Option<PathBuf>,
 }
 
 impl AppServerSession {
     async fn start(provider: &CodexAppServerProvider) -> Result<Self, String> {
+        Self::start_in(provider, None).await
+    }
+
+    async fn start_in(
+        provider: &CodexAppServerProvider,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
         let mut command = TokioCommand::new(&provider.app_server_binary);
+        command.arg("app-server");
+        Self::start_command(provider, command, cwd).await
+    }
+
+    async fn start_command(
+        provider: &CodexAppServerProvider,
+        mut command: TokioCommand,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
+        let scratch = if cwd.is_none() {
+            Some(tempfile::tempdir().map_err(|_| "Could not create Codex scratch folder")?)
+        } else {
+            None
+        };
+        let cwd = cwd
+            .unwrap_or_else(|| scratch.as_ref().unwrap().path())
+            .to_path_buf();
         command
-            .arg("app-server")
+            .current_dir(&cwd)
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1714,6 +2086,9 @@ impl AppServerSession {
             next_id: 1,
             timeout: Duration::from_secs(provider.config.timeout_seconds.max(30)),
             overload_retries: 0,
+            cwd,
+            _scratch: scratch,
+            codex_home: provider.codex_home.clone(),
         };
         session.initialize().await?;
         Ok(session)
@@ -1728,7 +2103,17 @@ impl AppServerSession {
 
     async fn account_read(&mut self) -> Result<CodexAccountState, String> {
         let value = self.request("account/read", serde_json::json!({})).await?;
-        Ok(parse_account_state(&value))
+        let account = parse_account_state(&value);
+        if let Some(home) = &self.codex_home {
+            remove_legacy_auth_after_keyring_signin(
+                home,
+                value
+                    .get("account")
+                    .is_some_and(|account| !account.is_null())
+                    && !account.is_unauthenticated(),
+            );
+        }
+        Ok(account)
     }
 
     async fn require_authenticated(&mut self) -> Result<(), String> {
@@ -1802,7 +2187,7 @@ impl AppServerSession {
         metadata: Value,
     ) -> Result<String, String> {
         let thread_response = self
-            .request_with_overload_retry("thread/start", serde_json::json!({ "model": model }))
+            .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
         let thread_id = json_string_at(&thread_response, &["thread", "id"])
             .or_else(|| json_string_at(&thread_response, &["id"]))
@@ -1811,15 +2196,16 @@ impl AppServerSession {
             })?;
         for attempt in 0..=CODEX_MAX_OVERLOAD_RETRIES {
             let id = self.next_id();
-            self.send(&app_server_turn_start_request(
+            let mut request = app_server_turn_start_request(
                 id,
                 &thread_id,
                 model,
                 transcript,
                 custom_prompt,
                 metadata.clone(),
-            ))
-            .await?;
+            );
+            restrict_turn(&mut request, &self.cwd);
+            self.send(&request).await?;
             match self.read_turn_result(id).await {
                 Ok(output) => return Ok(output),
                 Err(e) if is_overload_message(&e) && attempt < CODEX_MAX_OVERLOAD_RETRIES => {
@@ -1841,7 +2227,7 @@ impl AppServerSession {
     /// `process_turn`.
     async fn process_raw_prompt(&mut self, model: &str, prompt: &str) -> Result<String, String> {
         let thread_response = self
-            .request_with_overload_retry("thread/start", serde_json::json!({ "model": model }))
+            .request_with_overload_retry("thread/start", restricted_thread_params(model, &self.cwd))
             .await?;
         let thread_id = json_string_at(&thread_response, &["thread", "id"])
             .or_else(|| json_string_at(&thread_response, &["id"]))
@@ -1850,8 +2236,9 @@ impl AppServerSession {
             })?;
         for attempt in 0..=CODEX_MAX_OVERLOAD_RETRIES {
             let id = self.next_id();
-            self.send(&raw_turn_start_request(id, &thread_id, model, prompt))
-                .await?;
+            let mut request = raw_turn_start_request(id, &thread_id, model, prompt);
+            restrict_turn(&mut request, &self.cwd);
+            self.send(&request).await?;
             match self.read_turn_result(id).await {
                 Ok(output) => return Ok(output),
                 Err(e) if is_overload_message(&e) && attempt < CODEX_MAX_OVERLOAD_RETRIES => {
@@ -1937,6 +2324,7 @@ impl AppServerSession {
                     let message = self.read_message().await?;
                     if let Some(method) = message.get("method").and_then(Value::as_str) {
                         if matches!(method, "account/login/completed" | "account/updated") {
+                            let _ = self.account_read().await?;
                             return Ok::<(), String>(());
                         }
                     }
@@ -1961,15 +2349,20 @@ impl AppServerSession {
     }
 
     async fn read_message(&mut self) -> Result<Value, String> {
-        timeout(self.timeout, self.lines.next_line())
-            .await
-            .map_err(|_| "Timed out waiting for Codex app-server response".to_string())?
-            .map_err(|e| format!("Failed to read Codex app-server response: {e}"))?
-            .ok_or_else(|| "Codex app-server exited before completing the request".to_string())
-            .and_then(|line| {
-                serde_json::from_str::<Value>(&line)
-                    .map_err(|e| format!("Invalid Codex app-server JSONL response: {e}"))
-            })
+        loop {
+            let line = timeout(self.timeout, self.lines.next_line())
+                .await
+                .map_err(|_| "Timed out waiting for Codex app-server response")?
+                .map_err(|_| "Failed to read Codex app-server response")?
+                .ok_or("Codex app-server exited before completing the request")?;
+            let message: Value = serde_json::from_str(&line)
+                .map_err(|_| "Invalid Codex app-server JSONL response")?;
+            if let Some(reply) = decline_server_request(&message) {
+                self.send(&reply).await?;
+                continue;
+            }
+            return Ok(message);
+        }
     }
 
     async fn send(&mut self, value: &Value) -> Result<(), String> {
@@ -2891,6 +3284,9 @@ pub fn redact_secrets(value: &str) -> String {
 }
 
 fn sanitize_path_segment(value: &str) -> String {
+    if matches!(value, "" | "." | "..") {
+        return "_".into();
+    }
     value
         .chars()
         .map(|c| {
@@ -3234,6 +3630,7 @@ exit 2
         let output_dir = temp.path().join("meeting");
         let result = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-1".to_string(),
                 meeting_title: Some("Codex Standup".to_string()),
                 transcript: "[00:01] We will use Codex.".to_string(),
@@ -3255,6 +3652,7 @@ exit 2
         let provider = provider_with_fake_scenario(&temp, "invalid-json");
         let err = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-2".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),
@@ -3273,6 +3671,7 @@ exit 2
         let provider = provider_with_fake_scenario(&temp, "exec-nonzero");
         let err = provider
             .process_meeting(CodexMeetingProcessRequest {
+                sources: Vec::new(),
                 meeting_id: "meeting-3".to_string(),
                 meeting_title: None,
                 transcript: "hello".to_string(),

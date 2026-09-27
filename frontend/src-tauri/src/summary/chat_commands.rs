@@ -91,49 +91,39 @@ pub async fn api_chat_send<R: Runtime>(
                 .into(),
         );
     }
-    let (context, output) = match LLMProvider::from_str(&model)? {
-        LLMProvider::Ollama => {
-            let config = SettingsRepository::get_model_config(&pool)
-                .await
-                .map_err(|_| "Could not read model settings")?;
-            (
-                super::context_budget::ollama_context(
-                    &model_name,
-                    config
-                        .as_ref()
-                        .and_then(|value| value.ollama_endpoint.as_deref()),
-                )
-                .await,
-                2048,
+    let provider = LLMProvider::from_str(&model)?;
+    let mut context = None;
+    let mut output = None;
+    let mut budget_provider = provider.clone();
+    if provider == LLMProvider::Ollama {
+        let config = SettingsRepository::get_model_config(&pool)
+            .await
+            .map_err(|_| "Could not read model settings")?;
+        context = Some(
+            super::context_budget::ollama_context(
+                &model_name,
+                config.as_ref().and_then(|v| v.ollama_endpoint.as_deref()),
             )
+            .await,
+        );
+    } else if matches!(
+        provider,
+        LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
+    ) {
+        let config = SettingsRepository::get_custom_openai_config(&pool)
+            .await
+            .map_err(|_| "Could not read provider settings")?;
+        context = config.as_ref().and_then(|v| v.context_window);
+        output = config
+            .as_ref()
+            .and_then(|v| v.max_tokens)
+            .and_then(|v| usize::try_from(v).ok());
+        if config.is_none() && provider == LLMProvider::OpenAICompatible {
+            budget_provider = LLMProvider::OpenAI;
         }
-        LLMProvider::BuiltInAI => (
-            super::summary_engine::models::get_model_by_name(&model_name)
-                .ok_or("Unknown local summary model")?
-                .context_size
-                .min(8192) as usize,
-            4096,
-        ),
-        LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible => {
-            let config = SettingsRepository::get_custom_openai_config(&pool)
-                .await
-                .map_err(|_| "Could not read provider settings")?;
-            (
-                config
-                    .as_ref()
-                    .and_then(|value| value.context_window)
-                    .unwrap_or(8192),
-                config
-                    .as_ref()
-                    .and_then(|value| value.max_tokens)
-                    .unwrap_or(2048)
-                    .max(1) as usize,
-            )
-        }
-        _ => (8192, 2048),
-    };
-    let context_budget =
-        super::context_budget::input_budget(context, output, 2048 + question.len())?;
+    }
+    let limits = super::context_budget::resolve(&budget_provider, &model_name, context, output);
+    let context_budget = limits.input(&budget_provider, &model_name, 2048 + question.len())?;
     let transcript_context = build_transcript_context(&transcripts, &question, context_budget);
 
     let history = AiChatRepository::list(&pool, &meeting_id)
