@@ -68,7 +68,9 @@ pub fn build_meeting_docx(
         level: 1,
         text: title,
     });
-    blocks.extend(parse_markdown_blocks(summary_markdown));
+    blocks.extend(parse_markdown_blocks(
+        &crate::summary::sources::strip_source_links(summary_markdown),
+    ));
 
     if let Some(transcript) = transcript {
         if !transcript.trim().is_empty() {
@@ -310,6 +312,25 @@ fn escape_xml(text: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn docx_keeps_citation_time_without_internal_link() {
+        let bytes = build_meeting_docx(
+            "Notes",
+            "Send draft [00:12:34](#clawscribe-source-abc123)",
+            None,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains("(00:12:34)"));
+        assert!(!xml.contains("clawscribe-source"));
+    }
 
     #[test]
     fn docx_contains_expected_text_and_files() {

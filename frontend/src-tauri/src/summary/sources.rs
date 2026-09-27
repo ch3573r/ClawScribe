@@ -97,6 +97,14 @@ fn annotate(rows: Vec<Transcript>) -> (String, Vec<SummarySource>) {
     (text, sources)
 }
 
+/// Keep readable source labels in exports without exposing app-only link targets.
+pub(crate) fn strip_source_links(markdown: &str) -> String {
+    static LINK: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"\[([^\]\n]*)\]\(#clawscribe-source-[0-9a-f]+\)").unwrap()
+    });
+    LINK.replace_all(markdown, "($1)").into_owned()
+}
+
 /// Resolve model tags using only server-owned identities and timestamps.
 pub(crate) fn expand_tags(text: &str, sources: &[SummarySource]) -> String {
     static TAG: once_cell::sync::Lazy<regex::Regex> =
