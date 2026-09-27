@@ -50,6 +50,10 @@ recordings and migration paths continue to work.
 
 ## Data Boundaries
 
+SQLite connections explicitly enable WAL, normal synchronous mode, foreign keys
+and a five-second busy timeout. Legacy database transfers checkpoint first and
+use a consistent SQLite snapshot so committed WAL data is retained.
+
 Background Teams detection returns matching candidates only. Unmatched browser
 window titles are returned only when the settings diagnostics panel requests them.
 

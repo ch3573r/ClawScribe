@@ -1,6 +1,8 @@
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 use tauri::Manager;
 
 #[derive(Clone)]
@@ -19,7 +21,7 @@ impl DatabaseManager {
         if !Path::new(tauri_db_path).exists() {
             if Path::new(backend_db_path).exists() {
                 log::info!("Migrating the legacy local database");
-                fs::copy(backend_db_path, tauri_db_path).map_err(|e| sqlx::Error::Io(e))?;
+                snapshot_database(Path::new(backend_db_path), Path::new(tauri_db_path)).await?;
             } else {
                 log::info!("Creating the local database");
                 Sqlite::create_database(tauri_db_path).await?;
@@ -36,7 +38,7 @@ impl DatabaseManager {
                     Ok(())
                 })
             })
-            .connect(tauri_db_path)
+            .connect_with(connection_options(Path::new(tauri_db_path)))
             .await?;
 
         let migrator = sqlx::migrate!("./migrations");
@@ -177,7 +179,7 @@ impl DatabaseManager {
         let target_legacy_path = app_data_dir.join("meeting_minutes.db");
         log::info!("Copying legacy database to current storage");
 
-        fs::copy(legacy_db_path, &target_legacy_path).map_err(|e| sqlx::Error::Io(e))?;
+        snapshot_database(Path::new(legacy_db_path), &target_legacy_path).await?;
 
         // Now use the standard initialization which will detect and migrate the legacy db
         Self::new_from_app_handle(app_handle).await
@@ -233,6 +235,45 @@ impl DatabaseManager {
     }
 }
 
+fn connection_options(path: &Path) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .foreign_keys(true)
+}
+
+/// A SQLite snapshot includes committed WAL pages even when another reader
+/// prevents a complete checkpoint. Never copy only the main database file.
+async fn snapshot_database(source: &Path, target: &Path) -> Result<()> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(source)
+                .busy_timeout(Duration::from_secs(5)),
+        )
+        .await?;
+    let result = async {
+        sqlx::query("PRAGMA wal_checkpoint(FULL)")
+            .execute(&pool)
+            .await?;
+        let staged = tempfile::NamedTempFile::new_in(target.parent().unwrap_or(Path::new(".")))
+            .map_err(sqlx::Error::Io)?
+            .into_temp_path();
+        sqlx::query("VACUUM INTO ?")
+            .bind(staged.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await?;
+        std::fs::rename(&staged, target).map_err(sqlx::Error::Io)?;
+        Ok(())
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
 /// SHA-384 checksums of the migration SQL under both line-ending
 /// conventions, matching how SQLx hashes migration files at compile time.
 fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
@@ -250,6 +291,39 @@ fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha384};
+
+    #[tokio::test]
+    async fn fresh_database_uses_wal_and_snapshot_includes_uncheckpointed_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting.sqlite");
+        let db = DatabaseManager::new(
+            path.to_str().unwrap(),
+            dir.path().join("missing.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('wal-test', 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").execute(db.pool()).await.unwrap();
+        let target = dir.path().join("copy.sqlite");
+        snapshot_database(&path, &target).await.unwrap();
+        let copy = SqlitePool::connect(target.to_str().unwrap()).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'wal-test'")
+            .fetch_one(&copy)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        copy.close().await;
+        db.cleanup().await.unwrap();
+    }
 
     #[tokio::test]
     async fn failed_open_preserves_committed_wal_data() {
