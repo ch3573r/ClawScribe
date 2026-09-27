@@ -50,6 +50,9 @@ impl DatabaseManager {
         }
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
+        if prune_expired_snapshots(Path::new(tauri_db_path)).is_err() {
+            log::warn!("Could not remove expired pre-migration database backups");
+        }
         crate::database::repositories::summary::SummaryProcessesRepository::fail_interrupted_processes(&pool).await?;
         crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
         // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
@@ -260,6 +263,16 @@ async fn backup_before_migrations(
     )
     .fetch_one(pool)
     .await?;
+    if ledger == 0 {
+        let user_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if user_tables == 0 {
+            return Ok(());
+        }
+    }
     let applied: Vec<i64> = if ledger > 0 {
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
             .fetch_all(pool)
@@ -304,6 +317,34 @@ async fn backup_before_migrations(
     backups.sort_by(|a, b| b.cmp(a));
     for (_, path) in backups.into_iter().skip(2) {
         fs::remove_file(path).map_err(sqlx::Error::Io)?;
+    }
+    Ok(())
+}
+
+fn prune_expired_snapshots(database: &Path) -> std::io::Result<()> {
+    let root = database.parent().unwrap_or(Path::new(".")).join("backups");
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let pattern = regex::Regex::new(r"^meeting_minutes-\d+-\d{8}T\d{15}\.sqlite$")
+        .expect("snapshot filename pattern");
+    for entry in entries {
+        let entry = entry?;
+        if !pattern.is_match(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata
+                .modified()?
+                .elapsed()
+                .is_ok_and(|age| age > Duration::from_secs(14 * 24 * 60 * 60))
+        {
+            fs::remove_file(entry.path())?;
+        }
     }
     Ok(())
 }
@@ -357,6 +398,42 @@ mod tests {
     use sha2::{Digest, Sha384};
 
     #[tokio::test]
+    async fn startup_prunes_expired_snapshots_and_preserves_recent_and_unowned_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting_minutes.sqlite");
+        let legacy = dir.path().join("missing.db");
+        let manager = DatabaseManager::new(database.to_str().unwrap(), legacy.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.pool.close().await;
+        let backups = dir.path().join("backups");
+        assert!(!backups.exists());
+        fs::create_dir(&backups).unwrap();
+        let old = backups.join("meeting_minutes-1-20260101T000000000000000.sqlite");
+        let recent = backups.join("meeting_minutes-2-20260102T000000000000000.sqlite");
+        let unowned = backups.join("manual.sqlite");
+        for file in [&old, &recent, &unowned] {
+            fs::write(file, b"snapshot").unwrap();
+        }
+        let expired = std::time::SystemTime::now() - Duration::from_secs(15 * 24 * 60 * 60);
+        for file in [&old, &unowned] {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(expired))
+                .unwrap();
+        }
+        let manager = DatabaseManager::new(database.to_str().unwrap(), legacy.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(!old.exists());
+        assert!(recent.exists());
+        assert!(unowned.exists());
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
     async fn snapshots_only_for_pending_migrations_keep_the_newest_two() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("meeting.sqlite");
@@ -366,6 +443,17 @@ mod tests {
             .await
             .unwrap();
         let migrator = sqlx::migrate!("./migrations");
+        backup_before_migrations(&pool, &path, &migrator)
+            .await
+            .unwrap();
+        assert!(
+            !dir.path().join("backups").exists(),
+            "fresh databases need no snapshot"
+        );
+        sqlx::query("CREATE TABLE legacy_data (value TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
         backup_before_migrations(&pool, &path, &migrator)
             .await
             .unwrap();
