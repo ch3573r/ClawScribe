@@ -44,6 +44,8 @@ interface SpeakerDiarizationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   isProcessing: boolean;
+  isCancelling: boolean;
+  onCancel: () => void;
   progress: SpeakerDiarizationProgress | null;
   result: SpeakerDiarizationComplete | null;
   error: string | null;
@@ -75,6 +77,8 @@ export function SpeakerDiarizationDialog({
   open,
   onOpenChange,
   isProcessing,
+  isCancelling,
+  onCancel,
   progress,
   result,
   error,
@@ -221,9 +225,14 @@ export function SpeakerDiarizationDialog({
 
         <DialogFooter>
           {isProcessing && (
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Continue in background
-            </Button>
+            <>
+              <Button variant="outline" disabled={isCancelling} onClick={onCancel}>
+                {isCancelling ? 'Cancelling…' : 'Cancel speaker detection'}
+              </Button>
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                Continue in background
+              </Button>
+            </>
           )}
           {error && !isProcessing && (
             <>

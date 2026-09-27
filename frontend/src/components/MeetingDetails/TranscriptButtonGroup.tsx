@@ -56,6 +56,7 @@ export function TranscriptButtonGroup({
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [showDiarizationDialog, setShowDiarizationDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
   const [diarizationProgress, setDiarizationProgress] = useState<SpeakerDiarizationProgress | null>(null);
   const [diarizationResult, setDiarizationResult] = useState<SpeakerDiarizationComplete | null>(null);
@@ -102,6 +103,7 @@ export function TranscriptButtonGroup({
     lastCompletionKeyRef.current = key;
     handledErrorRef.current = false;
     setIsDiarizing(false);
+    setIsCancelling(false);
     setDiarizationMessage(null);
     setDiarizationProgress(null);
     setDiarizationResult(payload);
@@ -119,9 +121,16 @@ export function TranscriptButtonGroup({
     }
     handledErrorRef.current = true;
     setIsDiarizing(false);
+    setIsCancelling(false);
     setDiarizationMessage(null);
     setDiarizationProgress(null);
     setDiarizationResult(null);
+    if (message === 'Speaker detection cancelled') {
+      setDiarizationError(null);
+      setShowDiarizationDialog(false);
+      toast.info('Speaker detection cancelled');
+      return;
+    }
     setDiarizationError(message);
     setShowDiarizationDialog(true);
     toast.error('Speaker diarization failed', {
@@ -132,6 +141,7 @@ export function TranscriptButtonGroup({
 
   useEffect(() => {
     let cleanedUp = false;
+    let observedEvent = false;
     const unlistenCallbacks: Array<() => void> = [];
 
     const trackUnlistener = (unlisten: () => void) => {
@@ -144,6 +154,7 @@ export function TranscriptButtonGroup({
 
     void listen<SpeakerDiarizationProgress>('speaker-diarization-progress', (event) => {
       if (event.payload.meeting_id !== meetingIdRef.current) return;
+      observedEvent = true;
       if (event.payload.stage !== 'complete') {
         setIsDiarizing(true);
       }
@@ -153,19 +164,37 @@ export function TranscriptButtonGroup({
 
     void listen<SpeakerDiarizationComplete>('speaker-diarization-complete', (event) => {
       if (event.payload.meeting_id !== meetingIdRef.current) return;
+      observedEvent = true;
       showDiarizationComplete(event.payload);
     }).then(trackUnlistener);
 
     void listen<SpeakerDiarizationError>('speaker-diarization-error', (event) => {
       if (event.payload.meeting_id !== meetingIdRef.current) return;
+      observedEvent = true;
       showDiarizationError(event.payload.error);
     }).then(trackUnlistener);
+
+    void invoke<string | null>('active_speaker_diarization_command').then(active => {
+      if (!cleanedUp && !observedEvent) setIsDiarizing(active === meetingIdRef.current);
+    }).catch(() => {});
 
     return () => {
       cleanedUp = true;
       unlistenCallbacks.forEach((unlisten) => unlisten());
     };
-  }, [showDiarizationComplete, showDiarizationError]);
+  }, [meetingId, showDiarizationComplete, showDiarizationError]);
+
+  const handleCancelDiarization = useCallback(async () => {
+    if (!meetingId || isCancelling) return;
+    setIsCancelling(true);
+    setDiarizationMessage('Cancelling after the current speech step…');
+    try {
+      await invoke('cancel_speaker_diarization_command', { meetingId });
+    } catch (error) {
+      setIsCancelling(false);
+      toast.error('Could not cancel speaker detection', { description: String(error) });
+    }
+  }, [meetingId, isCancelling]);
 
   const handleRunSpeakerDiarization = useCallback(async (numSpeakers: number | null = null) => {
     if (!meetingId || !meetingFolderPath) return;
@@ -173,6 +202,7 @@ export function TranscriptButtonGroup({
     handledErrorRef.current = false;
     const speakerMode = numSpeakers ? `${numSpeakers} speakers` : 'Auto speaker detection';
     setIsDiarizing(true);
+    setIsCancelling(false);
     setDiarizationMessage(`Starting ${speakerMode.toLowerCase()}...`);
     setDiarizationMode(speakerMode);
     setDiarizationProgress({
@@ -268,6 +298,12 @@ export function TranscriptButtonGroup({
           </DropdownMenu>
         )}
 
+        {isDiarizing && (
+          <Button size="sm" variant="outline" disabled={isCancelling} onClick={() => void handleCancelDiarization()}>
+            {isCancelling ? 'Cancelling…' : 'Cancel speaker detection'}
+          </Button>
+        )}
+
         {meetingId && meetingFolderPath && (
           <Button
             size="sm"
@@ -299,6 +335,8 @@ export function TranscriptButtonGroup({
         open={showDiarizationDialog}
         onOpenChange={setShowDiarizationDialog}
         isProcessing={isDiarizing}
+        isCancelling={isCancelling}
+        onCancel={() => void handleCancelDiarization()}
         progress={diarizationProgress}
         result={diarizationResult}
         error={diarizationError}

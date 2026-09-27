@@ -72,7 +72,13 @@ const SHERPA_RUNTIME_DLLS: &[&str] = &[
     "sherpa-onnx-cxx-api.dll",
 ];
 
-static DIARIZATION_MEETING: Mutex<Option<String>> = Mutex::new(None);
+struct DiarizationJob {
+    meeting_id: String,
+    cancelled: Arc<AtomicBool>,
+    saving: bool,
+}
+
+static DIARIZATION_MEETING: Mutex<Option<DiarizationJob>> = Mutex::new(None);
 
 static DIARIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static DIARIZATION_DIRECTML_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -1970,7 +1976,11 @@ impl DiarizationRunGuard {
         if active.is_some() {
             return Err("Speaker diarization is already running".into());
         }
-        *active = Some(meeting.to_string());
+        *active = Some(DiarizationJob {
+            meeting_id: meeting.to_string(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            saving: false,
+        });
         DIARIZATION_IN_PROGRESS.store(true, Ordering::SeqCst);
         Ok(Self)
     }
@@ -1987,11 +1997,67 @@ impl Drop for DiarizationRunGuard {
 }
 
 pub(crate) fn is_diarizing_meeting(meeting: &str) -> bool {
+    active_speaker_diarization_command().as_deref() == Some(meeting)
+}
+
+#[tauri::command]
+pub fn active_speaker_diarization_command() -> Option<String> {
     DIARIZATION_MEETING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_deref()
-        == Some(meeting)
+        .as_ref()
+        .map(|job| job.meeting_id.clone())
+}
+
+#[tauri::command]
+pub fn cancel_speaker_diarization_command(meeting_id: String) -> std::result::Result<(), String> {
+    let active = DIARIZATION_MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(job) = active.as_ref().filter(|job| job.meeting_id == meeting_id) else {
+        return Ok(());
+    };
+    if job.saving {
+        return Err("Speaker labels are already being saved. Wait for completion.".into());
+    }
+    job.cancelled.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn diarization_cancel_flag() -> Arc<AtomicBool> {
+    DIARIZATION_MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|job| job.cancelled.clone())
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
+}
+
+fn check_diarization_cancelled(meeting: &str) -> Result<()> {
+    let active = DIARIZATION_MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if active
+        .as_ref()
+        .is_some_and(|job| job.meeting_id == meeting && job.cancelled.load(Ordering::Acquire))
+    {
+        return Err(anyhow!("Speaker detection cancelled"));
+    }
+    Ok(())
+}
+
+fn begin_diarization_save(meeting: &str) -> Result<()> {
+    let mut active = DIARIZATION_MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(job) = active.as_mut().filter(|job| job.meeting_id == meeting) {
+        if job.cancelled.load(Ordering::Acquire) {
+            return Err(anyhow!("Speaker detection cancelled"));
+        }
+        // Once saving starts, cancellation must not claim to have discarded committed labels.
+        job.saving = true;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2009,8 +2075,8 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
         "Local summary stopped because speaker detection started. Generate it again afterwards.",
     )
     .await?;
-    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let guard = DiarizationRunGuard::acquire(&meeting_id)?;
+    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let meeting_id_for_task = meeting_id.clone();
 
     let _guard = guard;
@@ -2032,7 +2098,11 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
             Ok(complete)
         }
         Err(error) => {
-            let message = error.to_string();
+            let message = if check_diarization_cancelled(&meeting_id_for_task).is_err() {
+                "Speaker detection cancelled".to_string()
+            } else {
+                error.to_string()
+            };
             let _ = app.emit(
                 "speaker-diarization-error",
                 SpeakerDiarizationError {
@@ -2060,6 +2130,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     num_speakers: Option<i32>,
     preserve_existing_labels: bool,
 ) -> Result<SpeakerDiarizationComplete> {
+    check_diarization_cancelled(&meeting_id)?;
     let run_started = Instant::now();
     let folder_path = PathBuf::from(&meeting_folder_path);
     if !folder_path.is_dir() {
@@ -2093,6 +2164,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     .fetch_all(&pool)
     .await?;
 
+    check_diarization_cancelled(&meeting_id)?;
     if stored_segments.is_empty() {
         return Err(anyhow!("No transcript segments found for this meeting"));
     }
@@ -2136,6 +2208,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&decode_path))
         .await
         .map_err(|e| anyhow!("Audio decode task failed: {}", e))??;
+    check_diarization_cancelled(&meeting_id)?;
 
     emit_progress(
         &app,
@@ -2147,6 +2220,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     let samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
         .await
         .map_err(|e| anyhow!("Audio preparation task failed: {}", e))?;
+    check_diarization_cancelled(&meeting_id)?;
     if samples.is_empty() {
         return Err(anyhow!("Meeting audio did not contain decodable samples"));
     }
@@ -2377,6 +2451,7 @@ async fn save_diarization_labels(
     stored_segments: &[StoredTranscriptSegment],
     mapped_segments: &[TranscriptSegment],
 ) -> Result<usize> {
+    begin_diarization_save(meeting_id)?;
     let mut tx = pool.begin().await?;
     let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id"
@@ -2452,6 +2527,7 @@ async fn run_diarization_mapping_attempt<R: Runtime>(
     progress_percentage: u32,
     retry_embedding_name: Option<&str>,
 ) -> Result<DiarizationMappingAttempt> {
+    check_diarization_cancelled(meeting_id)?;
     ensure_model_available(
         app,
         meeting_id,
@@ -2461,6 +2537,7 @@ async fn run_diarization_mapping_attempt<R: Runtime>(
         model_paths.can_download_segmentation,
     )
     .await?;
+    check_diarization_cancelled(meeting_id)?;
     ensure_model_available(
         app,
         meeting_id,
@@ -2471,6 +2548,7 @@ async fn run_diarization_mapping_attempt<R: Runtime>(
     )
     .await?;
 
+    check_diarization_cancelled(meeting_id)?;
     let clustering_threshold = default_clustering_threshold(&model_paths);
     let mut profile = DiarizationProfile::new(
         meeting_id,
@@ -3469,6 +3547,7 @@ async fn select_diarization_provider<R: Runtime>(
             result
         }
         Err(directml_error) => {
+            check_diarization_cancelled(meeting_id)?;
             profile.record_error(
                 "probe",
                 "directml",
@@ -3660,8 +3739,11 @@ async fn run_sherpa_diarization(
     config: SherpaDiarizationConfig,
     samples: Arc<Vec<f32>>,
 ) -> Result<Vec<DiarizationTurn>> {
-    super::inference::run(move |_cancelled| {
+    super::inference::run_cancellable(diarization_cancel_flag(), move |cancelled| {
         let diarizer = SherpaOfflineDiarizer::new(config)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err(anyhow!("Speaker detection cancelled"));
+        }
         let sample_rate = diarizer.sample_rate();
         if sample_rate != DIARIZATION_SAMPLE_RATE {
             return Err(anyhow!(
@@ -4245,6 +4327,83 @@ mod tests {
             })
             .collect();
         (pool, stored, mapped)
+    }
+
+    #[tokio::test]
+    async fn cancellation_reaches_native_work_preserves_rows_and_releases_the_job() {
+        let _lock = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (pool, stored, mapped) = label_save_fixture().await;
+        let meeting = "diarization-cancel-test";
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic cancellation', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(meeting).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE transcripts SET meeting_id = ?")
+            .bind(meeting)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = super::super::inference::claim_job().unwrap();
+        let guard = DiarizationRunGuard::acquire(meeting).unwrap();
+        assert!(super::super::inference::claim_job()
+            .unwrap_err()
+            .contains("Speaker detection"));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let flag = diarization_cancel_flag();
+        let native = tokio::spawn(super::super::inference::run_cancellable(
+            flag,
+            move |cancelled| {
+                started_tx.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert!(cancelled.load(Ordering::Acquire));
+                Ok(())
+            },
+        ));
+        started_rx.await.unwrap();
+        cancel_speaker_diarization_command(meeting.into()).unwrap();
+        assert!(native.await.unwrap().is_err());
+        assert!(save_diarization_labels(&pool, meeting, &stored, &mapped)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
+        let current: Vec<StoredTranscriptSegment> =
+            sqlx::query_as("SELECT * FROM transcripts ORDER BY audio_start_time, timestamp, id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            transcript_snapshot_fingerprint(&current).unwrap(),
+            transcript_snapshot_fingerprint(&stored).unwrap()
+        );
+        let revisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_revisions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(revisions, 0);
+        drop(guard);
+        drop(job);
+        assert!(super::super::inference::claim_job().is_ok());
+    }
+
+    #[tokio::test]
+    async fn completed_native_stage_does_not_cancel_the_next_stage() {
+        let _lock = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let flag = Arc::new(AtomicBool::new(false));
+        for _ in 0..2 {
+            super::super::inference::run_cancellable(flag.clone(), |_| Ok(()))
+                .await
+                .unwrap();
+            assert!(!flag.load(Ordering::Acquire));
+        }
+        let guard = DiarizationRunGuard::acquire("diarization-saving-test").unwrap();
+        begin_diarization_save("diarization-saving-test").unwrap();
+        assert!(
+            cancel_speaker_diarization_command("diarization-saving-test".into())
+                .unwrap_err()
+                .contains("already being saved")
+        );
+        drop(guard);
     }
 
     #[tokio::test]

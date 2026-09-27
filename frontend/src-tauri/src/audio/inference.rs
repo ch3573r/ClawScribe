@@ -15,7 +15,13 @@ static JOBS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
 pub(crate) static GLOBAL_JOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
-    let permit = JOBS.clone().try_acquire_owned().map_err(|_| "Another recording or transcription job is active. Stop or cancel it before starting another.".to_string())?;
+    let permit = JOBS.clone().try_acquire_owned().map_err(|_| {
+        if super::diarization::active_speaker_diarization_command().is_some() {
+            "Speaker detection is running. Cancel speaker detection before starting a recording.".to_string()
+        } else {
+            "Another recording or transcription job is active. Stop or cancel it before starting another.".to_string()
+        }
+    })?;
     if NATIVE.available_permits() == 0 {
         return Err("The previous speech engine is still finishing a native call. Wait for it to finish before starting another job or changing models.".into());
     }
@@ -44,23 +50,31 @@ pub(crate) async fn claim_job_preempting_local_summary(
     }
 }
 
-struct CancelOnDrop(Arc<AtomicBool>);
+struct CancelOnDrop(Option<Arc<AtomicBool>>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        if let Some(cancelled) = &self.0 {
+            cancelled.store(true, Ordering::Release);
+        }
     }
 }
 
 pub(crate) async fn run<T: Send + 'static>(
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    run_cancellable(Arc::new(AtomicBool::new(false)), work).await
+}
+
+pub(crate) async fn run_cancellable<T: Send + 'static>(
+    cancelled: Arc<AtomicBool>,
+    work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let permit = NATIVE
         .clone()
         .try_acquire_owned()
         .map_err(|_| anyhow!("Speech engine is still busy with a previous native call"))?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let _cancel_on_drop = CancelOnDrop(cancelled.clone());
-    tokio::task::spawn_blocking(move || {
+    let mut cancel_on_drop = CancelOnDrop(Some(cancelled.clone()));
+    let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         if cancelled.load(Ordering::Acquire) {
             return Err(anyhow!("Transcription cancelled"));
@@ -72,7 +86,9 @@ pub(crate) async fn run<T: Send + 'static>(
         Ok(result)
     })
     .await
-    .map_err(|_| anyhow!("Native speech engine task failed"))?
+    .map_err(|_| anyhow!("Native speech engine task failed"))?;
+    cancel_on_drop.0 = None;
+    result
 }
 
 #[cfg(test)]

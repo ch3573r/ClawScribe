@@ -231,3 +231,7 @@ speaker renames for that meeting. Before saving labels it verifies the transcrip
 has not changed; if it has, the existing edits are kept and detection must be run again.
 The previous transcript, including its speaker labels, is kept so **Restore previous
 transcript** can undo speaker detection.
+Cancel speaker detection from its dialog or the meeting toolbar, including after
+continuing in the background. Cancellation discards pending labels and waits for
+the current native speech step to finish before another recording can start. If
+recording is blocked by detection, its error offers **Cancel speaker detection and record**.
