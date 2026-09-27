@@ -238,6 +238,15 @@ and SHA-256 hashes. Transfers resume from `.partial` files and verify integrity
 before promotion to the final filename. Readiness caches successful verification
 for an unchanged file; a complete verified model needs no network request.
 
+Speech and speaker-detection downloads use the immutable revisions, exact sizes
+and SHA-256 hashes in `speech-model-pins.json`. The shared transfer verifies before
+publishing a file. Existing files are hashed on a blocking worker; verification
+receipts cache unchanged size, modification time and expected hash across starts.
+Changed or mismatched files require verification or re-download before loading.
+The default Parakeet v3 Hugging Face mirror is byte-identical to the previous
+four-file download. SmoothQuant retains the original export filenames from the
+last pinned revision before upstream reorganized those files.
+
 Codex output documents and their processing log live in the meeting folder.
 Temporary prompt/transcript run files are removed on success, failure or
 cancellation. Meeting deletion removes legacy run files, and startup retries

@@ -101,6 +101,8 @@ try {
         "audio::transcription::queue::tests",
         "audio::outcome::tests",
         "audio::retranscription::tests",
+        "audio::import::tests",
+        "audio::diarization::tests",
         "api::",
         "database::repositories::transcript::recording_save_tests",
         "whisper_engine::acceleration::tests",

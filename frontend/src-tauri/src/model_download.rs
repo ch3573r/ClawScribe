@@ -166,7 +166,80 @@ pub(crate) async fn download_file(
     token: &CancellationToken,
     progress: impl FnMut(u64, u64),
 ) -> Result<u64> {
-    download_file_checked(client, url, path, token, None, progress).await
+    let pin = pinned_file(url)?;
+    download_file_checked(
+        client,
+        url,
+        path,
+        token,
+        Some((pin.size, &pin.sha256)),
+        progress,
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct PinnedFile {
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+pub(crate) static SPEECH_PINS: once_cell::sync::Lazy<Vec<PinnedFile>> =
+    once_cell::sync::Lazy::new(|| {
+        serde_json::from_str(include_str!("speech-model-pins.json"))
+            .expect("pinned speech model manifest")
+    });
+
+pub(crate) fn pinned_file(url: &str) -> Result<&'static PinnedFile> {
+    SPEECH_PINS
+        .iter()
+        .find(|file| file.url == url)
+        .ok_or_else(|| anyhow!("No integrity pin for this model download"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize, PartialEq)]
+struct VerificationStamp {
+    size: u64,
+    modified: std::time::SystemTime,
+    expected_sha256: String,
+}
+
+/// Hash existing models off the async/UI thread. A receipt is valid only for
+/// the same pinned hash and unchanged metadata; interrupted checks never cache.
+pub(crate) async fn verify_pinned_file(path: &Path, url: &str) -> Result<()> {
+    let pin = pinned_file(url)?;
+    verify_cached(path, pin.size, &pin.sha256).await
+}
+
+async fn verify_cached(path: &Path, size: u64, hash: &str) -> Result<()> {
+    let metadata = fs::metadata(path).await?;
+    let stamp = VerificationStamp {
+        size: metadata.len(),
+        modified: metadata.modified()?,
+        expected_sha256: hash.into(),
+    };
+    if stamp.size != size {
+        bail!("Model needs re-download: size does not match the pinned file");
+    }
+    let mut receipt_name = path.as_os_str().to_os_string();
+    receipt_name.push(".verified.json");
+    let receipt = PathBuf::from(receipt_name);
+    if let Ok(bytes) = fs::read(&receipt).await {
+        if serde_json::from_slice::<VerificationStamp>(&bytes).is_ok_and(|cached| cached == stamp) {
+            return Ok(());
+        }
+    }
+    verify_file(path, size, hash).await?;
+    let after = fs::metadata(path).await?;
+    if after.len() != stamp.size || after.modified()? != stamp.modified {
+        bail!("Model changed during verification; retry");
+    }
+    // A receipt write failure only means verification runs again next time.
+    if let Ok(bytes) = serde_json::to_vec(&stamp) {
+        let _ = fs::write(receipt, bytes).await;
+    }
+    Ok(())
 }
 
 pub(crate) async fn verify_file(path: &Path, size: u64, hash: &str) -> Result<()> {
@@ -344,6 +417,50 @@ pub(crate) async fn download_file_checked(
 
 #[cfg(test)]
 mod tests {
+    // Transport fixtures exercise arbitrary local URLs, separate from catalog pins.
+    async fn download_file(
+        client: &super::Client,
+        url: &str,
+        path: &std::path::Path,
+        token: &tokio_util::sync::CancellationToken,
+        progress: impl FnMut(u64, u64),
+    ) -> anyhow::Result<u64> {
+        super::download_file_checked(client, url, path, token, None, progress).await
+    }
+
+    #[tokio::test]
+    async fn integrity_receipt_survives_restart_but_changed_files_need_verification() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synthetic.bin");
+        std::fs::write(&path, b"valid").unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"valid"));
+        super::verify_cached(&path, 5, &hash).await.unwrap();
+        let receipt = dir.path().join("synthetic.bin.verified.json");
+        let before = std::fs::metadata(&receipt).unwrap().modified().unwrap();
+        // No in-memory cache is required, so this also covers app restart.
+        super::verify_cached(&path, 5, &hash).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&receipt).unwrap().modified().unwrap(),
+            before
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        std::fs::write(&path, b"wrong").unwrap();
+        assert!(super::verify_cached(&path, 5, &hash).await.is_err());
+    }
+
+    #[test]
+    fn speech_catalog_has_only_immutable_urls_and_sha256_pins() {
+        for pin in super::SPEECH_PINS.iter() {
+            let (_, revision_file) = pin.url.split_once("/resolve/").unwrap();
+            let revision = revision_file.split('/').next().unwrap();
+            assert_eq!(revision.len(), 40);
+            assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(pin.sha256.len(), 64);
+            assert!(pin.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(pin.size > 0);
+        }
+    }
     use super::*;
     use tokio::io::AsyncReadExt;
 

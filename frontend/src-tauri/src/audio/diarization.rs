@@ -9,7 +9,6 @@ use crate::summary::metadata::{
 };
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sherpa_onnx::{
@@ -27,7 +26,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 const FLOAT_TIE_EPSILON: f64 = 1e-9;
@@ -60,8 +58,8 @@ const DEFAULT_EMBEDDING_MODEL_DIR: &str = "sherpa-onnx-wespeaker_en_voxceleb_CAM
 const ZH_CN_EMBEDDING_MODEL_DIR: &str =
     "sherpa-onnx-3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k";
 const SEGMENTATION_MODEL_URL: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
-const ZH_CN_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.int8.onnx";
+const ZH_CN_EMBEDDING_MODEL_URL: &str = "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 20 * 60;
 const DIRECTML_PROBE_SECONDS: usize = 5;
@@ -319,7 +317,7 @@ const SEGMENTATION_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
         cache_file: "model.onnx",
         source_file: "model.onnx",
         download_url:
-            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
         expected_sha256: Some(
             "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
         ),
@@ -359,7 +357,7 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
         cache_file: "model.onnx",
         source_file: "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
         download_url:
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
         expected_sha256: Some(
             "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
         ),
@@ -378,7 +376,7 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
         cache_file: "model.onnx",
         source_file: "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
         download_url:
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
         expected_sha256: Some(
             "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
         ),
@@ -397,7 +395,7 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
         cache_file: "model.onnx",
         source_file: "wespeaker_en_voxceleb_CAM++.onnx",
         download_url:
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B.onnx",
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/wespeaker_en_voxceleb_CAM%2B%2B.onnx",
         expected_sha256: Some(
             "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef",
         ),
@@ -416,7 +414,7 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
         cache_file: "model.onnx",
         source_file: "nemo_en_titanet_small.onnx",
         download_url:
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/nemo_en_titanet_small.onnx",
         expected_sha256: Some(
             "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
         ),
@@ -4093,38 +4091,20 @@ async fn ensure_model_available<R: Runtime>(
     allow_download: bool,
 ) -> Result<()> {
     if model_path.is_file() {
-        if !allow_download {
-            return Ok(());
+        if let Some(descriptor) = descriptor {
+            if crate::model_download::verify_pinned_file(model_path, descriptor.download_url)
+                .await
+                .is_err()
+            {
+                let path = model_path.to_path_buf();
+                let _ =
+                    tokio::task::spawn_blocking(move || quarantine_invalid_default_model(&path))
+                        .await;
+                return Err(anyhow!("{model_name} speaker-detection model needs re-download. Retry speaker detection to download a verified copy."));
+            }
         }
-
-        let descriptor = descriptor.ok_or_else(|| {
-            anyhow!(
-                "{} diarization model has no descriptor for validation: {}",
-                model_name,
-                model_path.display()
-            )
-        })?;
-        let validation = validate_model_file(model_path, descriptor)?;
-        if validation.is_valid() {
-            return Ok(());
-        }
-
-        let validation_error = validation.error_message(descriptor, model_path);
-        log::warn!("{validation_error}");
-        match quarantine_invalid_default_model(model_path)? {
-            Some(quarantine_path) => log::warn!(
-                "Quarantined invalid {} diarization model at {}",
-                model_name,
-                quarantine_path.display()
-            ),
-            None => log::warn!(
-                "Deleted invalid {} diarization model at {}",
-                model_name,
-                model_path.display()
-            ),
-        }
+        return Ok(());
     }
-
     if !allow_download {
         ensure_model_file(model_path, model_name)?;
     }
@@ -4157,99 +4137,23 @@ async fn ensure_model_available<R: Runtime>(
         .build()
         .map_err(|e| anyhow!("Failed to configure diarization model downloader: {}", e))?;
 
-    let response = client.get(download_url).send().await.map_err(|e| {
-        anyhow!(
-            "Failed to download {} diarization model from {}: {}",
-            model_name,
-            download_url,
-            e
-        )
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow!(
-            "Failed to download {} diarization model from {}: HTTP {}",
-            model_name,
-            download_url,
-            status
-        ));
-    }
-
-    let temp_path = model_path.with_extension("download");
-    let mut file = tokio::fs::File::create(&temp_path).await?;
-    let total_bytes = response.content_length();
-    let mut downloaded_bytes = 0u64;
-    let mut last_reported_percent = 0u32;
-    let mut last_reported_mebibytes = 0u64;
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            anyhow!(
-                "Failed to read {} diarization model download from {}: {}",
-                model_name,
-                download_url,
-                e
-            )
-        })?;
-        if chunk.is_empty() {
-            continue;
-        }
-
-        file.write_all(&chunk).await?;
-        downloaded_bytes += chunk.len() as u64;
-
-        if let Some(total) = total_bytes.filter(|value| *value > 0) {
-            let percent = ((downloaded_bytes.saturating_mul(100)) / total).min(100) as u32;
-            if percent == 100 || percent >= last_reported_percent.saturating_add(10) {
-                last_reported_percent = percent;
-                emit_progress(
-                    app,
-                    meeting_id,
-                    "downloading_models",
-                    8 + ((percent.min(100) * 6) / 100),
-                    &format!("Downloading {model_name} diarization model ({percent}%)..."),
-                );
-            }
-        } else {
-            let mebibytes = downloaded_bytes / (1024 * 1024);
-            if mebibytes >= last_reported_mebibytes.saturating_add(10) {
-                last_reported_mebibytes = mebibytes;
-                emit_progress(
-                    app,
-                    meeting_id,
-                    "downloading_models",
-                    8,
-                    &format!("Downloading {model_name} diarization model ({mebibytes} MiB)..."),
-                );
-            }
-        }
-    }
-
-    file.flush().await?;
-    drop(file);
-
-    if downloaded_bytes == 0 {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(anyhow!(
-            "{} diarization model download was empty: {}",
-            model_name,
-            download_url
-        ));
-    }
-
-    let validation = validate_model_file(&temp_path, descriptor)?;
-    if !validation.is_valid() {
-        let validation_error = validation.error_message(descriptor, &temp_path);
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(anyhow!(
-            "Downloaded {} diarization model failed validation: {}",
-            model_name,
-            validation_error
-        ));
-    }
-
-    tokio::fs::rename(&temp_path, model_path).await?;
+    crate::model_download::download_file(
+        &client,
+        download_url,
+        model_path,
+        &tokio_util::sync::CancellationToken::new(),
+        |bytes, total| {
+            let percent = (bytes.saturating_mul(100) / total.max(1)).min(99) as u32;
+            emit_progress(
+                app,
+                meeting_id,
+                "downloading_models",
+                8 + percent * 6 / 100,
+                &format!("Downloading {model_name} diarization model ({percent}%)..."),
+            );
+        },
+    )
+    .await?;
 
     Ok(())
 }
