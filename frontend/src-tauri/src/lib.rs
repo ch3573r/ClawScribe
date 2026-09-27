@@ -47,6 +47,7 @@ pub(crate) mod credentials;
 pub mod database;
 pub mod diagnostics;
 pub mod exports;
+mod external_url;
 pub mod groq;
 pub mod library;
 pub(crate) mod model_download;
@@ -72,7 +73,7 @@ use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, Runtime, Theme};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Theme};
 use tokio::sync::RwLock;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
@@ -567,6 +568,7 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
+        .manage(summary::commands::SummaryEditsState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
@@ -682,6 +684,7 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
+                    let _ = window.emit("summary-flush-on-close", ());
                     if let Err(e) = window.hide() {
                         log::error!("Failed to hide main window on close request: {}", e);
                     } else {
@@ -868,6 +871,9 @@ pub fn run() {
             summary::chat_commands::api_chat_clear,
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
+            summary::commands::api_restore_previous_summary,
+            summary::commands::api_set_summary_edits_pending,
+            summary::commands::api_finish_summary_edit_exit,
             summary::commands::api_get_meeting_summary_language,
             summary::commands::api_save_meeting_summary_language,
             summary::commands::api_get_meeting_detected_summary_language,
@@ -1018,6 +1024,15 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { .. } => {
                     tray::focus_main_window(_app_handle);
+                }
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    let edits = _app_handle.state::<summary::commands::SummaryEditsState>();
+                    if edits.pending.load(std::sync::atomic::Ordering::SeqCst) {
+                        api.prevent_exit();
+                        *edits.exit_code.lock().unwrap() = Some(code.unwrap_or(0));
+                        tray::focus_main_window(_app_handle);
+                        let _ = _app_handle.emit("summary-flush-before-exit", ());
+                    }
                 }
                 tauri::RunEvent::Exit => {
                     log::info!("Application exiting, cleaning up resources...");

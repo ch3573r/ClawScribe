@@ -15,7 +15,11 @@ import { planSummaryReplacement, ReplaceOptions, ReplacePreview } from "@/lib/su
 // Dynamically import BlockNote Editor to avoid SSR issues
 const Editor = dynamic(() => import('../BlockNoteEditor/Editor'), { ssr: false });
 
+import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
+
 interface BlockNoteSummaryViewProps {
+  onDraftChange?: (draft: SummaryDraft, read: () => Promise<SummaryDraft>) => void;
+  saveState?: SaveState;
   summaryData: SummaryDataResponse | Summary | null;
   onSave?: (data: { markdown?: string; summary_json?: BlockNoteBlock[] }) => void | Promise<void>;
   onSummaryChange?: (summary: Summary) => void;
@@ -77,7 +81,9 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   error = null,
   onRegenerateSummary,
   meeting,
-  onDirtyChange
+  onDirtyChange,
+  onDraftChange,
+  saveState,
 }, ref) => {
   const theme = useAppTheme();
   const saveInFlight = useRef(false);
@@ -117,13 +123,21 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [format, data?.markdown, data?.summary_json, editor]);
 
+  useEffect(() => { if (saveState === 'saved') setIsDirty(false); }, [saveState]);
+
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
     if (isContentLoaded.current) {
       setCurrentBlocks(blocks);
       setIsDirty(true);
+      // Retain immutable blocks immediately; navigation may destroy the editor ref.
+      const snapshot = structuredClone(blocks);
+      onDraftChange?.({ summary_json: snapshot }, async () => {
+        const result = await blocksToMarkdownSafely(editor, snapshot, { source: 'summary-autosave' });
+        return { summary_json: snapshot, ...(result.markdown === undefined ? {} : { markdown: result.markdown }) };
+      });
     }
-  }, []);
+  }, [editor, onDraftChange]);
 
   // Notify parent of dirty state changes
   useEffect(() => {
@@ -181,8 +195,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       if (plan.token !== token) throw new Error('The summary changed. Preview the replacements again.');
       if (plan.matches) {
         active.replaceBlocks(active.document, plan.blocks);
-        setCurrentBlocks(active.document);
-        setIsDirty(true);
+        handleEditorChange(active.document);
       }
     },
     getMarkdown: async () => {
@@ -232,7 +245,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       }
     },
     isDirty
-  }), [handleSave, isDirty, isSaving, editor, format, currentBlocks, data]);
+  }), [handleSave, handleEditorChange, isDirty, isSaving, editor, format, currentBlocks, data]);
 
   if (loadError) return <p role="alert" className="text-sm text-destructive">Could not open the summary editor. Reopen this meeting to retry; the saved notes are retained.</p>;
 

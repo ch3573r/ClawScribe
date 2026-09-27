@@ -1,3 +1,4 @@
+import { openExternal } from '@/lib/openExternal';
 import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
 import { useState, useEffect, useRef } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
@@ -1219,7 +1220,7 @@ export function ModelSettingsModal({
           duration: 7000,
           action: {
             label: 'Download',
-            onClick: () => invoke('open_external_url', { url: 'https://ollama.com/download' })
+            onClick: () => openExternal('https://ollama.com/download')
           }
         });
         // Update the installation status flag
@@ -1783,7 +1784,7 @@ export function ModelSettingsModal({
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => invoke('open_external_url', { url: 'https://github.com/ch3573r/ClawScribe/blob/main/docs/auth/codex-auth.md' })}
+              onClick={() => openExternal('https://github.com/ch3573r/ClawScribe/blob/main/docs/auth/codex-auth.md')}
             >
               <ExternalLink className="mr-2 h-4 w-4" />
               Open Codex auth docs
@@ -2007,7 +2008,7 @@ export function ModelSettingsModal({
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => invoke('open_external_url', { url: 'https://platform.openai.com/api-keys' })}
+                  onClick={() => openExternal('https://platform.openai.com/api-keys')}
                 >
                   <ExternalLink className="mr-2 h-4 w-4" />
                   Open API keys
@@ -2136,7 +2137,7 @@ export function ModelSettingsModal({
                     <Button
                       variant="default"
                       size="sm"
-                      onClick={() => invoke('open_external_url', { url: 'https://ollama.com/download' })}
+                      onClick={() => openExternal('https://ollama.com/download')}
                       className="w-full bg-primary hover:bg-primary"
                     >
                       <ExternalLink className="mr-2 h-4 w-4" />

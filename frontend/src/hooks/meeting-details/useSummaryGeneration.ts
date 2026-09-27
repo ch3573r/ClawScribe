@@ -1,3 +1,6 @@
+import { confirm } from '@tauri-apps/plugin-dialog';
+import { confirmSummaryRegeneration } from '@/lib/meetingDrafts';
+import { openExternal } from '@/lib/openExternal';
 import { useState, useCallback } from 'react';
 import { Transcript, Summary } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
@@ -54,6 +57,7 @@ async function resolveSummaryLanguage(
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
 interface UseSummaryGenerationProps {
+  beforeGeneration?: () => Promise<void>;
   meeting: any;
   transcripts: Transcript[];
   modelConfig: ModelConfig;
@@ -67,6 +71,7 @@ interface UseSummaryGenerationProps {
 }
 
 export function useSummaryGeneration({
+  beforeGeneration,
   meeting,
   transcripts,
   modelConfig,
@@ -113,6 +118,17 @@ export function useSummaryGeneration({
     customPrompt?: string;
     isRegeneration?: boolean;
   }) => {
+    try {
+      const accepted = await confirmSummaryRegeneration(
+        beforeGeneration ?? (async () => {}),
+        () => invokeTauri<{ data?: { user_edited_at?: unknown } }>('api_get_summary', { meetingId: meeting.id }),
+        message => confirm(message, { title: 'Regenerate summary', kind: 'warning' }),
+      );
+      if (!accepted) return;
+    } catch {
+      toast.error('Save your pending edits before generating a summary.');
+      return;
+    }
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
     setSummaryError(null);
 
@@ -393,6 +409,7 @@ export function useSummaryGeneration({
       );
     }
   }, [
+    beforeGeneration,
     meeting.id,
     meeting.created_at,
     modelConfig,
@@ -530,7 +547,7 @@ export function useSummaryGeneration({
               duration: 7000,
               action: {
                 label: 'Download',
-                onClick: () => invokeTauri('open_external_url', { url: 'https://ollama.com/download' })
+                onClick: () => openExternal('https://ollama.com/download')
               }
             }
           );
@@ -638,7 +655,7 @@ export function useSummaryGeneration({
       ...summaryPayload,
       customPrompt,
     });
-  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
+  }, [beforeGeneration, meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
 
   // Public API: Regenerate summary from the current saved transcript
   const handleRegenerateSummary = useCallback(async (customPrompt: string = '') => {

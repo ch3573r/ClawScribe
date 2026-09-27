@@ -18,7 +18,7 @@ use crate::exports::planner::PlannerDestination;
 use crate::exports::reqwest_transport::ReqwestGraphTransport;
 use crate::exports::todo::ToDoDestination;
 use crate::exports::token_store;
-use crate::summary::codex_provider::open_url_in_default_browser;
+use crate::external_url::open_url_in_default_browser;
 
 // ── Response types ──────────────────────────────────────────────────────
 

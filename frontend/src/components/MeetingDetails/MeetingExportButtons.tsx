@@ -1,5 +1,6 @@
 "use client";
 
+import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -216,7 +217,7 @@ export function MeetingExportButtons({
         toast.success(`${label} export complete`, {
           description: webUrl ? "Open in Microsoft 365" : undefined,
           action: webUrl
-            ? { label: "Open", onClick: () => window.open(webUrl, "_blank") }
+            ? { label: "Open", onClick: () => openExternal(webUrl) }
             : undefined,
         });
       } else {
@@ -403,14 +404,14 @@ export function MeetingExportButtons({
           toast.success("Confluence export complete", {
             description: report.webUrl ? "Page created in Confluence." : report.title,
             action: report.webUrl
-              ? { label: "Open", onClick: () => window.open(report.webUrl!, "_blank") }
+              ? { label: "Open", onClick: () => openExternal(report.webUrl!) }
               : undefined,
           });
           return;
         } catch (restError) {
           const copyMode = await writeConfluenceDraftToClipboard(draft);
           if (url && confluenceOpenAfterCopy) {
-            window.open(url, "_blank");
+            openExternal(url);
           }
           setDocumentDestination(null);
           toast.error("Confluence REST export failed", {
@@ -425,7 +426,7 @@ export function MeetingExportButtons({
 
       const mode = await writeConfluenceDraftToClipboard(draft);
       if (url && confluenceOpenAfterCopy) {
-        window.open(url, "_blank");
+        openExternal(url);
       }
 
       setDocumentDestination(null);
@@ -472,7 +473,7 @@ export function MeetingExportButtons({
       toast.success("OneDrive export complete", {
         description: `${kinds || "Files"} uploaded to ${response.destination.name}.`,
         action: openUrl
-          ? { label: "Open", onClick: () => window.open(openUrl, "_blank") }
+          ? { label: "Open", onClick: () => openExternal(openUrl) }
           : undefined,
       });
     } catch (e) {

@@ -1163,6 +1163,7 @@ mod meeting_deletion_tests {
 
     #[tokio::test]
     async fn database_only_deletion_is_allowed_during_inference() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let _busy = crate::audio::inference::claim_job().unwrap();
         let error = claim_meeting_deletion_job(true).unwrap_err();
@@ -1712,21 +1713,7 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
 
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
-    use std::process::Command;
-
-    let result = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(&["/C", "start", &url]).output()
-    } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(&url).output()
-    } else {
-        // Linux and other Unix-like systems
-        Command::new("xdg-open").arg(&url).output()
-    };
-
-    match result {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to open URL: {}", e)),
-    }
+    crate::external_url::open_url_in_default_browser(&url)
 }
 
 // ===== CUSTOM OPENAI API COMMANDS =====

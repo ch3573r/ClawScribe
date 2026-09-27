@@ -1,3 +1,4 @@
+use crate::external_url::open_url_in_default_browser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -2530,27 +2531,6 @@ fn hide_std_child_console(command: &mut StdCommand) {
 
 #[cfg(not(windows))]
 fn hide_std_child_console(_command: &mut StdCommand) {}
-
-pub(crate) fn open_url_in_default_browser(url: &str) -> Result<(), String> {
-    let mut command = if cfg!(target_os = "windows") {
-        let mut command = StdCommand::new("rundll32.exe");
-        command.args(["url.dll,FileProtocolHandler", url]);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = StdCommand::new("open");
-        command.arg(url);
-        command
-    } else {
-        let mut command = StdCommand::new("xdg-open");
-        command.arg(url);
-        command
-    };
-    hide_std_child_console(&mut command);
-    command
-        .spawn()
-        .map_err(|e| format!("Failed to open sign-in URL: {e}"))?;
-    Ok(())
-}
 
 fn build_app_server_turn_text(
     transcript: &str,

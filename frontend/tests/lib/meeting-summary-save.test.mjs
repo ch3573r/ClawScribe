@@ -3,22 +3,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
-import { deferred } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 function createHook(invoke) {
   const messages = [];
-  const slots = [];
-  let cursor = 0;
-  const react = {
-    useEffect() {},
-    useCallback: callback => callback,
-    useRef(value) { return slots[cursor++] ??= { current: value }; },
-    useState(value) {
-      const index = cursor++;
-      const slot = slots[index] ??= { value };
-      return [slot.value, next => { slot.value = typeof next === 'function' ? next(slot.value) : next; }];
-    },
-  };
+  const harness = createHookHarness();
+  const react = harness.react;
   const props = { meeting: { id: 'synthetic', title: 'Review', transcripts: [] }, summaryData: { markdown: 'Old summary' } };
   const modulePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/hooks/meeting-details/useMeetingData.ts');
   const { useMeetingData } = loadTsModule(modulePath, {
@@ -27,7 +17,8 @@ function createHook(invoke) {
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [], setMeetings() {}, setCurrentMeeting() {} }) },
     sonner: { toast: { success(message) { messages.push({ kind: 'success', message }); }, error(message) { messages.push({ kind: 'error', message }); } } },
   });
-  const render = () => { cursor = 0; return useMeetingData(props); };
+  const render = () => harness.render(() => useMeetingData(props));
+  render.unmount = () => harness.unmount();
   render.messages = messages;
   return render;
 }
@@ -63,17 +54,19 @@ test('a failed title write preserves the draft and reports failure instead of su
 test('duplicate save clicks share one write and later title edits remain dirty', async () => {
   const pending = deferred();
   let writes = 0;
-  const render = createHook(() => { writes++; return pending.promise; });
+  const render = createHook((command) => { if (command === 'api_save_meeting_title') { writes++; return pending.promise; } return Promise.resolve({}); });
   render().handleTitleChange('First title');
   const current = render();
   const saving = current.saveAllChanges();
   await current.saveAllChanges();
+  await flush();
   assert.equal(writes, 1);
   render().handleTitleChange('Later title');
   pending.resolve();
   await saving;
   assert.equal(render().meetingTitle, 'Later title');
   assert.equal(render().isTitleDirty, true);
+  await render().saveAllChanges();
 });
 
 test('edits made during a legacy summary save are retained for the next save', async () => {
@@ -87,4 +80,19 @@ test('edits made during a legacy summary save are retained for the next save', a
   pending.resolve();
   await saving;
   assert.equal(render().aiSummary, later);
+  await render().saveAllChanges();
+});
+
+
+test('switching meetings flushes the edited snapshot exactly once', async () => {
+  const calls = [];
+  const render = createHook(async (command, args) => { calls.push({ command, args }); return {}; });
+  render();
+  render().handleSummaryDraft({ summary_json: [{ id: 'edited' }] }, async () => ({ markdown: 'Edited before switching', summary_json: [{ id: 'edited' }] }));
+  render.unmount();
+  await flush();
+  const writes = calls.filter(call => call.command === 'api_save_meeting_summary');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].args.meetingId, 'synthetic');
+  assert.equal(writes[0].args.summary.markdown, 'Edited before switching');
 });

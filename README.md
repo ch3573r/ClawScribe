@@ -18,6 +18,10 @@ ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
 and [LICENSE.md](LICENSE.md).
 
+Meeting titles and summary edits save automatically. Regenerating edited notes asks
+for confirmation, and **Restore previous summary** lets you return to the previous
+version after a successful generation.
+
 ## Install And Start A Meeting
 
 Use the NSIS setup installer from the selected GitHub Release; an MSI is also

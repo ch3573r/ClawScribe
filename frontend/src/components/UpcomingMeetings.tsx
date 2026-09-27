@@ -1,5 +1,6 @@
 "use client";
 
+import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, Video } from "lucide-react";
 import {
@@ -95,7 +96,7 @@ export function UpcomingMeetings() {
             {ev.joinUrl && (
               <a
                 href={ev.joinUrl}
-                target="_blank"
+                onClick={event => { event.preventDefault(); void openExternal(event.currentTarget.href); }}
                 rel="noreferrer"
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-muted px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-primary/30 hover:bg-primary/10 hover:text-primary"
               >

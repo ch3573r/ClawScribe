@@ -11,6 +11,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 static NATIVE: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
 static JOBS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
 
+#[cfg(test)]
+pub(crate) static GLOBAL_JOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     let permit = JOBS.clone().try_acquire_owned().map_err(|_| "Another recording or transcription job is active. Stop or cancel it before starting another.".to_string())?;
     if NATIVE.available_permits() == 0 {
@@ -77,6 +80,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn jobs_are_exclusive_and_release_on_error() {
+        let _test_lock = GLOBAL_JOB_TEST_LOCK.lock().await;
         let first = claim_job().unwrap();
         assert!(claim_job().is_err());
         drop(first);

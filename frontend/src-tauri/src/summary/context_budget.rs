@@ -12,7 +12,7 @@ pub(crate) struct ModelBudget {
 }
 
 /// Deliberately small family table; unknown cloud models get 32K, never an
-/// inferred unlimited context. Operator endpoints use only their saved limit.
+/// inferred unlimited context. Saved operator limits always take precedence.
 pub(crate) fn resolve(
     provider: &LLMProvider,
     model: &str,
@@ -44,7 +44,7 @@ pub(crate) fn resolve(
             .unwrap_or(8192)
             .min(16_384),
         LLMProvider::Codex => 32_768,
-        LLMProvider::OpenAICompatible
+        LLMProvider::OpenAICompatible | LLMProvider::CustomOpenAI | LLMProvider::OpenClaw
             if super::openai_provider::is_openai_reasoning_model(model) =>
         {
             context.unwrap_or(known_cloud)
@@ -56,7 +56,7 @@ pub(crate) fn resolve(
     };
     let reasoning = super::openai_provider::is_openai_reasoning_model(model)
         || *provider == LLMProvider::Claude;
-    let output_tokens = output.unwrap_or(if reasoning {
+    let default_output = if reasoning {
         16_000
     } else {
         match provider {
@@ -64,7 +64,8 @@ pub(crate) fn resolve(
             LLMProvider::BuiltInAI | LLMProvider::Codex => 4096,
             _ => DEFAULT_OUTPUT_TOKENS,
         }
-    });
+    };
+    let output_tokens = output.unwrap_or(default_output.min((context_tokens / 4).max(1024)));
     ModelBudget {
         context_tokens,
         output_tokens,
@@ -184,6 +185,8 @@ mod tests {
             (LLMProvider::OpenAI, "gpt-4o", None),
             (LLMProvider::OpenAI, "gpt-5.6-sol", None),
             (LLMProvider::OpenAICompatible, "gpt-6-sol", None),
+            (LLMProvider::CustomOpenAI, "gpt-5.5", None),
+            (LLMProvider::OpenClaw, "gpt-6-sol", None),
             (LLMProvider::OpenClaw, "configured-model", None),
             (LLMProvider::CustomOpenAI, "configured-model", None),
             (LLMProvider::Claude, "claude-sonnet", None),
@@ -269,10 +272,21 @@ mod tests {
             resolve(&LLMProvider::OpenAI, "unknown-model", None, None).context_tokens,
             32768
         );
-        let error = resolve(&LLMProvider::CustomOpenAI, "tiny-test", Some(2048), None)
+        let error = resolve(&LLMProvider::CustomOpenAI, "tiny-test", Some(1024), None)
             .input(&LLMProvider::CustomOpenAI, "tiny-test", 100)
             .unwrap_err();
         assert!(error.contains("tiny-test") && error.contains("Context window"));
+    }
+    #[test]
+    fn default_output_fits_saved_context_but_explicit_output_is_not_clamped() {
+        let provider = LLMProvider::CustomOpenAI;
+        let budget = resolve(&provider, "gpt-5.5", Some(8192), None);
+        assert_eq!(budget.context_tokens, 8192);
+        assert_eq!(budget.output_tokens, 2048);
+        assert!(budget.input(&provider, "gpt-5.5", 1024).is_ok());
+        let explicit = resolve(&provider, "gpt-5.5", Some(8192), Some(20_000));
+        assert_eq!(explicit.output_tokens, 20_000);
+        assert!(explicit.input(&provider, "gpt-5.5", 1024).is_err());
     }
     #[test]
     fn unicode_windows_preserve_all_source_bytes() {
