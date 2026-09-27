@@ -108,7 +108,8 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 - **Local Word export:** save a summary, full transcript, or both as `.docx`,
   with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
   sign-in or Word installed.
-- **Project tags:** label saved meetings and filter the archive and transcript
+- **Project tags:** choose existing labels from a searchable list or create new
+  ones, then filter the archive and transcript
   search by project, including an untagged view.
 - **Meeting bookmarks:** mark a moment while recording, then label and revisit
   it from the saved transcript panel. Add markers during playback too.

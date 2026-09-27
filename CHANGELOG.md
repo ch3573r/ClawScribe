@@ -3,6 +3,7 @@
 ## 0.5.46
 
 - Codex summaries now enforce the meeting output format; a meeting without a suggested follow-up email no longer fails.
+- Project tags can be picked from existing tags or created in a searchable list.
 
 - Recover interrupted recordings even without transcripts. The recovery dialog recognizes raw capture audio instead of incorrectly showing "No audio". Keep originals until recovered audio is complete, fall back to WAV if compression fails, preserve capture-gap warnings, and allow retranscription when recording status is damaged.
 - Make long-meeting summaries more reliable with provider-aware context and output budgets, bounded reduction, clearer retry and failure states, and support for reasoning models and custom endpoints. Improve source citations and preserve useful partial chat output without duplicate assistant messages; generated notes still require review.
