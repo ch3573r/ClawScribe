@@ -22,7 +22,7 @@ test('HTTP opt-in appears only for private network destinations', () => {
 });
 
 test('Tailscale range and MagicDNS require opt-in without admitting public neighbours', () => {
-  for (const url of ['http://100.64.0.0', 'http://100.127.255.255', 'http://host.example.ts.net']) {
+  for (const url of ['http://100.101.102.103', 'http://box.tailnet.ts.net', 'http://100.64.0.0', 'http://100.127.255.255', 'http://host.example.ts.net']) {
     assert.equal(needsHttpOptIn(url), true, url);
     assert.ok(secretDestinationError(url, false), url);
     assert.equal(secretDestinationError(url, true), null, url);

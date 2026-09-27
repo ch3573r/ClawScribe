@@ -199,6 +199,8 @@ mod tests {
     #[test]
     fn tailscale_policy_checks_range_boundaries_and_dns() {
         for url in [
+            "http://100.101.102.103",
+            "http://box.tailnet.ts.net",
             "http://100.64.0.0",
             "http://100.127.255.255",
             "http://host.example.ts.net",
@@ -227,6 +229,10 @@ mod tests {
     }
     #[test]
     fn private_name_cannot_resolve_to_public_address() {
+        // This is the same address check secret_client applies after resolving
+        // a syntactically permitted MagicDNS name and before creating a client.
+        assert!(validate_secret_destination("http://box.tailnet.ts.net", true).is_ok());
+        assert!(validate_addresses(&["203.0.113.1:80".parse().unwrap()]).is_err());
         assert!(validate_addresses(&[
             "127.0.0.1:80".parse().unwrap(),
             "203.0.113.1:80".parse().unwrap()
