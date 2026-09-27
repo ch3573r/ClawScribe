@@ -98,6 +98,21 @@ impl MicrosoftAuthInner {
         Ok(())
     }
 
+    /// Completing or cancelling consent must preserve an already connected session.
+    pub fn finish_sign_in_failure(&mut self, generation: u64) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.sign_in_cancel = None;
+        self.pending_device_code = None;
+        self.connection_state = if self.current_token.is_some() {
+            MicrosoftConnectionState::Connected
+        } else {
+            MicrosoftConnectionState::NotConnected
+        };
+        true
+    }
+
     pub fn end_session(
         &mut self,
         delete: impl FnOnce() -> Result<(), token_store::TokenStoreError>,

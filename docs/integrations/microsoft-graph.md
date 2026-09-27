@@ -185,3 +185,13 @@ Before changing Microsoft integration:
 - test To Do preview before task creation
 - verify no tokens or auth URLs appear in logs
 - verify local recording and summary still work when Microsoft is disconnected
+
+## Partial consent
+
+An account can stay connected with only some permissions approved. Settings lists
+unavailable exports and offers **Request missing permissions**. This opens one
+explicit consent attempt. If the organization requires admin approval, the
+existing session remains connected and approved exports remain usable. Missing
+offline access means the session cannot be restored after closing the app.
+Export and discovery commands check their required permissions before calling
+Graph and report `Permission not granted: <scope>` when access is unavailable.

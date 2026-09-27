@@ -42,6 +42,7 @@ export function useMicrosoftExport() {
     try {
       const status = await microsoftExportService.connectionStatus();
       setConnection(status);
+      if (status.requestingPermissions) setSigningIn(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -57,9 +58,10 @@ export function useMicrosoftExport() {
       "microsoft-auth-complete",
       (event) => {
         setSigningIn(false);
-        if (event.payload.state !== "connected" && event.payload.error) {
+        if (event.payload.error) {
           setError(event.payload.error);
         }
+        void refreshStatus();
         setConnection({
           state: event.payload.state as MicrosoftConnectionInfo["state"],
           userDisplayName: event.payload.userDisplayName ?? null,
@@ -82,7 +84,7 @@ export function useMicrosoftExport() {
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [refreshStatus]);
 
   const signIn = useCallback(async () => {
     setSigningIn(true);
@@ -90,6 +92,17 @@ export function useMicrosoftExport() {
     try {
       await microsoftExportService.signIn();
       setConnection((prev) => ({ ...prev, state: "connecting" }));
+    } catch (e) {
+      setSigningIn(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const requestMissingPermissions = useCallback(async () => {
+    setSigningIn(true);
+    setError(null);
+    try {
+      await microsoftExportService.requestMissingPermissions();
     } catch (e) {
       setSigningIn(false);
       setError(e instanceof Error ? e.message : String(e));
@@ -266,6 +279,7 @@ export function useMicrosoftExport() {
     error,
     signIn,
     cancelSignIn,
+    requestMissingPermissions,
     signOut,
     notebooks,
     plans,

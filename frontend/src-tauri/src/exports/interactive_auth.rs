@@ -253,48 +253,25 @@ pub async fn run_interactive_sign_in(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
     open_browser: impl Fn(&str),
+    consent: bool,
     cancel: CancellationToken,
 ) -> Result<TokenResponse, MsAuthError> {
     tokio::select! {
         _ = cancel.cancelled() => Err(MsAuthError::AuthorizationDeclined),
-        result = sign_in_with_scopes(config, |consent| run_interactive_attempt(http, config, &open_browser, consent, cancel.clone())) => result,
+        result = sign_in_with_scopes(consent, |consent| run_interactive_attempt(http, config, &open_browser, consent, cancel.clone())) => result,
     }
 }
 
 async fn sign_in_with_scopes<F, Fut>(
-    config: &MicrosoftAuthConfig,
-    mut attempt: F,
+    consent: bool,
+    attempt: F,
 ) -> Result<TokenResponse, MsAuthError>
 where
-    F: FnMut(bool) -> Fut,
+    F: FnOnce(bool) -> Fut,
     Fut: std::future::Future<Output = Result<TokenResponse, MsAuthError>>,
 {
-    for consent in [false, true] {
-        let token = attempt(consent).await?;
-        let missing: Vec<_> = config
-            .scopes
-            .iter()
-            .filter(|required| {
-                // offline_access is represented by a refresh token, not a Graph permission.
-                if required.as_str() == "offline_access" {
-                    return token.refresh_token.as_ref().is_none_or(|t| t.is_empty());
-                }
-                !token.scope.split_whitespace().any(|granted| {
-                    granted
-                        .trim_start_matches("https://graph.microsoft.com/")
-                        .eq_ignore_ascii_case(required)
-                })
-            })
-            .cloned()
-            .collect();
-        if missing.is_empty() {
-            return Ok(token);
-        }
-        if consent {
-            return Err(MsAuthError::Unexpected(format!("Microsoft sign-in is missing required permissions: {}. Ask your administrator to approve these permissions.", missing.join(", "))));
-        }
-    }
-    unreachable!()
+    // Partial grants are a usable session. Only an explicit UI action requests consent.
+    attempt(consent).await
 }
 
 /// Run the full interactive sign-in: open the browser, capture the loopback
@@ -458,54 +435,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requests_consent_only_once_for_missing_scopes() {
-        for still_missing in [false, true] {
-            let config = MicrosoftAuthConfig::default();
-            let mut calls = Vec::new();
-            let result = sign_in_with_scopes(&config, |consent| {
-                calls.push(consent);
-                assert_eq!(
-                    authorize_url(
-                        &config,
-                        "http://localhost:12345",
-                        "challenge",
-                        "state",
-                        consent
-                    )
-                    .contains("prompt=consent"),
-                    consent
-                );
-                std::future::ready(Ok(TokenResponse {
-                    access_token: "test-token".into(),
-                    refresh_token: Some("test-token".into()),
-                    expires_in: 3600,
-                    token_type: "Bearer".into(),
-                    scope: if consent && !still_missing {
-                        config.scopes.join(" ")
-                    } else {
-                        "User.Read".into()
-                    },
-                }))
-            })
-            .await;
-            assert_eq!(calls, [false, true]);
-            assert_eq!(result.is_err(), still_missing);
-        }
-        let config = MicrosoftAuthConfig::default();
+    async fn partial_scopes_connect_without_automatic_consent() {
         let mut calls = Vec::new();
-        sign_in_with_scopes(&config, |consent| {
+        let token = sign_in_with_scopes(false, |consent| {
             calls.push(consent);
             std::future::ready(Ok(TokenResponse {
                 access_token: "test-token".into(),
-                refresh_token: Some("test-token".into()),
+                refresh_token: None,
                 expires_in: 3600,
                 token_type: "Bearer".into(),
-                scope: config.scopes.join(" "),
+                scope: "User.Read Notes.Create".into(),
             }))
         })
         .await
         .unwrap();
         assert_eq!(calls, [false]);
+        assert_eq!(token.scope, "User.Read Notes.Create");
+        assert!(token.refresh_token.is_none());
+        let config = MicrosoftAuthConfig::default();
+        assert!(authorize_url(
+            &config,
+            "http://localhost:12345",
+            "challenge",
+            "state",
+            true
+        )
+        .contains("prompt=consent"));
     }
 
     #[test]

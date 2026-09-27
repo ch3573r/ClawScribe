@@ -12,6 +12,10 @@ export interface MicrosoftConnectionInfo {
   userDisplayName: string | null;
   userEmail: string | null;
   grantedScopes?: string | null;
+  missingScopes?: string[];
+  unavailableExports?: string[];
+  sessionOnly?: boolean;
+  requestingPermissions?: boolean;
 }
 
 export interface ExportItemResult {
@@ -145,6 +149,10 @@ export function isOneNoteLargeLibraryError(error: unknown): boolean {
 }
 
 export const microsoftExportService = {
+  async requestMissingPermissions(): Promise<void> {
+    return invoke("microsoft_sign_in", { requestMissingPermissions: true });
+  },
+
   async signIn(): Promise<void> {
     // Opens the system browser for interactive sign-in; completion arrives via
     // the `microsoft-auth-complete` event.

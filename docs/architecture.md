@@ -226,9 +226,11 @@ Windows is the primary release target. Linux/macOS build paths may exist because
 of the upstream Tauri app and model libraries, but release validation currently
 focuses on Windows installers and GPU paths.
 
-Microsoft sign-in reuses existing consent by default. Only a token missing required
-permissions triggers one consent retry; any remaining missing permissions are
-reported for administrator review.
+Microsoft sign-in keeps partially granted sessions connected. Missing permissions
+and unavailable exports are shown in Settings; only “Request missing permissions”
+opens a consent flow. A declined request retains the session. Without offline
+access, sign-in lasts only for the current app run. Export commands check their
+required permissions before refresh or Graph calls.
 
 Credential-bearing integration endpoints require HTTPS, loopback HTTP, or an explicit
 private-network HTTP opt-in. Legacy private HTTP settings migrate on load. HTTP

@@ -291,35 +291,22 @@ function MicrosoftSignInPanel() {
                 Sign out
               </Button>
             </div>
-            {ms.connection.grantedScopes !== undefined &&
-              ms.connection.grantedScopes !== null &&
-              !/\bNotes\./i.test(ms.connection.grantedScopes ?? "") && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>
-                    This session was granted no OneNote permission, so notebook
-                    discovery will fail. Granted scopes:{" "}
-                    <code className="break-all">
-                      {ms.connection.grantedScopes || "(none)"}
-                    </code>
-                    . Sign out and sign in again to grant Microsoft export
-                    access; if the consent screen does not list them, the Entra
-                    app registration needs those Graph permissions and admin
-                    consent.
-                  </span>
-                </div>
-              )}
-            {ms.connection.grantedScopes !== undefined &&
-              ms.connection.grantedScopes !== null &&
-              !/\bFiles\.ReadWrite\b/i.test(ms.connection.grantedScopes ?? "") && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>
-                    This session was granted no OneDrive file permission. Sign
-                    out and sign in again to grant DOCX/PDF export access.
-                  </span>
-                </div>
-              )}
+            {(ms.connection.unavailableExports?.length ?? 0) > 0 && (
+              <div className="rounded-lg border border-border p-3 text-sm">
+                Unavailable with this account's current permissions: {ms.connection.unavailableExports?.join(', ')}.
+              </div>
+            )}
+            {ms.connection.sessionOnly && (
+              <p className="text-sm text-muted-foreground">Sign-in will not persist after closing ClawScribe because offline access was not granted.</p>
+            )}
+            {(ms.connection.missingScopes?.length ?? 0) > 0 && (
+              <div className="space-y-2 text-sm">
+                <p className="text-muted-foreground">Missing permissions: {ms.connection.missingScopes?.join(', ')}. Your administrator may need to approve them.</p>
+                <Button type="button" variant="outline" disabled={ms.signingIn} onClick={ms.requestMissingPermissions}>
+                  Request missing permissions
+                </Button>
+              </div>
+            )}
           </>
         )}
 

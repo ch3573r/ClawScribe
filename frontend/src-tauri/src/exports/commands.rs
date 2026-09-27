@@ -32,6 +32,10 @@ pub struct MicrosoftConnectionInfo {
     /// connected. Surfaced so permission problems (e.g. a token missing the
     /// OneNote scope) are diagnosable from the UI.
     pub granted_scopes: Option<String>,
+    pub missing_scopes: Vec<String>,
+    pub unavailable_exports: Vec<String>,
+    pub session_only: bool,
+    pub requesting_permissions: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,11 +92,25 @@ impl From<exporter::ExportReport> for ExportReportResponse {
 pub async fn microsoft_sign_in<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, MicrosoftAuthState>,
+    request_missing_permissions: Option<bool>,
 ) -> Result<(), String> {
+    let consent = request_missing_permissions.unwrap_or(false);
     let (config, http, cancel, generation);
     {
         let mut inner = state.inner.write().await;
-        cancel = super::ms_auth_state::begin_sign_in(&mut inner.connection_state)?;
+        if inner.sign_in_cancel.is_some() {
+            return Err("Microsoft sign-in is already in progress".into());
+        }
+        if consent {
+            if inner.connection_state != MicrosoftConnectionState::Connected
+                || inner.current_token.is_none()
+            {
+                return Err("Sign in before requesting missing permissions".into());
+            }
+            cancel = tokio_util::sync::CancellationToken::new();
+        } else {
+            cancel = super::ms_auth_state::begin_sign_in(&mut inner.connection_state)?;
+        }
         inner.sign_in_cancel = Some(cancel.clone());
         inner.generation = inner.generation.wrapping_add(1);
         generation = inner.generation;
@@ -108,6 +126,7 @@ pub async fn microsoft_sign_in<R: Runtime>(
             |url| {
                 let _ = open_url_in_default_browser(url);
             },
+            consent,
             cancel.clone(),
         )
         .await;
@@ -136,13 +155,29 @@ pub async fn microsoft_sign_in<R: Runtime>(
                     let mut inner = state.inner.write().await;
                     if cancel.is_cancelled()
                         || inner.generation != generation
-                        || inner.connection_state != MicrosoftConnectionState::Connecting
+                        || !matches!(
+                            inner.connection_state,
+                            MicrosoftConnectionState::Connecting
+                                | MicrosoftConnectionState::Connected
+                        )
                     {
                         return;
                     }
-                    if token_store::save_token(&stored).is_err() {
+                    let persistence = if stored
+                        .refresh_token
+                        .as_ref()
+                        .is_some_and(|token| !token.is_empty())
+                    {
+                        token_store::save_token(&stored)
+                    } else {
+                        // This session cannot be restored; do not leave an older account on disk.
+                        token_store::delete_token()
+                    };
+                    if persistence.is_err() {
                         log::warn!("Could not persist Microsoft session");
                     }
+                    // A refresh started while consent was open must not overwrite this grant.
+                    inner.generation = inner.generation.wrapping_add(1);
                     inner.connection_state = MicrosoftConnectionState::Connected;
                     inner.sign_in_cancel = None;
                     inner.pending_device_code = None;
@@ -162,18 +197,26 @@ pub async fn microsoft_sign_in<R: Runtime>(
                 );
             }
             Err(e) => {
-                {
-                    let mut inner = state.inner.write().await;
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    inner.connection_state = MicrosoftConnectionState::NotConnected;
-                    inner.sign_in_cancel = None;
-                    inner.pending_device_code = None;
+                let mut inner = state.inner.write().await;
+                if cancel.is_cancelled() || !inner.finish_sign_in_failure(generation) {
+                    return;
                 }
+                let error = if consent {
+                    let missing = inner
+                        .current_token
+                        .as_ref()
+                        .map(|token| super::permissions::missing_scopes(&config, token))
+                        .unwrap_or_default();
+                    format!("Ask your administrator to approve: {}", missing.join(", "))
+                } else {
+                    e.to_string()
+                };
                 let _ = app_handle.emit(
                     "microsoft-auth-complete",
-                    serde_json::json!({ "state": "not_connected", "error": e.to_string() }),
+                    serde_json::json!({
+                        "state": inner.connection_state, "error": error,
+                        "userDisplayName": inner.user_display_name, "userEmail": inner.user_email,
+                    }),
                 );
             }
         }
@@ -188,15 +231,13 @@ pub async fn microsoft_cancel_sign_in<R: Runtime>(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<(), String> {
     let mut inner = state.inner.write().await;
-    if inner.connection_state == MicrosoftConnectionState::Connecting {
-        if let Some(cancel) = inner.sign_in_cancel.take() {
-            cancel.cancel();
-        }
-        inner.connection_state = MicrosoftConnectionState::NotConnected;
-        inner.pending_device_code = None;
+    if let Some(cancel) = inner.sign_in_cancel.take() {
+        cancel.cancel();
+        let generation = inner.generation;
+        inner.finish_sign_in_failure(generation);
         let _ = app.emit(
             "microsoft-auth-complete",
-            serde_json::json!({"state": "not_connected"}),
+            serde_json::json!({"state": inner.connection_state}),
         );
     }
     Ok(())
@@ -217,6 +258,24 @@ pub async fn microsoft_connection_status(
 ) -> Result<MicrosoftConnectionInfo, String> {
     let inner = state.inner.read().await;
     Ok(MicrosoftConnectionInfo {
+        missing_scopes: inner
+            .current_token
+            .as_ref()
+            .map(|token| super::permissions::missing_scopes(&inner.config, token))
+            .unwrap_or_default(),
+        unavailable_exports: inner
+            .current_token
+            .as_ref()
+            .map(super::permissions::unavailable_exports)
+            .unwrap_or_default(),
+        session_only: inner.current_token.as_ref().is_some_and(|token| {
+            token
+                .refresh_token
+                .as_ref()
+                .is_none_or(|value| value.is_empty())
+        }),
+        requesting_permissions: inner.connection_state == MicrosoftConnectionState::Connected
+            && inner.sign_in_cancel.is_some(),
         state: inner.connection_state,
         user_display_name: inner.user_display_name.clone(),
         user_email: inner.user_email.clone(),
@@ -276,6 +335,7 @@ async fn load_ledger<R: Runtime>(
 
 async fn get_token_and_context(
     state: &MicrosoftAuthState,
+    required_scope: &str,
 ) -> Result<(String, String, String), String> {
     let (config, http, current, generation);
     {
@@ -287,11 +347,17 @@ async fn get_token_and_context(
         config = inner.config.clone();
         http = inner.http.clone();
         current = inner.current_token.clone();
+        super::permissions::require_scope(
+            current.as_ref().ok_or("Microsoft is not connected")?,
+            required_scope,
+        )?;
     }
 
     let stored = token_store::ensure_valid_token(&http, &config, current)
         .await
         .map_err(|e| e.to_string())?;
+
+    super::permissions::require_scope(&stored, required_scope)?;
 
     // Cache any refreshed token for the rest of the session.
     {
@@ -311,7 +377,7 @@ pub async fn export_to_onenote<R: Runtime>(
     summary_json: String,
     section_id: String,
 ) -> Result<ExportReportResponse, String> {
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
     let notes: crate::summary::codex_provider::MeetingNotesOutput =
         serde_json::from_str(&summary_json).map_err(|e| format!("Failed to parse summary: {e}"))?;
@@ -360,7 +426,7 @@ pub async fn export_to_planner<R: Runtime>(
     plan_id: String,
     bucket_id: String,
 ) -> Result<ExportReportResponse, String> {
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let notes: crate::summary::codex_provider::MeetingNotesOutput =
         serde_json::from_str(&summary_json).map_err(|e| format!("Failed to parse summary: {e}"))?;
@@ -416,7 +482,7 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
     markdown: String,
     section_id: String,
 ) -> Result<ExportReportResponse, String> {
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
         &meeting_id,
@@ -500,7 +566,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     notebook_id: String,
     section_name: String,
 ) -> Result<ExportReportResponse, String> {
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
     let section_name = sanitize_onenote_section_name(&section_name);
 
@@ -571,7 +637,7 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
     plan_id: String,
     bucket_id: String,
 ) -> Result<ExportReportResponse, String> {
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
         &meeting_id,
@@ -716,7 +782,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         return Err("No tasks selected to export.".to_string());
     }
 
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let mut by_bucket: BTreeMap<String, Vec<PlannerTaskInput>> = BTreeMap::new();
     for task in tasks {
@@ -838,7 +904,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         return Err("No tasks selected to export.".to_string());
     }
 
-    let (token, tenant_id, user_id) = get_token_and_context(&state).await?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     let ctx = ExportContext {
@@ -892,7 +958,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
 pub async fn list_onenote_notebooks(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<Vec<discovery::NotebookInfo>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Notes.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_notebooks(&client, &token).await
@@ -905,7 +971,7 @@ pub async fn list_calendar_events(
     start_iso: String,
     end_iso: String,
 ) -> Result<Vec<calendar::CalendarEvent>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Calendars.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     calendar::list_calendar_events(&client, &token, &start_iso, &end_iso).await
@@ -916,7 +982,7 @@ pub async fn list_calendar_events(
 pub async fn current_or_next_meeting(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<Option<calendar::CalendarEvent>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Calendars.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     calendar::current_or_next_meeting(&client, &token).await
@@ -948,7 +1014,7 @@ pub async fn create_onenote_notebook(
     state: tauri::State<'_, MicrosoftAuthState>,
     display_name: String,
 ) -> Result<discovery::NotebookInfo, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Notes.Create").await?;
     let name = sanitize_onenote_notebook_name(&display_name);
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -963,7 +1029,7 @@ pub async fn create_onenote_section(
     notebook_id: String,
     display_name: String,
 ) -> Result<discovery::SectionInfo, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Notes.Create").await?;
     let name = sanitize_onenote_section_name(&display_name);
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -977,7 +1043,7 @@ pub async fn create_planner_bucket(
     plan_id: String,
     name: String,
 ) -> Result<discovery::BucketInfo, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     let name = if name.is_empty() {
         "Action items".to_string()
@@ -1006,7 +1072,7 @@ pub async fn create_todo_list(
     state: tauri::State<'_, MicrosoftAuthState>,
     display_name: String,
 ) -> Result<discovery::ToDoListInfo, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let name = sanitize_todo_list_name(&display_name);
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -1019,7 +1085,7 @@ pub async fn create_todo_list(
 pub async fn list_onedrive_destinations(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<Vec<files::DriveDestination>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Files.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     Ok(vec![
@@ -1032,7 +1098,7 @@ pub async fn resolve_onedrive_destination_url(
     state: tauri::State<'_, MicrosoftAuthState>,
     sharing_url: String,
 ) -> Result<files::DriveDestination, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Files.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     files::resolve_sharing_url(&client, &token, &sharing_url).await
@@ -1044,7 +1110,7 @@ pub async fn create_onedrive_destination_folder(
     parent: files::DriveDestination,
     folder_name: String,
 ) -> Result<files::DriveDestination, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Files.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     files::create_folder(&client, &token, &parent, &folder_name).await
@@ -1055,7 +1121,7 @@ pub async fn export_meeting_to_onedrive_files(
     state: tauri::State<'_, MicrosoftAuthState>,
     request: files::OneDriveExportRequest,
 ) -> Result<files::OneDriveExportResponse, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Files.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     files::export_meeting_files(&client, &token, request).await
@@ -1066,7 +1132,7 @@ pub async fn list_onenote_sections(
     state: tauri::State<'_, MicrosoftAuthState>,
     notebook_id: String,
 ) -> Result<Vec<discovery::SectionInfo>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Notes.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_sections(&client, &token, &notebook_id).await
@@ -1076,7 +1142,7 @@ pub async fn list_onenote_sections(
 pub async fn list_planner_plans(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<Vec<discovery::PlanInfo>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_plans(&client, &token).await
@@ -1087,7 +1153,7 @@ pub async fn list_planner_buckets(
     state: tauri::State<'_, MicrosoftAuthState>,
     plan_id: String,
 ) -> Result<Vec<discovery::BucketInfo>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_buckets(&client, &token, &plan_id).await
@@ -1097,7 +1163,7 @@ pub async fn list_planner_buckets(
 pub async fn list_todo_lists(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<Vec<discovery::ToDoListInfo>, String> {
-    let (token, _, _) = get_token_and_context(&state).await?;
+    let (token, _, _) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     discovery::list_todo_lists(&client, &token).await
@@ -1106,6 +1172,72 @@ pub async fn list_todo_lists(
 #[cfg(test)]
 mod export_history_tests {
     use super::*;
+
+    fn partial_session(http: reqwest::Client) -> MicrosoftAuthState {
+        let mut token = token_store::StoredToken::from_token_response(
+            &auth::TokenResponse {
+                access_token: "test-token".into(),
+                refresh_token: Some("test-refresh".into()),
+                expires_in: 3600,
+                token_type: "Bearer".into(),
+                scope: "User.Read Notes.Create".into(),
+            },
+            "test-user".into(),
+            "Test User".into(),
+            None,
+            "organizations".into(),
+        );
+        token.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        MicrosoftAuthState {
+            inner: tokio::sync::RwLock::new(super::super::ms_auth_state::MicrosoftAuthInner {
+                config: auth::MicrosoftAuthConfig::default(),
+                generation: 1,
+                http,
+                connection_state: MicrosoftConnectionState::Connected,
+                pending_device_code: None,
+                sign_in_cancel: Some(tokio_util::sync::CancellationToken::new()),
+                user_display_name: Some("Test User".into()),
+                user_email: None,
+                user_id: Some("test-user".into()),
+                current_token: Some(token),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_export_scope_fails_without_even_refreshing() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let http = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!("http://{}", listener.local_addr().unwrap())).unwrap(),
+            )
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let state = partial_session(http);
+        let error = get_token_and_context(&state, "Tasks.ReadWrite")
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Permission not granted: Tasks.ReadWrite");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn declined_explicit_consent_preserves_existing_session() {
+        let state = partial_session(reqwest::Client::new());
+        let mut inner = state.inner.write().await;
+        assert!(inner.finish_sign_in_failure(1));
+        assert_eq!(inner.connection_state, MicrosoftConnectionState::Connected);
+        let token = inner.current_token.as_ref().unwrap();
+        assert_eq!(token.refresh_token.as_deref(), Some("test-refresh"));
+        assert_eq!(token.granted_scopes, "User.Read Notes.Create");
+        assert!(inner.sign_in_cancel.is_none());
+        assert!(!inner.finish_sign_in_failure(0));
+    }
 
     #[test]
     fn section_cleanup_preserves_confirmed_and_uncertain_pages() {
