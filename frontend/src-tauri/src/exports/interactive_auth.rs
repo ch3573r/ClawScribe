@@ -131,6 +131,7 @@ fn wait_for_redirect(
         stream
             .set_write_timeout(Some(Duration::from_millis(100)))
             .map_err(|_| MsAuthError::Network("Could not configure sign-in listener".into()))?;
+        let connection_deadline = Instant::now() + Duration::from_secs(5);
         let mut request = Vec::new();
         while !request.contains(&b'\n') {
             if cancel.is_cancelled() {
@@ -139,8 +140,19 @@ fn wait_for_redirect(
             if Instant::now() >= deadline {
                 return Err(MsAuthError::Unexpected("Sign-in timed out".into()));
             }
+            if Instant::now() >= connection_deadline {
+                continue 'accept;
+            }
             let mut buffer = [0u8; 256];
             match stream.read(&mut buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue
+                }
                 Ok(0) | Err(_) => continue 'accept,
                 Ok(count) => request.extend_from_slice(&buffer[..count]),
             }
@@ -353,13 +365,38 @@ mod tests {
             )
         });
         let mut client = std::net::TcpStream::connect(address).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(500));
         client
             .write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
             .unwrap();
         let result = worker.join().unwrap().unwrap();
         assert_eq!(result.code.as_deref(), Some("test-code"));
         assert_eq!(result.state.as_deref(), Some("test-state"));
+    }
+
+    #[test]
+    fn idle_callback_connection_expires_and_next_client_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            wait_for_redirect(
+                listener,
+                CancellationToken::new(),
+                Instant::now() + Duration::from_secs(9),
+            )
+        });
+        let _idle = std::net::TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let mut next = std::net::TcpStream::connect(address).unwrap();
+        next.write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
+            .unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap().code.as_deref(),
+            Some("test-code")
+        );
+        assert!(started.elapsed() >= Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 
     #[test]
