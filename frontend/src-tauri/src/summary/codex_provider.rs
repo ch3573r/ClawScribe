@@ -191,6 +191,21 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
 
     #[test]
+    fn scratch_cleanup_cannot_remove_a_replacement_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let meeting = temp.path().join("meeting");
+        let first = meeting.join("run-first");
+        let second = meeting.join("run-second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("transcript.md"), "synthetic replacement input").unwrap();
+        drop(RunScratch(first));
+        assert!(second.join("transcript.md").exists());
+        drop(RunScratch(second));
+        assert!(!meeting.exists());
+    }
+
+    #[test]
     fn bundled_app_server_runtime_is_discovered() {
         let temp = tempfile::tempdir().unwrap();
         let resource_dir = temp.path().join("resources");
@@ -1173,7 +1188,8 @@ impl CodexAppServerProvider {
         let scratch_dir = request
             .scratch_root
             .unwrap_or_else(default_codex_runs_root)
-            .join(sanitize_path_segment(&request.meeting_id));
+            .join(sanitize_path_segment(&request.meeting_id))
+            .join(format!("run-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir)
             .map_err(|e| format!("Failed to create Codex run folder: {e}"))?;
 
@@ -1670,20 +1686,26 @@ fn default_isolated_codex_home() -> PathBuf {
 struct RunScratch(PathBuf);
 impl Drop for RunScratch {
     fn drop(&mut self) {
-        if fs::remove_dir_all(&self.0).is_err() {
-            // Windows may hold the cwd until the cancelled child finishes exiting.
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                let path = self.0.clone();
-                runtime.spawn(async move {
-                    for _ in 0..10 {
-                        sleep(Duration::from_millis(200)).await;
-                        if tokio::fs::remove_dir_all(&path).await.is_ok() || !path.exists() {
-                            return;
-                        }
-                    }
-                    log::warn!("Could not remove Codex scratch files after child exit");
-                });
+        let parent = self.0.parent().map(Path::to_path_buf);
+        if fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+            if let Some(parent) = parent {
+                let _ = fs::remove_dir(parent);
             }
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // Retry only this unique run, never a replacement run for the same meeting.
+            let path = self.0.clone();
+            runtime.spawn(async move {
+                for _ in 0..10 {
+                    sleep(Duration::from_millis(200)).await;
+                    if tokio::fs::remove_dir_all(&path).await.is_ok() || !path.exists() {
+                        if let Some(parent) = parent {
+                            let _ = tokio::fs::remove_dir(parent).await;
+                        }
+                        return;
+                    }
+                }
+                log::warn!("Could not remove Codex scratch files after child exit");
+            });
         }
     }
 }
