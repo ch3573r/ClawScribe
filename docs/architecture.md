@@ -246,6 +246,8 @@ Settings responses carry `destination_problem` (camelCase for Confluence); this
 diagnostic is recomputed on load and is not saved as configuration.
 Confluence credentials include their saved origin and cannot be reused against a
 different origin; older unbound PATs must be saved again before use.
+Confluence status includes its saved base URL and HTTP opt-in, so settings can
+restore both without reaching the server or overwriting an edited destination.
 
 Microsoft sign-in has one active flow. Cancel stops its loopback listener and
 prevents late completion from restoring a session. Listener polling and bounded

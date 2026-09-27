@@ -13,6 +13,7 @@ const ACCOUNT_NAME: &str = "default";
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfluenceConnectionStatus {
+    pub base_url: Option<String>,
     pub destination_problem: Option<String>,
     pub token_configured: bool,
     pub allow_unencrypted: bool,
@@ -269,6 +270,7 @@ pub fn confluence_settings_status(base_url: String) -> Result<ConfluenceConnecti
 
 fn settings_status(binding: Option<&BoundPat>, base_url: &str) -> ConfluenceConnectionStatus {
     let mut status = ConfluenceConnectionStatus {
+        base_url: binding.map(|binding| binding.base_url.clone()),
         destination_problem: None,
         token_configured: binding.is_some(),
         allow_unencrypted: false,
@@ -277,6 +279,11 @@ fn settings_status(binding: Option<&BoundPat>, base_url: &str) -> ConfluenceConn
         message: "No Confluence PAT is saved.".into(),
     };
     if let Some(binding) = binding {
+        let base_url = if base_url.trim().is_empty() {
+            &binding.base_url
+        } else {
+            base_url
+        };
         status.destination_problem = binding
             .token_for(base_url)
             .err()
@@ -486,6 +493,10 @@ mod tests {
         assert!(!status.reachable);
         let json = serde_json::to_value(status).unwrap();
         assert_eq!(json["allowUnencrypted"], true);
+        assert_eq!(json["baseUrl"], "http://wiki.local");
+        let reopened = settings_status(Some(&saved), "");
+        assert_eq!(reopened.base_url.as_deref(), Some("http://wiki.local"));
+        assert!(reopened.allow_unencrypted);
         assert!(!settings_status(Some(&saved), "http://other.local").allow_unencrypted);
         assert!(!settings_status(None, "http://wiki.local").allow_unencrypted);
     }

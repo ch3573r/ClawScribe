@@ -1263,6 +1263,7 @@ function ConfluencePanel() {
       if (active && revision === httpOptionRevision.current) {
         setStatus(value);
         setAllowUnencrypted(value.allowUnencrypted);
+        if (!trimmedBaseUrl && value.baseUrl) setBaseUrl(value.baseUrl);
       }
     }).catch(error => {
       if (active && revision === httpOptionRevision.current) setStatus({

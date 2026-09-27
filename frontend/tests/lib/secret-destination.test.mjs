@@ -12,6 +12,22 @@ test('endpoint settings display the problem returned by the backend', () => {
   }));
   assert.match(html, /Settings need attention: Use HTTPS to repair the saved endpoint/);
 });
+
+test('Confluence saved status supplies the HTTP checkbox and base URL while offline', async () => {
+  const { confluenceExportService } = loadTsModule('src/services/confluenceExportService.ts', {
+    '@tauri-apps/api/core': { invoke: async (command) => {
+      assert.equal(command, 'confluence_settings_status');
+      return { baseUrl: 'http://wiki.local', allowUnencrypted: true, reachable: false, tokenConfigured: true, destinationProblem: null };
+    } },
+  });
+  const status = await confluenceExportService.settingsStatus('');
+  const html = renderToStaticMarkup(UnencryptedHttpOptIn({
+    urls: [status.baseUrl], checked: status.allowUnencrypted, onChange() {},
+    destinationProblem: status.destinationProblem,
+  }));
+  assert.match(html, /type="checkbox"[^>]*checked=""/);
+  assert.doesNotMatch(html, /Settings need attention/);
+});
 test('HTTP opt-in appears only for private network destinations', () => {
   for (const url of ['http://openclaw.local:8765', 'http://gateway', 'http://model.lan', 'http://wiki.internal', 'http://server.home.arpa', 'http://[fd00::1]']) {
     assert.equal(needsHttpOptIn(url), true, url);
