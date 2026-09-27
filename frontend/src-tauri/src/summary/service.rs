@@ -82,10 +82,12 @@ fn strip_title_if_present(markdown: &str) -> String {
 }
 
 fn is_default_meeting_title(title: &str) -> bool {
-    title == "New Meeting"
-        || regex::Regex::new(r"^Meeting \d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
-            .unwrap()
-            .is_match(title)
+    static DEFAULT: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(
+        r"^Meeting (?:\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}|\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2})$"
+    ).unwrap()
+    });
+    title == "New Meeting" || DEFAULT.is_match(title)
 }
 
 async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str) {
@@ -101,8 +103,10 @@ async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str)
     if let Ok(Some(current)) = current {
         if is_default_meeting_title(&current) {
             // A rename while generation was in flight wins over the generated heading.
-            if sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ?")
-                .bind(title).bind(meeting).bind(current).execute(pool).await.is_err() {
+            if MeetingsRepository::update_generated_meeting_name(pool, meeting, &current, &title)
+                .await
+                .is_err()
+            {
                 warn!("Could not apply generated meeting title");
             }
         }
@@ -1426,17 +1430,26 @@ mod generated_title_tests {
     #[tokio::test]
     async fn only_default_titles_are_replaced_and_placeholders_are_ignored() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO transcript_chunks (meeting_id, meeting_name, transcript_text, model, model_name, created_at) VALUES ('review-test', '', '', 'test', 'test', CURRENT_TIMESTAMP)").execute(&pool).await.unwrap();
         for (existing, proposed, expected) in [
             ("My chosen title", "New title", "My chosen title"),
             ("New Meeting", "<Add Title here>", "New Meeting"),
             ("New Meeting", "Planning", "Planning"),
             ("Meeting 2026-01-02_03-04-05", "Planning", "Planning"),
+            ("Meeting 27_09_26_10_30_00", "Planning", "Planning"),
         ] {
             sqlx::query("UPDATE meetings SET title = ? WHERE id = 'review-test'")
                 .bind(existing)
                 .execute(&pool)
                 .await
                 .unwrap();
+            sqlx::query(
+                "UPDATE transcript_chunks SET meeting_name = ? WHERE meeting_id = 'review-test'",
+            )
+            .bind(existing)
+            .execute(&pool)
+            .await
+            .unwrap();
             apply_generated_title(&pool, "review-test", &format!("# {proposed}\nNotes")).await;
             let actual: String =
                 sqlx::query_scalar("SELECT title FROM meetings WHERE id = 'review-test'")
@@ -1444,6 +1457,13 @@ mod generated_title_tests {
                     .await
                     .unwrap();
             assert_eq!(actual, expected);
+            let chunk_title: String = sqlx::query_scalar(
+                "SELECT meeting_name FROM transcript_chunks WHERE meeting_id = 'review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(chunk_title, expected);
         }
     }
 }
