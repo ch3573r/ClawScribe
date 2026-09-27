@@ -266,7 +266,7 @@ fn clean_task_text(text: &str) -> String {
 
 /// Whether the summary contains at least one parsed action item.
 pub fn has_action_items(markdown: &str) -> bool {
-    !parse_action_items(markdown).is_empty()
+    !parse_action_items(&crate::summary::sources::strip_source_links(markdown)).is_empty()
 }
 
 /// A [`MeetingExport`] for OneNote: the whole summary as rendered XHTML, with no
@@ -277,6 +277,8 @@ pub fn meeting_export_for_onenote(
     created_at: Option<String>,
     markdown: &str,
 ) -> MeetingExport {
+    let markdown = crate::summary::sources::strip_source_links(markdown);
+    let markdown = markdown.as_str();
     let html = markdown_to_xhtml(markdown);
     MeetingExport {
         meeting_id: meeting_id.into(),
@@ -297,6 +299,8 @@ pub fn meeting_export_for_planner(
     created_at: Option<String>,
     markdown: &str,
 ) -> MeetingExport {
+    let markdown = crate::summary::sources::strip_source_links(markdown);
+    let markdown = markdown.as_str();
     MeetingExport {
         meeting_id: meeting_id.into(),
         title: title.into(),
@@ -327,6 +331,20 @@ fn plain_excerpt(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_sources_keep_readable_times_without_internal_links() {
+        let markdown =
+            "## Action items\n- Send draft to finance [00:12:34](#clawscribe-source-abc123)";
+        let planner = meeting_export_for_planner("meeting", "Notes", None, markdown);
+        assert_eq!(planner.action_items[0].task, "Send draft to finance");
+        assert!(has_action_items(markdown));
+        let onenote = meeting_export_for_onenote("meeting", "Notes", None, markdown);
+        let html = onenote.summary_html.unwrap();
+        assert!(html.contains("(00:12:34)"));
+        assert!(!html.contains("clawscribe-source"));
+        assert!(!onenote.executive_summary.contains("clawscribe-source"));
+    }
 
     const SAMPLE: &str = "\
 # Meeting Summary
