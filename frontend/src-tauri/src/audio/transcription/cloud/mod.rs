@@ -142,6 +142,53 @@ pub fn is_cloud_provider(provider: Option<&str>) -> bool {
     )
 }
 
+/// The test endpoint may be edited, but an existing credential stays bound to
+/// the saved destination. Compare full normalized URLs, not just their origin.
+pub(crate) fn test_destination(
+    saved: Option<&str>,
+    requested: Option<&str>,
+    has_new_key: bool,
+) -> Result<String, String> {
+    let destination = requested
+        .or(saved)
+        .ok_or("Cloud transcription endpoint is missing")?;
+    if !has_new_key {
+        let saved = saved.ok_or("Enter an API key for this unsaved endpoint")?;
+        let normalize = |value: &str| {
+            let mut url = url::Url::parse(value.trim()).ok()?;
+            let path = url.path().trim_end_matches('/').to_string();
+            url.set_path(&path);
+            Some(url)
+        };
+        if normalize(saved).is_none() || normalize(saved) != normalize(destination) {
+            return Err("Endpoint changed. Enter a new API key or restore the saved endpoint before testing.".into());
+        }
+    }
+    Ok(destination.to_string())
+}
+
+pub(crate) async fn validate_test_audio_path(path: &Path) -> Result<u64, String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ![
+        "aac", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm", "wma",
+    ]
+    .contains(&extension.as_str())
+    {
+        return Err("Choose a supported audio file for the provider test".into());
+    }
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| "Test audio file does not exist or cannot be read")?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("Choose an existing, non-empty audio file for the provider test".into());
+    }
+    Ok(metadata.len())
+}
+
 pub(crate) async fn transcribe_whole_file<R: Runtime>(
     app: &AppHandle<R>,
     provider: &str,
@@ -209,7 +256,8 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 base_url.to_string(),
                 api_key,
                 model.clone(),
-            );
+            )
+            .with_http_opt_in(config.cloud_http_opt_in(provider));
             let cloud_segments = client
                 .transcribe_file(audio, file_name, mime_type, language)
                 .await?;
@@ -268,7 +316,8 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 endpoint.to_string(),
                 api_key,
                 model.clone(),
-            );
+            )
+            .with_http_opt_in(config.cloud_http_opt_in(provider));
             let cloud_segments = client
                 .transcribe_file(audio, &upload_file_name, upload_mime_type, language)
                 .await?;
@@ -627,6 +676,136 @@ pub(crate) fn mime_type_for_path(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_test_key_requires_the_saved_endpoint() {
+        let saved = Some("https://model.example.com/v1");
+        for requested in [
+            "https://other.example.com/v1",
+            "https://model.example.com/other",
+            "http://model.example.com/v1",
+        ] {
+            assert!(test_destination(saved, Some(requested), false).is_err());
+            assert!(test_destination(saved, Some(requested), true).is_ok());
+        }
+        assert!(test_destination(saved, Some("https://model.example.com/v1/"), false).is_ok());
+        assert!(test_destination(None, saved, false).is_err());
+        assert!(test_destination(
+            Some("https://model.example.com/v1?route=one/"),
+            Some("https://model.example.com/v1?route=one"),
+            false,
+        )
+        .is_err());
+        assert_eq!(
+            test_destination(saved, None, false).unwrap(),
+            saved.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn both_cloud_providers_refuse_public_http_before_upload() {
+        let whisper = openai_whisper::OpenAiWhisperProvider::new(
+            "http://model.example.com/v1".into(),
+            "test-token".into(),
+            "test-model".into(),
+        )
+        .with_http_opt_in(true);
+        let mai = mai_transcribe::MaiTranscribeProvider::new(
+            "http://speech.example.com".into(),
+            "test-token".into(),
+            "test-model".into(),
+        )
+        .with_http_opt_in(true);
+        for provider in [&whisper as &dyn CloudTranscriptionProvider, &mai] {
+            let error = provider
+                .transcribe_file(vec![0; 44], "test.wav", "audio/wav", None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.category(), CloudFallbackReasonCategory::AuthConfig);
+            assert!(error.to_string().contains("Public HTTP"));
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_test_requires_an_existing_audio_file() {
+        let directory = tempfile::tempdir().unwrap();
+        for file in ["missing.wav", "private.txt", "folder.wav", "empty.wav"] {
+            let path = directory.path().join(file);
+            match file {
+                "private.txt" => std::fs::write(&path, b"synthetic non-audio").unwrap(),
+                "folder.wav" => std::fs::create_dir(&path).unwrap(),
+                "empty.wav" => std::fs::write(&path, b"").unwrap(),
+                _ => {}
+            }
+            assert!(validate_test_audio_path(&path).await.is_err());
+        }
+        let audio = directory.path().join("test.WAV");
+        std::fs::write(&audio, encode_wav_pcm16_mono_16k(&[0.0; 100])).unwrap();
+        assert!(validate_test_audio_path(&audio).await.unwrap() > 44);
+    }
+
+    #[tokio::test]
+    async fn cloud_opt_ins_migrate_clean_and_existing_databases_and_remain_isolated() {
+        for upgraded in [false, true] {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            let migrator = sqlx::migrate!("./migrations");
+            // Exercise every shipped schema plus the new migration; the upgrade
+            // path contains a real pre-migration settings row.
+            for migration in migrator.iter() {
+                if upgraded && migration.version == 20260927000000 {
+                    sqlx::query("INSERT OR REPLACE INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl) VALUES ('1','cloud-whisper','test-model','http://model.local')").execute(&pool).await.unwrap();
+                }
+                sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+            }
+            if upgraded {
+                let old = SettingsRepository::get_transcript_config(&pool)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(old.cloud_http_opt_in(PROVIDER_CLOUD_WHISPER));
+            }
+            assert!(SettingsRepository::save_transcript_provider_config(
+                &pool,
+                PROVIDER_CLOUD_WHISPER,
+                Some("http://model.example.com"),
+                None,
+                None,
+                true
+            )
+            .await
+            .is_err());
+            SettingsRepository::save_transcript_provider_config(
+                &pool,
+                PROVIDER_CLOUD_WHISPER,
+                Some("http://model.local"),
+                None,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+            SettingsRepository::save_transcript_provider_config(
+                &pool,
+                PROVIDER_MAI_TRANSCRIBE,
+                None,
+                Some("https://speech.example.com"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+            let saved = SettingsRepository::get_transcript_config(&pool)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.cloud_whisper_allow_unencrypted, Some(true));
+            assert_eq!(saved.mai_transcribe_allow_unencrypted, Some(false));
+        }
+    }
 
     #[test]
     fn mai_word_policy_never_emits_real_word_timestamps() {

@@ -126,6 +126,10 @@ impl Setting {
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct TranscriptSetting {
+    #[sqlx(rename = "cloudWhisperAllowUnencrypted")]
+    pub cloud_whisper_allow_unencrypted: Option<bool>,
+    #[sqlx(rename = "maiTranscribeAllowUnencrypted")]
+    pub mai_transcribe_allow_unencrypted: Option<bool>,
     pub id: String,
     pub provider: String,
     pub model: String,
@@ -159,4 +163,23 @@ pub struct TranscriptSetting {
     #[sqlx(rename = "maiTranscribeRegion")]
     #[serde(rename = "maiTranscribeRegion")]
     pub mai_transcribe_region: Option<String>,
+}
+
+impl TranscriptSetting {
+    pub fn cloud_http_opt_in(&self, provider: &str) -> bool {
+        let (saved, endpoint) = match provider {
+            "cloud-whisper" => (
+                self.cloud_whisper_allow_unencrypted,
+                self.cloud_whisper_base_url.as_deref(),
+            ),
+            "mai-transcribe" => (
+                self.mai_transcribe_allow_unencrypted,
+                self.mai_transcribe_endpoint.as_deref(),
+            ),
+            _ => return false,
+        };
+        saved.unwrap_or_else(|| {
+            endpoint.is_some_and(crate::openai::secret_destination::needs_http_opt_in)
+        })
+    }
 }

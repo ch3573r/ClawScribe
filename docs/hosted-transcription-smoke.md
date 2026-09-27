@@ -12,6 +12,13 @@ Transcription**. Select Hosted Whisper or MAI-Transcribe, enter the provider
 settings, then use **Test** to pick a short audio file and run the provider
 against that file.
 
+Cloud endpoints follow the integration transport policy: HTTPS, loopback HTTP,
+or explicitly opted-in local-network HTTP. Each provider saves its own opt-in.
+HTTP requests validate and pin DNS answers and disable redirects and proxies.
+The provider test accepts only existing non-empty audio files. It reuses a saved
+key only for the saved endpoint; testing another endpoint requires entering a
+new key. Loading a rejected legacy endpoint still lets you correct its settings.
+
 ## What It Verifies
 
 - Hosted Whisper returns non-empty segments and real word timestamps.

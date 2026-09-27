@@ -104,6 +104,8 @@ pub struct GetApiKeyRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TranscriptConfig {
+    #[serde(rename = "allowUnencrypted", default)]
+    pub allow_unencrypted: bool,
     pub provider: String,
     pub model: String,
     #[serde(rename = "apiKey")]
@@ -643,6 +645,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
                 Ok(api_key) => {
                     log_info!("Successfully retrieved transcript config and API key.");
                     Ok(Some(TranscriptConfig {
+                        allow_unencrypted: config.cloud_http_opt_in(&config.provider),
                         provider: config.provider.clone(),
                         model: config.model,
                         api_key,
@@ -660,6 +663,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
         Ok(None) => {
             log_info!("No transcript config found, returning default.");
             Ok(Some(TranscriptConfig {
+                allow_unencrypted: false,
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
@@ -681,6 +685,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     base_url: Option<String>,
     endpoint: Option<String>,
@@ -693,6 +698,18 @@ pub async fn api_save_transcript_config<R: Runtime>(
     );
     let pool = state.db_manager.pool();
 
+    let allow_unencrypted = allow_unencrypted.unwrap_or(false);
+    match provider.as_str() {
+        PROVIDER_CLOUD_WHISPER => crate::openai::secret_destination::validate_secret_destination(
+            clean_optional(base_url.as_deref()).unwrap_or("https://api.openai.com/v1"),
+            allow_unencrypted,
+        )?,
+        PROVIDER_MAI_TRANSCRIBE => crate::openai::secret_destination::validate_secret_destination(
+            clean_optional(endpoint.as_deref()).unwrap_or(""),
+            allow_unencrypted,
+        )?,
+        _ => {}
+    }
     if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
         log_error!("Failed to save transcript config");
         return Err(e.to_string());
@@ -716,6 +733,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
         clean_base_url,
         clean_endpoint,
         clean_region,
+        allow_unencrypted,
     )
     .await
     {
@@ -769,6 +787,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
+    allow_unencrypted: Option<bool>,
     api_key: Option<String>,
     base_url: Option<String>,
     endpoint: Option<String>,
@@ -782,18 +801,53 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         &provider
     );
     let audio_path = Path::new(&audio_path);
-    let audio_size_bytes = tokio::fs::metadata(audio_path)
-        .await
-        .map_err(|e| format!("Failed to inspect test audio file: {e}"))?
-        .len();
-    if audio_size_bytes == 0 {
-        return Err("Test audio file is empty".to_string());
-    }
-
+    let audio_size_bytes =
+        crate::audio::transcription::cloud::validate_test_audio_path(audio_path).await?;
     let pool = state.db_manager.pool();
     let saved_config = SettingsRepository::get_transcript_config(pool)
         .await
-        .map_err(|e| format!("Failed to read saved transcript settings: {e}"))?;
+        .map_err(|_| "Failed to read saved transcript settings")?;
+    let saved_endpoint = saved_config
+        .as_ref()
+        .and_then(|config| match provider.as_str() {
+            PROVIDER_CLOUD_WHISPER => Some(
+                config
+                    .cloud_whisper_base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1"),
+            ),
+            PROVIDER_MAI_TRANSCRIBE => config.mai_transcribe_endpoint.as_deref(),
+            _ => None,
+        });
+    let requested = match provider.as_str() {
+        PROVIDER_CLOUD_WHISPER => clean_optional(base_url.as_deref()).or_else(|| {
+            saved_endpoint
+                .is_none()
+                .then_some("https://api.openai.com/v1")
+        }),
+        PROVIDER_MAI_TRANSCRIBE => clean_optional(endpoint.as_deref()),
+        _ => return Err("Unsupported cloud transcription provider".into()),
+    };
+    let destination = crate::audio::transcription::cloud::test_destination(
+        saved_endpoint,
+        requested,
+        clean_optional(api_key.as_deref()).is_some(),
+    )?;
+    let allow_unencrypted = allow_unencrypted.unwrap_or_else(|| {
+        crate::audio::transcription::cloud::test_destination(
+            saved_endpoint,
+            Some(&destination),
+            false,
+        )
+        .is_ok()
+            && saved_config
+                .as_ref()
+                .is_some_and(|config| config.cloud_http_opt_in(&provider))
+    });
+    crate::openai::secret_destination::validate_secret_destination(
+        &destination,
+        allow_unencrypted,
+    )?;
     let api_key = match clean_optional(api_key.as_deref()).map(str::to_string) {
         Some(key) => key,
         None => SettingsRepository::get_transcript_api_key(pool, &provider)
@@ -812,18 +866,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
 
     match provider.as_str() {
         PROVIDER_CLOUD_WHISPER => {
-            let base_url = clean_string(base_url)
-                .or_else(|| {
-                    saved_config
-                        .as_ref()
-                        .and_then(|config| {
-                            (config.provider == PROVIDER_CLOUD_WHISPER)
-                                .then(|| config.cloud_whisper_base_url.clone())
-                                .flatten()
-                        })
-                        .and_then(|value| clean_string(Some(value)))
-                })
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let base_url = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.to_string());
             validate_provider_upload_size(
@@ -840,7 +883,8 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             let audio = tokio::fs::read(audio_path)
                 .await
                 .map_err(|e| format!("Failed to read test audio file: {e}"))?;
-            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone());
+            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone())
+                .with_http_opt_in(allow_unencrypted);
             let segments = provider_client
                 .transcribe_file(audio, file_name, mime_type, language)
                 .await
@@ -853,18 +897,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             build_cloud_test_result(PROVIDER_CLOUD_WHISPER, &model, &segments, true)
         }
         PROVIDER_MAI_TRANSCRIBE => {
-            let endpoint = clean_string(endpoint)
-                .or_else(|| {
-                    saved_config
-                        .as_ref()
-                        .and_then(|config| {
-                            (config.provider == PROVIDER_MAI_TRANSCRIBE)
-                                .then(|| config.mai_transcribe_endpoint.clone())
-                                .flatten()
-                        })
-                        .and_then(|value| clean_string(Some(value)))
-                })
-                .ok_or_else(|| "Azure Speech endpoint is missing".to_string())?;
+            let endpoint = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
             validate_provider_upload_size(
@@ -881,7 +914,8 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             let audio = tokio::fs::read(audio_path)
                 .await
                 .map_err(|e| format!("Failed to read test audio file: {e}"))?;
-            let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone());
+            let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone())
+                .with_http_opt_in(allow_unencrypted);
             let segments = provider_client
                 .transcribe_file(audio, file_name, mime_type, language)
                 .await

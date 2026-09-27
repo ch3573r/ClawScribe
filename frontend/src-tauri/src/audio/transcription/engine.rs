@@ -72,6 +72,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                 crate::api::api::TranscriptConfig {
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                    allow_unencrypted: false,
                     api_key: None,
                     base_url: None,
                     endpoint: None,
@@ -86,6 +87,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                 crate::api::api::TranscriptConfig {
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                    allow_unencrypted: false,
                     api_key: None,
                     base_url: None,
                     endpoint: None,
@@ -223,6 +225,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 crate::api::api::TranscriptConfig {
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                    allow_unencrypted: false,
                     api_key: None,
                     base_url: None,
                     endpoint: None,
@@ -237,6 +240,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 crate::api::api::TranscriptConfig {
                     provider: "parakeet".to_string(),
                     model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                    allow_unencrypted: false,
                     api_key: None,
                     base_url: None,
                     endpoint: None,

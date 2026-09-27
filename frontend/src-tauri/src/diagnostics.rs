@@ -214,6 +214,7 @@ async fn transcript_config(state: &State<'_, AppState>) -> Result<TranscriptConf
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(TranscriptConfig {
+                allow_unencrypted: config.cloud_http_opt_in(&config.provider),
                 provider: config.provider,
                 model: config.model,
                 api_key,
@@ -229,6 +230,7 @@ async fn transcript_config(state: &State<'_, AppState>) -> Result<TranscriptConf
 
 fn default_transcript_config() -> TranscriptConfig {
     TranscriptConfig {
+        allow_unencrypted: false,
         provider: "parakeet".to_string(),
         model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
         api_key: None,

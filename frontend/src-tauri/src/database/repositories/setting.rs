@@ -184,33 +184,46 @@ impl SettingsRepository {
         base_url: Option<&str>,
         endpoint: Option<&str>,
         region: Option<&str>,
+        allow_unencrypted: bool,
     ) -> std::result::Result<(), sqlx::Error> {
         match provider {
             "cloud-whisper" => {
+                crate::openai::secret_destination::validate_secret_destination(
+                    base_url.unwrap_or("https://api.openai.com/v1"),
+                    allow_unencrypted,
+                )
+                .map_err(sqlx::Error::Protocol)?;
                 sqlx::query(
                     r#"
-                    INSERT INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl)
-                    VALUES ('1', 'cloud-whisper', 'whisper-1', $1)
+                    INSERT INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl, cloudWhisperAllowUnencrypted)
+                    VALUES ('1', 'cloud-whisper', 'whisper-1', $1, $2)
                     ON CONFLICT(id) DO UPDATE SET
-                        cloudWhisperBaseUrl = $1
+                        cloudWhisperBaseUrl = $1, cloudWhisperAllowUnencrypted = $2
                     "#,
                 )
                 .bind(base_url)
+                .bind(allow_unencrypted)
                 .execute(pool)
                 .await?;
             }
             "mai-transcribe" => {
+                crate::openai::secret_destination::validate_secret_destination(
+                    endpoint.unwrap_or(""),
+                    allow_unencrypted,
+                )
+                .map_err(sqlx::Error::Protocol)?;
                 sqlx::query(
                     r#"
-                    INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion)
-                    VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', $1, $2)
+                    INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion, maiTranscribeAllowUnencrypted)
+                    VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', $1, $2, $3)
                     ON CONFLICT(id) DO UPDATE SET
                         maiTranscribeEndpoint = $1,
-                        maiTranscribeRegion = $2
+                        maiTranscribeRegion = $2, maiTranscribeAllowUnencrypted = $3
                     "#,
                 )
                 .bind(endpoint)
                 .bind(region)
+                .bind(allow_unencrypted)
                 .execute(pool)
                 .await?;
             }

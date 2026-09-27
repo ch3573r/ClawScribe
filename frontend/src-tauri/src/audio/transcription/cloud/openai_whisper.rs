@@ -14,7 +14,7 @@ pub struct OpenAiWhisperProvider {
     base_url: String,
     api_key: String,
     model: String,
-    client: reqwest::Client,
+    allow_unencrypted: bool,
 }
 
 impl OpenAiWhisperProvider {
@@ -23,8 +23,13 @@ impl OpenAiWhisperProvider {
             base_url,
             api_key,
             model,
-            client: reqwest::Client::new(),
+            allow_unencrypted: false,
         }
+    }
+
+    pub fn with_http_opt_in(mut self, allow: bool) -> Self {
+        self.allow_unencrypted = allow;
+        self
     }
 
     fn endpoint(&self) -> String {
@@ -72,8 +77,14 @@ impl CloudTranscriptionProvider for OpenAiWhisperProvider {
     ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
         let audio = bytes::Bytes::from(audio);
         for attempt in 1..=MAX_ATTEMPTS {
-            let response = self
-                .client
+            let client = crate::openai::secret_destination::secret_client(
+                reqwest::Client::builder(),
+                &self.endpoint(),
+                self.allow_unencrypted,
+            )
+            .await
+            .map_err(CloudTranscriptionError::auth_config)?;
+            let response = client
                 .post(self.endpoint())
                 .timeout(Duration::from_secs(30 * 60))
                 .bearer_auth(&self.api_key)
