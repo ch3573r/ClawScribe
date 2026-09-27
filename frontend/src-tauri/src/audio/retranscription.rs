@@ -96,6 +96,9 @@ pub async fn start_retranscription<R: Runtime>(
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
     let _job = super::inference::claim_job().map_err(anyhow::Error::msg)?;
+    crate::summary::SummaryService::cancel_local_summaries(
+        "Local summary stopped because retranscription started. Generate it again afterwards.",
+    );
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;

@@ -249,6 +249,8 @@ Summary cancellation follows the job token rather than provider error wording.
 Starting a recording cancels Built-in AI summary jobs before stopping the helper,
 with a recording-specific message and the previous summary retained. Other
 providers continue independently.
+Import, retranscription and speaker detection use the same cancellation path
+with an operation-specific explanation before reclaiming the local helper.
 
 The local helper serializes model switches and requests under one exchange lock.
 Cancelling a queued request leaves the current generation intact; cancelling the

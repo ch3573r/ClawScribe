@@ -342,9 +342,13 @@ impl SummaryService {
     }
 
     pub fn cancel_local_summaries_for_recording() {
+        Self::cancel_local_summaries(RECORDING_INTERRUPTED_SUMMARY);
+    }
+
+    pub fn cancel_local_summaries(reason: &'static str) {
         if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
             for job in registry.values_mut().filter(|job| job.builtin) {
-                job.reason = Some(RECORDING_INTERRUPTED_SUMMARY);
+                job.reason.get_or_insert(reason);
                 job.token.cancel();
             }
         }
@@ -1508,6 +1512,23 @@ mod cancellation_status_tests {
 #[cfg(test)]
 mod recording_cancellation_tests {
     use super::*;
+    #[tokio::test]
+    async fn import_cancels_local_summary_with_its_specific_reason() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+            .await
+            .unwrap();
+        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let reason = "Local summary stopped because import started. Generate it again afterwards.";
+        SummaryService::cancel_local_summaries(reason);
+        finish_provider_error(&pool, "review-test", &local.token, "helper exited").await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.error.as_deref(), Some(reason));
+    }
     #[tokio::test]
     async fn recording_cancels_only_local_jobs_with_an_actionable_reason() {
         let pool = crate::database::transcript_edits::tests::fixture().await;

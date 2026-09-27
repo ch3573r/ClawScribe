@@ -287,6 +287,9 @@ pub async fn start_import<R: Runtime>(
     provider: Option<String>,
 ) -> Result<ImportResult> {
     let _job = super::inference::claim_job().map_err(anyhow::Error::msg)?;
+    crate::summary::SummaryService::cancel_local_summaries(
+        "Local summary stopped because import started. Generate it again afterwards.",
+    );
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
