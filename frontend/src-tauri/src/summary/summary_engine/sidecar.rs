@@ -417,12 +417,48 @@ impl SidecarManager {
         Ok(())
     }
 
-    /// Send a request to the sidecar and wait for response
+    /// Send a request to the sidecar and wait for response.
     pub async fn send_request(&self, request_json: String, timeout: Duration) -> Result<String> {
-        // Track active request
-        let _guard = RequestGuard::new(self.active_request_count.clone());
-        let _exchange = self.request_lock.lock().await;
+        self.send_request_cancellable(request_json, timeout, None, None)
+            .await
+    }
 
+    pub async fn send_request_cancellable(
+        &self,
+        request_json: String,
+        timeout: Duration,
+        model: Option<PathBuf>,
+        token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
+        let _guard = RequestGuard::new(self.active_request_count.clone());
+        let fallback_token = tokio_util::sync::CancellationToken::new();
+        let token = token.unwrap_or(&fallback_token);
+        // Waiting requests have no ownership of the helper and must never kill it.
+        let _exchange = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(anyhow!("Generation cancelled while queued")),
+            lock = self.request_lock.lock() => lock,
+        };
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => None,
+            result = async {
+                // Model switches and process startup belong to the exchange owner too.
+                if let Some(model) = model { self.ensure_running(model).await?; }
+                self.exchange_request(request_json, timeout).await
+            } => Some(result),
+        };
+        match result {
+            Some(result) => result,
+            None => {
+                // Keep the exchange guard until the cancelled worker has stopped.
+                self.shutdown().await?;
+                Err(anyhow!("Generation cancelled"))
+            }
+        }
+    }
+
+    async fn exchange_request(&self, request_json: String, timeout: Duration) -> Result<String> {
         // Write request to stdin
         {
             let mut stdin_lock = self.stdin_writer.lock().await;
@@ -808,6 +844,83 @@ mod protocol_tests {
             idle_timeout_secs: 600,
         });
         (manager, stderr)
+    }
+
+    #[tokio::test]
+    async fn queued_cancellation_leaves_the_running_exchange_intact() {
+        let (manager, mut stderr) = fake_sidecar(
+            r#"
+[Console]::In.ReadLine() | Out-Null
+[Console]::Error.WriteLine('ready')
+Start-Sleep -Milliseconds 700
+[Console]::Out.WriteLine('{"type":"response","text":"Running answer","error":null}')
+[Console]::In.ReadLine() | Out-Null
+"#,
+        )
+        .await;
+        let running = manager.clone();
+        let task = tokio::spawn(async move {
+            running
+                .send_request("{}".into(), Duration::from_secs(5))
+                .await
+        });
+        let mut ready = String::new();
+        stderr.read_line(&mut ready).await.unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        let queued_manager = manager.clone();
+        let queued_token = token.clone();
+        let queued = tokio::spawn(async move {
+            queued_manager
+                .send_request_cancellable(
+                    "{}".into(),
+                    Duration::from_secs(5),
+                    None,
+                    Some(&queued_token),
+                )
+                .await
+        });
+        while manager.active_request_count.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        token.cancel();
+        assert!(queued
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("queued"));
+        assert!(manager.is_healthy());
+        assert!(task.await.unwrap().unwrap().contains("Running answer"));
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_owner_stops_the_helper_before_unlocking() {
+        let (manager, mut stderr) = fake_sidecar("[Console]::In.ReadLine() | Out-Null; [Console]::Error.WriteLine('ready'); Start-Sleep -Seconds 60").await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let running = manager.clone();
+        let running_token = token.clone();
+        let task = tokio::spawn(async move {
+            running
+                .send_request_cancellable(
+                    "{}".into(),
+                    Duration::from_secs(60),
+                    None,
+                    Some(&running_token),
+                )
+                .await
+        });
+        let mut ready = String::new();
+        stderr.read_line(&mut ready).await.unwrap();
+        token.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(6), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!manager.is_healthy());
+        assert!(manager.request_lock.try_lock().is_ok());
     }
 
     #[tokio::test]

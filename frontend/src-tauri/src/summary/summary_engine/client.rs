@@ -168,16 +168,6 @@ pub async fn generate_with_builtin(
         global_manager.clone().unwrap()
     };
 
-    // Ensure sidecar is running with this model
-    manager.ensure_running(model_path.clone()).await?;
-
-    // Check cancellation after sidecar startup
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled during sidecar startup"));
-        }
-    }
-
     // Prepare generation request with model-specific sampling parameters
     let sampling = model_def.sampling.sanitize_for_llama_helper();
     let limits = crate::summary::context_budget::resolve(
@@ -208,24 +198,9 @@ pub async fn generate_with_builtin(
 
     log::info!("Sending generation request to sidecar");
 
-    // Race between send_request and cancellation token
-    let response_json = if let Some(token) = cancellation_token {
-        tokio::select! {
-            result = manager.send_request(request_json, timeout) => {
-                result?
-            }
-            _ = token.cancelled() => {
-                log::warn!("Generation cancelled by user, shutting down sidecar");
-                // Shutdown sidecar to stop generation immediately
-                if let Err(e) = manager.shutdown().await {
-                    log::error!("Failed to shutdown sidecar during cancellation: {}", e);
-                }
-                return Err(anyhow!("Generation cancelled by user"));
-            }
-        }
-    } else {
-        manager.send_request(request_json, timeout).await?
-    };
+    let response_json = manager
+        .send_request_cancellable(request_json, timeout, Some(model_path), cancellation_token)
+        .await?;
 
     // Check cancellation before parsing response
     if let Some(token) = cancellation_token {
