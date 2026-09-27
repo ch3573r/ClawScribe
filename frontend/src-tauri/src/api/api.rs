@@ -1163,6 +1163,7 @@ mod meeting_deletion_tests {
 
     #[tokio::test]
     async fn database_only_deletion_is_allowed_during_inference() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let _busy = crate::audio::inference::claim_job().unwrap();
         let error = claim_meeting_deletion_job(true).unwrap_err();

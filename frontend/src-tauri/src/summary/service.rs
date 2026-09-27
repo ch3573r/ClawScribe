@@ -1045,8 +1045,9 @@ impl SummaryService {
 mod tests {
     use super::*;
 
-    #[test]
-    fn summary_job_guards_reject_duplicates_and_release_early_failures() {
+    #[tokio::test]
+    async fn summary_job_guards_reject_duplicates_and_release_early_failures() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let meeting = "summary-job-guard-test";
         let job = SummaryService::register_job(meeting, "openai").unwrap();
         assert!(SummaryService::register_job(meeting, "openai").is_err());
@@ -1546,11 +1547,13 @@ mod recording_cancellation_tests {
     use super::*;
     #[tokio::test]
     async fn preemption_waits_for_local_owner_and_persists_its_reason() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
-        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind("preemption-owner").execute(&pool).await.unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, "preemption-owner")
             .await
             .unwrap();
-        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let local = SummaryService::register_job("preemption-owner", "builtin-ai").unwrap();
         let held = crate::audio::inference::claim_job().unwrap();
         let token = local.token.clone();
         let release = tokio::spawn(async move {
@@ -1562,8 +1565,8 @@ mod recording_cancellation_tests {
             .await
             .unwrap();
         release.await.unwrap();
-        finish_provider_error(&pool, "review-test", &local.token, "cancelled").await;
-        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+        finish_provider_error(&pool, "preemption-owner", &local.token, "cancelled").await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "preemption-owner")
             .await
             .unwrap()
             .unwrap();
@@ -1573,6 +1576,7 @@ mod recording_cancellation_tests {
 
     #[tokio::test]
     async fn preemption_refuses_other_jobs_and_times_out_without_cancelling_cloud() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let held = crate::audio::inference::claim_job().unwrap();
         let cloud = SummaryService::register_job("preempt-cloud", "openai").unwrap();
         let expected = crate::audio::inference::claim_job().unwrap_err();
@@ -1595,15 +1599,23 @@ mod recording_cancellation_tests {
     }
     #[tokio::test]
     async fn import_cancels_local_summary_with_its_specific_reason() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
-        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind("import-summary-cancel").execute(&pool).await.unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, "import-summary-cancel")
             .await
             .unwrap();
-        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let local = SummaryService::register_job("import-summary-cancel", "builtin-ai").unwrap();
         let reason = "Local summary stopped because import started. Generate it again afterwards.";
         SummaryService::cancel_local_summaries(reason);
-        finish_provider_error(&pool, "review-test", &local.token, "helper exited").await;
-        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
+        finish_provider_error(
+            &pool,
+            "import-summary-cancel",
+            &local.token,
+            "helper exited",
+        )
+        .await;
+        let result = SummaryProcessesRepository::get_summary_data(&pool, "import-summary-cancel")
             .await
             .unwrap()
             .unwrap();
@@ -1612,26 +1624,29 @@ mod recording_cancellation_tests {
     }
     #[tokio::test]
     async fn recording_cancels_only_local_jobs_with_an_actionable_reason() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
-        SummaryProcessesRepository::create_or_reset_process(&pool, "review-test")
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind("recording-summary-cancel").execute(&pool).await.unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, "recording-summary-cancel")
             .await
             .unwrap();
-        let local = SummaryService::register_job("review-test", "builtin-ai").unwrap();
+        let local = SummaryService::register_job("recording-summary-cancel", "builtin-ai").unwrap();
         let cloud = SummaryService::register_job("recording-test-cloud", "openai").unwrap();
         SummaryService::cancel_local_summaries_for_recording();
         assert!(local.token.is_cancelled());
         assert!(!cloud.token.is_cancelled());
         finish_provider_error(
             &pool,
-            "review-test",
+            "recording-summary-cancel",
             &local.token,
             "process may have crashed",
         )
         .await;
-        let result = SummaryProcessesRepository::get_summary_data(&pool, "review-test")
-            .await
-            .unwrap()
-            .unwrap();
+        let result =
+            SummaryProcessesRepository::get_summary_data(&pool, "recording-summary-cancel")
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(result.status, "cancelled");
         assert_eq!(result.error.as_deref(), Some(RECORDING_INTERRUPTED_SUMMARY));
     }
