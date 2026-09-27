@@ -14,13 +14,14 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
     const hooks = createHookHarness(), calls = [];
     const { TranscriptSettings } = loadTsModule('src/components/TranscriptSettings.tsx', {
       react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+      'next/navigation': { useRouter: () => ({ push() {} }) },
       'lucide-react': names('Eye EyeOff FlaskConical Loader2 Lock Unlock'),
       './ui/select': names('Select SelectContent SelectGroup SelectItem SelectLabel SelectTrigger SelectValue'),
       './ui/input': names('Input'), './ui/button': names('Button'), './ui/label': names('Label'),
       './WhisperModelManager': names('ModelManager'), './ParakeetModelManager': names('ParakeetModelManager'),
       './NemotronModelManager': names('NemotronModelManager'), './WhisperAccelerationStatus': names('WhisperAccelerationStatus'),
       './UnencryptedHttpOptIn': names('UnencryptedHttpOptIn'),
-      '@/hooks/useCloudTranscription': { useCloudTranscription: () => true },
+      '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: true, loaded: true }) },
       '@tauri-apps/plugin-dialog': { open: async () => 'test.wav' },
       '@tauri-apps/api/core': { invoke: async (command, args) => {
         calls.push({ command, args });
@@ -51,6 +52,62 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
     assert.equal(calls.at(-1).args.allowUnencrypted, true);
     await button('Test').props.onClick();
     assert.equal(calls.at(-1).args.apiKey, null, 'after save the key is bound again');
+    hooks.unmount();
+  });
+}
+
+for (const enabled of [true, false]) {
+  test(`saved MAI survives preference loading (${enabled}) and explains live transcription`, t => {
+    const hooks = createHookHarness(), saves = [], routes = [];
+    const previousWindow = globalThis.window, previousEvent = globalThis.CustomEvent;
+    const events = [];
+    globalThis.window = { dispatchEvent: event => events.push(event) };
+    globalThis.CustomEvent = class { constructor(type, options) { this.type = type; this.detail = options.detail; } };
+    t.after(() => { globalThis.window = previousWindow; globalThis.CustomEvent = previousEvent; });
+    let preferenceChanged;
+    const { useCloudTranscription } = loadTsModule('src/hooks/useCloudTranscription.ts', {
+      react: hooks.react,
+      '@/lib/cloudTranscription': {
+        getCloudTranscription: () => enabled,
+        subscribeCloudTranscription: callback => { preferenceChanged = callback; return () => {}; },
+      },
+    });
+    const { TranscriptSettings } = loadTsModule('src/components/TranscriptSettings.tsx', {
+      react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+      'next/navigation': { useRouter: () => ({ push: route => routes.push(route) }) },
+      'lucide-react': names('Eye EyeOff FlaskConical Loader2 Lock Unlock'),
+      './ui/select': names('Select SelectContent SelectGroup SelectItem SelectLabel SelectTrigger SelectValue'),
+      './ui/input': names('Input'), './ui/button': names('Button'), './ui/label': names('Label'),
+      './WhisperModelManager': names('ModelManager'), './ParakeetModelManager': names('ParakeetModelManager'),
+      './NemotronModelManager': names('NemotronModelManager'), './WhisperAccelerationStatus': names('WhisperAccelerationStatus'),
+      './UnencryptedHttpOptIn': names('UnencryptedHttpOptIn'),
+      '@/hooks/useCloudTranscription': { useCloudTranscription },
+      '@tauri-apps/plugin-dialog': { open: async () => null },
+      '@tauri-apps/api/core': { invoke: async () => null },
+      sonner: { toast: { success() {}, error() {} } },
+    });
+    const render = () => hooks.render(() => TranscriptSettings({
+      transcriptModelConfig: { provider: 'mai-transcribe', model: 'mai-transcribe-1.5' },
+      setTranscriptModelConfig: value => saves.push(value),
+    }));
+    const first = render();
+    assert.equal(nodes(first).find(node => node.type === 'Select').props.value, 'mai-transcribe');
+    assert.doesNotMatch(text(first), /Cloud transcription is turned off/);
+    for (let i = 0; i < 3; i++) {
+      const tree = render();
+      assert.equal(nodes(tree).find(node => node.type === 'Select').props.value, 'mai-transcribe');
+      assert.match(text(tree), /Live recordings always transcribe on this device with Parakeet \(parakeet-tdt-0.6b-v3-int8\)/);
+      assert.equal(text(tree).includes('Cloud transcription is turned off'), !enabled);
+      assert.equal(nodes(tree).some(node => node.type === 'SelectItem' && node.props.value === 'mai-transcribe'), true);
+    }
+    if (!enabled) {
+      nodes(render()).find(node => node.type === 'Button' && text(node) === 'Open Beta settings').props.onClick();
+      assert.deepEqual(routes, ['/settings?tab=beta']);
+      assert.equal(events[0].detail, 'beta');
+    }
+    preferenceChanged(!enabled);
+    assert.equal(nodes(render()).find(node => node.type === 'Select').props.value, 'mai-transcribe');
+    assert.equal(saves.length, 0);
     hooks.unmount();
   });
 }

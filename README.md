@@ -95,7 +95,11 @@ them through phrase matching. Nemotron's **Auto** language follows the system
 locale; select the spoken language explicitly when it differs. Parakeet's Auto
 selection does not label an unknown language as English.
 
-Cloud transcription requires explicit opt-in. Hosted Whisper can provide word
+Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
+when the opt-in is off. The
+settings explain which local engine and model live recordings use. Cloud APIs
+apply to Import and Enhance (whole-file), while live recordings stay on-device.
+Hosted Whisper can provide word
 timestamps; MAI has sentence-level timing and may use approximate local VAD-row
 alignment, not fabricated word timestamps. The implemented OpenAI-hosted upload
 limit is 25 MB; the implemented MAI limit is 300 MB. MAI uploads use WAV, MP3, or
@@ -108,7 +112,8 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 - **Local Word export:** save a summary, full transcript, or both as `.docx`,
   with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
   sign-in or Word installed.
-- **Project tags:** label saved meetings and filter the archive and transcript
+- **Project tags:** choose existing labels from a searchable list or create new
+  ones, then filter the archive and transcript
   search by project, including an untagged view.
 - **Meeting bookmarks:** mark a moment while recording, then label and revisit
   it from the saved transcript panel. Add markers during playback too.

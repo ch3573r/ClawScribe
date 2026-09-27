@@ -6,13 +6,13 @@ import {
   subscribeCloudTranscription,
 } from "@/lib/cloudTranscription";
 
-export function useCloudTranscription(): boolean {
-  const [enabled, setEnabled] = useState(false);
+export function useCloudTranscription(): { enabled: boolean; loaded: boolean } {
+  const [state, setState] = useState({ enabled: false, loaded: false });
 
   useEffect(() => {
-    setEnabled(getCloudTranscription());
-    return subscribeCloudTranscription(setEnabled);
+    setState({ enabled: getCloudTranscription(), loaded: true });
+    return subscribeCloudTranscription(enabled => setState({ enabled, loaded: true }));
   }, []);
 
-  return enabled;
+  return state;
 }

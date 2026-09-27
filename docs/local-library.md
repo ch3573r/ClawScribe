@@ -40,7 +40,11 @@ and clipboard fallback all use the same selected content.
 
 ## Project tags
 
-Use **Project tags** in a saved meeting to assign comma-separated labels. The
+Use **Project tags** in a saved meeting to choose existing labels from a searchable
+list or create new ones. Suggestions show the most-used tags first and preserve
+existing spelling. Enter or a comma adds a tag; comma-separated lists can also
+be pasted. Remove chips with their buttons or Backspace in the empty search field.
+Save up to 20 tags of 60 characters each, or clear every chip to remove all tags. The
 Meetings page can filter by a project or show only untagged meetings. The filter
 also applies to transcript search results. Tags are stored in SQLite and refreshed
 across views after changes. A meeting can have up to 20 tags of 60 characters each.

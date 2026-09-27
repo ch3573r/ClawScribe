@@ -26,6 +26,15 @@ const CODEX_APP_SERVER_MISSING: &str =
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
 const CODEX_REAUTH_MESSAGE: &str =
     "Codex app-server authentication is required. Sign in with ChatGPT again to store credentials securely.";
+const CODEX_LEGACY_REAUTH_MESSAGE: &str = "ClawScribe now keeps your ChatGPT sign-in in Windows Credential Manager instead of a file. Sign in once more to continue.";
+
+fn codex_reauth_message(isolated_home: Option<&Path>) -> &'static str {
+    if isolated_home.is_some_and(|home| home.join("auth.json").exists()) {
+        CODEX_LEGACY_REAUTH_MESSAGE
+    } else {
+        CODEX_REAUTH_MESSAGE
+    }
+}
 const CODEX_OVERLOAD_CODE: i64 = -32001;
 const CODEX_MAX_OVERLOAD_RETRIES: usize = 3;
 
@@ -39,6 +48,21 @@ pub enum CodexHomeMode {
 #[cfg(test)]
 mod app_server_tests {
     use super::*;
+
+    #[test]
+    fn reauth_message_explains_legacy_file_migration_only_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(codex_reauth_message(None), CODEX_REAUTH_MESSAGE);
+        assert_eq!(
+            codex_reauth_message(Some(temp.path())),
+            CODEX_REAUTH_MESSAGE
+        );
+        fs::write(temp.path().join("auth.json"), "not parsed").unwrap();
+        assert_eq!(
+            codex_reauth_message(Some(temp.path())),
+            CODEX_LEGACY_REAUTH_MESSAGE
+        );
+    }
 
     fn make_executable(path: &Path) {
         fs::write(path, "# app-server placeholder\n").unwrap();
@@ -431,6 +455,15 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         assert_eq!(turn["method"], "turn/start");
         assert_eq!(turn["params"]["threadId"], "thread-1");
         assert_eq!(turn["params"]["model"], "gpt-5.5");
+        assert_eq!(
+            turn["params"]["outputSchema"],
+            serde_json::from_str::<Value>(&output_schema_json()).unwrap()
+        );
+        assert!(
+            raw_turn_start_request(12, "thread-1", "gpt-5.5", "Polish a title")["params"]
+                .get("outputSchema")
+                .is_none()
+        );
         assert!(turn["params"]["input"][0]["text"]
             .as_str()
             .unwrap()
@@ -579,6 +612,7 @@ import sys
 scenario = "{scenario}"
 overload_count = 0
 meeting_json = {meeting_json}
+meeting_schema = json.loads({meeting_schema})
 sys.stderr.write("Authorization: Bearer secret-token-value-1234567890\n")
 sys.stderr.flush()
 
@@ -613,6 +647,10 @@ for line in sys.stdin:
     elif method == "thread/start":
         send({{"id": mid, "result": {{"thread": {{"id": "thread-1"}}}}}})
     elif method == "turn/start":
+        if scenario == "raw":
+            assert "outputSchema" not in msg["params"]
+        else:
+            assert msg["params"]["outputSchema"] == meeting_schema
         if scenario == "auth-failure":
             send({{"id": mid, "error": {{"code": 401, "message": "not authenticated"}}}})
             continue
@@ -626,6 +664,7 @@ for line in sys.stdin:
 "#,
             scenario = scenario,
             meeting_json = serde_json::to_string(&valid_meeting_json()).unwrap(),
+            meeting_schema = serde_json::to_string(&output_schema_json()).unwrap(),
         )
         .unwrap();
         drop(file);
@@ -715,6 +754,18 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn fake_app_server_raw_turn_has_no_meeting_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_with_fake(&temp, "raw");
+        let mut session = AppServerSession::start(&provider).await.unwrap();
+        assert!(session
+            .process_raw_prompt("test-model", "Polish a title")
+            .await
+            .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn fake_app_server_lists_picker_visible_models() {
         let temp = tempfile::tempdir().unwrap();
         let provider = provider_with_fake(&temp, "ok");
@@ -789,6 +840,52 @@ for line in sys.stdin:
         let raw = format!("Here are the notes:\n{}", valid_meeting_json());
         let parsed = parse_meeting_output(&raw).expect("leading prose should be tolerated");
         assert_eq!(parsed.follow_up_email.subject, "Codex runtime");
+    }
+
+    #[test]
+    fn meeting_output_accepts_absent_email_and_null_optional_content() {
+        for missing_email in [false, true] {
+            let mut value: Value = serde_json::from_str(&valid_meeting_json()).unwrap();
+            for key in [
+                "executive_summary",
+                "decisions",
+                "risks_blockers",
+                "open_questions",
+                "action_items",
+                "follow_up_email",
+            ] {
+                value[key] = Value::Null;
+            }
+            if missing_email {
+                value.as_object_mut().unwrap().remove("follow_up_email");
+            }
+            let parsed = parse_meeting_output(&value.to_string()).unwrap();
+            assert!(parsed.executive_summary.is_empty());
+            assert!(parsed.decisions.is_empty());
+            assert!(parsed.risks_blockers.is_empty());
+            assert!(parsed.open_questions.is_empty());
+            assert!(parsed.action_items.is_empty());
+            assert_eq!(
+                render_follow_up_email(&parsed.follow_up_email),
+                "No follow-up email was suggested."
+            );
+        }
+    }
+
+    #[test]
+    fn meeting_output_normalization_preserves_strict_validation() {
+        for (key, replacement) in [
+            ("unexpected", serde_json::json!(true)),
+            ("decisions", serde_json::json!("invalid")),
+            (
+                "follow_up_email",
+                serde_json::json!({"subject": "incomplete"}),
+            ),
+        ] {
+            let mut value: Value = serde_json::from_str(&valid_meeting_json()).unwrap();
+            value[key] = replacement;
+            assert!(parse_meeting_output(&value.to_string()).is_err());
+        }
     }
 
     #[test]
@@ -2007,8 +2104,9 @@ fn app_server_turn_start_request(
             "model": model,
             "input": [{
                 "type": "text",
-                "text": build_app_server_turn_text(transcript, custom_prompt, metadata),
+            "text": build_app_server_turn_text(transcript, custom_prompt, metadata),
             }],
+            "outputSchema": serde_json::from_str::<Value>(&output_schema_json()).expect("Meeting output schema must be valid JSON"),
         }),
     )
 }
@@ -2206,7 +2304,7 @@ impl AppServerSession {
     async fn require_authenticated(&mut self) -> Result<(), String> {
         let account = self.account_read().await?;
         if account.is_unauthenticated() {
-            return Err(CODEX_REAUTH_MESSAGE.to_string());
+            return Err(codex_reauth_message(self.codex_home.as_deref()).to_string());
         }
         Ok(())
     }
@@ -2322,7 +2420,7 @@ impl AppServerSession {
                     sleep(delay).await;
                 }
                 Err(e) if is_auth_failure_message(&e) => {
-                    return Err(CODEX_REAUTH_MESSAGE.to_string());
+                    return Err(codex_reauth_message(self.codex_home.as_deref()).to_string());
                 }
                 Err(e) => return Err(e),
             }
@@ -2356,7 +2454,7 @@ impl AppServerSession {
                     sleep(delay).await;
                 }
                 Err(e) if is_auth_failure_message(&e) => {
-                    return Err(CODEX_REAUTH_MESSAGE.to_string());
+                    return Err(codex_reauth_message(self.codex_home.as_deref()).to_string());
                 }
                 Err(e) => return Err(e),
             }
@@ -2417,7 +2515,7 @@ impl AppServerSession {
                     sleep(delay).await;
                 }
                 Err(e) if is_auth_failure_message(&e) => {
-                    return Err(CODEX_REAUTH_MESSAGE.to_string())
+                    return Err(codex_reauth_message(self.codex_home.as_deref()).to_string())
                 }
                 Err(e) => return Err(e),
             }
@@ -3083,14 +3181,37 @@ pub(crate) fn parse_meeting_output(raw: &str) -> Result<MeetingNotesOutput, Stri
     // Read only the first JSON value via the streaming deserializer so trailing
     // characters after the object (extra prose, a second value, etc.) don't fail
     // parsing the way `serde_json::from_str` would.
-    let output = serde_json::Deserializer::from_str(json_start)
-        .into_iter::<MeetingNotesOutput>()
+    let mut value = serde_json::Deserializer::from_str(json_start)
+        .into_iter::<Value>()
         .next()
         .unwrap_or_else(|| {
             Err(serde::de::Error::custom(
                 "Provider returned no meeting JSON",
             ))
         })
+        .map_err(|e| format!("Provider returned invalid meeting JSON: {e}"))?;
+    if let Some(object) = value.as_object_mut() {
+        if matches!(object.get("follow_up_email"), None | Some(Value::Null)) {
+            object.insert(
+                "follow_up_email".into(),
+                serde_json::json!({"subject": "", "body_markdown": ""}),
+            );
+        }
+        for field in [
+            "decisions",
+            "risks_blockers",
+            "open_questions",
+            "action_items",
+        ] {
+            if object.get(field).is_some_and(Value::is_null) {
+                object.insert(field.into(), serde_json::json!([]));
+            }
+        }
+        if object.get("executive_summary").is_some_and(Value::is_null) {
+            object.insert("executive_summary".into(), Value::String(String::new()));
+        }
+    }
+    let output: MeetingNotesOutput = serde_json::from_value(value)
         .map_err(|e| format!("Provider returned invalid meeting JSON: {e}"))?;
     // JSON escapes can conceal tags until deserialization. Guard every exported
     // field as well as the primary Markdown report.
@@ -3285,6 +3406,9 @@ fn confidence_str(confidence: &Confidence) -> &'static str {
 }
 
 pub(crate) fn render_follow_up_email(email: &FollowUpEmail) -> String {
+    if email.subject.trim().is_empty() && email.body_markdown.trim().is_empty() {
+        return "No follow-up email was suggested.".into();
+    }
     format!(
         "# Follow-Up Email\n\n**Subject:** {}\n\n{}",
         email.subject, email.body_markdown
