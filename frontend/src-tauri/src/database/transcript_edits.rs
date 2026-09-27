@@ -195,6 +195,58 @@ async fn undo(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
     Ok(changes.len())
 }
 
+async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
+    let mut tx = pool.begin().await.map_err(error)?;
+    assert_editable(&mut tx, meeting).await?;
+    let json: Option<String> = sqlx::query_scalar("SELECT transcripts_json FROM transcript_revisions WHERE meeting_id = ? ORDER BY rowid DESC LIMIT 1")
+        .bind(meeting).fetch_optional(&mut *tx).await.map_err(error)?;
+    let previous: Vec<Transcript> =
+        serde_json::from_str(&json.ok_or("No previous transcript is available")?).map_err(error)?;
+    if previous.iter().any(|row| row.meeting_id != meeting) {
+        return Err("The archived transcript does not belong to this meeting".into());
+    }
+    let current: Vec<Transcript> =
+        sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY id")
+            .bind(meeting)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(error)?;
+    sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES (?, ?, ?, ?)")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(meeting).bind(chrono::Utc::now().to_rfc3339())
+        .bind(serde_json::to_string(&current).map_err(error)?).execute(&mut *tx).await.map_err(error)?;
+    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+        .bind(meeting)
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+    for row in &previous {
+        sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp, summary, action_items, key_points, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json, original_transcript) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&row.id).bind(meeting).bind(&row.transcript).bind(&row.timestamp)
+            .bind(&row.summary).bind(&row.action_items).bind(&row.key_points)
+            .bind(row.audio_start_time).bind(row.audio_end_time).bind(row.duration)
+            .bind(&row.speaker).bind(&row.word_timestamps_json).bind(&row.original_transcript)
+            .execute(&mut *tx).await.map_err(error)?;
+    }
+    sqlx::query("UPDATE transcript_edit_batches SET undone = 1 WHERE meeting_id = ?")
+        .bind(meeting)
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+    sqlx::query("INSERT OR IGNORE INTO transcript_file_sync (meeting_id) VALUES (?)")
+        .bind(meeting)
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+    sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now())
+        .bind(meeting)
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+    tx.commit().await.map_err(error)?;
+    Ok(previous.len())
+}
+
 // A failed file mirror never rolls back a committed correction or reports it as
 // unsaved. The UI offers a retry; summaries and Graph exports read SQLite.
 async fn sync_file(pool: &SqlitePool, meeting: &str) -> Result<(), String> {
@@ -258,6 +310,7 @@ pub struct EditState {
     can_undo: bool,
     pending_file_sync: bool,
     has_edits: bool,
+    can_restore_previous: bool,
 }
 
 #[tauri::command]
@@ -280,10 +333,17 @@ pub async fn api_get_transcript_edit_state(
             .await
             .map_err(error)?;
     let edits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ? AND original_transcript IS NOT NULL AND transcript != original_transcript").bind(&meeting_id).fetch_one(pool).await.map_err(error)?;
+    let revisions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transcript_revisions WHERE meeting_id = ?")
+            .bind(&meeting_id)
+            .fetch_one(pool)
+            .await
+            .map_err(error)?;
     Ok(EditState {
         can_undo: can_undo > 0,
         pending_file_sync: pending > 0,
         has_edits: edits > 0,
+        can_restore_previous: revisions > 0,
     })
 }
 
@@ -399,6 +459,18 @@ pub async fn api_undo_transcript_edit<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn api_restore_previous_transcript<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<EditResult, String> {
+    let _job = crate::audio::inference::claim_job()?;
+    let pool = state.db_manager.pool();
+    let count = restore_previous(pool, &meeting_id).await?;
+    Ok(complete(&app, pool, &meeting_id, count).await)
+}
+
+#[tauri::command]
 pub async fn api_sync_transcript_file(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
@@ -462,6 +534,51 @@ pub(crate) mod tests {
         assert_eq!(restored[0].transcript, "Äpfel project");
         assert_eq!(restored[0].word_timestamps_json.as_deref(), Some("[]"));
         assert!(restored[0].original_transcript.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_revision_preserves_every_field_and_toggles_without_reusing_edit_batches() {
+        let pool = fixture().await;
+        let (_, changes) = replacement_plan(
+            rows(&pool, "review-test").await.unwrap(),
+            "project",
+            "correction",
+            false,
+        )
+        .unwrap();
+        apply(&pool, "review-test", &changes).await.unwrap();
+        let original = serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap();
+        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES ('revision', 'review-test', CURRENT_TIMESTAMP, ?)")
+            .bind(original.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE transcripts SET id = id || '-new', transcript = 'replacement', original_transcript = NULL").execute(&pool).await.unwrap();
+        let replacement = serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap();
+        assert_eq!(restore_previous(&pool, "review-test").await.unwrap(), 2);
+        assert_eq!(
+            serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap(),
+            original
+        );
+        assert!(undo(&pool, "review-test").await.is_err());
+        assert_eq!(restore_previous(&pool, "review-test").await.unwrap(), 2);
+        assert_eq!(
+            serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap(),
+            replacement
+        );
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transcript_file_sync WHERE meeting_id = 'review-test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1);
+        sqlx::query("INSERT INTO summary_processes (meeting_id, status, created_at, updated_at) VALUES ('review-test', 'processing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").execute(&pool).await.unwrap();
+        assert!(restore_previous(&pool, "review-test")
+            .await
+            .unwrap_err()
+            .contains("summary generation"));
+        assert_eq!(
+            serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap(),
+            replacement
+        );
     }
 
     #[tokio::test]

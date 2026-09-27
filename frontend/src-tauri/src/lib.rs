@@ -934,6 +934,7 @@ pub fn run() {
             database::transcript_edits::api_preview_transcript_replace,
             database::transcript_edits::api_replace_transcript_text,
             database::transcript_edits::api_undo_transcript_edit,
+            database::transcript_edits::api_restore_previous_transcript,
             database::transcript_edits::api_sync_transcript_file,
             summary::sources::api_get_summary_sources,
             summary::sources::api_resolve_summary_source,

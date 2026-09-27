@@ -169,6 +169,12 @@ and visible retry preserve corrections if the atomic `transcripts.json` mirror
 cannot be written. Existing migrations are immutable; the correction schema is
 added by a new migration.
 
+Retranscription warns when it will replace corrections. Restore previous
+transcript swaps the current rows with the latest archived revision, preserving
+every original ID and field. It archives the replaced version, retires old edit
+batches, and queues the file mirror in one transaction. Active summaries block
+restoration; regenerated notes are needed to refresh source links.
+
 `summary/sources.rs` prepares summaries from the complete saved transcript and
 annotates passages with stable content-derived source links. Reduction prompts
 retain links alongside their facts. Completed results store the cited source

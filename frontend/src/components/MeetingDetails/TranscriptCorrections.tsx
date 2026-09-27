@@ -10,7 +10,7 @@ import { ReplaceOptions, ReplacePreview, TextReplaceDialog } from './TextReplace
 import { TranscriptSegmentData } from '@/types';
 
 interface EditResult { changed: number; file_warning: boolean }
-interface EditState { can_undo: boolean; pending_file_sync: boolean; has_edits: boolean }
+interface EditState { can_undo: boolean; pending_file_sync: boolean; has_edits: boolean; can_restore_previous: boolean }
 
 export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, replaceOpen, onReplaceOpenChange }: {
   meetingId: string; editing: TranscriptSegmentData | null; onClose: () => void; onChanged?: () => Promise<void>;
@@ -19,7 +19,7 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [state, setState] = useState<EditState>({ can_undo: false, pending_file_sync: false, has_edits: false });
+  const [state, setState] = useState<EditState>({ can_undo: false, pending_file_sync: false, has_edits: false, can_restore_previous: false });
   const operation = useRef(false);
   const currentMeeting = useRef(meetingId);
   currentMeeting.current = meetingId;
@@ -30,10 +30,11 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
   }, [meetingId]);
   useEffect(() => {
     currentMeeting.current = meetingId;
-    setState({ can_undo: false, pending_file_sync: false, has_edits: false });
+    setState({ can_undo: false, pending_file_sync: false, has_edits: false, can_restore_previous: false });
     void refresh().catch(() => setError('Could not load correction history. Reopen the meeting to retry.'));
+    const retranscription = listen<{meeting_id: string}>('retranscription-complete', event => { if (event.payload.meeting_id === meetingId) void refresh().catch(() => {}); });
     const subscription = listen<{meeting_id: string}>('transcript-text-edited', event => { if (event.payload.meeting_id === meetingId) void refresh().catch(() => {}); });
-    return () => { currentMeeting.current = ''; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+    return () => { currentMeeting.current = ''; void retranscription.then(unlisten => unlisten()).catch(() => {}); void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [meetingId, refresh]);
 
   const completed = async (result: EditResult) => {
@@ -59,7 +60,8 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
   return <>
     <div className="space-y-2 border-b border-border px-3 py-2 text-xs">
       <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={() => onReplaceOpenChange(true)}>Find and replace</Button>
-        <Button size="sm" variant="ghost" disabled={busy || !state.can_undo} onClick={() => void change('api_undo_transcript_edit', {})}>Undo last correction</Button></div>
+        <Button size="sm" variant="ghost" disabled={busy || !state.can_undo} onClick={() => void change('api_undo_transcript_edit', {})}>Undo last correction</Button>
+        {state.can_restore_previous && <Button size="sm" variant="outline" disabled={busy} onClick={() => void change('api_restore_previous_transcript', {})}>Restore previous transcript</Button>}</div>
       {state.has_edits && <p className="text-muted-foreground">Transcript corrected. Regenerate notes to include the changes.</p>}
       {state.pending_file_sync && <p role="alert">Corrections are saved in ClawScribe. The recording-folder copy needs updating. <button className="underline" disabled={busy} onClick={async () => {
         setBusy(true); setError('');

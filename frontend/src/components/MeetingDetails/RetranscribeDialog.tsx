@@ -82,6 +82,17 @@ export function RetranscribeDialog({
   onComplete,
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const [hasEdits, setHasEdits] = useState(false);
+  const [editStateError, setEditStateError] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let disposed = false;
+    setHasEdits(false); setEditStateError(false);
+    void invoke<{has_edits: boolean}>('api_get_transcript_edit_state', { meetingId })
+      .then(state => { if (!disposed) setHasEdits(state.has_edits); })
+      .catch(() => { if (!disposed) setEditStateError(true); });
+    return () => { disposed = true; };
+  }, [open, meetingId]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
@@ -398,6 +409,8 @@ export function RetranscribeDialog({
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <div>
                   <p className="font-medium">Retranscription replaces the current transcript.</p>
+                  {hasEdits && <p role="alert" className="mt-1">Your corrections will be replaced. You can restore the previous transcript afterwards. Summary source links will need regenerating.</p>}
+                  {editStateError && <p role="alert" className="mt-1">Could not check for corrections. Any corrections will be replaced; you can restore the previous transcript afterwards.</p>}
                   <p className="mt-1 text-xs leading-5 opacity-90">
                     The existing transcript remains available until the replacement
                     finishes successfully. Meeting audio, notes, and summaries are not deleted.
