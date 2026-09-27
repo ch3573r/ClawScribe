@@ -100,6 +100,7 @@ try {
         "audio::recording_state::tests",
         "audio::recording_commands::stop_tests",
         "audio::transcription::queue::tests",
+        "audio::transcription::worker::metrics_lifecycle_tests",
         "audio::outcome::tests",
         "audio::retranscription::tests",
         "audio::import::tests",
