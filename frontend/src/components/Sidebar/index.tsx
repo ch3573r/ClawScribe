@@ -21,6 +21,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useSidebar } from "./SidebarProvider";
 import type { CurrentMeeting } from "@/components/Sidebar/SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
+import { indexedDBService } from "@/services/indexedDBService";
 import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -200,10 +201,16 @@ const Sidebar: React.FC = () => {
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      const metadata = await invoke<{ folder_path?: string | null }>('api_get_meeting_metadata', { meetingId: itemId });
       const result = await invoke<{ warnings: string[] }>("api_delete_meeting", {
         meetingId: itemId,
         deleteFiles,
       });
+      try {
+        await indexedDBService.deleteMeeting(itemId, metadata.folder_path);
+      } catch {
+        toast.warning('Meeting deleted, but its cached recovery copy could not be removed.');
+      }
       console.log("Meeting deleted successfully");
       const updatedMeetings = meetings.filter(
         (m: CurrentMeeting) => m.id !== itemId,

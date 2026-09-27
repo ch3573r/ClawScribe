@@ -176,22 +176,21 @@ class IndexedDBService {
       const transaction = this.db!.transaction(['meetings'], 'readwrite');
       const store = transaction.objectStore('meetings');
 
-      return new Promise((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
         const getRequest = store.get(meetingId);
         getRequest.onsuccess = () => {
           const meeting = getRequest.result;
           if (meeting) {
             meeting.savedToSQLite = true;
             meeting.lastUpdated = Date.now();
-            const putRequest = store.put(meeting);
-            putRequest.onsuccess = () => resolve();
-            putRequest.onerror = () => reject(putRequest.error);
-          } else {
-            resolve();
+            store.put(meeting);
           }
         };
-        getRequest.onerror = () => reject(getRequest.error);
       });
+      await this.deleteMeeting(meetingId);
     } catch (error) {
       console.warn('Failed to mark meeting as saved:', error);
     }
@@ -200,7 +199,7 @@ class IndexedDBService {
   /**
    * Delete meeting and all its transcripts
    */
-  async deleteMeeting(meetingId: string): Promise<void> {
+  async deleteMeeting(meetingId: string, folderPath?: string | null): Promise<void> {
     try {
       if (!this.db) await this.init();
 
@@ -208,15 +207,31 @@ class IndexedDBService {
       const meetingsStore = transaction.objectStore('meetings');
       const transcriptsStore = transaction.objectStore('transcripts');
 
-      // Delete transcripts
-      await this.deleteTranscriptsForMeetingInternal(transcriptsStore, meetingId);
-
-      // Delete meeting
-      await new Promise<void>((resolve, reject) => {
-        const request = meetingsStore.delete(meetingId);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
+      const complete = new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
       });
+      void complete.catch(() => {});
+      const ids = new Set([meetingId]);
+      if (folderPath) {
+        const meetings = await new Promise<MeetingMetadata[]>((resolve, reject) => {
+          const request = meetingsStore.getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        // Recovery IDs predate the SQLite ID; the saved folder binds the copies.
+        for (const meeting of meetings) if (meeting.folderPath === folderPath) ids.add(meeting.meetingId);
+      }
+      for (const id of ids) {
+        await this.deleteTranscriptsForMeetingInternal(transcriptsStore, id);
+        await new Promise<void>((resolve, reject) => {
+          const request = meetingsStore.delete(id);
+          request.onsuccess = () => resolve();
+          request.onerror = () => reject(request.error);
+        });
+      }
+      await complete;
     } catch (error) {
       console.error('Failed to delete meeting from IndexedDB:', error);
       throw error;
@@ -323,7 +338,7 @@ class IndexedDBService {
   // Cleanup operations
 
   /**
-   * Delete meetings older than specified days
+   * Delete saved meetings older than specified days; unsaved recovery data is retained
    * @param daysOld Number of days threshold
    * @returns Number of meetings deleted
    */
@@ -346,7 +361,7 @@ class IndexedDBService {
       let deletedCount = 0;
 
       for (const meeting of allMeetings) {
-        if (meeting.lastUpdated < cutoffTime) {
+        if (meeting.savedToSQLite === true && meeting.lastUpdated < cutoffTime) {
           // Delete transcripts
           await this.deleteTranscriptsForMeetingInternal(transcriptsStore, meeting.meetingId);
 
@@ -429,7 +444,7 @@ class IndexedDBService {
     const index = transcriptsStore.index('meetingId');
 
     return new Promise((resolve, reject) => {
-      const request = index.openCursor(IDBKeyRange.only(meetingId));
+      const request = index.openCursor(meetingId);
 
       request.onsuccess = (event) => {
         const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
@@ -448,3 +463,9 @@ class IndexedDBService {
 
 // Export singleton instance
 export const indexedDBService = new IndexedDBService();
+
+let startupCleanup: Promise<number> | undefined;
+/** Run once for the application, including direct navigation to a meeting. */
+export function cleanupTranscriptRecoveryOnce(): Promise<number> {
+  return startupCleanup ??= indexedDBService.deleteSavedMeetings(24);
+}

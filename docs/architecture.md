@@ -409,3 +409,7 @@ migrates legacy browser-storage values without replacing existing database
 context and removes each legacy value only after persistence succeeds. Library
 archives include the column; older archives omit it and restore with empty
 context. Deleting the meeting removes its context.
+
+Live-transcript IndexedDB copies are removed after SQLite save and library
+deletion. Startup cleanup runs once from the root layout and removes only aged
+saved copies; unsaved recovery data never expires automatically.
