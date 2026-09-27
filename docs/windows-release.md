@@ -130,6 +130,9 @@ checkpoint fallback, capture gaps, transcript snapshot failures, duplicate saves
 outcome migrations and acceleration selection. Tests run serially where they
 share native resources.
 It does not perform live capture, GUI interaction, or model-quality benchmarking.
+The unfiltered library suite can also run in the runner's service session.
+Tests that require a real audio output device are explicitly ignored; run those
+with `--ignored --exact` in an interactive session with the required hardware.
 
 ## GitHub Actions
 
