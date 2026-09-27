@@ -790,15 +790,13 @@ async fn transcribe_chunk_with_provider(
 
 /// Format current timestamp (wall-clock time)
 fn format_current_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    format_timestamp_at(std::time::SystemTime::now())
+}
 
-    let hours = (now.as_secs() / 3600) % 24;
-    let minutes = (now.as_secs() / 60) % 60;
-    let seconds = now.as_secs() % 60;
-
-    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+fn format_timestamp_at(now: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(now)
+        .format("%H:%M:%S")
+        .to_string()
 }
 
 fn with_word_speaker(words: Vec<TranscriptWord>, speaker: Option<&str>) -> Vec<TranscriptWord> {
@@ -828,6 +826,15 @@ fn format_recording_time(seconds: f64) -> String {
 #[cfg(test)]
 mod metrics_lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn live_timestamp_uses_local_time_for_the_supplied_instant() {
+        let instant = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
+        let expected = chrono::DateTime::<chrono::Local>::from(instant)
+            .format("%H:%M:%S")
+            .to_string();
+        assert_eq!(format_timestamp_at(instant), expected);
+    }
 
     #[test]
     fn repeated_segment_failures_warn_but_only_notify_once_per_session() {
