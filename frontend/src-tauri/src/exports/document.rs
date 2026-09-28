@@ -404,7 +404,7 @@ fn table_xml(header: &[String], rows: &[Vec<String>]) -> String {
         }
         xml.push_str("</w:tr>");
     }
-    xml.push_str("</w:tbl>");
+    xml.push_str(r#"</w:tbl><w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p>"#);
     xml
 }
 
@@ -427,6 +427,26 @@ fn escape_xml(text: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn adjacent_docx_tables_are_separated_by_an_empty_paragraph() {
+        let blocks =
+            parse_markdown_blocks("| First |\n| --- |\n| One |\n\n| Second |\n| --- |\n| Two |");
+        let xml = build_document_xml(&blocks);
+        assert_eq!(xml.matches("<w:tbl>").count(), 2);
+        assert!(
+            xml.contains(r#"</w:tbl><w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p><w:tbl>"#)
+        );
+    }
+
+    #[test]
+    fn final_docx_table_has_an_empty_paragraph_before_section_properties() {
+        let blocks = parse_markdown_blocks("# Notes\n\n| Task |\n| --- |\n| Review |");
+        let xml = build_document_xml(&blocks);
+        let after_table = xml.rsplit_once("</w:tbl>").unwrap().1;
+        assert!(after_table
+            .starts_with(r#"<w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p><w:sectPr>"#));
+    }
 
     #[test]
     fn docx_renders_a_table_with_escaped_cells_and_repeatable_header() {
