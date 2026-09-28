@@ -20,8 +20,8 @@ async function setup({ connected = true, rest = false, restFailure = false, save
   const { MeetingExportButtons } = loadTsModule('src/components/MeetingDetails/MeetingExportButtons.tsx', {
     react: harness.react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
-    'lucide-react': names('Loader2 Upload ChevronDown FileText'),
-    '@/components/IntegrationIcons': names('ConfluenceIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
+    'lucide-react': names('Loader2 Upload ChevronDown'),
+    '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
     '@/components/ui/input': names('Input'),
     '@/components/ui/label': names('Label'),
@@ -73,6 +73,12 @@ const destinations = [
   ['OneDrive DOCX/PDF', 'Upload to OneDrive', 'onedrive'],
   ['OneNote', 'Export page', 'onenote'],
 ];
+
+test('Word export uses its integration icon', async () => {
+  const view = await setup();
+  const item = find(view.render(), 'DropdownMenuItem', 'Word document (.docx)');
+  assert.ok(find(item, 'WordIcon'));
+});
 
 for (const [menuLabel, buttonLabel, kind] of destinations) {
   test(`${menuLabel} reviews content before exporting and honors all inclusion modes`, async () => {
