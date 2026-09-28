@@ -6,6 +6,7 @@ import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MeetingTag } from '@/lib/library';
+import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MAX, readStoredSidebarWidth } from '@/lib/sidebarWidth';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSummaryPolling } from '@/hooks/useSummaryPolling';
 
@@ -42,6 +43,12 @@ interface SidebarContextType {
   setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
   sidebarItems: SidebarItem[];
   isCollapsed: boolean;
+  sidebarWidth: number;
+  setSidebarWidth: (width: number) => void;
+  sidebarMaxWidth: number;
+  sidebarOffset: string;
+  isSidebarResizing: boolean;
+  setIsSidebarResizing: (resizing: boolean) => void;
   toggleCollapse: () => void;
   meetings: CurrentMeeting[];
   setMeetings: React.Dispatch<React.SetStateAction<CurrentMeeting[]>>;
@@ -92,6 +99,22 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [sidebarWidth, updateSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [sidebarMaxWidth, setSidebarMaxWidth] = useState(MAX);
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const setSidebarWidth = React.useCallback((width: number) => {
+    updateSidebarWidth(clampSidebarWidth(width, window.innerWidth));
+  }, []);
+  useEffect(() => {
+    setSidebarWidth(readStoredSidebarWidth());
+    const resize = () => {
+      updateSidebarWidth(width => clampSidebarWidth(width, window.innerWidth));
+      setSidebarMaxWidth(clampSidebarWidth(MAX, window.innerWidth));
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, [setSidebarWidth]);
   useEffect(() => {
     const compact = window.matchMedia('(max-width: 899px)');
     const update = () => setIsCollapsed(compact.matches);
@@ -112,6 +135,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const { isRecording } = useRecordingState();
 
   const pathname = usePathname();
+  const sidebarOffset = isCollapsed || pathname === '/settings' ? '4rem' : `${sidebarWidth}px`;
   const router = useRouter();
 
   // Extract fetchMeetings as a reusable function
@@ -250,6 +274,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       setCurrentMeeting,
       sidebarItems,
       isCollapsed,
+      sidebarWidth,
+      setSidebarWidth,
+      sidebarMaxWidth,
+      sidebarOffset,
+      isSidebarResizing,
+      setIsSidebarResizing,
       toggleCollapse,
       meetings,
       setMeetings,
