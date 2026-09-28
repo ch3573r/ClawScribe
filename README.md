@@ -7,9 +7,9 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.46**. This release improves recording recovery,
-summary reliability, transcript review, and Windows audio-device stability.
-See the [0.5.46 release notes](docs/releases/0.5.46.md) and the
+Source version: **0.5.47**. This release offers transcription for audio-only
+meetings, fixes summaries of very long meetings, and improves exports, project
+filtering, and the sidebar. See the [0.5.47 release notes](docs/releases/0.5.47.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Draft candidates are excluded from updates; Stable publication follows real-device
 acceptance.
@@ -103,11 +103,11 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 ## Meeting Notes And Exports
 
 - **Local Word export:** save a summary, full transcript, or both as `.docx`,
-  with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
+  including tables, with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
   sign-in or Word installed.
 - **Project tags:** choose existing labels from a searchable list or create new
-  ones, then filter the archive and transcript search by project, including an
-  untagged view.
+  ones, then filter the archive and transcript search by one or more projects
+  (matching any or all), or show untagged meetings.
 - **Meeting bookmarks:** mark a moment while recording, then label and revisit
   it from the saved transcript panel. Add markers during playback too.
 
@@ -191,21 +191,16 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.46
+## What Changed In 0.5.47
 
-- Recover audio-only meetings and recognize retained raw audio in the recovery dialog.
-- Improve summary budgets, citations, retries, reasoning models, and custom endpoints.
-- Autosave titles and summaries, and restore the previous summary or transcript.
-- Preserve corrections during speaker detection, protect concurrent edits, and allow cancellation.
-- Verify pinned model downloads and validate external links before opening them.
-- Guard meeting deletion, retain unsaved recovery data, and back up meeting summary context.
-- Preserve database WAL data and create snapshots before pending migrations.
-- Fix Windows device-enumeration crashes after short-lived audio threads exit.
-- Enforce the Codex meeting output schema and accept an absent follow-up email.
-- Pick existing project tags or create them in a searchable list.
-- Keep saved cloud transcription engines visible and explain Import/Enhance versus live recording.
+- Offer **Transcribe now** on saved meetings that have audio but no transcript.
+- Fix summaries and transcript copying for meetings with more than 1,000 transcript lines.
+- Show the full-meeting playback timeline, and a playback bar for every meeting with audio.
+- Remove summary source times when Timestamps is off, and export tables to Word, OneNote, and Confluence.
+- Filter meetings by several project tags at once, matching any or all.
+- Show meeting dates in a resizable sidebar.
 
-See the [release notes](docs/releases/0.5.46.md), the
+See the [release notes](docs/releases/0.5.47.md), the
 [local library guide](docs/local-library.md), the
 [meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
 
