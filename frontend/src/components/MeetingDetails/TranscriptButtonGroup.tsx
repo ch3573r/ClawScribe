@@ -36,6 +36,8 @@ interface SpeakerDiarizationError {
 
 interface TranscriptButtonGroupProps {
   transcriptCount: number;
+  transcribeOpen: boolean;
+  onTranscribeOpenChange: (open: boolean) => void;
   onCopyTranscript: () => void;
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
@@ -46,6 +48,8 @@ interface TranscriptButtonGroupProps {
 
 export function TranscriptButtonGroup({
   transcriptCount,
+  transcribeOpen,
+  onTranscribeOpenChange,
   onCopyTranscript,
   onOpenMeetingFolder,
   meetingId,
@@ -53,7 +57,6 @@ export function TranscriptButtonGroup({
   showSpeakerAttribution = true,
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
-  const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [showDiarizationDialog, setShowDiarizationDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -311,7 +314,7 @@ export function TranscriptButtonGroup({
             className="bg-primary/10 hover:bg-primary/20 border-primary/30 text-foreground 2xl:px-4"
             onClick={() => {
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
-              setShowRetranscribeDialog(true);
+              onTranscribeOpenChange(true);
             }}
             title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'}
           >
@@ -323,8 +326,8 @@ export function TranscriptButtonGroup({
 
       {meetingId && meetingFolderPath && (
         <RetranscribeDialog
-          open={showRetranscribeDialog}
-          onOpenChange={setShowRetranscribeDialog}
+          open={transcribeOpen}
+          onOpenChange={onTranscribeOpenChange}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
           onComplete={handleRetranscribeComplete}

@@ -93,6 +93,7 @@ export default function PageContent({
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const [audioPath, setAudioPath] = useState<string | null>(null);
+  const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
   const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
 
@@ -183,9 +184,11 @@ export default function PageContent({
   useEffect(() => {
     let cancelled = false;
     const folderPath = meeting.folder_path;
+    setAudioStatus('loading');
 
     if (!folderPath) {
       setAudioPath(null);
+      setAudioStatus('missing');
       return;
     }
 
@@ -193,12 +196,14 @@ export default function PageContent({
       .then((path) => {
         if (!cancelled) {
           setAudioPath(path);
+          setAudioStatus(path ? 'found' : 'missing');
         }
       })
       .catch((error) => {
         console.warn('Could not resolve meeting audio file:', error);
         if (!cancelled) {
           setAudioPath(null);
+          setAudioStatus('missing');
         }
       });
 
@@ -304,6 +309,7 @@ export default function PageContent({
           // Retranscription props
           meetingId={meeting.id}
           meetingFolderPath={hasRecordingFolder ? meeting.folder_path : null}
+          audioStatus={audioStatus}
           showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
           onSeekToTime={isAudioReady ? handleTimelineSeek : undefined}

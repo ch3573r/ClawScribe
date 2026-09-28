@@ -28,6 +28,8 @@ export interface VirtualizedTranscriptViewProps {
     onEditSegment?: (segment: TranscriptSegmentData) => void;
     /** Transcript segments to display */
     segments: TranscriptSegmentData[];
+    /** Saved-meeting empty state; recording keeps its live status. */
+    emptyState?: React.ReactNode;
     /** Whether recording is in progress */
     isRecording?: boolean;
     /** Whether recording is paused */
@@ -366,6 +368,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     onEditSegment,
     focusedSource,
     segments,
+    emptyState,
     isRecording = false,
     isPaused = false,
     isProcessing = false,
@@ -540,7 +543,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                 {isPaused ? 'Click resume to continue recording' : 'Speak to see live transcription'}
                             </p>
                         </>
-                    ) : (
+                    ) : emptyState || (
                         <>
                             <p className="text-lg font-semibold">Welcome to ClawScribe!</p>
                             <p className="text-xs mt-1">Start recording to see live transcription</p>

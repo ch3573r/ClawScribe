@@ -6,6 +6,7 @@ import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useMemo, useState, useEffect } from 'react';
 import { TranscriptCorrections } from './TranscriptCorrections';
 import { MeetingBookmarks } from './MeetingBookmarks';
+import { Button } from '@/components/ui/button';
 
 interface TranscriptPanelProps {
   focusedSource?: { id: string; request: number };
@@ -30,6 +31,7 @@ interface TranscriptPanelProps {
   // Retranscription props
   meetingId?: string;
   meetingFolderPath?: string | null;
+  audioStatus: 'loading' | 'found' | 'missing';
   showSpeakerAttribution?: boolean;
   activeTime?: number;
   onSeekToTime?: (seconds: number) => void;
@@ -57,6 +59,7 @@ export function TranscriptPanel({
   onLoadMore,
   meetingId,
   meetingFolderPath,
+  audioStatus,
   showSpeakerAttribution = true,
   activeTime,
   onSeekToTime,
@@ -66,7 +69,8 @@ export function TranscriptPanel({
 }: TranscriptPanelProps) {
   const [editing, setEditing] = useState<TranscriptSegmentData | null>(null);
   const [replaceOpen, setReplaceOpen] = useState(false);
-  useEffect(() => { setEditing(null); setReplaceOpen(false); }, [meetingId]);
+  const [transcribeOpen, setTranscribeOpen] = useState(false);
+  useEffect(() => { setEditing(null); setReplaceOpen(false); setTranscribeOpen(false); }, [meetingId]);
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -84,6 +88,28 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  const transcriptCount = usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0);
+  const emptyState = transcriptCount === 0 ? (
+    <div className="space-y-3 text-sm">
+      {audioStatus === 'loading' ? (
+        <p>Loading meeting…</p>
+      ) : !meetingFolderPath ? (
+        <p>No transcript or recording is attached to this meeting.</p>
+      ) : audioStatus === 'found' ? (
+        <>
+          <h3 className="text-lg font-semibold text-foreground">No transcript yet</h3>
+          <p>This meeting&apos;s audio is saved but hasn&apos;t been transcribed.</p>
+          <Button onClick={() => setTranscribeOpen(true)}>Transcribe now</Button>
+        </>
+      ) : (
+        <>
+          <p>No transcript yet, and no audio file was found in this meeting&apos;s folder.</p>
+          <Button variant="outline" onClick={onOpenMeetingFolder}>Open recording folder</Button>
+        </>
+      )}
+    </div>
+  ) : undefined;
+
   return (
     <div data-transcript-panel tabIndex={0} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') { event.preventDefault(); event.stopPropagation(); setReplaceOpen(true); }
@@ -95,11 +121,13 @@ export function TranscriptPanel({
           <div className="min-w-0 flex items-baseline gap-2">
             <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
             <span className="text-xs text-muted-foreground">
-              {usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)} segments
+              {transcriptCount} segments
             </span>
           </div>
           <TranscriptButtonGroup
-            transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
+            transcriptCount={transcriptCount}
+            transcribeOpen={transcribeOpen}
+            onTranscribeOpenChange={setTranscribeOpen}
             onCopyTranscript={onCopyTranscript}
             onOpenMeetingFolder={onOpenMeetingFolder}
             meetingId={meetingId}
@@ -118,6 +146,7 @@ export function TranscriptPanel({
           focusedSource={focusedSource}
           onEditSegment={meetingId && !isRecording ? setEditing : undefined}
           segments={convertedSegments}
+          emptyState={emptyState}
           isRecording={isRecording}
           isPaused={false}
           isProcessing={false}
