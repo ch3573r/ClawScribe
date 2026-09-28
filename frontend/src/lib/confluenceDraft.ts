@@ -64,6 +64,32 @@ function inlineMarkdownToHtml(value: string): string {
   return html;
 }
 
+function splitTableRow(line: string): string[] {
+  const cells: string[] = [];
+  let cell = "";
+  let backslashes = 0;
+  let trailingPipe = false;
+  for (const char of line.trim().replace(/^\|/, "")) {
+    trailingPipe = char === "|" && backslashes % 2 === 0;
+    if (trailingPipe) {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      if (char === "|") cell = cell.slice(0, -1);
+      cell += char;
+    }
+    backslashes = char === "\\" ? backslashes + 1 : 0;
+  }
+  if (!trailingPipe || !cells.length) cells.push(cell.trim());
+  return cells;
+}
+
+function isTableDelimiter(line: string | undefined, columns: number): boolean {
+  if (line === undefined) return false;
+  const cells = splitTableRow(line);
+  return cells.length === columns && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+}
+
 export function markdownToConfluenceHtml(markdown: string): string {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const html: string[] = [];
@@ -82,13 +108,29 @@ export function markdownToConfluenceHtml(markdown: string): string {
     html.push(`<${nextType}>`);
   };
 
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trimEnd();
     const trimmed = line.trim();
 
     if (!trimmed) {
       closeList();
       continue;
+    }
+
+    if (trimmed.startsWith("|")) {
+      const header = splitTableRow(trimmed);
+      if (isTableDelimiter(lines[index + 1], header.length)) {
+        closeList();
+        index++;
+        const table = [`<table><tbody><tr>${header.map(cell => `<th>${inlineMarkdownToHtml(cell)}</th>`).join("")}</tr>`];
+        while (lines[index + 1]?.trim().startsWith("|")) {
+          const row = splitTableRow(lines[++index]);
+          table.push(`<tr>${header.map((_, column) => `<td>${inlineMarkdownToHtml(row[column] ?? "")}</td>`).join("")}</tr>`);
+        }
+        table.push("</tbody></table>");
+        html.push(table.join(""));
+        continue;
+      }
     }
 
     const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
