@@ -58,6 +58,7 @@ function MeetingDetailsContent() {
   const {
     metadata,
     segments,
+    timelineSegments,
     transcripts,
     isLoadingMore,
     hasMore,
@@ -348,6 +349,7 @@ function MeetingDetailsContent() {
     onApplySpeakerToMatching={applySpeakerToMatching}
     // Pagination props for efficient transcript loading
     segments={segments}
+    timelineSegments={timelineSegments}
     hasMore={hasMore}
     isLoadingMore={isLoadingMore}
     totalCount={totalCount}

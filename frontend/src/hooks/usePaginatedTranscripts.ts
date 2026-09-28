@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Transcript, MeetingMetadata, PaginatedTranscriptsResponse, TranscriptSegmentData } from "@/types";
+import { fetchAllMeetingTranscripts } from "@/lib/meetingTranscripts";
+import { toast } from "sonner";
 
 const DEFAULT_PAGE_SIZE = 100;
 
@@ -13,6 +15,7 @@ interface UsePaginatedTranscriptsProps {
 interface UsePaginatedTranscriptsReturn {
     metadata: MeetingMetadata | null;
     segments: TranscriptSegmentData[];
+    timelineSegments: TranscriptSegmentData[];
     transcripts: Transcript[];
     isLoading: boolean;
     isLoadingMore: boolean;
@@ -57,6 +60,7 @@ export function usePaginatedTranscripts({
 }: UsePaginatedTranscriptsProps): UsePaginatedTranscriptsReturn {
     const [metadata, setMetadata] = useState<MeetingMetadata | null>(null);
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);
+    const [timelineSegments, setTimelineSegments] = useState<TranscriptSegmentData[]>([]);
     const [totalCount, setTotalCount] = useState(0);
     const [isLoading, setIsLoading] = useState(true);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -73,6 +77,7 @@ export function usePaginatedTranscripts({
         isLoadingRef.current = false;
         setMetadata(null);
         setTranscripts([]);
+        setTimelineSegments([]);
         setTotalCount(0);
         setIsLoading(true);
         setIsLoadingMore(false);
@@ -148,6 +153,19 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId]);
 
+    const loadTimeline = useCallback(async (generation: number) => {
+        if (!meetingId) return;
+        try {
+            const rows = await fetchAllMeetingTranscripts(invoke, meetingId);
+            if (generation !== generationRef.current) return;
+            setTimelineSegments(convertTranscriptsToSegments(rows));
+        } catch {
+            if (generation !== generationRef.current) return;
+            setTimelineSegments([]);
+            toast.error('Failed to load speaker timeline. Reopen the meeting to retry.');
+        }
+    }, [meetingId]);
+
     // A synchronous lock prevents duplicate pages before React renders the loading state.
     const loadMore = useCallback(async () => {
         if (isLoadingRef.current || !hasMore || !meetingId || isLoading) return;
@@ -177,6 +195,7 @@ export function usePaginatedTranscripts({
             await Promise.all([
                 loadMetadata(generation),
                 loadTranscriptsAtOffset(0, false, generation),
+                loadTimeline(generation),
             ]);
         } finally {
             if (generation === generationRef.current) {
@@ -184,13 +203,16 @@ export function usePaginatedTranscripts({
                 isLoadingRef.current = false;
             }
         }
-    }, [meetingId, loadMetadata, loadTranscriptsAtOffset]);
+    }, [meetingId, loadMetadata, loadTranscriptsAtOffset, loadTimeline]);
 
     const updateSpeaker = useCallback(async (transcriptId: string, speaker: string | null) => {
         if (!meetingId) return;
         const generation = generationRef.current;
         const nextSpeaker = normalizeSpeaker(speaker);
         setTranscripts(prev =>
+            prev.map(t => t.id === transcriptId ? { ...t, speaker: nextSpeaker ?? undefined } : t)
+        );
+        setTimelineSegments(prev =>
             prev.map(t => t.id === transcriptId ? { ...t, speaker: nextSpeaker ?? undefined } : t)
         );
         try {
@@ -221,6 +243,9 @@ export function usePaginatedTranscripts({
                 const rowSpeaker = normalizeSpeaker(t.speaker);
                 return rowSpeaker === currentSpeaker ? { ...t, speaker: nextSpeaker ?? undefined } : t;
             })
+        );
+        setTimelineSegments(prev =>
+            prev.map(t => normalizeSpeaker(t.speaker) === currentSpeaker ? { ...t, speaker: nextSpeaker ?? undefined } : t)
         );
         try {
             const response = await invoke<{ updated: number }>('api_update_transcript_speakers_matching', {
@@ -271,6 +296,7 @@ export function usePaginatedTranscripts({
     return {
         metadata,
         segments,
+        timelineSegments,
         transcripts,
         isLoading,
         isLoadingMore,

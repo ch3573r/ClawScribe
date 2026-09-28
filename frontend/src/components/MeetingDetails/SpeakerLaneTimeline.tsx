@@ -7,7 +7,7 @@ import { TranscriptSegmentData } from "@/types";
 interface SpeakerLaneTimelineProps {
   segments: TranscriptSegmentData[];
   totalCount?: number;
-  loadedCount?: number;
+  showSpeakerAttribution?: boolean;
   currentTime?: number;
   durationSeconds?: number;
   isPlaying?: boolean;
@@ -149,7 +149,7 @@ const LaneBars = memo(function LaneBars({
 export function SpeakerLaneTimeline({
   segments,
   totalCount,
-  loadedCount,
+  showSpeakerAttribution = true,
   currentTime = 0,
   durationSeconds,
   isPlaying = false,
@@ -159,24 +159,23 @@ export function SpeakerLaneTimeline({
 }: SpeakerLaneTimelineProps) {
   const { itemCount, lanes, duration } = useMemo(() => buildTimeline(segments), [segments]);
 
-  if (itemCount === 0 || lanes.length === 0 || duration <= 0) {
+  if (!isAudioReady) {
     return null;
   }
 
   const timelineDuration = Math.max(duration, durationSeconds ?? 0);
   const canSeek = Boolean(onSeek && timelineDuration > 0);
   const playheadLeft = Math.max(0, Math.min(100, (currentTime / timelineDuration) * 100));
-  const visibleCount = loadedCount ?? segments.length;
-  const countLabel = totalCount && totalCount > visibleCount
-    ? `${visibleCount}/${totalCount}`
-    : `${itemCount}`;
+  const showLanes = showSpeakerAttribution && itemCount > 0 && lanes.length > 0;
+  const visibleLanes = showLanes ? lanes : [null];
+  const countLabel = totalCount ?? segments.length;
 
   return (
     <section className="border-b border-border bg-card/70 px-4 py-3">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Activity className="h-4 w-4 shrink-0 text-accent" aria-hidden="true" />
-          <h2 className="truncate text-sm font-semibold text-foreground">Speaker timeline</h2>
+          <h2 className="truncate text-sm font-semibold text-foreground">{showLanes ? 'Speaker timeline' : 'Recording playback'}</h2>
         </div>
         <div className="flex shrink-0 items-center gap-3">
           {isAudioReady && onPlayPause && (
@@ -201,11 +200,11 @@ export function SpeakerLaneTimeline({
       </div>
 
       <div className="space-y-1.5">
-        {lanes.map((lane) => (
-          <div key={lane.speaker} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
-            <div className="min-w-0 truncate font-mono text-[11px] font-medium uppercase tracking-normal text-muted-foreground">
+        {visibleLanes.map((lane) => (
+          <div key={lane?.speaker ?? 'audio'} className={lane ? 'grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3' : ''}>
+            {lane && <div className="min-w-0 truncate font-mono text-[11px] font-medium uppercase tracking-normal text-muted-foreground">
               {lane.speaker}
-            </div>
+            </div>}
             <button
               type="button"
               disabled={!canSeek}
@@ -216,9 +215,9 @@ export function SpeakerLaneTimeline({
                 const ratio = (event.clientX - rect.left) / rect.width;
                 onSeek(Math.max(0, Math.min(timelineDuration, ratio * timelineDuration)));
               }}
-              aria-label={`Seek ${lane.speaker} timeline`}
+              aria-label={lane ? `Seek ${lane.speaker} timeline` : 'Seek recording'}
             >
-              <LaneBars lane={lane} timelineDuration={timelineDuration} />
+              {lane && <LaneBars lane={lane} timelineDuration={timelineDuration} />}
               {canSeek && (
                 <span
                   className="pointer-events-none absolute top-0 h-full w-px bg-foreground/80 shadow-[0_0_0_1px_rgba(255,255,255,0.22)]"
