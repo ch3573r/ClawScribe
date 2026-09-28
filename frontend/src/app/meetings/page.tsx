@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import {
   ArrowRight,
   CalendarDays,
+  ChevronDown,
   Clock3,
   FileText,
   NotebookPen,
@@ -14,7 +15,17 @@ import {
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { LibraryBackup } from "@/components/LibraryBackup";
-import { matchesProjectTag } from "@/lib/library";
+import { matchesProjectFilter, type ProjectFilter } from "@/lib/library";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuCheckboxItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -67,13 +78,17 @@ export default function MeetingsPage() {
   const [query, setQuery] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("newest");
-  const [projectFilter, setProjectFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState<ProjectFilter>({ tags: [], untagged: false, mode: 'any' });
   const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
+  const projectFilterLabel = projectFilter.untagged ? 'Untagged'
+    : projectFilter.tags.length === 0 ? 'All projects'
+    : projectFilter.tags.length === 1 ? projectFilter.tags[0]
+    : `${projectFilter.tags.length} projects`;
 
   const normalizedQuery = query.trim().toLowerCase();
 
   const sortedMeetings = useMemo(() => {
-    const next = meetings.filter(meeting => matchesProjectTag(meeting.id, projectFilter, projectTags));
+    const next = meetings.filter(meeting => matchesProjectFilter(meeting.id, projectFilter, projectTags));
     next.sort((a, b) => {
       if (sortMode === "title") {
         return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
@@ -95,7 +110,7 @@ export default function MeetingsPage() {
     );
   }, [normalizedQuery, sortedMeetings]);
 
-  const filteredSearchResults = searchResults.filter(result => matchesProjectTag(result.id, projectFilter, projectTags));
+  const filteredSearchResults = searchResults.filter(result => matchesProjectFilter(result.id, projectFilter, projectTags));
   const hasTranscriptMatches = normalizedQuery.length > 0 && filteredSearchResults.length > 0;
   const visibleMeetings = normalizedQuery ? titleMatches : sortedMeetings;
 
@@ -188,12 +203,51 @@ export default function MeetingsPage() {
             </InputGroup>
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
-              <label className="flex items-center gap-2">Project
-                <select aria-label="Project" className="h-9 max-w-48 rounded-md border border-input bg-background px-2 text-foreground" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} disabled={projectTagsLoading || !!projectTagsError}>
-                  <option value="">All projects</option><option value="__untagged">Untagged</option>
-                  {tagOptions.map(tag => <option key={tag.toLowerCase()} value={`tag:${tag}`}>{tag}</option>)}
-                </select>
-              </label>
+              <div className="flex items-center gap-2">Project
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={`Project: ${projectFilterLabel}`}
+                      className="flex h-9 max-w-48 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={projectTagsLoading || !!projectTagsError}
+                    >
+                      <span className="truncate">{projectFilterLabel}</span>
+                      <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
+                    <DropdownMenuRadioGroup
+                      aria-label="Project matching"
+                      value={projectFilter.mode}
+                      onValueChange={mode => setProjectFilter(current => ({ ...current, mode: mode as ProjectFilter['mode'] }))}
+                    >
+                      <DropdownMenuRadioItem value="any" disabled={projectFilter.tags.length < 2} onSelect={event => event.preventDefault()}>Match any</DropdownMenuRadioItem>
+                      <DropdownMenuRadioItem value="all" disabled={projectFilter.tags.length < 2} onSelect={event => event.preventDefault()}>Match all</DropdownMenuRadioItem>
+                    </DropdownMenuRadioGroup>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuCheckboxItem
+                      checked={projectFilter.untagged}
+                      onSelect={event => event.preventDefault()}
+                      onCheckedChange={checked => setProjectFilter(current => ({ ...current, tags: [], untagged: checked === true }))}
+                    >Untagged</DropdownMenuCheckboxItem>
+                    {tagOptions.map(tag => (
+                      <DropdownMenuCheckboxItem
+                        key={tag.toLowerCase()}
+                        checked={projectFilter.tags.some(selected => selected.toLowerCase() === tag.toLowerCase())}
+                        onSelect={event => event.preventDefault()}
+                        onCheckedChange={checked => setProjectFilter(current => ({
+                          ...current,
+                          untagged: false,
+                          tags: [...current.tags.filter(selected => selected.toLowerCase() !== tag.toLowerCase()), ...(checked === true ? [tag] : [])],
+                        }))}
+                      >{tag}</DropdownMenuCheckboxItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => setProjectFilter({ tags: [], untagged: false, mode: 'any' })}>Clear filter</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
               {projectTagsLoading && <span role="status">Loading project tags…</span>}
               {projectTagsError && <button className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</button>}
               <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>

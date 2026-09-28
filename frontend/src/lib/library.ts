@@ -51,10 +51,14 @@ export function removeLastTag(selected: string[]): string[] {
   return selected.slice(0, -1);
 }
 
-export function matchesProjectTag(meetingId: string, filter: string, tags: MeetingTag[]): boolean {
-  if (!filter) return true;
-  const assigned = tags.filter(tag => tag.meeting_id === meetingId);
-  return filter === '__untagged' ? assigned.length === 0 : assigned.some(tag => `tag:${tag.tag.toLowerCase()}` === filter.toLowerCase());
+export type ProjectFilter = { tags: string[]; untagged: boolean; mode: 'any' | 'all' };
+
+export function matchesProjectFilter(meetingId: string, filter: ProjectFilter, tags: MeetingTag[]): boolean {
+  if (!filter.tags.length && !filter.untagged) return true;
+  const assigned = new Set(tags.filter(tag => tag.meeting_id === meetingId).map(tag => tag.tag.toLowerCase()));
+  if (filter.untagged) return assigned.size === 0;
+  const matches = (tag: string) => assigned.has(tag.toLowerCase());
+  return filter.mode === 'all' ? filter.tags.every(matches) : filter.tags.some(matches);
 }
 
 export function bookmarkTime(seconds: number): string {

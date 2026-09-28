@@ -14,15 +14,15 @@ export function ExportContentOptions({ value, onChange, disabled = false }: {
         <option value="transcript">Transcript only</option>
       </select>
     </label>
-    <label className="flex items-center gap-2 text-sm">
+    {value.content !== 'summary' && <label className="flex items-center gap-2 text-sm">
       <input className="accent-[hsl(var(--primary))]" type="checkbox" checked={value.speakers}
-        disabled={disabled || value.content === 'summary'} onChange={event => onChange({ ...value, speakers: event.target.checked })} />
+        disabled={disabled} onChange={event => onChange({ ...value, speakers: event.target.checked })} />
       Speaker labels
-    </label>
+    </label>}
     <label className="flex items-center gap-2 text-sm">
       <input className="accent-[hsl(var(--primary))]" type="checkbox" checked={value.timestamps}
-        disabled={disabled || value.content === 'summary'} onChange={event => onChange({ ...value, timestamps: event.target.checked })} />
-      Transcript timestamps
+        disabled={disabled} onChange={event => onChange({ ...value, timestamps: event.target.checked })} />
+      <span>Timestamps<span className="block text-xs text-muted-foreground">Source times in the summary and line times in the transcript</span></span>
     </label>
   </div>;
 }

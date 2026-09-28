@@ -7,6 +7,28 @@ function contentModule(invoke = async () => { throw new Error('Unexpected transc
   return loadTsModule('src/lib/meetingExportContent.ts', { '@tauri-apps/api/core': { invoke } });
 }
 
+test('summary timestamp stripping removes citations, metadata times and bracketed clocks only', () => {
+  const { stripSummaryTimestamps } = contentModule();
+  for (const [input, expected] of [
+    ['Send draft [00:12:34](#clawscribe-source-abc123).', 'Send draft.'],
+    ['Send draft [source](#clawscribe-source-ABC123) tomorrow.', 'Send draft tomorrow.'],
+    ['Send draft (owner: Ana; timestamp: 00:12; confidence: high).', 'Send draft (owner: Ana; confidence: high).'],
+    ['Send draft (timestamp: 00:12).', 'Send draft.'],
+    ['Send draft [12:34] and review [01:12:34].', 'Send draft and review.'],
+    ['Agenda: 10 items', 'Agenda: 10 items'],
+    ['  - Draft [12:34].\n  - Review tomorrow.', '  - Draft.\n  - Review tomorrow.'],
+    ['| Timestamp | Item |\n| --- | --- |\n| 00:12 | Draft |', '| Timestamp | Item |\n| --- | --- |\n| 00:12 | Draft |'],
+    ['Ordinary  spacing and [reference](https://example.com) (Agenda: 10 items)', 'Ordinary  spacing and [reference](https://example.com) (Agenda: 10 items)'],
+  ]) assert.equal(stripSummaryTimestamps(input), expected);
+});
+
+test('summary-only exports honor the timestamp option', async () => {
+  const { readExportSummary } = contentModule();
+  const markdown = 'Send draft [00:12:34](#clawscribe-source-abc123) (owner: Ana; timestamp: 00:12).';
+  assert.equal(await readExportSummary(async () => markdown, { content: 'summary', speakers: false, timestamps: false }), 'Send draft (owner: Ana).');
+  assert.equal(await readExportSummary(async () => markdown, { content: 'summary', speakers: false, timestamps: true }), markdown);
+});
+
 test('summary-only exports never read or include transcript content', async () => {
   const { prepareMeetingExport, defaultExportOptions } = contentModule();
   const result = await prepareMeetingExport('meeting', async () => 'Edited notes', defaultExportOptions());

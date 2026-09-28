@@ -51,7 +51,7 @@ test('project tags distinguish initial loading, failure, retry, and success', as
   const previousWindow = globalThis.window;
   let SidebarProvider;
   try {
-    globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+    globalThis.window = { innerWidth: 1400, addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
     ({ SidebarProvider } = loadTsModule('src/components/Sidebar/SidebarProvider.tsx', {
       react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
       'next/navigation': { usePathname: () => '/meetings', useRouter: () => ({}) },

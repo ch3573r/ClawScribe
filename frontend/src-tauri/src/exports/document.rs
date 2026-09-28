@@ -1,7 +1,7 @@
 //! Minimal DOCX generation for OneDrive/SharePoint file export.
 //!
 //! The writer intentionally supports only the structure ClawScribe summaries
-//! need: headings, bullet list items, and plain paragraphs. It avoids adding a
+//! need: headings, bullet list items, tables, and plain paragraphs. It avoids adding a
 //! document-generation dependency by creating the small Open XML ZIP package
 //! directly.
 
@@ -10,9 +10,16 @@ use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 
 enum DocBlock {
-    Heading { level: u8, text: String },
+    Heading {
+        level: u8,
+        text: String,
+    },
     Bullet(String),
     Paragraph(String),
+    Table {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
 }
 
 const CONTENT_TYPES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -124,11 +131,40 @@ fn parse_markdown_blocks(markdown: &str) -> Vec<DocBlock> {
     let mut blocks = Vec::new();
     let mut paragraph_lines: Vec<String> = Vec::new();
 
-    for raw_line in markdown.lines() {
+    let mut lines = markdown.lines().peekable();
+    while let Some(raw_line) = lines.next() {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
             flush_paragraph(&mut blocks, &mut paragraph_lines);
             continue;
+        }
+
+        if trimmed.starts_with('|') {
+            let header = split_table_row(trimmed);
+            if lines
+                .peek()
+                .is_some_and(|line| is_table_delimiter(line, header.len()))
+            {
+                flush_paragraph(&mut blocks, &mut paragraph_lines);
+                lines.next(); // Delimiter line.
+                let mut rows = Vec::new();
+                while lines
+                    .peek()
+                    .is_some_and(|line| line.trim().starts_with('|'))
+                {
+                    let mut row = split_table_row(lines.next().unwrap());
+                    row.resize(header.len(), String::new());
+                    rows.push(row.iter().map(|cell| clean_inline_markdown(cell)).collect());
+                }
+                blocks.push(DocBlock::Table {
+                    header: header
+                        .iter()
+                        .map(|cell| clean_inline_markdown(cell))
+                        .collect(),
+                    rows,
+                });
+                continue;
+            }
         }
 
         if let Some((level, text)) = parse_heading(trimmed) {
@@ -151,6 +187,43 @@ fn parse_markdown_blocks(markdown: &str) -> Vec<DocBlock> {
 
     flush_paragraph(&mut blocks, &mut paragraph_lines);
     blocks
+}
+
+/// Split on unescaped pipes, retaining empty cells and unescaping literal pipes.
+pub(super) fn split_table_row(line: &str) -> Vec<String> {
+    let line = line.trim();
+    let line = line.strip_prefix('|').unwrap_or(line);
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut backslashes = 0;
+    let mut trailing_pipe = false;
+    for ch in line.chars() {
+        trailing_pipe = ch == '|' && backslashes % 2 == 0;
+        if trailing_pipe {
+            cells.push(cell.trim().to_string());
+            cell.clear();
+        } else {
+            if ch == '|' {
+                cell.pop(); // Remove the escape backslash.
+            }
+            cell.push(ch);
+        }
+        backslashes = if ch == '\\' { backslashes + 1 } else { 0 };
+    }
+    if !trailing_pipe || cells.is_empty() {
+        cells.push(cell.trim().to_string());
+    }
+    cells
+}
+
+pub(super) fn is_table_delimiter(line: &str, columns: usize) -> bool {
+    let cells = split_table_row(line);
+    cells.len() == columns
+        && cells.iter().all(|cell| {
+            let dashes = cell.strip_prefix(':').unwrap_or(cell);
+            let dashes = dashes.strip_suffix(':').unwrap_or(dashes);
+            dashes.len() >= 3 && dashes.chars().all(|ch| ch == '-')
+        })
 }
 
 fn transcript_blocks(transcript: &str) -> Vec<DocBlock> {
@@ -233,6 +306,7 @@ fn build_document_xml(blocks: &[DocBlock]) -> String {
             DocBlock::Heading { level, text } => xml.push_str(&heading_xml(*level, text)),
             DocBlock::Bullet(text) => xml.push_str(&bullet_xml(text)),
             DocBlock::Paragraph(text) => xml.push_str(&paragraph_xml(text)),
+            DocBlock::Table { header, rows } => xml.push_str(&table_xml(header, rows)),
         }
     }
 
@@ -263,7 +337,7 @@ fn heading_xml(level: u8, text: &str) -> String {
       </w:pPr>
       <w:r>
         <w:rPr><w:b/><w:sz w:val="{size}"/></w:rPr>
-        <w:t>{}</w:t>
+        <w:t xml:space="preserve">{}</w:t>
       </w:r>
     </w:p>"#,
         escape_xml(text)
@@ -277,7 +351,7 @@ fn bullet_xml(text: &str) -> String {
         <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
         <w:spacing w:after="80"/>
       </w:pPr>
-      <w:r><w:t>{}</w:t></w:r>
+      <w:r><w:t xml:space="preserve">{}</w:t></w:r>
     </w:p>"#,
         escape_xml(text)
     )
@@ -287,10 +361,51 @@ fn paragraph_xml(text: &str) -> String {
     format!(
         r#"<w:p>
       <w:pPr><w:spacing w:after="120"/></w:pPr>
-      <w:r><w:t>{}</w:t></w:r>
+      <w:r><w:t xml:space="preserve">{}</w:t></w:r>
     </w:p>"#,
         escape_xml(text)
     )
+}
+
+fn table_xml(header: &[String], rows: &[Vec<String>]) -> String {
+    let mut xml =
+        String::from(r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>"#);
+    for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
+        xml.push_str(&format!(
+            r#"<w:{edge} w:val="single" w:sz="4" w:color="auto"/>"#
+        ));
+    }
+    xml.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
+    let widths: Vec<usize> = (0..header.len())
+        .map(|i| 9360 / header.len() + usize::from(i < 9360 % header.len()))
+        .collect();
+    for width in &widths {
+        xml.push_str(&format!(r#"<w:gridCol w:w="{width}"/>"#));
+    }
+    xml.push_str("</w:tblGrid>");
+    for (index, row) in std::iter::once(header)
+        .chain(rows.iter().map(Vec::as_slice))
+        .enumerate()
+    {
+        xml.push_str("<w:tr>");
+        if index == 0 {
+            xml.push_str("<w:trPr><w:tblHeader/></w:trPr>");
+        }
+        for (cell, width) in row.iter().zip(&widths) {
+            let bold = if index == 0 {
+                "<w:rPr><w:b/></w:rPr>"
+            } else {
+                ""
+            };
+            xml.push_str(&format!(
+                r#"<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr><w:p><w:r>{bold}<w:t xml:space="preserve">{}</w:t></w:r></w:p></w:tc>"#,
+                escape_xml(cell)
+            ));
+        }
+        xml.push_str("</w:tr>");
+    }
+    xml.push_str(r#"</w:tbl><w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p>"#);
+    xml
 }
 
 fn escape_xml(text: &str) -> String {
@@ -312,6 +427,109 @@ fn escape_xml(text: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn adjacent_docx_tables_are_separated_by_an_empty_paragraph() {
+        let blocks =
+            parse_markdown_blocks("| First |\n| --- |\n| One |\n\n| Second |\n| --- |\n| Two |");
+        let xml = build_document_xml(&blocks);
+        assert_eq!(xml.matches("<w:tbl>").count(), 2);
+        assert!(
+            xml.contains(r#"</w:tbl><w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p><w:tbl>"#)
+        );
+    }
+
+    #[test]
+    fn final_docx_table_has_an_empty_paragraph_before_section_properties() {
+        let blocks = parse_markdown_blocks("# Notes\n\n| Task |\n| --- |\n| Review |");
+        let xml = build_document_xml(&blocks);
+        let after_table = xml.rsplit_once("</w:tbl>").unwrap().1;
+        assert!(after_table
+            .starts_with(r#"<w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p><w:sectPr>"#));
+    }
+
+    #[test]
+    fn docx_renders_a_table_with_escaped_cells_and_repeatable_header() {
+        let bytes = build_meeting_docx(
+            "Notes",
+            "| **Owner** | Task |\n| :--- | ---: |\n| Ana | Ship & learn |\n| Ben | <review> |",
+            None,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert_eq!(xml.matches("<w:tbl>").count(), 1);
+        assert_eq!(xml.matches("<w:tr>").count(), 3);
+        assert_eq!(xml.matches("<w:tblHeader/>").count(), 1);
+        assert_eq!(xml.matches("<w:tc>").count(), 6);
+        assert!(xml.contains("Ship &amp; learn"));
+        assert!(xml.contains("&lt;review&gt;"));
+        assert!(!xml.contains('|'));
+        assert!(!xml.contains("**"));
+        assert_eq!(xml.matches(r#"<w:gridCol w:w="4680"/>"#).count(), 2);
+        assert!(xml.contains(r#"<w:tblW w:w="5000" w:type="pct"/>"#));
+        let table = xml
+            .split("<w:tbl>")
+            .nth(1)
+            .unwrap()
+            .split("</w:tbl>")
+            .next()
+            .unwrap();
+        assert_eq!(table.matches("<w:p>").count(), 6);
+        assert_eq!(table.matches("<w:b/>").count(), 2);
+        assert!(!xml.contains("<w:t>"));
+    }
+
+    #[test]
+    fn table_rows_pad_truncate_and_keep_escaped_pipes_in_one_cell() {
+        let blocks = parse_markdown_blocks(
+            "| Name | Note |\n| --- | :---: |\n| Ana |\n| Ben | left \\| right | extra |",
+        );
+        let DocBlock::Table { header, rows } = &blocks[0] else {
+            panic!("expected table")
+        };
+        assert_eq!(header, &["Name", "Note"]);
+        assert_eq!(rows[0], ["Ana", ""]);
+        assert_eq!(rows[1], ["Ben", "left | right"]);
+        assert!(table_xml(header, rows).contains("left | right"));
+        assert_eq!(split_table_row(r"| a \\| b |"), [r"a \\", "b"]);
+        assert_eq!(split_table_row(r"| a \|"), ["a |"]);
+    }
+
+    #[test]
+    fn table_grid_widths_sum_to_text_width_and_text_preserves_spaces() {
+        let header = vec![" heading ".to_string(); 7];
+        let xml = table_xml(&header, &[vec![" cell ".to_string(); 7]]);
+        assert_eq!(xml.matches(r#"<w:gridCol w:w="1338"/>"#).count(), 1);
+        assert_eq!(xml.matches(r#"<w:gridCol w:w="1337"/>"#).count(), 6);
+        for xml in [
+            xml,
+            heading_xml(1, " heading "),
+            bullet_xml(" bullet "),
+            paragraph_xml(" paragraph "),
+        ] {
+            assert!(xml.contains("xml:space=\"preserve\"> "));
+            assert!(!xml.contains("<w:t>"));
+        }
+    }
+
+    #[test]
+    fn pipe_lines_without_a_valid_delimiter_stay_paragraphs() {
+        for markdown in [
+            "| not a table |",
+            "| Name |\n| -- |",
+            "| Name |\n| --- | --- |",
+        ] {
+            let blocks = parse_markdown_blocks(markdown);
+            assert!(matches!(&blocks[0], DocBlock::Paragraph(text) if text.starts_with("|")));
+            assert!(!build_document_xml(&blocks).contains("<w:tbl>"));
+        }
+    }
 
     #[test]
     fn docx_keeps_citation_time_without_internal_link() {

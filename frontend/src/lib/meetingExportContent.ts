@@ -12,12 +12,31 @@ export function defaultExportOptions(content: MeetingExportOptions['content'] = 
   return { content, speakers: true, timestamps: true };
 }
 
+export function stripSummaryTimestamps(markdown: string): string {
+  return markdown.split('\n').map(line => {
+    const stripped = line
+      .replace(/[ \t]*\[[^\]\r\n]*\]\(#clawscribe-source-[a-f0-9]+\)/gi, '')
+      .replace(/([ \t]*)\(([^()\r\n]*)\)/g, (whole, space: string, metadata: string) => {
+        const parts = metadata.split(';');
+        if (!parts.every(part => /^\s*[^:;]+:\s*.*$/.test(part))) return whole;
+        const remaining = parts.filter(part => !/^\s*timestamp\s*:/i.test(part));
+        if (remaining.length === parts.length) return whole;
+        return remaining.length ? `${space}(${remaining.map(part => part.trim()).join('; ')})` : '';
+      })
+      .replace(/[ \t]*\[\d{2}:\d{2}(?::\d{2})?\]/g, '');
+    if (stripped === line) return line;
+    // Preserve Markdown indentation and line boundaries while cleaning removal gaps.
+    const indent = stripped.match(/^[ \t]*/)?.[0] ?? '';
+    return indent + stripped.slice(indent.length).replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+([,.;:!?])/g, '$1').trimEnd();
+  }).join('\n');
+}
+
 export async function readExportSummary(getMarkdown: () => Promise<string>, options: MeetingExportOptions): Promise<string> {
   const markdown = options.content === 'transcript' ? '' : await getMarkdown();
   if (options.content === 'summary' && !markdown.trim()) {
     throw new Error('Generate or save notes before exporting a summary.');
   }
-  return markdown;
+  return options.timestamps ? markdown : stripSummaryTimestamps(markdown);
 }
 
 export function formatExportTranscript(transcripts: Transcript[], options: MeetingExportOptions): string {

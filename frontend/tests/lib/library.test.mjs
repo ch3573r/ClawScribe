@@ -3,7 +3,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
-const { parseProjectTags, matchesProjectTag, bookmarkTime, safeDocumentName, suggestTags, addTag, removeLastTag } = loadTsModule(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/lib/library.ts'));
+const { parseProjectTags, matchesProjectFilter, bookmarkTime, safeDocumentName, suggestTags, addTag, removeLastTag } = loadTsModule(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/lib/library.ts'));
 
 test('tag suggestions deduplicate, rank usage then alphabetically, filter and exclude selected', () => {
   const tags = [{ meeting_id: 'a', tag: 'Zulu' }, { meeting_id: 'b', tag: 'zulu' },
@@ -40,12 +40,26 @@ test('project tags normalize whitespace and deduplicate case', () => {
 });
 test('project filters distinguish untagged meetings and literal reserved labels', () => {
   const tags = [{ meeting_id: 'a', tag: 'Atlas' }, { meeting_id: 'b', tag: '__untagged' }];
-  assert.equal(matchesProjectTag('a', 'tag:ATLAS', tags), true);
-  assert.equal(matchesProjectTag('b', 'tag:Atlas', tags), false);
-  assert.equal(matchesProjectTag('c', '__untagged', tags), true);
-  assert.equal(matchesProjectTag('b', '__untagged', tags), false);
-  assert.equal(matchesProjectTag('b', 'tag:__untagged', tags), true);
-  assert.equal(matchesProjectTag('c', '', tags), true);
+  const filter = { tags: ['ATLAS'], untagged: false, mode: 'any' };
+  assert.equal(matchesProjectFilter('a', filter, tags), true);
+  assert.equal(matchesProjectFilter('b', filter, tags), false);
+  assert.equal(matchesProjectFilter('c', { ...filter, untagged: true }, tags), true);
+  assert.equal(matchesProjectFilter('b', { ...filter, untagged: true }, tags), false);
+  assert.equal(matchesProjectFilter('b', { ...filter, tags: ['__untagged'] }, tags), true);
+  for (const mode of ['any', 'all']) {
+    for (const meetingId of ['a', 'c']) {
+      assert.equal(matchesProjectFilter(meetingId, { tags: [], untagged: false, mode }, tags), true);
+    }
+  }
+});
+test('project filters match any or all selected tags case-insensitively', () => {
+  const tags = [{ meeting_id: 'a', tag: 'Atlas' }, { meeting_id: 'a', tag: 'Beta' }, { meeting_id: 'b', tag: 'Gamma' }];
+  const filter = { tags: ['ATLAS', 'beta', 'Gamma'], untagged: false, mode: 'all' };
+  assert.equal(matchesProjectFilter('a', filter, tags), false);
+  assert.equal(matchesProjectFilter('a', { ...filter, mode: 'any' }, tags), true);
+  assert.equal(matchesProjectFilter('a', { ...filter, tags: ['atlas', 'BETA'] }, tags), true);
+  assert.equal(matchesProjectFilter('b', { ...filter, tags: ['atlas', 'BETA'] }, tags), false);
+  assert.equal(matchesProjectFilter('c', { ...filter, mode: 'any' }, tags), false);
 });
 test('bookmark times retain hours and document names avoid Windows special names', () => {
   assert.equal(bookmarkTime(7323.8), '02:02:03');

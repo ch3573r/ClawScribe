@@ -23,6 +23,8 @@ import type { CurrentMeeting } from "@/components/Sidebar/SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
 import { indexedDBService } from "@/services/indexedDBService";
 import Analytics from "@/lib/analytics";
+import { formatSidebarMeetingDate } from "@/lib/meetingDates";
+import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MIN, MAX, storeSidebarWidth } from "@/lib/sidebarWidth";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Tooltip,
@@ -53,6 +55,7 @@ import {
 interface SidebarItem {
   id: string;
   title: string;
+  created_at?: string;
   type: "folder" | "file";
   children?: SidebarItem[];
 }
@@ -75,6 +78,11 @@ const Sidebar: React.FC = () => {
     setCurrentMeeting,
     sidebarItems,
     isCollapsed,
+    sidebarWidth,
+    setSidebarWidth,
+    sidebarMaxWidth,
+    isSidebarResizing,
+    setIsSidebarResizing,
     toggleCollapse,
     handleRecordingToggle,
     searchTranscripts,
@@ -83,6 +91,27 @@ const Sidebar: React.FC = () => {
     meetings,
     setMeetings,
   } = useSidebar();
+
+  const resizeDrag = useRef<{
+    pointerId: number; startX: number; startWidth: number; width: number;
+    handle: HTMLDivElement; userSelect: string;
+  } | null>(null);
+  const stopResize = useCallback((save: boolean) => {
+    const drag = resizeDrag.current;
+    if (!drag) return;
+    resizeDrag.current = null;
+    document.body.style.userSelect = drag.userSelect;
+    setIsSidebarResizing(false);
+    if (save) storeSidebarWidth(clampSidebarWidth(drag.width, window.innerWidth));
+    if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+  }, [setIsSidebarResizing]);
+  useEffect(() => () => stopResize(false), [stopResize, isCollapsed, pathname]);
+
+  const saveWidth = (width: number) => {
+    const clamped = clampSidebarWidth(width, window.innerWidth);
+    setSidebarWidth(clamped);
+    storeSidebarWidth(clamped);
+  };
 
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording, isPaused } = useRecordingState();
@@ -519,7 +548,7 @@ const Sidebar: React.FC = () => {
             <div className="line-clamp-2 text-sm font-medium leading-5 text-sidebar-foreground">
               {item.title}
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">Recent meeting</div>
+            <div className="mt-1 text-xs text-muted-foreground">{formatSidebarMeetingDate(item.created_at)}</div>
           </div>
           {isMeetingItem && (
             <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -606,10 +635,50 @@ const Sidebar: React.FC = () => {
       )}
 
       <aside
-        className={`flex h-full flex-col border-r border-sidebar-border bg-sidebar text-muted-foreground shadow-sm transition-all duration-300 ${
-          isEffectivelyCollapsed ? "w-16" : "w-[17.5rem]"
+        style={isEffectivelyCollapsed ? undefined : { width: sidebarWidth }}
+        className={`relative flex h-full flex-col border-r border-sidebar-border bg-sidebar text-muted-foreground shadow-sm ${isSidebarResizing ? "" : "transition-all duration-300"} ${
+          isEffectivelyCollapsed ? "w-16" : ""
         }`}
       >
+        {!isEffectivelyCollapsed && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            aria-valuemin={Math.min(MIN, sidebarMaxWidth)}
+            aria-valuemax={sidebarMaxWidth}
+            aria-valuenow={sidebarWidth}
+            tabIndex={0}
+            className="absolute inset-y-0 right-0 z-40 w-[6px] cursor-col-resize touch-none hover:bg-primary/20 focus-visible:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            onPointerDown={event => {
+              if (event.button !== 0 || resizeDrag.current) return;
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              resizeDrag.current = {
+                pointerId: event.pointerId, startX: event.clientX, startWidth: sidebarWidth,
+                width: sidebarWidth, handle: event.currentTarget, userSelect: document.body.style.userSelect,
+              };
+              document.body.style.userSelect = 'none';
+              setIsSidebarResizing(true);
+            }}
+            onPointerMove={event => {
+              const drag = resizeDrag.current;
+              if (!drag || drag.pointerId !== event.pointerId) return;
+              drag.width = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX, window.innerWidth);
+              setSidebarWidth(drag.width);
+            }}
+            onPointerUp={event => { if (resizeDrag.current?.pointerId === event.pointerId) stopResize(true); }}
+            onPointerCancel={event => { if (resizeDrag.current?.pointerId === event.pointerId) stopResize(false); }}
+            onLostPointerCapture={event => { if (resizeDrag.current?.pointerId === event.pointerId) stopResize(false); }}
+            onDoubleClick={() => saveWidth(DEFAULT_SIDEBAR_WIDTH)}
+            onKeyDown={event => {
+              const width = { ArrowLeft: sidebarWidth - 16, ArrowRight: sidebarWidth + 16, Home: MIN, End: MAX }[event.key];
+              if (width === undefined) return;
+              event.preventDefault();
+              saveWidth(width);
+            }}
+          />
+        )}
         {isEffectivelyCollapsed ? (
           renderCollapsedIcons()
         ) : (
@@ -666,7 +735,7 @@ const Sidebar: React.FC = () => {
             <div className="mt-6 flex min-h-0 flex-1 flex-col px-3">
               <div className="mb-2 flex items-center justify-between px-1">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                  Recent Meetings
+                  {showAllMeetings ? "All meetings" : "Recent meetings"}
                 </div>
                 {isSearching && (
                   <span className="text-[11px] text-primary">Searching…</span>

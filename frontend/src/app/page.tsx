@@ -41,7 +41,7 @@ export default function Home() {
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
-  const { setIsMeetingActive, isCollapsed: sidebarCollapsed, refetchMeetings } = useSidebar();
+  const { setIsMeetingActive, sidebarOffset, isSidebarResizing, refetchMeetings } = useSidebar();
   const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
   const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
   const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState);
@@ -246,8 +246,8 @@ export default function Home() {
               status !== RecordingStatus.SAVING && (
                 <div className="fixed bottom-12 left-0 right-0 z-10 pointer-events-none">
                   <div
-                    className="flex justify-center pl-8 transition-[margin] duration-300"
-                    style={{ marginLeft: sidebarCollapsed ? '4rem' : '16rem' }}
+                    className={`flex justify-center ${isSidebarResizing ? '' : 'transition-[margin] duration-300'}`}
+                    style={{ marginLeft: sidebarOffset }}
                   >
                     <div className="pointer-events-auto rounded-full border border-border shadow-lg">
                       <RecordingControls
@@ -272,7 +272,6 @@ export default function Home() {
             <StatusOverlays
               isProcessing={status === RecordingStatus.PROCESSING_TRANSCRIPTS && !recordingState.isRecording}
               isSaving={status === RecordingStatus.SAVING}
-              sidebarCollapsed={sidebarCollapsed}
             />
           </>
         ) : (

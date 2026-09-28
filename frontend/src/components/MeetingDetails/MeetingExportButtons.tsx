@@ -5,9 +5,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
-import { Loader2, Upload, ChevronDown, FileText } from "lucide-react";
+import { Loader2, Upload, ChevronDown } from "lucide-react";
 import {
   ConfluenceIcon,
+  WordIcon,
   OneNoteIcon,
   OneDriveIcon,
   PlannerIcon,
@@ -527,7 +528,7 @@ export function MeetingExportButtons({
         <DropdownMenuContent align="end" className="w-52">
           <DropdownMenuLabel>Export meeting to</DropdownMenuLabel>
           <DropdownMenuItem onClick={() => openDocumentExport("word")}>
-            <FileText className="mr-2 h-4 w-4" />
+            <WordIcon className="mr-2 h-4 w-4" />
             Word document (.docx)
           </DropdownMenuItem>
           {connected && (

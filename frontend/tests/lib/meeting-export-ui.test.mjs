@@ -20,8 +20,8 @@ async function setup({ connected = true, rest = false, restFailure = false, save
   const { MeetingExportButtons } = loadTsModule('src/components/MeetingDetails/MeetingExportButtons.tsx', {
     react: harness.react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
-    'lucide-react': names('Loader2 Upload ChevronDown FileText'),
-    '@/components/IntegrationIcons': names('ConfluenceIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
+    'lucide-react': names('Loader2 Upload ChevronDown'),
+    '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
     '@/components/ui/input': names('Input'),
     '@/components/ui/label': names('Label'),
@@ -73,6 +73,12 @@ const destinations = [
   ['OneDrive DOCX/PDF', 'Upload to OneDrive', 'onedrive'],
   ['OneNote', 'Export page', 'onenote'],
 ];
+
+test('Word export uses its integration icon', async () => {
+  const view = await setup();
+  const item = find(view.render(), 'DropdownMenuItem', 'Word document (.docx)');
+  assert.ok(find(item, 'WordIcon'));
+});
 
 for (const [menuLabel, buttonLabel, kind] of destinations) {
   test(`${menuLabel} reviews content before exporting and honors all inclusion modes`, async () => {
@@ -146,14 +152,17 @@ test('failed transcript reads prevent remote exports and leave the dialog open f
   assert.ok(nodes(view.render()).some(node => node.type === 'Dialog' && node.props.open));
 });
 
-test('summary-only controls disable transcript formatting without clearing the choices', () => {
+test('summary-only controls hide speakers and keep timestamps enabled without clearing choices', () => {
   const { ExportContentOptions } = loadTsModule('src/components/MeetingDetails/ExportContentOptions.tsx', { 'react/jsx-runtime': { jsx, jsxs: jsx } });
   for (const content of ['summary', 'transcript', 'both']) {
     const root = ExportContentOptions({ value: { content, speakers: true, timestamps: false }, onChange() {} });
     const inputs = nodes(root).filter(node => node.type === 'input');
-    assert.equal(inputs.length, 2);
-    assert.ok(inputs.every(input => input.props.disabled === (content === 'summary')));
-    assert.equal(inputs[0].props.checked, true);
-    assert.equal(inputs[1].props.checked, false);
+    assert.equal(inputs.length, content === 'summary' ? 1 : 2);
+    assert.ok(inputs.every(input => input.props.disabled === false));
+    assert.equal(text(root).includes('Speaker labels'), content !== 'summary');
+    assert.match(text(root), /Timestamps/);
+    assert.match(text(root), /Source times in the summary and line times in the transcript/);
+    assert.equal(inputs.at(-1).props.checked, false);
+    if (content !== 'summary') assert.equal(inputs[0].props.checked, true);
   }
 });

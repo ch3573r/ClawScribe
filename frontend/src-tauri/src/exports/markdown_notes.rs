@@ -4,7 +4,7 @@
 //! works from that text rather than a structured `MeetingNotesOutput`:
 //!
 //! - **OneNote** gets the *whole* summary rendered to sanitized XHTML
-//!   (headings, lists, emphasis preserved), so nothing is lost.
+//!   (headings, lists, tables, emphasis preserved), so nothing is lost.
 //! - **Planner** gets just the discrete action items parsed out of the
 //!   "Action items" / "Tasks" / "Next steps" section, one task each.
 //!
@@ -14,6 +14,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::exports::document::{is_table_delimiter, split_table_row};
 use crate::exports::model::{ExportActionItem, MeetingExport};
 use crate::exports::onenote::escape_xml;
 use crate::exports::planner;
@@ -86,7 +87,7 @@ fn inline_xhtml(escaped: &str) -> String {
 
 /// Render a markdown summary into a sanitized XHTML fragment suitable for a
 /// OneNote page body. Supports headings, unordered/ordered lists, bold, inline
-/// code, and paragraphs. Everything else is treated as paragraph text.
+/// code, tables, and paragraphs. Everything else is treated as paragraph text.
 pub fn markdown_to_xhtml(markdown: &str) -> String {
     let mut out = String::new();
     let mut in_list = false;
@@ -107,13 +108,45 @@ pub fn markdown_to_xhtml(markdown: &str) -> String {
         }
     };
 
-    for raw in markdown.lines() {
+    let mut lines = markdown.lines().peekable();
+    while let Some(raw) = lines.next() {
         let line = raw.trim_end();
 
         if line.trim().is_empty() {
             flush_paragraph(&mut out, &mut paragraph);
             close_list(&mut out, &mut in_list);
             continue;
+        }
+
+        if line.trim().starts_with('|') {
+            let header = split_table_row(line);
+            if lines
+                .peek()
+                .is_some_and(|next| is_table_delimiter(next, header.len()))
+            {
+                flush_paragraph(&mut out, &mut paragraph);
+                close_list(&mut out, &mut in_list);
+                lines.next();
+                out.push_str("<table><tbody><tr>");
+                for cell in &header {
+                    out.push_str(&format!("<th>{}</th>", inline_xhtml(&escape_xml(cell))));
+                }
+                out.push_str("</tr>");
+                while lines
+                    .peek()
+                    .is_some_and(|next| next.trim().starts_with('|'))
+                {
+                    let mut row = split_table_row(lines.next().unwrap());
+                    row.resize(header.len(), String::new());
+                    out.push_str("<tr>");
+                    for cell in row {
+                        out.push_str(&format!("<td>{}</td>", inline_xhtml(&escape_xml(&cell))));
+                    }
+                    out.push_str("</tr>");
+                }
+                out.push_str("</tbody></table>");
+                continue;
+            }
         }
 
         if let Some((level, text)) = heading_level(line) {
@@ -331,6 +364,26 @@ fn plain_excerpt(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xhtml_tables_escape_cells_and_close_surrounding_blocks() {
+        let table = "| **Name** | Note |\n| :--- | ---: |\n| Ana | <script>alert(1)</script> |\n| Ben | left \\| right | extra |\n| Sam |";
+        let expected = "<table><tbody><tr><th><b>Name</b></th><th>Note</th></tr><tr><td>Ana</td><td>&lt;script&gt;alert(1)&lt;/script&gt;</td></tr><tr><td>Ben</td><td>left | right</td></tr><tr><td>Sam</td><td></td></tr></tbody></table>";
+        assert_eq!(markdown_to_xhtml(table), expected);
+        assert_eq!(
+            markdown_to_xhtml(&format!("Before\n{table}\n\nAfter")),
+            format!("<p>Before</p>{expected}<p>After</p>")
+        );
+        assert_eq!(
+            markdown_to_xhtml(&format!("- Before\n{table}")),
+            format!("<ul><li>Before</li></ul>{expected}")
+        );
+        assert_eq!(
+            markdown_to_xhtml("| not a table |"),
+            "<p>| not a table |</p>"
+        );
+        assert!(!markdown_to_xhtml("| Name |\n| -- |").contains("<table>"));
+    }
 
     #[test]
     fn export_sources_keep_readable_times_without_internal_links() {

@@ -13,6 +13,16 @@ export function Microsoft365Icon({ className = "h-5 w-5" }: IntegrationIconProps
   );
 }
 
+export function WordIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
+      <path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4z" fill="#41A5EE" />
+      <rect x="3" y="4" width="14" height="16" rx="2" fill="#185ABD" />
+      <path d="M5 8h1.8l1.1 5.2L9.1 8h1.8l1.2 5.2L13.2 8H15l-2 8h-1.8L10 10.8 8.8 16H7z" fill="#fff" />
+    </svg>
+  );
+}
+
 export function OneNoteIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
