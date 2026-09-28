@@ -3,19 +3,20 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import { BookmarkPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { bookmarkTime, MeetingBookmark } from '@/lib/library';
 
-export function LiveBookmarkButton({ disabled }: { disabled?: boolean }) {
+export function LiveBookmarkButton({ disabled, className }: { disabled?: boolean; className?: string }) {
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
-  return <Button variant="outline" size="sm" disabled={disabled || busy} onClick={async () => {
+  return <button type="button" className={className} aria-label="Bookmark this moment" disabled={disabled || busy} onClick={async () => {
     if (pending.current) return;
     pending.current = true; setBusy(true);
     try { await invoke('add_meeting_bookmark', { meetingId: null, seconds: null, label: 'Review this' }); toast.success('Meeting bookmarked', { description: 'Rename it in the saved meeting.' }); }
     catch (error) { toast.error('Could not add bookmark', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
-  }}>{busy ? 'Saving…' : 'Bookmark'}</Button>;
+  }}>{busy ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <BookmarkPlus size={16} />}</button>;
 }
 
 export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId: string; currentTime?: number; onSeek?: (time: number) => void }) {
