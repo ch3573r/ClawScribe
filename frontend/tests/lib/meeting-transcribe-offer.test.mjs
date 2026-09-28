@@ -146,7 +146,10 @@ test('toolbar opens and closes the controlled transcription dialog', () => {
   nodes(render()).find(node => node.props.title === 'Transcribe saved audio').props.onClick();
   let dialog = find(render(), 'RetranscribeDialog');
   assert.equal(dialog.props.open, true);
+  assert.equal(dialog.props.hasTranscript, false);
   dialog.props.onOpenChange(false);
   assert.equal(find(render(), 'RetranscribeDialog').props.open, false);
+  props.transcriptCount = 2;
+  assert.equal(find(render(), 'RetranscribeDialog').props.hasTranscript, true);
   hooks.unmount();
 });

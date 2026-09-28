@@ -330,6 +330,7 @@ export function TranscriptButtonGroup({
           onOpenChange={onTranscribeOpenChange}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
+          hasTranscript={transcriptCount > 0}
           onComplete={handleRetranscribeComplete}
         />
       )}

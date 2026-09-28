@@ -41,6 +41,7 @@ interface RetranscribeDialogProps {
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   meetingFolderPath: string | null;
+  hasTranscript: boolean;
   onComplete?: () => void;
 }
 
@@ -79,20 +80,24 @@ export function RetranscribeDialog({
   onOpenChange,
   meetingId,
   meetingFolderPath,
+  hasTranscript,
   onComplete,
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig } = useConfig();
+  // Keep completion wording tied to this run when the parent refreshes its transcript count.
+  const [startedWithTranscript, setStartedWithTranscript] = useState<boolean | null>(null);
+  const isRetranscription = startedWithTranscript ?? hasTranscript;
   const [hasEdits, setHasEdits] = useState(false);
   const [editStateError, setEditStateError] = useState(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open || !hasTranscript || !isRetranscription) return;
     let disposed = false;
     setHasEdits(false); setEditStateError(false);
     void invoke<{has_edits: boolean}>('api_get_transcript_edit_state', { meetingId })
       .then(state => { if (!disposed) setHasEdits(state.has_edits); })
       .catch(() => { if (!disposed) setEditStateError(true); });
     return () => { disposed = true; };
-  }, [open, meetingId]);
+  }, [open, meetingId, hasTranscript, isRetranscription]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
@@ -153,6 +158,7 @@ export function RetranscribeDialog({
     prevOpenRef.current = open;
 
     if (open && !wasOpen) {
+      setStartedWithTranscript(null);
       resetSelection();
       setIsProcessing(false);
       setIsCancelling(false);
@@ -213,7 +219,7 @@ export function RetranscribeDialog({
               language: event.payload.language || 'Auto',
             });
             toast.success(
-              `Retranscription complete! ${event.payload.segments_count} segments created.`
+              `${isRetranscription ? 'Retranscription' : 'Transcription'} complete! ${event.payload.segments_count} segments created.`
             );
             onCompleteRef.current?.();
           }
@@ -237,7 +243,7 @@ export function RetranscribeDialog({
               setIsCancelling(false);
               setProgress(null);
               setError(null);
-              toast.info('Retranscription cancelled');
+              toast.info(isRetranscription ? 'Retranscription cancelled' : 'Transcription cancelled');
               onOpenChangeRef.current(false);
               return;
             }
@@ -264,7 +270,7 @@ export function RetranscribeDialog({
       cleanedUpRef.current = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [open, meetingId]);
+  }, [open, meetingId, isRetranscription]);
 
   const handleStartRetranscription = async () => {
     if (!meetingFolderPath) {
@@ -272,6 +278,7 @@ export function RetranscribeDialog({
       return;
     }
 
+    setStartedWithTranscript(hasTranscript);
     setIsProcessing(true);
     setIsCancelling(false);
     setError(null);
@@ -314,7 +321,7 @@ export function RetranscribeDialog({
         meeting_id: meetingId,
         stage: 'cancelling',
         progress_percentage: current?.progress_percentage ?? 0,
-        message: 'Cancelling retranscription...'
+        message: isRetranscription ? 'Cancelling retranscription...' : 'Cancelling transcription...'
       }));
       try {
         await invoke('cancel_retranscription_command');
@@ -358,27 +365,27 @@ export function RetranscribeDialog({
             {isCancelling ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                Cancelling Retranscription...
+                {isRetranscription ? 'Cancelling Retranscription...' : 'Cancelling Transcription...'}
               </>
             ) : isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                Retranscribing...
+                {isRetranscription ? 'Retranscribing...' : 'Transcribing…'}
               </>
             ) : error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-red-600" />
-                Retranscription Failed
+                {isRetranscription ? 'Retranscription Failed' : 'Transcription Failed'}
               </>
             ) : stats ? (
               <>
                 <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                Retranscription Complete
+                {isRetranscription ? 'Retranscription Complete' : 'Transcription Complete'}
               </>
             ) : (
               <>
                 <RefreshCw className="h-5 w-5 text-primary" />
-                Retranscribe Meeting
+                {isRetranscription ? 'Retranscribe Meeting' : 'Transcribe Meeting'}
               </>
             )}
           </DialogTitle>
@@ -388,15 +395,15 @@ export function RetranscribeDialog({
               : isProcessing
               ? progress?.message || 'Processing audio...'
               : error
-                ? 'An error occurred during retranscription'
+                ? (isRetranscription ? 'An error occurred during retranscription' : 'An error occurred during transcription')
                 : stats
-                  ? 'Updated transcript is ready. Benchmark below.'
-                : 'Replace the current transcript using the saved audio'}
+                  ? (isRetranscription ? 'Updated transcript is ready. Benchmark below.' : 'Your transcript is ready. Benchmark below.')
+                : (isRetranscription ? 'Replace the current transcript using the saved audio' : 'Create a transcript from the saved audio')}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {!isProcessing && !isCancelling && !error && !stats && (
+          {isRetranscription && !isProcessing && !isCancelling && !error && !stats && (
             <div
               className="rounded-lg border p-3 text-sm"
               style={{
@@ -549,7 +556,7 @@ export function RetranscribeDialog({
               <div className="space-y-1 text-xs text-muted-foreground">
                 <div className="flex items-center gap-1.5">
                   <Cpu className="h-3.5 w-3.5" />
-                  Retranscribed with {stats.modelLabel}
+                  {isRetranscription ? 'Retranscribed' : 'Transcribed'} with {stats.modelLabel}
                 </div>
                 <div className="flex items-center gap-1.5">
                   <Globe className="h-3.5 w-3.5" />
@@ -572,7 +579,7 @@ export function RetranscribeDialog({
                 disabled={!meetingFolderPath}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Replace Transcript
+                {isRetranscription ? 'Replace Transcript' : 'Start Transcription'}
               </Button>
             </>
           )}
@@ -583,6 +590,7 @@ export function RetranscribeDialog({
               </Button>
               <Button
                 onClick={() => {
+                  setStartedWithTranscript(null);
                   setStats(null);
                   setProgress(null);
                   setError(null);
