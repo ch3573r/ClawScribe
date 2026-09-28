@@ -13,6 +13,7 @@ import { useSummaryPolling } from '@/hooks/useSummaryPolling';
 interface SidebarItem {
   id: string;
   title: string;
+  created_at?: string;
   type: 'folder' | 'file';
   children?: SidebarItem[];
 }
@@ -164,7 +165,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       title: 'Meetings',
       type: 'folder' as const,
       children: [
-        ...meetings.map(meeting => ({ id: meeting.id, title: meeting.title, type: 'file' as const }))
+        ...meetings.map(meeting => ({ id: meeting.id, title: meeting.title, created_at: meeting.created_at, type: 'file' as const }))
       ]
     },
   ];

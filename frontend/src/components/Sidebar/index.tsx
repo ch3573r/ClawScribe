@@ -23,6 +23,7 @@ import type { CurrentMeeting } from "@/components/Sidebar/SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
 import { indexedDBService } from "@/services/indexedDBService";
 import Analytics from "@/lib/analytics";
+import { formatSidebarMeetingDate } from "@/lib/meetingDates";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Tooltip,
@@ -53,6 +54,7 @@ import {
 interface SidebarItem {
   id: string;
   title: string;
+  created_at?: string;
   type: "folder" | "file";
   children?: SidebarItem[];
 }
@@ -519,7 +521,7 @@ const Sidebar: React.FC = () => {
             <div className="line-clamp-2 text-sm font-medium leading-5 text-sidebar-foreground">
               {item.title}
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">Recent meeting</div>
+            <div className="mt-1 text-xs text-muted-foreground">{formatSidebarMeetingDate(item.created_at)}</div>
           </div>
           {isMeetingItem && (
             <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -666,7 +668,7 @@ const Sidebar: React.FC = () => {
             <div className="mt-6 flex min-h-0 flex-1 flex-col px-3">
               <div className="mb-2 flex items-center justify-between px-1">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                  Recent Meetings
+                  {showAllMeetings ? "All meetings" : "Recent meetings"}
                 </div>
                 {isSearching && (
                   <span className="text-[11px] text-primary">Searching…</span>
