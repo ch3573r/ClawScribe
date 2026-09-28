@@ -8,8 +8,8 @@ optional. Transcript timestamps use elapsed recording time (including hours),
 with the legacy timestamp as a fallback when an audio offset is unavailable.
 Export runs locally without Word, Microsoft sign-in, or a network
 connection. The summary uses the current editor contents; transcripts use the
-complete saved database snapshot rather than the visible page. Basic headings,
-bullets, and paragraphs are supported; advanced editor formatting is not retained.
+complete saved database snapshot rather than the visible page. Headings, bullets,
+paragraphs, and Markdown tables are supported; advanced editor formatting is not retained.
 
 The local main window's Tauri capability grants `dialog:allow-save` for Word
 export and backup destinations, and `dialog:allow-open` for restore archives.
@@ -21,8 +21,11 @@ browser tests with mocked native calls cannot verify dialog access.
 
 The **Export** menu groups local Word, Confluence, OneNote, and OneDrive DOCX/PDF.
 Each destination lets you choose **Summary only**, **Transcript only**, or
-**Summary and transcript**, with optional speaker labels and transcript timestamps.
-Formatting switches are disabled for summary-only exports. The menu remains
+**Summary and transcript**, with optional speaker labels and timestamps.
+**Timestamps** covers source times in the summary and line times in the transcript;
+turn it off to export a summary without them. **Speaker labels** applies only to
+transcript lines and is hidden for summary-only exports. Tables in the summary are
+exported as tables to Word, OneDrive DOCX, OneNote, and Confluence. The menu remains
 available without a summary so saved transcripts can be exported on their own.
 
 Local Word starts with both summary and transcript selected. Remote document
@@ -45,14 +48,15 @@ list or create new ones. Suggestions show the most-used tags first and preserve
 existing spelling. Enter or a comma adds a tag; comma-separated lists can also
 be pasted. Remove chips with their buttons or Backspace in the empty search field.
 Save up to 20 tags of 60 characters each, or clear every chip to remove all tags. The
-Meetings page can filter by a project or show only untagged meetings. The filter
-also applies to transcript search results. Tags are stored in SQLite and refreshed
+Meetings page can filter by one or more projects, matching meetings with any or all
+of the selected tags, or show only untagged meetings. The filter also applies to
+transcript search results. Tags are stored in SQLite and refreshed
 across views after changes.
 
 ## Bookmarks
 
-Select **Bookmark** during recording to mark the current position as “Review
-this.” The timestamp excludes pauses. Markers are stored immediately and linked
+Select the bookmark button (**Bookmark this moment**) in the recording bar to mark
+the current position as “Review this.” The timestamp excludes pauses. Markers are stored immediately and linked
 to the saved meeting by its recording folder. In the saved transcript panel,
 expand **Bookmarks** to rename or remove markers, add a labeled time in seconds,
 or use the current playback time. Select a marker to seek in the recording.

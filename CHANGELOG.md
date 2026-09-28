@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.47
+
+- Saved meetings with audio but no transcript now show **No transcript yet** with **Transcribe now** instead of the home screen's welcome text. The dialog says Transcribe and Start Transcription for a first transcript and skips the replace warning; Generate Summary waits until a transcript exists.
+- Summaries and Copy transcript work again for meetings with more than 1,000 transcript lines. Transcripts are read in pages, and a failed page stops the action instead of using a partial transcript.
+- The playback timeline covers the whole meeting rather than only the transcript lines loaded so far. Every meeting with saved audio gets a playback bar, including audio-only meetings and meetings with speaker attribution turned off.
+- Exports: the Timestamps option also removes source times from the summary, and Speaker labels is hidden for summary-only exports. Markdown tables export as real tables to Word and OneDrive DOCX, OneNote, and Confluence. Word export uses a Word icon.
+- The Meetings page filters by several project tags at once (match any or all) or shows untagged meetings.
+- The sidebar shows each meeting's date instead of "Recent meeting" and can be resized by dragging its edge; the width is remembered. Recording controls and status messages stay centred under the content.
+- The recording bar's bookmark control is a round icon button that matches Pause and Stop.
+- Advance installer/runtime/updater version to 0.5.47 with Whisper Vulkan and ONNX/sherpa DirectML. Installers are staged as a draft for real-device acceptance; drafts do not change the stable updater. See `docs/releases/0.5.47.md` for validation and signing caveats.
+
 ## 0.5.46
 
 - Codex summaries now enforce the meeting output format; a meeting without a suggested follow-up email no longer fails.
