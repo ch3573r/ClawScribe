@@ -581,6 +581,7 @@ export function SummaryPanel({
           </div>
           {/* Empty state message */}
           <EmptyStateSummary
+            hasTranscript={transcripts.length > 0}
             onGenerate={() => onGenerateSummary(customPrompt)}
             hasModel={modelConfig.provider !== null && modelConfig.model !== null}
             isGenerating={isSummaryLoading}
