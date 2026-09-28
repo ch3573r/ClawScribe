@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getMeetingContext, setMeetingContext } from '@/lib/meetingContext';
 import { motion } from 'framer-motion';
-import { Summary, SummaryResponse } from '@/types';
+import { Summary, SummaryResponse, TranscriptSegmentData } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
@@ -35,6 +35,7 @@ export default function PageContent({
   onApplySpeakerToMatching,
   // Pagination props for efficient transcript loading
   segments,
+  timelineSegments,
   hasMore,
   isLoadingMore,
   totalCount,
@@ -52,6 +53,7 @@ export default function PageContent({
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
   // Pagination props
   segments?: any[];
+  timelineSegments?: TranscriptSegmentData[];
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
@@ -93,6 +95,7 @@ export default function PageContent({
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const [audioPath, setAudioPath] = useState<string | null>(null);
+  const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
   const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
 
@@ -183,9 +186,11 @@ export default function PageContent({
   useEffect(() => {
     let cancelled = false;
     const folderPath = meeting.folder_path;
+    setAudioStatus('loading');
 
     if (!folderPath) {
       setAudioPath(null);
+      setAudioStatus('missing');
       return;
     }
 
@@ -193,12 +198,14 @@ export default function PageContent({
       .then((path) => {
         if (!cancelled) {
           setAudioPath(path);
+          setAudioStatus(path ? 'found' : 'missing');
         }
       })
       .catch((error) => {
         console.warn('Could not resolve meeting audio file:', error);
         if (!cancelled) {
           setAudioPath(null);
+          setAudioStatus('missing');
         }
       });
 
@@ -269,11 +276,11 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex h-full flex-col bg-background"
     >
-      {showSpeakerAttribution && isAudioReady && (
+      {isAudioReady && (
         <SpeakerLaneTimeline
-          segments={segments ?? []}
+          segments={timelineSegments ?? []}
+          showSpeakerAttribution={showSpeakerAttribution}
           totalCount={totalCount}
-          loadedCount={loadedCount}
           currentTime={audioPlayer.currentTime}
           durationSeconds={audioPlayer.duration || undefined}
           isPlaying={audioPlayer.isPlaying}
@@ -304,6 +311,7 @@ export default function PageContent({
           // Retranscription props
           meetingId={meeting.id}
           meetingFolderPath={hasRecordingFolder ? meeting.folder_path : null}
+          audioStatus={audioStatus}
           showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
           onSeekToTime={isAudioReady ? handleTimelineSeek : undefined}

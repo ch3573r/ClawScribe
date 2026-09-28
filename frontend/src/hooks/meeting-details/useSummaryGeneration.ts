@@ -13,6 +13,7 @@ import { BuiltInModelInfo } from '@/lib/builtin-ai';
 import { getMeetingContext } from '@/lib/meetingContext';
 import { getMeetingCalendar, attendeeChecklist } from '@/lib/meetingCalendar';
 import { formatTranscriptLine } from '@/lib/transcriptFormatting';
+import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 import {
   detectAndCacheSummaryLanguage,
   readMeetingSummaryLanguage,
@@ -421,37 +422,12 @@ export function useSummaryGeneration({
   ]);
 
   // Helper function to fetch ALL transcripts for summary generation
-  const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[]> => {
+  const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[] | null> => {
     try {
-      console.log('📊 Fetching all transcripts for meeting:', meetingId);
-
-      // First, get total count by fetching first page
-      const firstPage = await invokeTauri('api_get_meeting_transcripts', {
-        meetingId,
-        limit: 1,
-        offset: 0,
-      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
-
-      const totalCount = firstPage.total_count;
-      console.log(`📊 Total transcripts in database: ${totalCount}`);
-
-      if (totalCount === 0) {
-        return [];
-      }
-
-      // Fetch all transcripts in one call
-      const allData = await invokeTauri('api_get_meeting_transcripts', {
-        meetingId,
-        limit: totalCount,
-        offset: 0,
-      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
-
-      console.log(`✅ Fetched ${allData.transcripts.length} transcripts from database`);
-      return allData.transcripts;
-    } catch (error) {
-      console.error('❌ Error fetching all transcripts:', error);
+      return await fetchAllMeetingTranscripts(invokeTauri, meetingId);
+    } catch {
       toast.error('Failed to fetch transcripts for summary generation');
-      return [];
+      return null;
     }
   }, []);
 
@@ -509,6 +485,7 @@ export function useSummaryGeneration({
     // CHANGE: Fetch ALL transcripts from database, not from pagination state
     console.log('📊 Fetching all transcripts for summary generation...');
     const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (allTranscripts === null) return;
 
     if (!allTranscripts.length) {
       const error_msg = 'No transcripts available for summary';
@@ -672,6 +649,7 @@ export function useSummaryGeneration({
       return;
     }
     const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (allTranscripts === null) return;
 
     if (!allTranscripts.length) {
       console.error('No transcripts available for regeneration');

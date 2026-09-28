@@ -13,10 +13,11 @@ import {
 interface EmptyStateSummaryProps {
   onGenerate: () => void;
   hasModel: boolean;
+  hasTranscript: boolean;
   isGenerating?: boolean;
 }
 
-export function EmptyStateSummary({ onGenerate, hasModel, isGenerating = false }: EmptyStateSummaryProps) {
+export function EmptyStateSummary({ onGenerate, hasModel, hasTranscript, isGenerating = false }: EmptyStateSummaryProps) {
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.95 }}
@@ -26,13 +27,15 @@ export function EmptyStateSummary({ onGenerate, hasModel, isGenerating = false }
     >
       <FileQuestion className="w-16 h-16 text-muted-foreground mb-4" />
       <h3 className="text-lg font-semibold text-foreground mb-2">
-        No Summary Generated Yet
+        {hasTranscript ? 'No Summary Generated Yet' : 'No transcript yet'}
       </h3>
       <p className="text-sm text-muted-foreground mb-6 max-w-md">
-        Generate an AI-powered summary of your meeting transcript to get key points, action items, and decisions.
+        {hasTranscript
+          ? 'Generate an AI-powered summary of your meeting transcript to get key points, action items, and decisions.'
+          : 'Transcribe the recording first, then generate a summary.'}
       </p>
 
-      <TooltipProvider>
+      {hasTranscript && <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
             <div>
@@ -52,9 +55,9 @@ export function EmptyStateSummary({ onGenerate, hasModel, isGenerating = false }
             </TooltipContent>
           )}
         </Tooltip>
-      </TooltipProvider>
+      </TooltipProvider>}
 
-      {!hasModel && (
+      {hasTranscript && !hasModel && (
         <p className="text-xs text-amber-600 mt-3">
           Please select a model in Settings first
         </p>

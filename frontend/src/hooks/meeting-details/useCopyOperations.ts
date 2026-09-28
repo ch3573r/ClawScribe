@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { formatTranscriptLine } from '@/lib/transcriptFormatting';
+import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 
 interface UseCopyOperationsProps {
   meeting: any;
@@ -25,37 +26,12 @@ export function useCopyOperations({
 }: UseCopyOperationsProps) {
 
   // Helper function to fetch ALL transcripts for copying (not just paginated data)
-  const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[]> => {
+  const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[] | null> => {
     try {
-      console.log('📊 Fetching all transcripts for copying:', meetingId);
-
-      // First, get total count by fetching first page
-      const firstPage = await invokeTauri('api_get_meeting_transcripts', {
-        meetingId,
-        limit: 1,
-        offset: 0,
-      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
-
-      const totalCount = firstPage.total_count;
-      console.log(`📊 Total transcripts in database: ${totalCount}`);
-
-      if (totalCount === 0) {
-        return [];
-      }
-
-      // Fetch all transcripts in one call
-      const allData = await invokeTauri('api_get_meeting_transcripts', {
-        meetingId,
-        limit: totalCount,
-        offset: 0,
-      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
-
-      console.log(`✅ Fetched ${allData.transcripts.length} transcripts from database for copying`);
-      return allData.transcripts;
-    } catch (error) {
-      console.error('❌ Error fetching all transcripts:', error);
+      return await fetchAllMeetingTranscripts(invokeTauri, meetingId);
+    } catch {
       toast.error('Failed to fetch transcripts for copying');
-      return [];
+      return null;
     }
   }, []);
 
@@ -64,6 +40,7 @@ export function useCopyOperations({
     // CHANGE: Fetch ALL transcripts from database, not from pagination state
     console.log('📊 Fetching all transcripts for copying...');
     const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (allTranscripts === null) return;
 
     if (!allTranscripts.length) {
       const error_msg = 'No transcripts available to copy';

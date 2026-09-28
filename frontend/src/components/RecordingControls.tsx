@@ -495,7 +495,16 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   ) : (
                     // Recording controls (pause/resume + stop)
                     <>
-                      <LiveBookmarkButton disabled={isStopping || isPausing || isResuming} />
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex">
+                            <LiveBookmarkButton className={secondaryButtonClassName} disabled={isStopping || isPausing || isResuming} />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Bookmark this moment</p>
+                        </TooltipContent>
+                      </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <button
