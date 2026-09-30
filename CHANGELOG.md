@@ -9,7 +9,7 @@
 - The Meetings page filters by several project tags at once (match any or all) or shows untagged meetings.
 - The sidebar shows each meeting's date instead of "Recent meeting" and can be resized by dragging its edge; the width is remembered. Recording controls and status messages stay centred under the content.
 - The recording bar's bookmark control is a round icon button that matches Pause and Stop.
-- Advance installer/runtime/updater version to 0.5.47 with Whisper Vulkan and ONNX/sherpa DirectML. Installers are staged as a draft for real-device acceptance; drafts do not change the stable updater. See `docs/releases/0.5.47.md` for validation and signing caveats.
+- Advance installer/runtime/updater version to 0.5.47 with Whisper Vulkan and ONNX/sherpa DirectML. The verified draft build was published unchanged to Stable after owner-confirmed real-device acceptance. See `docs/releases/0.5.47.md` for validation and signing caveats.
 
 ## 0.5.46
 
@@ -26,7 +26,7 @@
 - Guard meeting deletion and remove saved transcript recovery copies promptly while retaining unsaved recovery data. Clean abandoned queue folders and bookmarks only when their recordings are no longer recoverable. Store summary context with the meeting so it survives library backup and restore.
 - Preserve SQLite WAL data during database transfers and take consistent snapshots before pending migrations. Restored meetings whose recovery files were excluded from the archive now explain that recovery must happen on the original computer.
 - Fix the Windows audio-device crash that could follow a short-lived monitoring or enumeration thread. Keep live transcription failure notices to one per recording and display live timestamps in local time.
-- Advance installer/runtime/updater version to 0.5.46 with Whisper Vulkan and ONNX/sherpa DirectML. Installers are staged as a draft for real-device acceptance; drafts do not change the stable updater. See `docs/releases/0.5.46.md` for validation and signing caveats.
+- Advance installer/runtime/updater version to 0.5.46 with Whisper Vulkan and ONNX/sherpa DirectML. The verified draft build was published unchanged to Stable after real-device acceptance. See `docs/releases/0.5.46.md` for validation and signing caveats.
 
 ## 0.5.45
 

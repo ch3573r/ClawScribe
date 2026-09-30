@@ -14,13 +14,13 @@ use tokio::time::{sleep, timeout};
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const LEGACY_DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 600;
-const CODEX_RUNTIME_VERSION: &str = "0.157.0";
+const CODEX_RUNTIME_VERSION: &str = "0.159.2";
 const CODEX_RUNTIME_TARGET: &str = "x86_64-pc-windows-msvc";
-const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.157.0-win32-x64";
+const CODEX_RUNTIME_SOURCE_PACKAGE: &str = "@openai/codex@0.159.2-win32-x64";
 const CODEX_RUNTIME_SOURCE_URL: &str =
-    "https://registry.npmjs.org/@openai/codex/-/codex-0.157.0-win32-x64.tgz";
+    "https://registry.npmjs.org/@openai/codex/-/codex-0.159.2-win32-x64.tgz";
 const CODEX_RUNTIME_SHA256: &str =
-    "ed1c7b36e44536809c868864c833af8a857f56599a7a7fe23b908a1ba1093b1f";
+    "52f75c649bebb8001102a1dd129c1ea6d02b0940321e6d7e82ee0526753bd58a";
 const CODEX_APP_SERVER_MISSING: &str =
     "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.";
 const CODEX_WINDOWSAPPS_REJECTED: &str = "Windows Store Codex app executables under WindowsApps are not supported for ClawScribe automation. Codex app-server mode uses the bundled ClawScribe runtime only.";
@@ -382,14 +382,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         let models = parse_codex_model_list(&serde_json::json!({
             "data": [
                 {
-                    "id": "gpt-5.6-sol",
-                    "model": "gpt-5.6-sol",
-                    "displayName": "GPT-5.6-Sol",
+                    "id": "gpt-6.1-sol",
+                    "model": "gpt-6.1-sol",
+                    "displayName": "GPT-6.1 Sol",
                     "hidden": false,
-                    "defaultReasoningEffort": "low",
+                    "defaultReasoningEffort": "medium",
                     "supportedReasoningEfforts": [{
-                        "reasoningEffort": "low",
-                        "description": "Lower latency"
+                        "reasoningEffort": "medium",
+                        "description": "Balanced reasoning"
                     }],
                     "inputModalities": ["text", "image"],
                     "isDefault": true
@@ -404,12 +404,15 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         .unwrap();
 
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "gpt-5.6-sol");
-        assert_eq!(models[0].display_name, "GPT-5.6-Sol");
-        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(models[0].id, "gpt-6.1-sol");
+        assert_eq!(models[0].display_name, "GPT-6.1 Sol");
+        assert_eq!(
+            models[0].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
         assert_eq!(
             models[0].supported_reasoning_efforts[0].reasoning_effort,
-            "low"
+            "medium"
         );
         assert!(models[0].is_default);
     }
@@ -2152,7 +2155,7 @@ impl CodexAccountState {
     }
 }
 
-// Pinned 0.157 ThreadStartParams / TurnStartParams. Apply independently of home mode.
+// Pinned 0.159.2 ThreadStartParams / TurnStartParams. Apply independently of home mode.
 fn restricted_thread_params(model: &str, cwd: &Path) -> Value {
     serde_json::json!({ "model": model, "cwd": cwd, "approvalPolicy": "never",
         "sandbox": "read-only", "ephemeral": true,
@@ -2368,7 +2371,7 @@ impl AppServerSession {
         if self.codex_home.is_some() {
             return Ok(());
         }
-        // rust-v0.157.0 recursively merges config tables: mcp_servers={} does
+        // rust-v0.159.2 recursively merges config tables: mcp_servers={} does
         // not remove inherited entries. Inspect the effective config for this
         // same cwd and refuse before thread/start instead of exposing tools.
         let response = self.request_with_overload_retry(
