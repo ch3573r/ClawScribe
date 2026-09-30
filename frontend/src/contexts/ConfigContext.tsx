@@ -370,7 +370,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     claude: ['claude-opus-5'],
     groq: ['llama-3.3-70b-versatile'],
     openrouter: [],
-    openai: ['gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini'],
+    openai: ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini'],
     'builtin-ai': [],
     'custom-openai': [modelConfig.customOpenAIModel || modelConfig.model || 'gpt-4o-mini'],
     openclaw: ['openclaw-managed'],

@@ -182,6 +182,7 @@ interface GroqModel {
 
 // Fallback models for when API fetch fails or no API key provided
 const OPENAI_FALLBACK_MODELS = [
+  'gpt-6.1-sol',
   'gpt-6-sol',
   'gpt-6-luna',
   'gpt-6-astra',
