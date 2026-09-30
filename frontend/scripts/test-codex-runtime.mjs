@@ -10,7 +10,9 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const tauriRoot = fileURLToPath(new URL('../src-tauri/', import.meta.url));
-const manifest = JSON.parse(await readFile(path.join(tauriRoot, 'binaries/codex-app-server-runtime.json'), 'utf8'));
+// Windows PowerShell 5's UTF-8 staging output includes a BOM.
+const manifestText = await readFile(path.join(tauriRoot, 'binaries/codex-app-server-runtime.json'), 'utf8');
+const manifest = JSON.parse(manifestText.replace(/^\uFEFF/, ''));
 const executable = path.resolve(tauriRoot, manifest.entrypoint);
 assert.equal(createHash('sha256').update(await readFile(executable)).digest('hex'), manifest.runtime_sha256);
 const scratch = await mkdtemp(path.join(tmpdir(), 'clawscribe-codex-smoke-'));
