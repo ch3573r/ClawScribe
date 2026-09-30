@@ -1,6 +1,6 @@
 # ClawScribe Documentation
 
-Documentation for source version **0.5.47**. Installer availability and stable,
+Documentation for source version **0.5.48**. Installer availability and stable,
 prerelease, or draft status are tracked in
 [GitHub Releases](https://github.com/ch3573r/ClawScribe/releases), not inferred
 from the source version.
@@ -12,6 +12,7 @@ from the source version.
 - [Architecture](architecture.md)
 - [Building from source](BUILDING.md)
 - [Windows release, signing, and acceptance checks](windows-release.md)
+- [0.5.48 preview release notes](releases/0.5.48.md)
 - [0.5.47 release notes](releases/0.5.47.md)
 - [0.5.46 release notes](releases/0.5.46.md)
 - [0.5.45 release notes](releases/0.5.45.md)

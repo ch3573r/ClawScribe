@@ -7,12 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.47**. This release offers transcription for audio-only
-meetings, fixes summaries of very long meetings, and improves exports, project
-filtering, and the sidebar. See the [0.5.47 release notes](docs/releases/0.5.47.md) and the
+Source version: **0.5.48**. This Windows GPU preview updates the bundled Codex
+provider and model catalog for GPT-6.1 Sol. See the
+[0.5.48 preview notes](docs/releases/0.5.48.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
-Draft candidates are excluded from updates; Stable publication follows real-device
-acceptance.
+Enable **Include prereleases** to discover published previews; drafts are
+excluded from updates. Stable promotion follows real-device acceptance.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -197,18 +197,14 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.47
+## What Changed In 0.5.48
 
-- Offer **Transcribe now** on saved meetings that have audio but no transcript.
-- Fix summaries and transcript copying for meetings with more than 1,000 transcript lines.
-- Show the full-meeting playback timeline, and a playback bar for every meeting with audio.
-- Remove summary source times when Timestamps is off, and export tables to Word, OneNote, and Confluence.
-- Filter meetings by several project tags at once, matching any or all.
-- Show meeting dates in a resizable sidebar.
+- Bundle Codex app-server 0.159.2 with GPT-6.1 Sol in the live model picker.
+- Include GPT-6.1 Sol among OpenAI API fallback model choices.
+- Verify the staged Codex catalog and signed-out auth in Windows release checks.
 
-See the [release notes](docs/releases/0.5.47.md), the
-[local library guide](docs/local-library.md), the
-[meeting-quality guide](docs/meeting-quality.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.48.md), the
+[Codex runtime guide](docs/codex-runtime.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 
