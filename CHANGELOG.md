@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.48
+
+- Update the optional Advanced: Codex app-server provider from Codex 0.157.0 to 0.159.2, whose catalog includes GPT-6.1 Sol (`gpt-6.1-sol`). Choose **Check bundled runtime** in Summary settings after upgrading to refresh models. Saved model selections are preserved; model access depends on the signed-in account and workspace.
+- Add GPT-6.1 Sol to the OpenAI API fallback model choices. The Codex picker continues to use the live, paginated runtime catalog.
+- Windows preflight and installer builds now verify the actual staged Codex executable and its GPT-6.1 Sol catalog using a fresh keyring-only profile, including signed-out account/logout checks. Runtime package and executable hashes, About attribution, and build metadata are synchronized.
+- Advance installer/runtime/updater version to 0.5.48 as a Windows GPU preview, newer than stable 0.5.47. Enable **Include prereleases** or install manually; stable remains 0.5.47. Draft candidates are excluded from updates.
+- Automated validation for the runtime update passed 227 frontend tests, 628 native app tests (three exclusions), five helper tests, and the signed-out Codex runtime smoke. Authenticated Codex sign-in, GPT-6.1 summaries/chat, real dual-source recording acceptance, and installed-app update discovery remain to be checked before stable promotion. Updater signatures do not provide Windows publisher signing, and a Vulkan loader remains required. See `docs/releases/0.5.48.md`.
+
 ## 0.5.47
 
 - Saved meetings with audio but no transcript now show **No transcript yet** with **Transcribe now** instead of the home screen's welcome text. The dialog says Transcribe and Start Transcription for a first transcript and skips the replace warning; Generate Summary waits until a transcript exists.
