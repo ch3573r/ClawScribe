@@ -15,17 +15,48 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: pwsh
+
+concurrency:
+  group: summary-chunking-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   chunking:
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - name: Compile production chunker and its unit tests without desktop dependencies
-        shell: bash
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Compile production chunker and its unit tests without desktop dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $testExe = Join-Path $env:RUNNER_TEMP "summary-chunking-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.exe"
           rustc --version
-          rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o "$RUNNER_TEMP/summary-chunking-tests"
+          rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o $testExe
       - name: Verify source coverage, Unicode, overlap, and token budgets
-        shell: bash
-        run: '"$RUNNER_TEMP/summary-chunking-tests"'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          & (Join-Path $env:RUNNER_TEMP "summary-chunking-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.exe")

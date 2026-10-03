@@ -2,34 +2,83 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-// Deliberately fail closed for new runner expressions: a policy change needs
-// review before native code is allowed onto another machine.
+export const trustedPullRequestCondition = "${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.pull_request.author_association)) }}";
+const localRunner = '[self-hosted, Windows, X64, clawscribe]';
+
+// Workflows use block-style job declarations. Reject unknown runner syntax and
+// external reusable workflows instead of assuming they use the local machine.
+function workflowJobs(source) {
+  const lines = source.split(/\r?\n/);
+  const jobsStart = lines.indexOf('jobs:');
+  if (jobsStart < 0) return [];
+  const jobs = [];
+  for (const line of lines.slice(jobsStart + 1)) {
+    if (/^[^\s#]/.test(line)) break;
+    const header = /^  ([\w-]+):\s*$/.exec(line);
+    if (header) jobs.push({ name: header[1], lines: [] });
+    else if (jobs.length) jobs.at(-1).lines.push(line);
+  }
+  return jobs.map(job => ({ name: job.name, source: job.lines.join('\n') }));
+}
+
+function workflowTriggers(source) {
+  const lines = source.split(/\r?\n/);
+  const triggerStart = lines.indexOf('on:');
+  if (triggerStart < 0) return null;
+  const triggers = [];
+  for (const line of lines.slice(triggerStart + 1)) {
+    if (/^[^\s#]/.test(line)) break;
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const trigger = /^  (\w+):/.exec(line);
+    if (trigger) triggers.push(trigger[1]);
+    else if (!/^ {4}/.test(line)) return null;
+  }
+  return triggers.length ? triggers : null;
+}
+
 export function workflowPolicyErrors(name, source) {
   const errors = [];
-  if (/uses:\s*(?:actions\/(?:upload-artifact|cache)|Swatinem\/rust-cache)@/i.test(source)
+  if (/uses:\s*(?:actions\/(?:upload-artifact|cache)(?:\/[^\s@]+)?|Swatinem\/rust-cache)@/i.test(source)
       || /^\s*cache:\s*(?:true|pnpm|npm|yarn)\s*$/im.test(source)) {
     errors.push(`${name}: Actions artifact/cache storage is disabled`);
   }
   if (/hosted-runner/.test(source)) errors.push(`${name}: hosted fallback is forbidden`);
-  const native = /runs-on:.*(?:self-hosted|windows)/i.test(source);
-  if (native) {
-    const runners = [...source.matchAll(/^\s*runs-on:\s*(.+)$/gm)].map(match => match[1].trim());
-    if (runners.some(runner => runner !== '[self-hosted, Windows, X64, clawscribe]')) {
-      errors.push(`${name}: native jobs require the designated local runner labels`);
+  const runners = [...source.matchAll(/^[ \t]*runs-on:[ \t]*(.*)$/gm)];
+  if (runners.some(match => match[1].trim() !== localRunner)) {
+    errors.push(`${name}: all jobs require the designated local runner labels; runner expressions are forbidden`);
+  }
+  const triggers = workflowTriggers(source);
+  if (!triggers) errors.push(`${name}: unsupported or missing trigger declarations`);
+  const pullRequests = triggers?.includes('pull_request');
+  if (triggers?.includes('pull_request_target')) {
+    errors.push(`${name}: pull_request_target must not execute on the persistent runner`);
+  }
+  const jobs = workflowJobs(source);
+  if (!jobs.length) errors.push(`${name}: unsupported or missing job declarations`);
+  for (const job of jobs) {
+    const label = `${name} (${job.name})`;
+    const runner = /^    runs-on:[ \t]*(.*)$/m.exec(job.source);
+    if (!runner) {
+      if (!/^    uses: \.\/\.github\/workflows\/[\w-]+\.ya?ml\s*$/m.test(job.source)) {
+        errors.push(`${label}: jobs must declare the local runner or use a repository workflow`);
+      }
+      if (pullRequests) errors.push(`${label}: pull requests must use a guarded local job`);
+      continue;
     }
-    if (/^\s*pull_request(?:_target)?:/m.test(source)) {
-      errors.push(`${name}: untrusted pull requests must not execute on the persistent runner`);
+    if (pullRequests && /^    if:[ \t]*(.*)$/m.exec(job.source)?.[1].trim() !== trustedPullRequestCondition) {
+      errors.push(`${label}: exclude forks and untrusted authors before scheduling a pull-request job`);
     }
-    const checkout = source.indexOf('uses: actions/checkout@');
-    const guard = source.indexOf('EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}');
+    const checkout = job.source.indexOf('uses: actions/checkout@');
+    const guard = job.source.indexOf('EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}');
     if (guard < 0 || checkout < guard
-        || !source.includes("$env:RUNNER_ENVIRONMENT -ne 'self-hosted'")
-        || !source.includes('$env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER')
-        || !source.includes('$env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER')) {
-      errors.push(`${name}: verify the designated machine before checkout`);
+        || !job.source.includes("$env:RUNNER_ENVIRONMENT -ne 'self-hosted'")
+        || !job.source.includes('[string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER)')
+        || !job.source.includes('$env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER')
+        || !job.source.includes('$env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER')) {
+      errors.push(`${label}: verify the designated machine before checkout`);
     }
-    if (!/uses: actions\/checkout@[^\n]+\r?\n\s+with:\s*\r?\n(?:[^\n]*\r?\n)*?\s+clean: false/m.test(source)) {
-      errors.push(`${name}: preserve local build caches on checkout`);
+    if (!/uses: actions\/checkout@[^\n]+\n\s+with:\s*\n(?:[^\n]*\n)*?\s+clean: false/m.test(job.source)) {
+      errors.push(`${label}: preserve local build caches on checkout`);
     }
   }
   return errors;

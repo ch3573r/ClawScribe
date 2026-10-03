@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: pwsh
+
 concurrency:
   group: release-readiness-${{ github.ref }}
   cancel-in-progress: true
@@ -23,22 +27,42 @@ concurrency:
 jobs:
   core:
     name: Production core regression tests
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
     timeout-minutes: 15
     steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
       - uses: actions/checkout@v4
+        with:
+          clean: false
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
       - name: Public repository safety check
         run: node scripts/verify-public-repo-safety.mjs
       - name: Test production modules without desktop/native dependencies
-        shell: bash
         run: |
-          set -euo pipefail
-          test_root="$RUNNER_TEMP/clawscribe-core-checks"
-          mkdir -p "$test_root"
-          cat > "$test_root/Cargo.toml" <<EOF
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $testRoot = Join-Path $env:RUNNER_TEMP "clawscribe-core-checks-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+          $sourceRoot = $env:GITHUB_WORKSPACE.Replace('\', '/')
+          @"
           [package]
           name = "clawscribe-core-checks"
           version = "0.0.0"
@@ -52,12 +76,12 @@ jobs:
           sysinfo = "0.32"
           [[test]]
           name = "chunking"
-          path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/summary/chunking.rs"
+          path = "$sourceRoot/frontend/src-tauri/src/summary/chunking.rs"
           [[test]]
           name = "async_logger"
-          path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/audio/async_logger.rs"
+          path = "$sourceRoot/frontend/src-tauri/src/audio/async_logger.rs"
           [[test]]
           name = "hardware_detector"
-          path = "$GITHUB_WORKSPACE/frontend/src-tauri/src/audio/hardware_detector.rs"
-          EOF
-          cargo test --manifest-path "$test_root/Cargo.toml" -- --nocapture
+          path = "$sourceRoot/frontend/src-tauri/src/audio/hardware_detector.rs"
+          "@ | Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Encoding utf8NoBOM
+          cargo test --manifest-path (Join-Path $testRoot 'Cargo.toml') -- --nocapture
