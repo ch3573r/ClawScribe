@@ -118,9 +118,9 @@
       "nativeControls": 0
     },
     "frontend/src/components/IntegrationsSettings.tsx": {
-      "paletteColors": 71,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 8
+      "nativeControls": 0
     },
     "frontend/src/components/KeyboardShortcutsSettings.tsx": {
       "paletteColors": 1,

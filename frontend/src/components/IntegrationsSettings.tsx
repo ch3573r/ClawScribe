@@ -34,6 +34,11 @@ import {
   ToDoIcon,
 } from "@/components/IntegrationIcons";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import {
   teamsDetectionService,
   TeamsDetectionStatus,
@@ -93,21 +98,19 @@ function stateBadge(state: AddonState) {
 
 function stateClasses(state: AddonState) {
   switch (state) {
-    // Solid saturated pills with white text: readable in both light and dark
-    // mode, and immune to the globals.css `.dark .bg-*-100` overrides that
-    // otherwise hijack soft-tint utilities in dark mode (unreadable text).
+    // Status colors follow the active light or dark theme.
     case "ready":
     case "connected":
-      return "border-transparent bg-emerald-600 text-white";
+      return "border-transparent bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]";
     case "connecting":
     case "signin":
-      return "border-transparent bg-primary text-white";
+      return "border-transparent bg-primary text-primary-foreground";
     case "prompt":
-      return "border-transparent bg-primary text-white";
+      return "border-transparent bg-primary text-primary-foreground";
     case "provider":
       return "border-primary/30 bg-primary/15 text-primary";
     case "advanced":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200";
+      return "border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))]";
     case "planned":
     default:
       return "border-border bg-muted text-foreground";
@@ -202,7 +205,7 @@ function DetectionSummary({ status }: { status: TeamsDetectionStatus | null }) {
         <ul className="space-y-1 text-xs">
           {status.signals.map((s) => (
             <li key={s.detector} className="flex items-start gap-2">
-              <span className={s.matched ? "text-emerald-500" : "text-muted-foreground"}>
+              <span className={s.matched ? "text-[hsl(var(--theme-success-fg))]" : "text-muted-foreground"}>
                 {s.matched ? "✓" : "✗"}
               </span>
               <span className="text-foreground">
@@ -271,7 +274,7 @@ function MicrosoftSignInPanel() {
           <>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                <CheckCircle2 className="h-4 w-4 text-[hsl(var(--theme-success-fg))]" />
                 <span>
                   {ms.connection.userDisplayName}
                   {ms.connection.userEmail && (
@@ -311,7 +314,7 @@ function MicrosoftSignInPanel() {
         )}
 
         {(ms.connection.state === "connecting" || ms.signingIn) && (
-          <div className="rounded-lg border border-primary bg-primary/10 p-4 dark:border-blue-900 dark:bg-primary/40">
+          <div className="rounded-lg border border-primary bg-primary/10 p-4 dark:border-primary dark:bg-primary/40">
             <div className="flex items-center gap-2 text-sm text-primary dark:text-primary">
               <Loader2 className="h-4 w-4 animate-spin" />
               <span>
@@ -362,6 +365,7 @@ function sanitizeOneDriveFolderName(raw: string): string {
 }
 
 const NEW_OPTION = "__new__";
+const EMPTY_OPTION = "__empty__";
 
 function OneNotePanel() {
   const ms = useMicrosoftExport();
@@ -430,9 +434,10 @@ function OneNotePanel() {
               <label className="block text-xs font-medium text-muted-foreground">
                 Notebook
               </label>
-              <button
+              <Button
+                variant="ghost"
                 type="button"
-                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                 onClick={() => void ms.loadNotebooks()}
                 disabled={ms.loadingNotebooks}
               >
@@ -440,40 +445,45 @@ function OneNotePanel() {
                   className={`h-3 w-3 ${ms.loadingNotebooks ? "animate-spin" : ""}`}
                 />
                 Reload
-              </button>
+              </Button>
             </div>
-            <select
-              className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-              value={creatingNotebook ? NEW_OPTION : selectedNotebook}
-              onChange={(e) => {
-                if (e.target.value === NEW_OPTION) {
+            <Select
+              value={(creatingNotebook ? NEW_OPTION : selectedNotebook) || EMPTY_OPTION}
+              onValueChange={(value) => {
+                const nextValue = value === EMPTY_OPTION ? "" : value;
+                if (nextValue === NEW_OPTION) {
                   setCreatingNotebook(true);
                 } else {
                   setCreatingNotebook(false);
-                  setSelectedNotebook(e.target.value);
+                  setSelectedNotebook(nextValue);
                 }
               }}
               disabled={ms.loadingNotebooks}
             >
-              <option value="">
-                {ms.loadingNotebooks ? "Loading…" : "Select a notebook"}
-              </option>
-              {ms.notebooks.map((nb) => (
-                <option key={nb.id} value={nb.id}>
-                  {nb.displayName}
-                </option>
-              ))}
-              {selectedNotebookMissing && (
-                <option value={selectedNotebook}>
-                  {saved.notebookName ?? "Saved notebook"}
-                </option>
-              )}
-              <option value={NEW_OPTION}>+ New notebook…</option>
-            </select>
+              <SelectTrigger aria-label="Notebook" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={EMPTY_OPTION}>
+                  {ms.loadingNotebooks ? "Loading…" : "Select a notebook"}
+                </SelectItem>
+                {ms.notebooks.map((nb) => (
+                  <SelectItem key={nb.id} value={nb.id}>
+                    {nb.displayName}
+                  </SelectItem>
+                ))}
+                {selectedNotebookMissing && (
+                  <SelectItem value={selectedNotebook}>
+                    {saved.notebookName ?? "Saved notebook"}
+                  </SelectItem>
+                )}
+                <SelectItem value={NEW_OPTION}>+ New notebook…</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           {ms.oneNoteNotebookListingLimited && (
-            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+            <p className="rounded-lg border border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] p-3 text-sm text-[hsl(var(--theme-warning-fg))]">
               {ONENOTE_LARGE_LIBRARY_MESSAGE}
             </p>
           )}
@@ -484,7 +494,7 @@ function OneNotePanel() {
                 New notebook name
               </label>
               <div className="flex items-center gap-2">
-                <input
+                <Input
                   type="text"
                   autoFocus
                   value={newNotebookName}
@@ -495,9 +505,9 @@ function OneNotePanel() {
                     if (e.key === "Enter") void submitNewNotebook();
                     if (e.key === "Escape") setCreatingNotebook(false);
                   }}
-                  placeholder="e.g. Meeting Notes"
+                  placeholder="e.g. Meeting notes"
                   maxLength={128}
-                  className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                  className="h-auto w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
                 />
                 <Button
                   type="button"
@@ -543,7 +553,7 @@ function OneNotePanel() {
             </p>
           )}
           {selectedNotebook && (
-            <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
+            <div className="flex items-center gap-2 text-sm text-[hsl(var(--theme-success-fg))]">
               <CheckCircle2 className="h-4 w-4" />
               <span>
                 OneNote notebook ready. Each export creates a new dated section.
@@ -632,9 +642,10 @@ function PlannerPanel() {
                 <label className="block text-xs font-medium text-muted-foreground">
                   Plan
                 </label>
-                <button
+                <Button
+                  variant="ghost"
                   type="button"
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                   onClick={() => void ms.loadPlans()}
                   disabled={ms.loadingPlans}
                 >
@@ -642,60 +653,70 @@ function PlannerPanel() {
                     className={`h-3 w-3 ${ms.loadingPlans ? "animate-spin" : ""}`}
                   />
                   Reload
-                </button>
+                </Button>
               </div>
-              <select
-                className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-                value={selectedPlan}
-                onChange={(e) => {
-                  setSelectedPlan(e.target.value);
+              <Select
+                value={(selectedPlan) || EMPTY_OPTION}
+                onValueChange={(value) => {
+                  const nextValue = value === EMPTY_OPTION ? "" : value;
+                  setSelectedPlan(nextValue);
                   setSelectedBucket("");
                 }}
                 disabled={ms.loadingPlans}
               >
-                <option value="">
-                  {ms.loadingPlans ? "Loading…" : "Select a plan"}
-                </option>
-                {ms.plans.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.title}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger aria-label="Plan" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={EMPTY_OPTION}>
+                    {ms.loadingPlans ? "Loading…" : "Select a plan"}
+                  </SelectItem>
+                  {ms.plans.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                Default Bucket
+                Default bucket
               </label>
-              <select
-                className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-                value={creatingBucket ? NEW_OPTION : selectedBucket}
-                onChange={(e) => {
-                  if (e.target.value === NEW_OPTION) {
+              <Select
+                value={(creatingBucket ? NEW_OPTION : selectedBucket) || EMPTY_OPTION}
+                onValueChange={(value) => {
+                  const nextValue = value === EMPTY_OPTION ? "" : value;
+                  if (nextValue === NEW_OPTION) {
                     setCreatingBucket(true);
                   } else {
                     setCreatingBucket(false);
-                    setSelectedBucket(e.target.value);
+                    setSelectedBucket(nextValue);
                   }
                 }}
                 disabled={!selectedPlan || ms.loadingBuckets}
               >
-                <option value="">
-                  {ms.loadingBuckets
-                    ? "Loading…"
-                    : !selectedPlan
-                      ? "Select a plan first"
-                      : "Select a bucket"}
-                </option>
-                {ms.buckets.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-                {selectedPlan && (
-                  <option value={NEW_OPTION}>+ New bucket…</option>
-                )}
-              </select>
+                <SelectTrigger aria-label="Default bucket" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={EMPTY_OPTION}>
+                    {ms.loadingBuckets
+                      ? "Loading…"
+                      : !selectedPlan
+                        ? "Select a plan first"
+                        : "Select a bucket"}
+                  </SelectItem>
+                  {ms.buckets.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                  {selectedPlan && (
+                    <SelectItem value={NEW_OPTION}>+ New bucket…</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -705,7 +726,7 @@ function PlannerPanel() {
                 New bucket name
               </label>
               <div className="flex items-center gap-2">
-                <input
+                <Input
                   type="text"
                   autoFocus
                   value={newBucketName}
@@ -716,7 +737,7 @@ function PlannerPanel() {
                   }}
                   placeholder="e.g. Action items"
                   maxLength={255}
-                  className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                  className="h-auto w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
                 />
                 <Button
                   type="button"
@@ -753,21 +774,12 @@ function PlannerPanel() {
                 is created.
               </span>
             </span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={aiPolish}
-              onClick={toggleAiPolish}
-              className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                aiPolish ? "bg-primary" : "bg-border"
-              }`}
-            >
-              <span
-                className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
-                  aiPolish ? "translate-x-5" : "translate-x-0.5"
-                }`}
-              />
-            </button>
+            <Switch
+              checked={aiPolish}
+              onCheckedChange={toggleAiPolish}
+              aria-label="AI-generate task titles & notes"
+              className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+            />
           </label>
 
           {ms.error && (
@@ -785,7 +797,7 @@ function PlannerPanel() {
             </p>
           )}
           {selectedBucket && (
-            <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
+            <div className="flex items-center gap-2 text-sm text-[hsl(var(--theme-success-fg))]">
               <CheckCircle2 className="h-4 w-4" />
               <span>
                 Planner destination ready. Export from a meeting&apos;s summary
@@ -864,9 +876,10 @@ function ToDoPanel() {
               <label className="block text-xs font-medium text-muted-foreground">
                 To Do list
               </label>
-              <button
+              <Button
+                variant="ghost"
                 type="button"
-                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                 onClick={() => void ms.loadToDoLists()}
                 disabled={ms.loadingToDoLists}
               >
@@ -874,36 +887,41 @@ function ToDoPanel() {
                   className={`h-3 w-3 ${ms.loadingToDoLists ? "animate-spin" : ""}`}
                 />
                 Reload
-              </button>
+              </Button>
             </div>
-            <select
-              className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-              value={creatingList ? NEW_OPTION : selectedList}
-              onChange={(e) => {
-                if (e.target.value === NEW_OPTION) {
+            <Select
+              value={(creatingList ? NEW_OPTION : selectedList) || EMPTY_OPTION}
+              onValueChange={(value) => {
+                const nextValue = value === EMPTY_OPTION ? "" : value;
+                if (nextValue === NEW_OPTION) {
                   setCreatingList(true);
                 } else {
                   setCreatingList(false);
-                  setSelectedList(e.target.value);
+                  setSelectedList(nextValue);
                 }
               }}
               disabled={ms.loadingToDoLists}
             >
-              <option value="">
-                {ms.loadingToDoLists ? "Loading…" : "Select a To Do list"}
-              </option>
-              {ms.todoLists.map((list) => (
-                <option key={list.id} value={list.id}>
-                  {list.displayName}
-                </option>
-              ))}
-              {selectedListMissing && (
-                <option value={selectedList}>
-                  {saved.todoListName ?? "Saved To Do list"}
-                </option>
-              )}
-              <option value={NEW_OPTION}>+ New To Do list…</option>
-            </select>
+              <SelectTrigger aria-label="To Do list" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={EMPTY_OPTION}>
+                  {ms.loadingToDoLists ? "Loading…" : "Select a To Do list"}
+                </SelectItem>
+                {ms.todoLists.map((list) => (
+                  <SelectItem key={list.id} value={list.id}>
+                    {list.displayName}
+                  </SelectItem>
+                ))}
+                {selectedListMissing && (
+                  <SelectItem value={selectedList}>
+                    {saved.todoListName ?? "Saved To Do list"}
+                  </SelectItem>
+                )}
+                <SelectItem value={NEW_OPTION}>+ New To Do list…</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           {creatingList && (
@@ -912,7 +930,7 @@ function ToDoPanel() {
                 New To Do list name
               </label>
               <div className="flex items-center gap-2">
-                <input
+                <Input
                   type="text"
                   autoFocus
                   value={newListName}
@@ -925,7 +943,7 @@ function ToDoPanel() {
                   }}
                   placeholder="e.g. Meeting action items"
                   maxLength={255}
-                  className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                  className="h-auto w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
                 />
                 <Button
                   type="button"
@@ -969,7 +987,7 @@ function ToDoPanel() {
             </p>
           )}
           {selectedList && (
-            <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
+            <div className="flex items-center gap-2 text-sm text-[hsl(var(--theme-success-fg))]">
               <CheckCircle2 className="h-4 w-4" />
               <span>To Do destination ready. Export reviewed action items from a meeting summary.</span>
             </div>
@@ -1119,7 +1137,7 @@ function OneDrivePanel() {
           </div>
 
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-            <input
+            <Input
               type="url"
               value={sharingUrl}
               onChange={(e) => setSharingUrl(e.target.value)}
@@ -1127,7 +1145,7 @@ function OneDrivePanel() {
                 if (e.key === "Enter") void resolveSharingUrl();
               }}
               placeholder="Paste OneDrive or SharePoint folder link"
-              className="min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              className="h-auto min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
               disabled={resolvingUrl}
             />
             <Button
@@ -1142,7 +1160,7 @@ function OneDrivePanel() {
           </div>
 
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-            <input
+            <Input
               type="text"
               value={newFolderName}
               onChange={(e) => setNewFolderName(sanitizeOneDriveFolderName(e.target.value))}
@@ -1151,7 +1169,7 @@ function OneDrivePanel() {
               }}
               placeholder="Create subfolder, e.g. ClawScribe"
               maxLength={120}
-              className="min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              className="h-auto min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
               disabled={creatingFolder}
             />
             <Button
@@ -1173,21 +1191,12 @@ function OneDrivePanel() {
                   Upload a PDF copy beside the DOCX.
                 </span>
               </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={includePdf}
-                onClick={() => setIncludePdf((value) => !value)}
-                className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                  includePdf ? "bg-primary" : "bg-border"
-                }`}
-              >
-                <span
-                  className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
-                    includePdf ? "translate-x-5" : "translate-x-0.5"
-                  }`}
-                />
-              </button>
+              <Switch
+                checked={includePdf}
+                onCheckedChange={() => setIncludePdf((value) => !value)}
+                aria-label="Include PDF"
+                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+              />
             </label>
 
             <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
@@ -1197,21 +1206,12 @@ function OneDrivePanel() {
                   Ask Graph for view links scoped to your organization.
                 </span>
               </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={createOrgLink}
-                onClick={() => setCreateOrgLink((value) => !value)}
-                className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                  createOrgLink ? "bg-primary" : "bg-border"
-                }`}
-              >
-                <span
-                  className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
-                    createOrgLink ? "translate-x-5" : "translate-x-0.5"
-                  }`}
-                />
-              </button>
+              <Switch
+                checked={createOrgLink}
+                onCheckedChange={() => setCreateOrgLink((value) => !value)}
+                aria-label="Create org links"
+                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+              />
             </label>
           </div>
 
@@ -1223,7 +1223,7 @@ function OneDrivePanel() {
           )}
 
           {activeDestination && (
-            <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
+            <div className="flex items-center gap-2 text-sm text-[hsl(var(--theme-success-fg))]">
               <CheckCircle2 className="h-4 w-4" />
               <span>
                 File destination ready. Exports upload a DOCX{includePdf ? " and PDF" : ""}.
@@ -1418,11 +1418,11 @@ function ConfluencePanel() {
   const badgeClasses =
     mode === "draft"
       ? trimmedUrl
-        ? "border-transparent bg-emerald-600 text-white"
+        ? "border-transparent bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]"
         : "border-border bg-muted text-foreground"
       : restReady
-        ? "border-transparent bg-emerald-600 text-white"
-        : "border-transparent bg-amber-600 text-white";
+        ? "border-transparent bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]"
+        : "border-transparent bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))]";
 
   return (
     <AddonPanel
@@ -1435,10 +1435,11 @@ function ConfluencePanel() {
     >
       <div className="space-y-3">
         <div className="grid gap-2 sm:grid-cols-2">
-          <button
+          <Button
+            variant="ghost"
             type="button"
             onClick={() => setMode("draft")}
-            className={`rounded-md border p-3 text-left transition-colors ${
+            className={`block h-auto whitespace-normal rounded-md border p-3 text-left transition-colors ${
               mode === "draft"
                 ? "border-primary bg-primary/10"
                 : "border-border bg-muted hover:bg-muted/80"
@@ -1451,11 +1452,12 @@ function ConfluencePanel() {
               Copy rich text and open Confluence in your existing browser
               session. No API token is used.
             </span>
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
             type="button"
             onClick={() => setMode("rest")}
-            className={`rounded-md border p-3 text-left transition-colors ${
+            className={`block h-auto whitespace-normal rounded-md border p-3 text-left transition-colors ${
               mode === "rest"
                 ? "border-primary bg-primary/10"
                 : "border-border bg-muted hover:bg-muted/80"
@@ -1468,7 +1470,7 @@ function ConfluencePanel() {
               Create pages through a reachable self-hosted Confluence Server or
               Data Center instance.
             </span>
-          </button>
+          </Button>
         </div>
 
         {mode === "draft" ? (
@@ -1477,12 +1479,12 @@ function ConfluencePanel() {
               <label className="mb-1 block text-xs font-medium text-muted-foreground">
                 Create page URL
               </label>
-              <input
+              <Input
                 type="url"
                 value={createUrl}
                 onChange={(e) => setCreateUrl(e.target.value)}
                 placeholder="https://confluence.example.com/confluence/pages/createpage.action?spaceKey=TEAM"
-                className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
               />
               <p className="mt-1 text-xs text-muted-foreground">
                 For Jira/Confluence behind SSO or App Proxy, this opens in your
@@ -1500,26 +1502,17 @@ function ConfluencePanel() {
                   the configured create-page URL so you can paste manually.
                 </span>
               </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={openAfterCopy}
-                onClick={() => setOpenAfterCopy((v) => !v)}
-                className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                  openAfterCopy ? "bg-primary" : "bg-border"
-                }`}
-              >
-                <span
-                  className={`inline-block h-5 w-5 transform rounded-full bg-background shadow transition-transform ${
-                    openAfterCopy ? "translate-x-5" : "translate-x-0.5"
-                  }`}
-                />
-              </button>
+              <Switch
+                checked={openAfterCopy}
+                onCheckedChange={() => setOpenAfterCopy((v) => !v)}
+                aria-label="Open Confluence after copying"
+                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+              />
             </label>
           </>
         ) : (
           <div className="space-y-3">
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-muted-foreground">
+            <div className="rounded-md border border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] p-3 text-xs text-muted-foreground">
               <p className="font-medium text-foreground">
                 Direct REST requirements
               </p>
@@ -1536,12 +1529,12 @@ function ConfluencePanel() {
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Base URL
                 </label>
-                <input
+                <Input
                   type="url"
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                   placeholder="https://confluence.example.com/confluence"
-                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
               <UnencryptedHttpOptIn destinationProblem={status?.destinationProblem} urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
@@ -1552,22 +1545,22 @@ function ConfluencePanel() {
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Space key
                 </label>
-                <input
+                <Input
                   value={spaceKey}
                   onChange={(e) => setSpaceKey(e.target.value)}
                   placeholder="TEAM"
-                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Parent page ID optional
                 </label>
-                <input
+                <Input
                   value={parentId}
                   onChange={(e) => setParentId(e.target.value)}
                   placeholder="123456789"
-                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
             </div>
@@ -1577,12 +1570,12 @@ function ConfluencePanel() {
                 Personal access token
               </label>
               <div className="flex flex-col gap-2 sm:flex-row">
-                <input
+                <Input
                   type="password"
                   value={patInput}
                   onChange={(e) => setPatInput(e.target.value)}
                   placeholder="Paste PAT to save in OS credentials"
-                  className="min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto w-auto min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
                 <Button
                   type="button"
@@ -1634,7 +1627,7 @@ function ConfluencePanel() {
               <div
                 className={`flex items-start gap-2 rounded-md border p-3 text-sm ${
                   status.reachable
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    ? "border-[hsl(var(--theme-success-fg))]/30 bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]"
                     : "border-border bg-muted text-muted-foreground"
                 }`}
               >
@@ -1721,8 +1714,8 @@ function OpenClawPanel() {
             <span
               className={`rounded-full px-2.5 py-1 text-xs font-medium ${
                 status?.ready
-                  ? "bg-green-100 text-green-800 dark:bg-green-950/40 dark:text-green-200"
-                  : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                  ? "bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]"
+                  : "bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))]"
               }`}
             >
               {status?.ready ? "Ready" : "Not ready"}
@@ -1732,15 +1725,16 @@ function OpenClawPanel() {
                 (error ? "Status unavailable" : "Loading status…")}
             </span>
           </span>
-          <button
+          <Button
+            variant="ghost"
             type="button"
             onClick={() => void load()}
             disabled={loading}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-muted disabled:opacity-50"
+            className="inline-flex h-9 w-9 p-0 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-muted disabled:opacity-50"
             aria-label="Refresh OpenClaw handoff status"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-          </button>
+          </Button>
         </div>
 
         {error ? (
@@ -1749,68 +1743,72 @@ function OpenClawPanel() {
             <span>{error}</span>
           </div>
         ) : (
-          <details className="rounded-lg border border-border bg-muted/40 p-3">
-            <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">
-              Diagnostics
-            </summary>
-            <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Endpoint
-              </div>
-              <div className="mt-1 break-all font-mono text-xs text-foreground">
-                {status?.endpoint || "—"}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Bearer token
-              </div>
-              <div className="mt-1 text-foreground">
-                {status?.bearer_token_configured ? "Configured" : "Missing"}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Audio path
-              </div>
-              <div className="mt-1 text-foreground">
-                {status?.include_audio_path ? "Included" : "Not included"}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                Source
-              </div>
-              <div className="mt-1 font-mono text-xs text-foreground">
-                {status?.source || "—"}
-              </div>
-            </div>
-            {status?.last_submission && (
-              <div className="rounded-lg bg-muted p-3 md:col-span-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium uppercase text-muted-foreground">
-                    Last handoff
-                  </span>
-                  <span className="rounded-full bg-background px-2 py-0.5 text-xs font-medium text-foreground">
-                    {status.last_submission.state}
-                  </span>
-                  {status.last_submission.status_code && (
-                    <span className="text-xs text-muted-foreground">
-                      HTTP {status.last_submission.status_code}
-                    </span>
-                  )}
+          <Accordion type="single" collapsible className="rounded-lg border border-border bg-muted/40 p-3">
+            <AccordionItem value="openclaw-diagnostics" className="border-0">
+              <AccordionTrigger className="py-0 cursor-pointer select-none text-xs font-medium text-muted-foreground">
+                Diagnostics
+              </AccordionTrigger>
+              <AccordionContent className="pb-0">
+                <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
+                <div>
+                  <div className="text-xs font-medium text-muted-foreground">
+                    Endpoint
+                  </div>
+                  <div className="mt-1 break-all font-mono text-xs text-foreground">
+                    {status?.endpoint || "—"}
+                  </div>
                 </div>
-                <div className="mt-2 text-sm text-foreground">
-                  {status.last_submission.message}
+                <div>
+                  <div className="text-xs font-medium text-muted-foreground">
+                    Bearer token
+                  </div>
+                  <div className="mt-1 text-foreground">
+                    {status?.bearer_token_configured ? "Configured" : "Missing"}
+                  </div>
                 </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {status.last_submission.updated_at}
+                <div>
+                  <div className="text-xs font-medium text-muted-foreground">
+                    Audio path
+                  </div>
+                  <div className="mt-1 text-foreground">
+                    {status?.include_audio_path ? "Included" : "Not included"}
+                  </div>
                 </div>
-              </div>
-            )}
-            </div>
-          </details>
+                <div>
+                  <div className="text-xs font-medium text-muted-foreground">
+                    Source
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-foreground">
+                    {status?.source || "—"}
+                  </div>
+                </div>
+                {status?.last_submission && (
+                  <div className="rounded-lg bg-muted p-3 md:col-span-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Last handoff
+                      </span>
+                      <span className="rounded-full bg-background px-2 py-0.5 text-xs font-medium text-foreground">
+                        {status.last_submission.state}
+                      </span>
+                      {status.last_submission.status_code && (
+                        <span className="text-xs text-muted-foreground">
+                          HTTP {status.last_submission.status_code}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-2 text-sm text-foreground">
+                      {status.last_submission.message}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {status.last_submission.updated_at}
+                    </div>
+                  </div>
+                )}
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
         )}
       </div>
     </AddonPanel>
@@ -1834,13 +1832,11 @@ function TeamsAutoStartPanel() {
       : mode === "prompt"
         ? {
             label: "Prompt",
-            // Solid pill + white text: readable in both modes and immune to the
-            // globals.css `.dark .bg-primary/15` override.
-            classes: "border-transparent bg-primary text-white",
+            classes: "border-transparent bg-primary text-primary-foreground",
           }
         : {
             label: "Auto-record",
-            classes: "border-transparent bg-emerald-600 text-white",
+            classes: "border-transparent bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]",
           };
   return (
     <AddonPanel
@@ -1855,15 +1851,19 @@ function TeamsAutoStartPanel() {
         <label className="block text-sm font-medium text-foreground">
           When a meeting is detected
         </label>
-        <select
-          className="w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm"
+        <Select
           value={mode}
-          onChange={(e) => onChange(e.target.value as TeamsDetectionMode)}
+          onValueChange={(value) => onChange(value as TeamsDetectionMode)}
         >
-          <option value="off">Do nothing</option>
-          <option value="prompt">Prompt me to record</option>
-          <option value="auto">Auto-start recording</option>
-        </select>
+          <SelectTrigger aria-label="When a meeting is detected" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="off">Do nothing</SelectItem>
+            <SelectItem value="prompt">Prompt me to record</SelectItem>
+            <SelectItem value="auto">Auto-start recording</SelectItem>
+          </SelectContent>
+        </Select>
         <p className="text-xs text-muted-foreground">
           {mode === "off"
             ? "Detection runs but takes no action."
@@ -2018,9 +2018,9 @@ function CodexPanel() {
           <span
             className={`rounded-full px-2.5 py-1 text-xs font-medium ${
               signedIn
-                ? "bg-green-100 text-green-800 dark:bg-green-950/40 dark:text-green-200"
+                ? "bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]"
                 : ready
-                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                  ? "bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))]"
                   : "bg-muted text-muted-foreground"
             }`}
           >
@@ -2032,15 +2032,16 @@ function CodexPanel() {
               (error ? "Status unavailable" : "Loading status…")}
           </span>
         </span>
-        <button
+        <Button
+          variant="ghost"
           type="button"
           onClick={() => void load()}
           disabled={loading}
-          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-muted disabled:opacity-50"
+          className="inline-flex h-9 w-9 p-0 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-muted disabled:opacity-50"
           aria-label="Refresh Codex status"
         >
           <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-        </button>
+        </Button>
       </div>
       {error && (
         <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
@@ -2146,15 +2147,16 @@ function CalendarPanel() {
             <span className="text-xs font-medium text-muted-foreground">
               Current / next meeting
             </span>
-            <button
+            <Button
+              variant="ghost"
               type="button"
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
               onClick={() => void ms.loadCalendar()}
               disabled={ms.loadingCalendar}
             >
               <RefreshCw className={`h-3 w-3 ${ms.loadingCalendar ? "animate-spin" : ""}`} />
               Reload
-            </button>
+            </Button>
           </div>
 
           {current ? (
@@ -2164,7 +2166,7 @@ function CalendarPanel() {
                   {current.subject || "(no title)"}
                 </span>
                 {current.isOnlineMeeting && (
-                  <span className="shrink-0 rounded-full border border-transparent bg-primary px-2 py-0.5 text-[10px] font-medium text-white">
+                  <span className="shrink-0 rounded-full border border-transparent bg-primary px-2 py-0.5 text-[10px] font-medium text-primary-foreground">
                     Online
                   </span>
                 )}
@@ -2190,14 +2192,13 @@ function CalendarPanel() {
                               : "text-muted-foreground line-through"
                           }`}
                         >
-                          <input
-                            type="checkbox"
+                          <Checkbox
                             className="h-3.5 w-3.5 accent-primary"
                             checked={included}
-                            onChange={(e) =>
+                            onCheckedChange={(checked) =>
                               setAttendeeIncluded((prev) => ({
                                 ...prev,
-                                [key]: e.target.checked,
+                                [key]: checked === true,
                               }))
                             }
                           />
@@ -2208,9 +2209,10 @@ function CalendarPanel() {
                   </div>
                 </div>
               )}
-              <button
+              <Button
+                variant="ghost"
                 type="button"
-                className="mt-2 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary hover:bg-primary/20"
+                className="h-auto mt-2 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary hover:bg-primary/20"
                 onClick={() => {
                   setPendingCalendar({
                     eventId: current.id,
@@ -2227,7 +2229,7 @@ function CalendarPanel() {
                 {usedForNext
                   ? "✓ Set for your next recording"
                   : "Use for next recording"}
-              </button>
+              </Button>
             </div>
           ) : (
             <p className="rounded-lg border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
@@ -2415,9 +2417,9 @@ function diagnosticsState(snapshot: DiagnosticsSnapshot | null): AddonState {
 function diagnosticToneClasses(tone: "good" | "warn" | "neutral" | "bad") {
   switch (tone) {
     case "good":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200";
+      return "border-[hsl(var(--theme-success-fg))]/30 bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))]";
     case "warn":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200";
+      return "border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))]";
     case "bad":
       return "border-destructive/30 bg-destructive/10 text-destructive";
     case "neutral":
@@ -2441,7 +2443,7 @@ function DiagnosticTile({
 }) {
   return (
     <div className={`rounded-lg border p-3 ${diagnosticToneClasses(tone)}`}>
-      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide opacity-80">
+      <div className="flex items-center gap-2 text-xs font-medium tracking-wide opacity-80">
         <Icon className="h-3.5 w-3.5" />
         {label}
       </div>
@@ -2702,7 +2704,7 @@ function DiagnosticsSystemPanel({
         </div>
 
         {snapshot?.acceleration?.gpuAvailableButUnused && (
-          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+          <div className="flex items-start gap-2 rounded-lg border border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] p-3 text-sm text-[hsl(var(--theme-warning-fg))]">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
               A {snapshot.acceleration.runtimeDetectedGpu} GPU is visible, but this build is using
@@ -2712,66 +2714,70 @@ function DiagnosticsSystemPanel({
         )}
 
         {snapshot && (
-          <details className="rounded-lg border border-border bg-muted/35 p-3">
-            <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">
-              Details
-            </summary>
-            <div className="mt-3 grid gap-3 text-sm lg:grid-cols-2">
-              <div className="space-y-2">
-                <div className="text-xs font-medium uppercase text-muted-foreground">
-                  System load
-                </div>
-                <div className="rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
-                  CPU {formatPercent(snapshot.systemResources?.cpu_usage_percent)} · Memory{" "}
-                  {formatPercent(snapshot.systemResources?.memory_used_percent)} ·{" "}
-                  {snapshot.systemResources?.cpu_cores ?? snapshot.acceleration?.cpuCores ?? "—"}{" "}
-                  cores
-                </div>
-              </div>
-              <div className="space-y-2">
-                <div className="text-xs font-medium uppercase text-muted-foreground">
-                  Recording
-                </div>
-                <div className="rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
-                  {snapshot.recording.is_recording ? "Recording" : "Idle"} ·{" "}
-                  {snapshot.recording.is_paused ? "Paused" : "Active-ready"} · active{" "}
-                  {formatSeconds(snapshot.recording.active_duration)}
-                </div>
-              </div>
-              <div className="space-y-2">
-                <div className="text-xs font-medium uppercase text-muted-foreground">
-                  Models
-                </div>
-                <div className="space-y-1 rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
-                  {snapshot.transcription.engines.map((engine) => (
-                    <div key={engine.provider} className="flex justify-between gap-3">
-                      <span>{providerLabel(engine.provider)}</span>
-                      <span>
-                        {engine.downloadedModels}/{engine.totalModels} downloaded
-                        {engine.loaded ? " · loaded" : ""}
-                      </span>
+          <Accordion type="single" collapsible className="rounded-lg border border-border bg-muted/35 p-3">
+            <AccordionItem value="system-details" className="border-0">
+              <AccordionTrigger className="py-0 cursor-pointer select-none text-xs font-medium text-muted-foreground">
+                Details
+              </AccordionTrigger>
+              <AccordionContent className="pb-0">
+                <div className="mt-3 grid gap-3 text-sm lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      System load
                     </div>
-                  ))}
+                    <div className="rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
+                      CPU {formatPercent(snapshot.systemResources?.cpu_usage_percent)} · Memory{" "}
+                      {formatPercent(snapshot.systemResources?.memory_used_percent)} ·{" "}
+                      {snapshot.systemResources?.cpu_cores ?? snapshot.acceleration?.cpuCores ?? "—"}{" "}
+                      cores
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      Recording
+                    </div>
+                    <div className="rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
+                      {snapshot.recording.is_recording ? "Recording" : "Idle"} ·{" "}
+                      {snapshot.recording.is_paused ? "Paused" : "Active-ready"} · active{" "}
+                      {formatSeconds(snapshot.recording.active_duration)}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      Models
+                    </div>
+                    <div className="space-y-1 rounded-md border border-border bg-background/70 p-3 text-xs text-muted-foreground">
+                      {snapshot.transcription.engines.map((engine) => (
+                        <div key={engine.provider} className="flex justify-between gap-3">
+                          <span>{providerLabel(engine.provider)}</span>
+                          <span>
+                            {engine.downloadedModels}/{engine.totalModels} downloaded
+                            {engine.loaded ? " · loaded" : ""}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      Runtime paths
+                    </div>
+                    <div className="space-y-1 rounded-md border border-border bg-background/70 p-3 font-mono text-[11px] text-muted-foreground">
+                      <div className="break-all">Data: {snapshot.app.appDataDir ?? "—"}</div>
+                      <div className="break-all">Logs: {snapshot.app.logsDir ?? "—"}</div>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div className="space-y-2">
-                <div className="text-xs font-medium uppercase text-muted-foreground">
-                  Runtime paths
-                </div>
-                <div className="space-y-1 rounded-md border border-border bg-background/70 p-3 font-mono text-[11px] text-muted-foreground">
-                  <div className="break-all">Data: {snapshot.app.appDataDir ?? "—"}</div>
-                  <div className="break-all">Logs: {snapshot.app.logsDir ?? "—"}</div>
-                </div>
-              </div>
-            </div>
-            {snapshot.errors.length > 0 && (
-              <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
-                {snapshot.errors.map((item) => (
-                  <div key={item}>{item}</div>
-                ))}
-              </div>
-            )}
-          </details>
+                {snapshot.errors.length > 0 && (
+                  <div className="mt-3 rounded-md border border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] p-3 text-xs text-[hsl(var(--theme-warning-fg))]">
+                    {snapshot.errors.map((item) => (
+                      <div key={item}>{item}</div>
+                    ))}
+                  </div>
+                )}
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
         )}
       </div>
     </AddonPanel>
