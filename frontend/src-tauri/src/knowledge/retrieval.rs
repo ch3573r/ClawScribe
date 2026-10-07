@@ -99,9 +99,134 @@ pub async fn recheck_scope(pool: &SqlitePool, frozen: &FrozenScope) -> Result<()
     Ok(())
 }
 
+pub async fn search_channels(
+    _pool: &SqlitePool,
+    _scope: &FrozenScope,
+    _query: &str,
+    _vector: Option<(&str, &[f32])>,
+) -> Result<Vec<Passage>, KnowledgeError> {
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn add_text(pool: &SqlitePool, id: &str, meeting: &str, text: &str) {
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES(?,?,?,'00:01',1)").bind(id).bind(meeting).bind(text).execute(pool).await.unwrap();
+    }
+    #[tokio::test]
+    async fn keyword_search_uses_current_canonical_rows_and_backend_scope() {
+        let pool = fixture().await;
+        add_text(&pool, "a", "one", "ATLAS-42 release is Friday").await;
+        add_text(
+            &pool,
+            "b",
+            "two",
+            "ATLAS-42 ATLAS-42 ATLAS-42 unrelated project",
+        )
+        .await;
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let hits = search_channels(&pool, &scope, "ATLAS-42", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "keyword evidence cannot depend on embeddings"
+        );
+        assert_eq!(hits[0].meeting_id, "one");
+        assert!(hits[0].text.contains("Friday"));
+        sqlx::query("UPDATE transcripts SET transcript='Corrected to Monday', original_transcript='ATLAS-42' WHERE id='a'").execute(&pool).await.unwrap();
+        assert!(search_channels(&pool, &scope, "ATLAS-42", None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(search_channels(&pool, &scope, "\" OR * : )", None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    #[tokio::test]
+    async fn hybrid_preserves_identifier_hits_and_fuses_only_covering_chunks() {
+        use super::super::store;
+        let pool = fixture().await;
+        let text = format!(
+            "{} ATLAS-42 schedule is Friday",
+            "General status. ".repeat(30)
+        );
+        add_text(&pool, "a", "one", &text).await;
+        let job:store::SourceJob=sqlx::query_as("SELECT j.source_id,s.meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id WHERE s.meeting_id='one'").fetch_one(&pool).await.unwrap();
+        let row = store::rows_page(&pool, &job, None).await.unwrap().remove(0);
+        let vector = super::super::embedding::normalize(vec![1.; 384]).unwrap();
+        let span = TextSpan {
+            transcript_id: "a".into(),
+            start_byte: 0,
+            end_byte: 15,
+        };
+        store::stage(&pool, &job, &row, &span, 0, &vector, "test-space")
+            .await
+            .unwrap();
+        store::publish(&pool, &job, "test-space").await.unwrap();
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let hits = search_channels(&pool, &scope, "ATLAS-42", Some(("test-space", &vector)))
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("ATLAS-42")),
+            "partial semantic neighbor must not replace exact lexical evidence"
+        );
+        let wrong_space = search_channels(
+            &pool,
+            &scope,
+            "nonmatchingword",
+            Some(("new-space", &vector)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            wrong_space.is_empty(),
+            "model_space_change_requires_reindex"
+        );
+    }
+    #[tokio::test]
+    async fn frozen_scope_recheck_detects_removal_without_adding_new_members() {
+        let pool = fixture().await;
+        let scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                tags: vec!["beta".into()],
+                ..Default::default()
+            },
+        };
+        let frozen = freeze_scope(&pool, &scope).await.unwrap();
+        sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES('one','Beta')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        recheck_scope(&pool, &frozen).await.unwrap();
+        assert_eq!(frozen.meeting_ids, vec!["two"]);
+        sqlx::query("DELETE FROM meeting_tags WHERE meeting_id='two' AND tag='Beta'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            recheck_scope(&pool, &frozen).await,
+            Err(KnowledgeError::Superseded)
+        );
+    }
     async fn fixture() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
