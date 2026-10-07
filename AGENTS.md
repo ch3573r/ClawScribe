@@ -241,6 +241,35 @@ length of the transcription backlog.
 
 ## Frontend And UX
 
+### UI conventions
+
+Existing violations are debt, not precedent. New and changed UI must follow
+these conventions:
+
+- Use shared controls from `frontend/src/components/ui/`: Button, Switch,
+  Select, Textarea, Input, Progress, Tabs, Popover, DropdownMenu, Tooltip,
+  Dialog, ScrollArea, Separator, and Checkbox. Add missing primitives in the
+  existing shadcn style without new UI dependencies. Native select, textarea,
+  progress, checkbox inputs, and details belong only in that directory.
+- Use theme tokens from `globals.css` through Tailwind: background, card,
+  border, muted, muted-foreground, primary, accent, destructive, success,
+  warning, error, and info. Do not use hex colors or raw palette utilities.
+- Use sentence case for headings, labels, buttons, tabs, menus, and dialogs.
+  Keep proper nouns such as ClawScribe, Microsoft 365, OneNote, and Codex.
+- Keep wording plain and short. Put internal identifiers, hashes, citation
+  tags, and model repository IDs in a Tooltip or Details when needed; keep
+  them out of the normal view.
+- Use one primary action per panel. Use outline or ghost secondary actions
+  and an overflow menu for rare actions. Avoid empty boxes and duplicate
+  headings. Reuse the shared PageSection card and spacing pattern. Keep one
+  scrollbar per view and support light/dark themes at 1000 px and wider.
+- Provide loading, empty, error, and disabled states for asynchronous
+  controls. Show actions only when they apply. Preserve visible keyboard
+  focus and label icon buttons. Enter submits; Shift+Enter adds a new line.
+- Run `node scripts/verify-ui-conventions.mjs`. The committed baseline records
+  existing debt; never raise counts to accommodate new violations. Fixes
+  remove files from the baseline once all their counts reach zero.
+
 - Respect dark and light themes, the selected accent color, keyboard use, focus
   visibility, and narrow as well as wide desktop layouts.
 - Use shared contexts/hooks for cross-page settings rather than page-local

@@ -11,6 +11,9 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { PageSection } from "@/components/ui/page-section";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { LibraryBackup } from "@/components/LibraryBackup";
@@ -136,77 +139,11 @@ export default function MeetingsPage() {
 
   const shownCount = visibleMeetings.length;
 
-  return (
-    <div className="h-full min-h-0 overflow-y-auto bg-background text-foreground">
-      <div className="mx-auto flex min-h-full w-full max-w-[1600px] flex-col gap-6 px-8 py-7">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h1 className="text-4xl font-semibold tracking-tight text-foreground">
-              Meetings
-            </h1>
-            <p className="mt-2 max-w-2xl text-base text-muted-foreground">
-              Browse saved recordings, transcripts, and generated summaries.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2"><LibraryBackup /><button
-            onClick={handleRefresh}
-            className="inline-flex w-fit items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition hover:bg-muted"
-          >
-            <RefreshCw
-              className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
-            />
-            Refresh
-          </button>
-          </div>
-        </header>
-
-        <div role="tablist" aria-label="Meetings views" className="flex gap-6 border-b border-border">
-          {(["archive", "memory"] as const).map((value) => (
-            <button key={value} id={`meetings-${value}-tab`} type="button" role="tab"
-              aria-selected={tab === value} aria-controls={value === "memory" ? "meeting-memory-panel" : "meetings-archive-panel"}
-              tabIndex={tab === value ? 0 : -1}
-              onClick={() => setTab(value)}
-              onKeyDown={(event) => {
-                if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-                  event.preventDefault();
-                  const next = event.key === "Home" ? "archive" : event.key === "End" ? "memory" : tab === "archive" ? "memory" : "archive";
-                  setTab(next);
-                  document.getElementById(`meetings-${next}-tab`)?.focus();
-                }
-              }}
-              className={`border-b-2 px-1 py-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${tab === value ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-            >{value === "archive" ? "Archive" : "Meeting memory"}</button>
-          ))}
-        </div>
-
-        <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
-          <div className="grid gap-4 xl:grid-cols-[1fr_auto] xl:items-center">
-            <div hidden={tab !== "archive"}><InputGroup className="rounded-md border-border bg-background text-foreground shadow-none">
-              <InputGroupInput
-                id="meetings-search"
-                placeholder="Filter meeting titles..."
-                value={query}
-                onChange={(event) => handleQueryChange(event.target.value)}
-                className="placeholder:text-muted-foreground"
-              />
-              <InputGroupAddon>
-                <Search className="h-4 w-4 text-muted-foreground" />
-              </InputGroupAddon>
-              {query && (
-                <InputGroupAddon align="inline-end">
-                  <InputGroupButton onClick={() => handleQueryChange("")}>
-                    <X className="h-4 w-4" />
-                  </InputGroupButton>
-                </InputGroupAddon>
-              )}
-            </InputGroup></div>
-
-            <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
-              <div className="flex items-center gap-2">Project
+  const projectControl = <>
+<div className="flex items-center gap-2">Project
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <button
+                    <Button variant="ghost"
                       type="button"
                       aria-label={`Project: ${projectFilterLabel}`}
                       className="flex h-9 max-w-48 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -214,7 +151,7 @@ export default function MeetingsPage() {
                     >
                       <span className="truncate">{projectFilterLabel}</span>
                       <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
-                    </button>
+                    </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
                     <DropdownMenuRadioGroup
@@ -249,7 +186,67 @@ export default function MeetingsPage() {
                 </DropdownMenu>
               </div>
               {projectTagsLoading && <span role="status">Loading project tags…</span>}
-              {projectTagsError && <button className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</button>}
+              {projectTagsError && <Button variant="ghost" className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</Button>}
+  </>;
+
+  return (
+    <div className="h-full min-h-0 overflow-hidden bg-background text-foreground">
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col gap-4 px-5 py-5">
+        <header className="flex shrink-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight text-foreground">
+              Meetings
+            </h1>
+            <p className="mt-2 max-w-2xl text-base text-muted-foreground">
+              Browse saved recordings, transcripts, and generated summaries.
+            </p>
+          </div>
+
+          {tab === "archive" && <div className="flex flex-wrap items-center gap-2"><LibraryBackup /><Button variant="outline" disabled={isRefreshing}
+            onClick={handleRefresh}
+            className="inline-flex w-fit items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition hover:bg-muted"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
+            />
+            Refresh
+          </Button>
+          </div>}
+        </header>
+
+        <Tabs value={tab} onValueChange={value => setTab(value as "archive" | "memory")} className="flex min-h-0 flex-1 flex-col gap-4">
+          <TabsList aria-label="Meetings views" className="w-fit shrink-0">
+            <TabsTrigger value="archive" id="meetings-archive-tab" aria-controls="meetings-archive-panel">Archive</TabsTrigger>
+            <TabsTrigger value="memory" id="meetings-memory-tab" aria-controls="meeting-memory-panel">Meeting memory</TabsTrigger>
+          </TabsList>
+          <TabsContent value="memory" forceMount id="meeting-memory-panel" hidden={tab !== "memory"} className={tab === "memory" ? "m-0 min-h-0 flex-1" : "hidden"}>
+            <KnowledgeArchive meetings={sortedMeetings} meetingTitles={meetings} projectFilter={projectFilter} projectControl={projectControl} />
+          </TabsContent>
+          <TabsContent value="archive" forceMount id="meetings-archive-panel" hidden={tab !== "archive"} className={tab === "archive" ? "m-0 min-h-0 flex-1 space-y-4 overflow-y-auto" : "hidden"}>
+        <PageSection className="rounded-lg border border-border bg-card p-5 shadow-sm">
+          <div className="grid gap-4 xl:grid-cols-[1fr_auto] xl:items-center">
+            <div hidden={tab !== "archive"}><InputGroup className="rounded-md border-border bg-background text-foreground shadow-none">
+              <InputGroupInput
+                id="meetings-search"
+                placeholder="Filter meeting titles..."
+                value={query}
+                onChange={(event) => handleQueryChange(event.target.value)}
+                className="placeholder:text-muted-foreground"
+              />
+              <InputGroupAddon>
+                <Search className="h-4 w-4 text-muted-foreground" />
+              </InputGroupAddon>
+              {query && (
+                <InputGroupAddon align="inline-end">
+                  <InputGroupButton aria-label="Clear title filter" onClick={() => handleQueryChange("")}>
+                    <X className="h-4 w-4" />
+                  </InputGroupButton>
+                </InputGroupAddon>
+              )}
+            </InputGroup></div>
+
+            <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
+              {projectControl}
               <div hidden={tab !== "archive"}><Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
                 <SelectTrigger className="h-9 w-36 bg-background">
                   <SelectValue />
@@ -262,22 +259,17 @@ export default function MeetingsPage() {
               </Select></div>
               <span>{meetings.length} total</span>
               <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
-              <span>{tab === "archive" ? shownCount : sortedMeetings.length} shown</span>
+              <span>{shownCount} shown</span>
             </div>
           </div>
-        </section>
+        </PageSection>
 
-        <div id="meeting-memory-panel" role="tabpanel" aria-labelledby="meetings-memory-tab" hidden={tab !== "memory"}>
-          <KnowledgeArchive meetings={sortedMeetings} projectFilter={projectFilter} />
-        </div>
-
-        <div id="meetings-archive-panel" role="tabpanel" aria-labelledby="meetings-archive-tab" hidden={tab !== "archive"}>
         <div className="min-h-0">
-          <section className="min-w-0 rounded-lg border border-border bg-card shadow-sm">
+          <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between gap-4 border-b border-border px-6 py-5">
               <div>
                 <h2 className="text-lg font-semibold text-foreground">
-                  Saved Meetings
+                  Saved meetings
                 </h2>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {normalizedQuery
@@ -291,10 +283,10 @@ export default function MeetingsPage() {
             {visibleMeetings.length > 0 ? (
               <div className="divide-y divide-border">
                 {visibleMeetings.map((meeting) => (
-                  <button
+                  <Button variant="ghost"
                     key={meeting.id}
                     onClick={() => openMeeting(meeting.id, meeting.title)}
-                    className="group grid w-full gap-4 px-6 py-5 text-left transition hover:bg-muted lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"
+                    className="group grid h-auto w-full justify-stretch whitespace-normal rounded-none gap-4 px-6 py-5 text-left transition hover:bg-muted lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"
                   >
                     <div className="flex min-w-0 items-center gap-3">
                       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-primary">
@@ -315,7 +307,7 @@ export default function MeetingsPage() {
                       Open details
                       <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
                     </span>
-                  </button>
+                  </Button>
                 ))}
               </div>
             ) : (
@@ -331,10 +323,11 @@ export default function MeetingsPage() {
                 </p>
               </div>
             )}
-          </section>
+          </PageSection>
 
         </div>
-        </div>
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

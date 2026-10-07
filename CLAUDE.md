@@ -26,6 +26,35 @@ on Meetily Community Edition and is currently focused on the Tauri desktop app:
 The historical Python/FastAPI backend has been removed. Do not reintroduce a
 separate backend runtime unless the project explicitly chooses that direction.
 
+## UI conventions
+
+Existing violations are debt, not precedent. Use shared controls from
+`frontend/src/components/ui/` (Button, Switch, Select, Textarea, Input,
+Progress, Tabs, Popover, DropdownMenu, Tooltip, Dialog, ScrollArea, Separator,
+and Checkbox). Add missing primitives in the existing shadcn style without
+new UI dependencies. Native select, textarea, progress, checkbox inputs, and
+details belong only in that directory.
+
+Use `globals.css` theme tokens through Tailwind: background, card, border,
+muted, muted-foreground, primary, accent, destructive, success, warning,
+error, and info. Do not use hex colors or raw palette utilities. Use sentence
+case throughout the UI, retaining proper nouns such as ClawScribe, Microsoft
+365, OneNote, and Codex. Keep wording plain and short; internal identifiers,
+hashes, citation tags, and model repository IDs belong in a Tooltip or Details
+when needed, outside the normal view.
+
+Use one primary action per panel, outline/ghost secondary actions, and an
+overflow menu for rare actions. Avoid empty boxes and duplicate headings.
+Reuse the shared PageSection card and spacing pattern. Keep one scrollbar per
+view; support light/dark themes at 1000 px and wider. Provide loading, empty,
+error, and disabled states for asynchronous controls, and show actions only
+when they apply. Keep keyboard focus visible and label icon buttons. Enter
+submits; Shift+Enter adds a new line.
+
+Run `node scripts/verify-ui-conventions.mjs`. Its committed baseline records
+existing debt; do not raise counts for new violations. Remove a file from the
+baseline when all its counts reach zero.
+
 ## Development Commands
 
 From `frontend/`:

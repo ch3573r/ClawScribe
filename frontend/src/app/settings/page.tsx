@@ -9,6 +9,7 @@ import {
   Keyboard,
   AudioLines,
   Sparkles,
+  BrainCircuit,
   Plug,
   Activity,
   FlaskConical,
@@ -54,7 +55,7 @@ const GROUPS: { label: string; items: SectionItem[] }[] = [
     items: [
       { value: "transcription", label: "Transcription", icon: AudioLines, desc: "Speech-to-text engine and model." },
       { value: "summary", label: "Summary", icon: Sparkles, desc: "AI summary provider and model." },
-      { value: "memory", label: "Meeting memory", icon: Sparkles, desc: "Local search model and index progress." },
+      { value: "memory", label: "Meeting memory", icon: BrainCircuit, desc: "Local search and index progress." },
     ],
   },
   {

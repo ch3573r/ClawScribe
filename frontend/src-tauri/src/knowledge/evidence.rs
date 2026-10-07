@@ -3,6 +3,9 @@ use super::types::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
+/// Must match MAX_EVIDENCE_ENTRIES in the frontend knowledge state helpers.
+pub const MAX_EVIDENCE_ENTRIES: usize = 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceStatus {
@@ -165,7 +168,7 @@ pub async fn preceding_questions(
     frozen: &super::retrieval::FrozenScope,
     passages: &[Passage],
 ) -> Result<Vec<Option<usize>>, String> {
-    if passages.len() > 64 {
+    if passages.len() > MAX_EVIDENCE_ENTRIES {
         return Err("Too many evidence rows".into());
     }
     let mut complete = vec![false; passages.len()];
@@ -247,7 +250,7 @@ pub fn validate_context_metadata(
     evidence: &[EvidenceRef],
     metadata: &[EvidenceDisplay],
 ) -> Result<(), String> {
-    if evidence.len() != metadata.len() || evidence.len() > 64 {
+    if evidence.len() != metadata.len() || evidence.len() > MAX_EVIDENCE_ENTRIES {
         return Err("Invalid evidence map".into());
     }
     for (index, display) in metadata.iter().enumerate() {
@@ -315,26 +318,25 @@ pub fn validate_context_metadata(
 /// A complete bracket group is accepted or rejected together. Never salvage an
 /// inner tag from malformed/nested syntax, or expand an unknown range endpoint.
 fn citation_group(body: &str, count: usize) -> Option<Vec<usize>> {
-    const MAX_GROUP_TAGS: usize = 64;
     if body.len() > 1024 {
         return None;
     }
     let number = |item: &str| {
         let digits = item.trim().strip_prefix('K')?;
         if digits.is_empty()
-            || digits.len() > 3
+            || digits.len() > MAX_EVIDENCE_ENTRIES.to_string().len()
             || digits.starts_with('0')
             || !digits.bytes().all(|b| b.is_ascii_digit())
         {
             return None;
         }
         let tag = digits.parse::<usize>().ok()?;
-        (tag <= count).then_some(tag)
+        (tag <= count.min(MAX_EVIDENCE_ENTRIES)).then_some(tag)
     };
     if body.contains(',') {
         let mut group = Vec::new();
         for item in body.split(',') {
-            if group.len() == MAX_GROUP_TAGS {
+            if group.len() == MAX_EVIDENCE_ENTRIES {
                 return None;
             }
             group.push(number(item)?);
@@ -343,7 +345,7 @@ fn citation_group(body: &str, count: usize) -> Option<Vec<usize>> {
     } else if let Some((first, last)) = body.split_once('-') {
         let first = number(first)?;
         let last = number(last)?;
-        if last < first || last - first >= MAX_GROUP_TAGS {
+        if last < first || last - first >= MAX_EVIDENCE_ENTRIES {
             return None;
         }
         Some((first..=last).collect())
@@ -523,8 +525,16 @@ mod tests {
             );
         }
         assert!(tag_numbers("[K1, K2]", 1).is_empty());
-        assert!(tag_numbers("[K1-K65]", 999).is_empty());
-        assert!(tag_numbers(&format!("[{}]", vec!["K1"; 65].join(",")), 1).is_empty());
+        assert!(tag_numbers("[K1-K1025]", MAX_EVIDENCE_ENTRIES).is_empty());
+        assert!(tag_numbers(
+            &format!("[{}]", vec!["K1"; MAX_EVIDENCE_ENTRIES + 1].join(",")),
+            1
+        )
+        .is_empty());
+        assert_eq!(
+            tag_numbers("[K700][K1024]", MAX_EVIDENCE_ENTRIES),
+            vec![700, 1024]
+        );
         assert_eq!(tag_numbers("[K1-K64]", 64), (1..=64).collect::<Vec<_>>());
         assert_eq!(tag_numbers("Unknown [K999]. Known [K1].", 1), vec![1]);
     }

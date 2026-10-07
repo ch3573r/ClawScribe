@@ -805,7 +805,7 @@ async fn import_conversations(
         let ordinal = row
             .get("ordinal")
             .and_then(Value::as_i64)
-            .filter(|n| (1..=64).contains(n))
+            .filter(|n| (1..=crate::knowledge::evidence::MAX_EVIDENCE_ENTRIES as i64).contains(n))
             .ok_or("Invalid citation ordinal")?;
         ordinals.entry(id.into()).or_default().push(ordinal);
         let reference: EvidenceRef =
@@ -1217,13 +1217,33 @@ mod tests {
     use super::*;
 
     async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest) {
+        conversation_fixture_schema(false).await
+    }
+
+    async fn conversation_fixture_schema(
+        legacy: bool,
+    ) -> (SqlitePool, crate::knowledge::types::AskRequest) {
         use crate::knowledge::{conversations, retrieval, store, types::*};
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        if legacy {
+            let shipped = sqlx::migrate::Migrator {
+                migrations: std::borrow::Cow::Owned(
+                    sqlx::migrate!("./migrations")
+                        .iter()
+                        .filter(|migration| migration.version < 20261008000000)
+                        .cloned()
+                        .collect(),
+                ),
+                ..sqlx::migrate::Migrator::DEFAULT
+            };
+            shipped.run(&pool).await.unwrap();
+        } else {
+            sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        }
         sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('archive-source','Public archive fixture','2026-09-01','2026-09-01')").execute(&pool).await.unwrap();
         for (id, text) in [
             ("archive-first", "Approved: 21 September."),
@@ -1381,6 +1401,248 @@ mod tests {
             .await
             .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn conversation_evidence_upgrade_preserves_populated_schema_and_old_backup() {
+        use crate::knowledge::{conversations, retrieval, store, types::*};
+        async fn counts(pool: &SqlitePool) -> Vec<(String, i64)> {
+            let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'knowledge_%' ORDER BY name").fetch_all(pool).await.unwrap();
+            let mut result = Vec::new();
+            for table in tables {
+                let count: i64 = sqlx::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM \"{}\"",
+                    table.replace('"', "\"\"")
+                ))
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                result.push((table, count));
+            }
+            result
+        }
+        async fn schema(pool: &SqlitePool) -> Vec<(String, String, String, Option<String>)> {
+            sqlx::query_as("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN('index','trigger') AND (name LIKE 'knowledge_%' OR tbl_name LIKE 'knowledge_%') ORDER BY type,name").fetch_all(pool).await.unwrap()
+        }
+        let (source, first) = conversation_fixture_schema(true).await;
+        let mut owners = vec![first.owner.clone()];
+        for index in 0..3 {
+            let meeting = format!("upgrade-meeting-{index}");
+            let transcript = format!("upgrade-row-{index}");
+            let text = "Launch plan approved.";
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Public upgrade fixture','2026-09-02','2026-09-02')").bind(&meeting).execute(&source).await.unwrap();
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,?,?,'2026-09-02')").bind(&transcript).bind(&meeting).bind(text).execute(&source).await.unwrap();
+            let request = AskRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                owner: conversations::create_library(&source).await.unwrap(),
+                search: SearchRequest {
+                    scope: KnowledgeScope::Library {
+                        filter: MeetingFilter {
+                            meeting_ids: vec![meeting.clone()],
+                            ..Default::default()
+                        },
+                    },
+                    query: "What was approved?".into(),
+                    document_ids: vec![],
+                    mode: SearchMode::Keyword,
+                },
+            };
+            owners.push(request.owner.clone());
+            conversations::reserve(&source, &request, "builtin-ai", "qwen3.5:4b")
+                .await
+                .unwrap();
+            let frozen = retrieval::freeze_scope(&source, &request.search.scope)
+                .await
+                .unwrap();
+            let job:store::SourceJob=sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id=?").bind(&meeting).fetch_one(&source).await.unwrap();
+            let passage = store::materialize(
+                &source,
+                &store::SelectedRow::for_job(&job, transcript.clone()),
+                TextSpan {
+                    transcript_id: transcript,
+                    start_byte: 0,
+                    end_byte: text.len(),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            conversations::prepare(
+                &source,
+                &request.request_id,
+                &frozen,
+                &[passage],
+                &BTreeMap::new(),
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+            conversations::finish(
+                &source,
+                &request.request_id,
+                &frozen,
+                "Launch approved [K1].",
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO knowledge_chunks(id,source_id,revision,generation,ordinal,transcript_id,start_byte,end_byte,fingerprint,text) SELECT 'upgrade-chunk',id,revision,generation,1,'archive-first',0,1,'public-fixture','A' FROM knowledge_sources WHERE meeting_id='archive-source'").execute(&source).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_vectors(chunk_id,space,dimensions,vector) VALUES ('upgrade-chunk','public-fixture',384,zeroblob(1536))").execute(&source).await.unwrap();
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table'")
+                .fetch_all(&source)
+                .await
+                .unwrap();
+        for table in tables {
+            let children = sqlx::query(&format!(
+                "PRAGMA foreign_key_list(\"{}\")",
+                table.replace('"', "\"\"")
+            ))
+            .fetch_all(&source)
+            .await
+            .unwrap();
+            assert!(
+                children
+                    .iter()
+                    .all(|row| row.get::<String, _>("table") != "knowledge_request_evidence"),
+                "Evidence rebuild has a child table: {table}"
+            );
+        }
+        let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&source)
+            .await
+            .unwrap();
+        assert_eq!(enabled, 1, "Migration must run with foreign keys enabled");
+        let before_counts = counts(&source).await;
+        let before_schema = schema(&source).await;
+        assert!(before_schema.len() > 10);
+        let (old_backup, _) = snapshot(&source).await.unwrap();
+        let mut histories = Vec::new();
+        for owner in &owners {
+            histories.push(conversations::history(&source, owner).await.unwrap());
+        }
+        sqlx::migrate!("./migrations").run(&source).await.unwrap();
+        assert_eq!(
+            counts(&source).await,
+            before_counts,
+            "Every knowledge table, including derived tables, must retain its rows"
+        );
+        assert_eq!(
+            schema(&source).await,
+            before_schema,
+            "Indexes and triggers must retain their exact names, owners and SQL"
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&source)
+            .await
+            .unwrap()
+            .is_empty());
+        for (owner, history) in owners.iter().zip(&histories) {
+            assert_eq!(
+                serde_json::to_value(conversations::history(&source, owner).await.unwrap())
+                    .unwrap(),
+                serde_json::to_value(history).unwrap()
+            );
+        }
+        sqlx::query("INSERT INTO knowledge_request_evidence SELECT request_id,700,reference_json,display_json FROM knowledge_request_evidence WHERE request_id=? AND ordinal=1").bind(&first.request_id).execute(&source).await.unwrap();
+        assert!(sqlx::query("INSERT INTO knowledge_request_evidence SELECT request_id,1025,reference_json,display_json FROM knowledge_request_evidence WHERE request_id=? AND ordinal=1").bind(&first.request_id).execute(&source).await.is_err());
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, old_backup, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        for (owner, history) in owners.iter().zip(&histories) {
+            let restored = conversations::history(&destination, owner).await.unwrap();
+            assert_eq!(restored.len(), history.len());
+            for (after, before) in restored.iter().zip(history) {
+                assert_eq!(after.content, before.content);
+                if let Some(before) = &before.reply {
+                    let after = after.reply.as_ref().unwrap();
+                    assert_eq!(after.cited_tags, before.cited_tags);
+                    assert_eq!(after.evidence.len(), before.evidence.len());
+                    for (a, b) in after.evidence.iter().zip(&before.evidence) {
+                        assert_eq!(a.fingerprint, b.fingerprint);
+                        assert_eq!(a.locator, b.locator);
+                    }
+                }
+            }
+        }
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&destination)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn conversation_round_trip_keeps_seven_hundred_evidence_entries() {
+        use crate::knowledge::{conversations, retrieval, store, types::*};
+        let (source, mut request) = conversation_fixture().await;
+        let text = "Launch plan remains approved.";
+        for index in 0..700 {
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,'archive-source',?,'2026-09-01')")
+                .bind(format!("large-{index:04}")).bind(text).execute(&source).await.unwrap();
+        }
+        request.request_id = uuid::Uuid::new_v4().to_string();
+        conversations::reserve(&source, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        let frozen = retrieval::freeze_scope(&source, &request.search.scope)
+            .await
+            .unwrap();
+        let job: store::SourceJob = sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id='archive-source'").fetch_one(&source).await.unwrap();
+        let mut passages = Vec::new();
+        for index in 0..700 {
+            let id = format!("large-{index:04}");
+            passages.push(
+                store::materialize(
+                    &source,
+                    &store::SelectedRow::for_job(&job, id.clone()),
+                    TextSpan {
+                        transcript_id: id,
+                        start_byte: 0,
+                        end_byte: text.len(),
+                    },
+                    false,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        conversations::prepare(
+            &source,
+            &request.request_id,
+            &frozen,
+            &passages,
+            &BTreeMap::new(),
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        conversations::finish(
+            &source,
+            &request.request_id,
+            &frozen,
+            "Launch approved [K1][K700].",
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (manifest, _) = snapshot(&source).await.unwrap();
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        let reply = conversations::history(&destination, &request.owner)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+            .reply
+            .unwrap();
+        assert_eq!(reply.evidence.len(), 700);
+        assert_eq!(reply.evidence_metadata.len(), 700);
+        assert_eq!(reply.cited_tags, vec![1, 700]);
     }
 
     #[tokio::test]
