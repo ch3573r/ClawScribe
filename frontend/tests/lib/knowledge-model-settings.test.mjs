@@ -40,3 +40,15 @@ test('failed native download survives a new settings view and offers a retry',as
   assert(nodes(tree).some(node=>node.props?.role==='alert'&&/Retry/.test(text(node))));
   assert(nodes(tree).some(node=>node.type==='button'&&/Retry download/.test(text(node))));app.unmount();
 });
+test('status refresh moves the transfer through verification to readiness',async(t)=>{
+  let configuration={enabled:true,ready:false,installed:false,model:'intfloat/multilingual-e5-small',download:{...idle,stage:'downloading',downloaded_bytes:243675620,current_file:'onnx/model.onnx'}};
+  const app=settings(t,configuration,{modelStatus:async()=>configuration});
+  app.render();await flush();assert.match(text(app.render()),/50%/);
+  configuration={...configuration,download:{...configuration.download,stage:'verifying',downloaded_bytes:487351240}};
+  nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Refresh status').props.onClick();await flush();
+  assert.match(text(app.render()),/Verifying/);assert.doesNotMatch(text(app.render()),/100%/);
+  configuration={...configuration,ready:true,installed:true,download:{...configuration.download,stage:'ready',current_file:null}};
+  nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Refresh status').props.onClick();await flush();
+  assert.match(text(app.render()),/Ready for local semantic retrieval/);
+  assert(!nodes(app.render()).some(node=>node.type==='button'&&text(node)==='Cancel download'));
+});

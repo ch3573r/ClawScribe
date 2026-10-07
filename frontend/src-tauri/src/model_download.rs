@@ -269,19 +269,21 @@ pub(crate) async fn verify_file(path: &Path, size: u64, hash: &str) -> Result<()
     .await?
 }
 
-pub(crate) async fn download_file_checked(
+pub(crate) async fn download_file_checked_with_verification(
     client: &Client,
     url: &str,
     path: &Path,
     token: &CancellationToken,
     integrity: Option<(u64, &str)>,
     mut progress: impl FnMut(u64, u64),
+    mut verifying: impl FnMut(),
 ) -> Result<u64> {
     let operation = async {
         let partial = partial_path(path);
         let final_size = fs::metadata(path).await.ok().map(|m| m.len());
         if let Some((size, hash)) = integrity {
             if final_size == Some(size) {
+                verifying();
                 if verify_file(path, size, hash).await.is_ok() {
                     progress(size, size);
                     return Ok(size);
@@ -395,6 +397,7 @@ pub(crate) async fn download_file_checked(
             return Err(Cancelled.into());
         }
         if let Some((size, hash)) = integrity {
+            verifying();
             if let Err(error) = verify_file(&partial, size, hash).await {
                 fs::remove_file(&partial).await?;
                 return Err(error);
@@ -415,17 +418,17 @@ pub(crate) async fn download_file_checked(
     operation.await
 }
 
-/// Optional integrity-stage notification; ordinary transfer callbacks keep their contract.
-pub(crate) async fn download_file_checked_with_verification(
+/// Ordinary transfer callbacks keep their existing contract.
+pub(crate) async fn download_file_checked(
     client: &Client,
     url: &str,
     path: &Path,
     token: &CancellationToken,
     integrity: Option<(u64, &str)>,
     progress: impl FnMut(u64, u64),
-    _verifying: impl FnMut(),
 ) -> Result<u64> {
-    download_file_checked(client, url, path, token, integrity, progress).await
+    download_file_checked_with_verification(client, url, path, token, integrity, progress, || {})
+        .await
 }
 
 #[cfg(test)]
