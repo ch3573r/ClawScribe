@@ -82,8 +82,8 @@ pub struct OnnxEmbedding {
 impl OnnxEmbedding {
     // Called only on the scheduler's blocking worker after artifact verification.
     pub fn load(model: &VerifiedModel) -> Result<Self, KnowledgeError> {
-        let tokenizer = Tokenizer::from_file(model.root().join("tokenizer.json"))
-            .map_err(|_| KnowledgeError::ModelUnavailable)?;
+        #[cfg(test)]
+        acceptance::trace_load_phase("before_session");
         let session = (|| -> ort::Result<Session> {
             Session::builder()?
                 .with_execution_providers([CPUExecutionProvider::default()
@@ -111,6 +111,16 @@ impl OnnxEmbedding {
         {
             return Err(KnowledgeError::ModelUnavailable);
         }
+        #[cfg(test)]
+        acceptance::trace_load_phase("after_session");
+        // Session construction temporarily retains protobuf/initializer data.
+        // Do not overlap that phase with the resident tokenizer allocation.
+        #[cfg(test)]
+        acceptance::trace_load_phase("before_tokenizer");
+        let tokenizer = Tokenizer::from_file(model.root().join("tokenizer.json"))
+            .map_err(|_| KnowledgeError::ModelUnavailable)?;
+        #[cfg(test)]
+        acceptance::trace_load_phase("after_tokenizer");
         Ok(Self { session, tokenizer })
     }
     pub fn encode(
@@ -221,6 +231,18 @@ mod acceptance {
         },
         time::{Duration, Instant},
     };
+    // Test-only diagnostics: no model paths, input text, or production logging.
+    pub(super) fn trace_load_phase(stage: &str) {
+        if std::env::var_os("CLAWSCRIBE_KNOWLEDGE_REFERENCE").is_some() {
+            if let Some(memory) = memory_stats::memory_stats() {
+                println!(
+                    "KNOWLEDGE_PHASE stage={stage} rss_bytes={} private_bytes={}",
+                    memory.physical_mem, memory.virtual_mem
+                );
+            }
+        }
+    }
+
     #[derive(serde::Deserialize)]
     struct Reference {
         purpose: String,
@@ -247,6 +269,10 @@ mod acceptance {
         let fixtures: Vec<Reference> =
             serde_json::from_slice(&std::fs::read(reference).unwrap()).unwrap();
         let baseline = memory_stats::memory_stats().unwrap();
+        println!(
+            "KNOWLEDGE_BASELINE rss_bytes={} private_bytes={}",
+            baseline.physical_mem, baseline.virtual_mem
+        );
         let peak_rss = Arc::new(AtomicUsize::new(baseline.physical_mem));
         let peak_private = Arc::new(AtomicUsize::new(baseline.virtual_mem));
         let monitoring = Arc::new(AtomicBool::new(true));
