@@ -236,13 +236,14 @@ invoke wrapper. `useKnowledgeSearch` owns request sequence, loading state,
 actual retrieval mode, and scope; components render that state. Expose index
 progress, Pause/Retry/Rebuild, and model download in Settings.
 
-- [ ] Add helper tests `old_query_cannot_replace_new_results`, `meeting_navigation_discards_late_reply`, `scope_and_project_filter_stay_synchronized`, and `repeated_submit_reuses_request_id`. Assert only the newest response is visible and a single request is sent while pending.
-- [ ] Run `pnpm run test` from `frontend` and confirm the new assertions fail before implementation.
-- [ ] Add Keyword/Semantic search modes, selected-meeting/project scope, ranked passages, and an Ask about these meetings action. Keep keyword mode usable before model download.
-- [ ] Add citation previews with transcript reveal/playback navigation and stale/missing-source messages. Preserve existing meeting history and default scope. Show the configured answer provider and the actual retrieval mode.
-- [ ] Implement cancellation, empty/error states, accessible focus/keyboard behavior, dark/light/accent styling, and narrow-layout behavior using existing shared components.
-- [ ] Run `pnpm run typecheck`, `pnpm run test`, and `pnpm run build`; complete installed-app offline retrieval and provider-failure smoke on the designated runner. Update `README.md`, `docs/architecture.md`, and `docs/local-library.md` to describe only delivered behavior.
-- [ ] Run the safety scan and commit `feat: add meeting knowledge interface`.
+- [x] Add helper tests `old_query_cannot_replace_new_results`, `meeting_navigation_discards_late_reply`, `scope_and_project_filter_stay_synchronized`, and `repeated_submit_reuses_request_id`. Assert only the newest response is visible and a single request is sent while pending.
+- [x] Run `pnpm run test` from `frontend` and confirm the new assertions fail before implementation.
+- [x] Add Keyword/Semantic search modes, selected-meeting/project scope, ranked passages, and an Ask about these meetings action. Keep keyword mode usable before model download.
+- [x] Add citation previews with transcript reveal/playback navigation and stale/missing-source messages. Preserve existing meeting history and default scope. Show the configured answer provider and the actual retrieval mode.
+- [x] Implement cancellation, empty/error states, accessible focus/keyboard behavior, dark/light/accent styling, and narrow-layout behavior using existing shared components.
+- [x] Run `pnpm run typecheck`, `pnpm run test`, and `pnpm run build` on the designated runner. Update `README.md`, `docs/architecture.md`, and `docs/local-library.md` to describe only delivered behavior.
+- [ ] Complete installed-app offline retrieval, provider-failure recovery, citation navigation/playback, focus, and actual theme/narrow-layout smoke on the designated runner. These checks remain pending for the explicitly labeled preview; automated checks do not establish installed acceptance.
+- [x] Run the safety scan and commit `feat: add meeting knowledge interface`.
 
 **Phase 1 gate:** Search and cited library questions work independently of
 documents/live assistance. Pass fresh/upgrade database, mutation, deletion,
