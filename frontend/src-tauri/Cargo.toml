@@ -154,7 +154,9 @@ whatlang = "0.16.4"
 
 ffmpeg-sidecar = { git = "https://github.com/nathanbabcock/ffmpeg-sidecar", branch = "main" }
 
-sqlx = { version = "0.8", features = [ "runtime-tokio", "sqlite", "chrono"] }
+sqlx = { version = "=0.8.6", features = [ "runtime-tokio", "sqlite", "chrono"] }
+# SQLx's locked-handle API exposes this exact native ABI; no runtime upgrade.
+libsqlite3-sys = "=0.30.1"
 
 # Common Tauri configuration
 tauri = { version = "2.6.2", features = [ "macos-private-api", "protocol-asset", "tray-icon"] }

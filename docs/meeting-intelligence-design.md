@@ -117,6 +117,11 @@ Retrieval rules:
   when a decision changed, and qualify gaps instead of treating the closest
   semantic match as the current decision. Project scope prevents unrelated
   meetings with similar terminology from being silently combined.
+- Cap each passage display string (speaker, title and date) at 1,024 UTF-8
+  bytes on a character boundary and set `metadata_truncated` when any is
+  incomplete. Canonical metadata is retained and fully fingerprinted. Answer
+  prompts must label incomplete metadata and must not treat a clipped name or
+  date as a complete factual value; source previews must show the indication.
 
 The initial workload gate is 10,000 passages from synthetic meetings and at
 least 30 English/German retrieval questions. At least 27 questions must return

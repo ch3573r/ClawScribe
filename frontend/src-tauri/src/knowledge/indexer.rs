@@ -1,5 +1,5 @@
 //! One durable worker for the installed application pool. Notifications only wake it.
-use super::{chunking, model, retrieval, scheduler::Scheduler, store, types::*, KnowledgeState};
+use super::{model, retrieval, scheduler::Scheduler, store, types::*, KnowledgeState};
 use sqlx::SqlitePool;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -66,55 +66,66 @@ pub async fn index_source(
     runtime: &Arc<Scheduler>,
     job: &store::SourceJob,
 ) -> Result<(), KnowledgeError> {
-    let mut after: Option<(String, String)> = None;
+    let mut after: Option<String> = None;
     let mut ordinal = 0;
     let space = model::PINS.space();
     loop {
-        let rows = store::rows_page(
-            pool,
-            job,
-            after
-                .as_ref()
-                .map(|(time, id)| (time.as_str(), id.as_str())),
-        )
-        .await?;
+        if !runtime.is_enabled() {
+            return Err(KnowledgeError::Disabled);
+        }
+        drop(super::scheduler::claim_snapshot()?);
+        let rows = store::row_ids_page(pool, job, after.as_deref()).await?;
         if rows.is_empty() {
             break;
         }
-        for row in rows {
+        for id in rows {
+            let selected = store::SelectedRow::for_job(job, id.clone());
             let mut base = 0;
-            while base < row.transcript.len() {
+            loop {
+                if !runtime.is_enabled() {
+                    return Err(KnowledgeError::Disabled);
+                }
                 if !store::current(pool, job).await? {
                     return Err(KnowledgeError::Superseded);
                 }
-                let end = chunking::floor_boundary(&row.transcript, base + 16 * 1024);
-                let window = &row.transcript[base..end];
+                let (window, total) = store::body_window(pool, &selected, base).await?;
+                let end = base + window.len();
+                if base == total {
+                    break;
+                }
                 if window.trim().is_empty() {
                     base = end;
                     continue;
                 }
-                let spans = runtime.spans(row.id.clone(), window.into()).await?;
+                let spans = runtime.spans(id.clone(), window).await?;
                 if spans.is_empty() {
                     base = end;
                     continue;
                 }
                 // Retain the last partial chunk as the next window's beginning
                 // when more source bytes remain, so token overlap crosses windows.
-                let partial = end < row.transcript.len() && spans.len() > 1;
+                let partial = end < total && spans.len() > 1;
                 let count = spans.len() - usize::from(partial);
                 for span in spans.iter().take(count) {
                     let span = TextSpan {
-                        transcript_id: row.id.clone(),
+                        transcript_id: id.clone(),
                         start_byte: base + span.start_byte,
                         end_byte: base + span.end_byte,
                     };
+                    let passage = store::materialize(pool, &selected, span, true).await?;
                     let vector = runtime
-                        .embed(
-                            row.transcript[span.start_byte..span.end_byte].to_owned(),
-                            EmbeddingPurpose::Passage,
-                        )
+                        .embed(passage.text.clone(), EmbeddingPurpose::Passage)
                         .await?;
-                    store::stage(pool, job, &row, &span, ordinal, &vector, &space.id).await?;
+                    store::stage_evidence(
+                        pool,
+                        job,
+                        &passage.evidence,
+                        &passage.text,
+                        ordinal,
+                        &vector,
+                        &space.id,
+                    )
+                    .await?;
                     ordinal += 1;
                 }
                 base = if partial {
@@ -123,7 +134,7 @@ pub async fn index_source(
                     end
                 };
             }
-            after = Some((row.timestamp, row.id));
+            after = Some(id);
         }
     }
     store::publish(pool, job, &space.id).await

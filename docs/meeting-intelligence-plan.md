@@ -147,6 +147,11 @@ async fn retrieve(pool: &SqlitePool, runtime: &KnowledgeState,
 `SearchResponse` contains passages, actual retrieval mode, and index status.
 Each passage contains `EvidenceRef`, display metadata, text, and rank;
 define `EvidenceRef` in this task so Task 3 can implement its resolver.
+Each speaker/title/date display string is limited to 1,024 UTF-8 bytes on a
+character boundary, with `metadata_truncated: bool` marking any incomplete
+display metadata. Hash full canonical metadata without truncation. Task 3
+must label incomplete metadata in prompts and avoid treating clipped names or
+dates as complete facts; Task 4 must show the indication in source previews.
 Keep scope checks in the backend and use
 the existing tag semantics. Live is rejected until Task 7 supplies its source.
 

@@ -1,5 +1,7 @@
 //! Scoped keyword and local semantic retrieval.
-use super::store::{self, CanonicalRow, SourceJob};
+use super::store;
+#[cfg(test)]
+use super::store::{CanonicalRow, SourceJob};
 use super::types::*;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{BTreeMap, BinaryHeap};
@@ -11,7 +13,8 @@ pub const RRF_CONSTANT: f64 = 60.;
 #[cfg(test)]
 tokio::task_local! { static MOVE_AFTER_FTS: std::cell::RefCell<Option<(String,String)>>; }
 #[cfg(test)]
-static MAPPING_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static MAPPING_PEAK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 pub struct FrozenScope {
@@ -246,7 +249,7 @@ pub async fn search_channels(
             .collect::<Vec<_>>()
             .join(" OR ");
         let expression = format!("text: ({body_expression}) OR speaker: ({speaker_expression})");
-        let ids:Vec<String>=sqlx::query_scalar("SELECT f.transcript_id FROM knowledge_fts f JOIN transcripts t ON t.id=f.transcript_id JOIN json_each(?) allowed ON allowed.value=t.meeting_id WHERE knowledge_fts MATCH ? ORDER BY bm25(knowledge_fts),f.transcript_id LIMIT 64").bind(&allowed).bind(expression).fetch_all(pool).await?;
+        let selected:Vec<store::SelectedRow>=sqlx::query_as("SELECT f.transcript_id,s.id AS source_id,s.meeting_id,s.revision,s.generation FROM knowledge_fts f JOIN transcripts t ON t.id=f.transcript_id JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN json_each(?) allowed ON allowed.value=t.meeting_id WHERE knowledge_fts MATCH ? ORDER BY bm25(knowledge_fts),f.transcript_id LIMIT 64").bind(&allowed).bind(expression).fetch_all(pool).await?;
         #[cfg(test)]
         if let Ok(Some((id, owner))) = MOVE_AFTER_FTS.try_with(|slot| slot.borrow_mut().take()) {
             sqlx::query("UPDATE transcripts SET meeting_id=? WHERE id=?")
@@ -255,57 +258,29 @@ pub async fn search_channels(
                 .execute(pool)
                 .await?;
         }
-        for id in ids {
-            let Some(data) = canonical(pool, &id).await? else {
+        for selected in selected {
+            let Some(hit) = store::locate(
+                pool,
+                &selected,
+                query.into(),
+                terms.iter().map(|s| (*s).into()).collect(),
+                raw_terms.iter().map(|s| (*s).into()).collect(),
+            )
+            .await?
+            else {
                 continue;
             };
-            let hit = match_span(&data.0.transcript, query, &terms).or_else(|| {
-                data.0
-                    .speaker
-                    .as_ref()
-                    .and_then(|speaker| match_span(speaker, query, &raw_terms))
-                    .map(|_| {
-                        (
-                            0,
-                            super::chunking::floor_boundary(
-                                &data.0.transcript,
-                                super::chunking::LEXICAL_BYTES,
-                            ),
-                        )
-                    })
-            });
-            let Some((start, end)) = hit else {
-                continue;
-            };
-            let covering:Option<(i64,i64)>=sqlx::query_as("SELECT c.start_byte,c.end_byte FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id WHERE c.transcript_id=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.start_byte<=? AND c.end_byte>=? ORDER BY c.ordinal LIMIT 1").bind(&id).bind(&active_space).bind(start as i64).bind(end as i64).fetch_optional(pool).await?;
+            let covering:Option<(i64,i64)>=sqlx::query_as("SELECT c.start_byte,c.end_byte FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id WHERE c.transcript_id=? AND s.id=? AND s.revision=? AND s.generation=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.start_byte<=? AND c.end_byte>=? ORDER BY c.ordinal LIMIT 1").bind(&selected.transcript_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).bind(&active_space).bind(hit.start as i64).bind(hit.end as i64).fetch_optional(pool).await?;
             let span = if let Some((start, end)) = covering {
                 TextSpan {
-                    transcript_id: id,
+                    transcript_id: selected.transcript_id.clone(),
                     start_byte: start as usize,
                     end_byte: end as usize,
                 }
             } else {
-                let regular = super::chunking::lexical_spans(&id, &data.0.transcript)
-                    .into_iter()
-                    .find(|span| span.start_byte <= start && span.end_byte >= end);
-                regular.unwrap_or_else(|| {
-                    let mut begin =
-                        start.saturating_sub((super::chunking::LEXICAL_BYTES - (end - start)) / 2);
-                    while !data.0.transcript.is_char_boundary(begin) {
-                        begin += 1;
-                    }
-                    let finish = super::chunking::floor_boundary(
-                        &data.0.transcript,
-                        begin + super::chunking::LEXICAL_BYTES,
-                    );
-                    TextSpan {
-                        transcript_id: id,
-                        start_byte: begin,
-                        end_byte: finish,
-                    }
-                })
+                hit.lexical
             };
-            lexical.push(passage(data, span)?);
+            lexical.push(store::materialize(pool, &selected, span, false).await?);
         }
     }
     let semantic = if let Some((space, vector)) = vector {
@@ -333,6 +308,9 @@ pub async fn search_channels(
     });
     let mut result: Vec<Passage> = Vec::new();
     for mut candidate in candidates {
+        if !scope.meeting_ids.contains(&candidate.meeting_id) {
+            return Err(KnowledgeError::Superseded);
+        }
         if result
             .iter()
             .any(|existing| contained(existing, &candidate))
@@ -383,76 +361,6 @@ fn contained(a: &Passage, b: &Passage) -> bool {
         }
         _ => false,
     }
-}
-fn folded_match(text: &str, needle: &str) -> Option<(usize, usize)> {
-    if needle.is_empty() {
-        return None;
-    }
-    let mut folded = String::new();
-    let mut map = Vec::new();
-    for (start, ch) in text.char_indices() {
-        for lower in ch.to_lowercase() {
-            folded.push(lower);
-            for _ in 0..lower.len_utf8() {
-                map.push((start, start + ch.len_utf8()));
-            }
-        }
-    }
-    let needle = needle.to_lowercase();
-    #[cfg(test)]
-    MAPPING_PEAK.fetch_max(
-        map.len() * std::mem::size_of::<(usize, usize)>(),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    let start = folded.find(&needle)?;
-    Some((map[start].0, map[start + needle.len() - 1].1))
-}
-fn match_span(text: &str, query: &str, terms: &[&str]) -> Option<(usize, usize)> {
-    if let Some(span) = folded_match(text, query.trim()) {
-        return Some(span);
-    }
-    let mut terms = terms.to_vec();
-    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
-    terms.into_iter().find_map(|term| folded_match(text, term))
-}
-async fn canonical(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<Option<(CanonicalRow, SourceJob, String, String)>, KnowledgeError> {
-    let row=sqlx::query("SELECT t.*,s.id AS source_id,s.revision,s.generation,m.title,m.created_at AS date FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=?").bind(id).fetch_optional(pool).await?;
-    row.map(|row| {
-        #[cfg(test)]
-        store::track_row(&CanonicalRow::from_row(&row)?);
-        Ok((
-            CanonicalRow::from_row(&row)?,
-            SourceJob {
-                source_id: row.try_get("source_id")?,
-                meeting_id: row.try_get("meeting_id")?,
-                revision: row.try_get("revision")?,
-                generation: row.try_get("generation")?,
-            },
-            row.try_get("title")?,
-            row.try_get("date")?,
-        ))
-    })
-    .transpose()
-}
-fn passage(
-    data: (CanonicalRow, SourceJob, String, String),
-    span: TextSpan,
-) -> Result<Passage, KnowledgeError> {
-    let (row, job, title, date) = data;
-    let evidence = store::evidence(&job, &row, &span)?;
-    Ok(Passage {
-        evidence,
-        meeting_id: row.meeting_id,
-        title,
-        date,
-        speaker: row.speaker,
-        metadata_truncated: false,
-        text: row.transcript[span.start_byte..span.end_byte].into(),
-        rank: 0.,
-    })
 }
 #[derive(Debug)]
 struct Scored {
@@ -542,20 +450,18 @@ async fn semantic_candidates(
     best.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     let mut result = Vec::new();
     for hit in best {
-        let chunk:Option<(String,i64,i64,String)>=sqlx::query_as("SELECT c.transcript_id,c.start_byte,c.end_byte,c.fingerprint FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id WHERE c.id=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=?").bind(&hit.id).bind(space).fetch_optional(pool).await?;
-        if let Some((id, start, end, fingerprint)) = chunk {
-            if let Some(data) = canonical(pool, &id).await? {
-                let item = passage(
-                    data,
-                    TextSpan {
-                        transcript_id: id,
-                        start_byte: start as usize,
-                        end_byte: end as usize,
-                    },
-                )?;
-                if item.evidence.fingerprint == fingerprint && item.evidence.chunk_id == hit.id {
-                    result.push(item);
-                }
+        let chunk=sqlx::query("SELECT c.transcript_id,c.start_byte,c.end_byte,c.fingerprint,s.id AS source_id,s.meeting_id,s.revision,s.generation FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE c.id=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=?").bind(allowed).bind(&hit.id).bind(space).fetch_optional(pool).await?;
+        if let Some(chunk) = chunk {
+            let selected = store::SelectedRow::from_row(&chunk)?;
+            let fingerprint: String = chunk.try_get("fingerprint")?;
+            let span = TextSpan {
+                transcript_id: selected.transcript_id.clone(),
+                start_byte: chunk.try_get::<i64, _>("start_byte")? as usize,
+                end_byte: chunk.try_get::<i64, _>("end_byte")? as usize,
+            };
+            let item = store::materialize(pool, &selected, span, false).await?;
+            if item.evidence.fingerprint == fingerprint && item.evidence.chunk_id == hit.id {
+                result.push(item);
             }
         }
     }
@@ -1051,7 +957,6 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_ne!(hits[0].evidence.chunk_id, hits[1].evidence.chunk_id);
         assert_ne!(hits[0].date, hits[1].date);
-        assert_eq!(folded_match("İ Äpfel", "äpfel"), Some((3, 9)));
     }
     #[tokio::test]
     async fn covering_chunk_receives_both_channel_ranks() {

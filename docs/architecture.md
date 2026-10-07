@@ -525,6 +525,28 @@ at most 128 bytes of overlap. Semantic bodies use at most 320 model tokens and
 Evidence identities hash source/revision, canonical row/span and a fingerprint
 including current speaker and time metadata. They do not depend on derived
 cache rows. Titles and meeting dates are joined from current metadata.
+FTS selection carries the original source, revision and generation into
+materialization; a moved or replaced row is rejected as superseded. Canonical
+row pages contain IDs only. Bodies and complete speaker/timing metadata use
+16 KiB incremental SQLite reads, with hashing and keyword matching on one
+bounded blocking reader. Each reader owns its connection, read transaction,
+locked handle and BLOBs until completion or acknowledged cancellation, and
+releases them before model inference or writes. Recording prevents background
+reads and preempts them between windows; keyword reads remain available.
+
+The native boundary uses the existing resolved SQLx 0.8.6 and libsqlite3-sys
+0.30.1, now pinned exactly as required by
+[SQLx's locked-handle API](https://docs.rs/sqlx/0.8.6/sqlx/sqlite/struct.LockedSqliteHandle.html#method.as_raw_handle).
+[SQLite incremental BLOB reads](https://www.sqlite.org/c3ref/blob_open.html)
+also support TEXT values and avoid whole-value copies from SQL substring/cast
+expressions. BLOB handles close before their SQLx guards and transactions.
+No SQLite or model runtime version changes accompany this dependency edge.
+
+Display speaker, title and date strings are each capped at 1,024 UTF-8 bytes,
+with `metadata_truncated` explicitly marking incomplete previews. Complete
+canonical metadata is streamed into the existing evidence fingerprint format;
+internal ordering and scope checks use authoritative values. Answer prompts
+must label incomplete metadata rather than infer facts from clipped labels.
 
 Library scope requires selected meeting IDs, project/date/untagged constraints,
 or explicit `all_meetings`. Unicode-lowercase tag equality and Any/All/Untagged

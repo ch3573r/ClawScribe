@@ -996,6 +996,7 @@ dependencies = [
  "infer 0.15.0",
  "keyring",
  "lazy_static",
+ "libsqlite3-sys",
  "log",
  "memory-stats",
  "ndarray",

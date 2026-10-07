@@ -32,6 +32,16 @@ struct Priority {
     active: Option<Weak<AtomicBool>>,
 }
 static PRIORITY: Lazy<Mutex<Priority>> = Lazy::new(|| Mutex::new(Priority::default()));
+pub(crate) fn foreground_waiting() -> bool {
+    PRIORITY.lock().unwrap().foreground > 0
+}
+pub(crate) fn claim_snapshot() -> Result<tokio::sync::OwnedSemaphorePermit, KnowledgeError> {
+    let priority = PRIORITY.lock().unwrap();
+    if priority.foreground > 0 {
+        return Err(KnowledgeError::Busy);
+    }
+    inference::claim_job().map_err(|_| KnowledgeError::Busy)
+}
 pub(crate) struct ForegroundPriority {
     pub preempted: bool,
 }

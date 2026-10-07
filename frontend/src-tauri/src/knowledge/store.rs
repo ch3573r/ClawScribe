@@ -2,6 +2,549 @@
 use super::types::*;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
+pub const READ_BYTES: usize = 16 * 1024;
+pub const DISPLAY_BYTES: usize = 1024;
+
+/// Selection identity is carried through materialization, never re-inferred from
+/// a transcript ID that may have moved to a different owner in the meantime.
+#[derive(Debug, Clone, FromRow)]
+pub struct SelectedRow {
+    pub transcript_id: String,
+    pub source_id: String,
+    pub meeting_id: String,
+    pub revision: i64,
+    pub generation: i64,
+}
+impl SelectedRow {
+    pub fn for_job(job: &SourceJob, id: String) -> Self {
+        Self {
+            transcript_id: id,
+            source_id: job.source_id.clone(),
+            meeting_id: job.meeting_id.clone(),
+            revision: job.revision,
+            generation: job.generation,
+        }
+    }
+}
+#[derive(FromRow)]
+struct Snapshot {
+    rowid: i64,
+    meeting_rowid: i64,
+    speaker_null: bool,
+    words_null: bool,
+    audio_start_time: Option<f64>,
+    audio_end_time: Option<f64>,
+    duration: Option<f64>,
+}
+static READERS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
+    once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+struct CancelRead(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelRead {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+struct ReadContext {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    background: bool,
+}
+impl ReadContext {
+    fn check(&self) -> Result<(), KnowledgeError> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+            || (self.background && super::scheduler::foreground_waiting())
+        {
+            Err(KnowledgeError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The blocking closure owns its lease, transaction, locked handle and read
+/// permit. Dropping its async waiter signals cancellation but cannot free a
+/// SQLite pointer still in use. No handle survives a model await or a write.
+async fn read_snapshot<T: Send + 'static>(
+    pool: &SqlitePool,
+    selected: SelectedRow,
+    background: bool,
+    work: impl FnOnce(
+            &mut sqlx::sqlite::LockedSqliteHandle<'_>,
+            &Snapshot,
+            &ReadContext,
+        ) -> Result<T, KnowledgeError>
+        + Send
+        + 'static,
+) -> Result<T, KnowledgeError> {
+    let permit = READERS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| KnowledgeError::Cancelled)?;
+    let pool = pool.clone();
+    let context = ReadContext {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        background,
+    };
+    let waiter = CancelRead(context.cancelled.clone());
+    let runtime = tokio::runtime::Handle::current();
+    let result=tokio::task::spawn_blocking(move || {
+        let _permit=permit;
+        context.check()?;
+        let _priority=if background { Some(super::scheduler::claim_snapshot()?) } else { None };
+        runtime.block_on(async move {
+            let mut tx=pool.begin().await?;
+            let row:Snapshot=sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
+                .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx).await?.ok_or(KnowledgeError::Superseded)?;
+            let result={
+                let mut handle=(&mut *tx).lock_handle().await?;
+                context.check()?;
+                work(&mut handle,&row,&context)
+            };
+            // Explicitly finish before handing the result back to a caller that
+            // may immediately stage a vector using a one-connection pool.
+            match result { Ok(value)=>{tx.commit().await?;Ok(value)},Err(error)=>{tx.rollback().await?;Err(error)} }
+        })
+    }).await.map_err(|_|KnowledgeError::Storage)?;
+    drop(waiter);
+    result
+}
+
+/// Read-only incremental BLOB handles also support SQLite TEXT columns. This
+/// avoids materializing a complete TEXT value even inside SQLite's substr/cast.
+struct TextBlob<'a> {
+    raw: *mut libsqlite3_sys::sqlite3_blob,
+    len: usize,
+    #[cfg(test)]
+    body: bool,
+    _guard: std::marker::PhantomData<&'a mut libsqlite3_sys::sqlite3>,
+}
+impl<'a> TextBlob<'a> {
+    fn open(
+        handle: &'a mut sqlx::sqlite::LockedSqliteHandle<'_>,
+        table: &std::ffi::CStr,
+        column: &std::ffi::CStr,
+        rowid: i64,
+    ) -> Result<Self, KnowledgeError> {
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: SQLx's locked handle excludes its worker for this entire
+        // borrow. Static identifiers and read-only access are used. The BLOB
+        // cannot outlive the handle borrow and closes exactly once in Drop.
+        let status = unsafe {
+            libsqlite3_sys::sqlite3_blob_open(
+                handle.as_raw_handle().as_ptr(),
+                c"main".as_ptr(),
+                table.as_ptr(),
+                column.as_ptr(),
+                rowid,
+                0,
+                &mut raw,
+            )
+        };
+        if status != libsqlite3_sys::SQLITE_OK {
+            return Err(KnowledgeError::Storage);
+        }
+        let len = unsafe { libsqlite3_sys::sqlite3_blob_bytes(raw) } as usize;
+        Ok(Self {
+            raw,
+            len,
+            #[cfg(test)]
+            body: column == c"transcript",
+            _guard: std::marker::PhantomData,
+        })
+    }
+    fn window(
+        &self,
+        start: usize,
+        max: usize,
+        align_start: bool,
+        context: &ReadContext,
+    ) -> Result<(usize, String), KnowledgeError> {
+        context.check()?;
+        if start > self.len || max > READ_BYTES {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        let mut bytes = vec![0u8; max.min(self.len - start)];
+        if !bytes.is_empty() {
+            let status = unsafe {
+                libsqlite3_sys::sqlite3_blob_read(
+                    self.raw,
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len() as i32,
+                    start as i32,
+                )
+            };
+            if status != libsqlite3_sys::SQLITE_OK {
+                return Err(KnowledgeError::Storage);
+            }
+        }
+        #[cfg(test)]
+        if self.body {
+            BODY_PEAK.fetch_max(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        if !self.body {
+            METADATA_PEAK.fetch_max(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        let skipped = if align_start {
+            bytes
+                .iter()
+                .take_while(|byte| (**byte & 0xc0) == 0x80)
+                .count()
+        } else {
+            0
+        };
+        if skipped > 3 {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        let valid = match std::str::from_utf8(&bytes[skipped..]) {
+            Ok(_) => bytes.len() - skipped,
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => return Err(KnowledgeError::InvalidInput),
+        };
+        bytes.truncate(skipped + valid);
+        if skipped > 0 {
+            bytes.drain(..skipped);
+        }
+        Ok((
+            start + skipped,
+            String::from_utf8(bytes).map_err(|_| KnowledgeError::InvalidInput)?,
+        ))
+    }
+}
+impl Drop for TextBlob<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            libsqlite3_sys::sqlite3_blob_close(self.raw);
+        }
+    }
+}
+
+pub async fn row_ids_page(
+    pool: &SqlitePool,
+    job: &SourceJob,
+    after: Option<&str>,
+) -> Result<Vec<String>, KnowledgeError> {
+    if !current(pool, job).await? {
+        return Err(KnowledgeError::Superseded);
+    }
+    Ok(sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id=? AND (? IS NULL OR (timestamp,id)>(SELECT timestamp,id FROM transcripts WHERE id=?)) ORDER BY timestamp,id LIMIT 32").bind(&job.meeting_id).bind(after).bind(after).fetch_all(pool).await?)
+}
+pub async fn body_window(
+    pool: &SqlitePool,
+    selected: &SelectedRow,
+    start: usize,
+) -> Result<(String, usize), KnowledgeError> {
+    read_snapshot(pool, selected.clone(), true, move |handle, row, context| {
+        let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+        let (_, text) = blob.window(start, READ_BYTES, false, context)?;
+        Ok((text, blob.len))
+    })
+    .await
+}
+pub struct LocatedHit {
+    pub start: usize,
+    pub end: usize,
+    pub lexical: TextSpan,
+}
+pub async fn locate(
+    pool: &SqlitePool,
+    selected: &SelectedRow,
+    query: String,
+    terms: Vec<String>,
+    raw_terms: Vec<String>,
+) -> Result<Option<LocatedHit>, KnowledgeError> {
+    let id = selected.transcript_id.clone();
+    read_snapshot(
+        pool,
+        selected.clone(),
+        false,
+        move |handle, row, context| {
+            let hit = {
+                let body = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+                scan(&body, &query, &terms, context)?
+            };
+            let hit = if hit.is_some() {
+                hit
+            } else if !row.speaker_null {
+                let speaker_hit = {
+                    let speaker = TextBlob::open(handle, c"transcripts", c"speaker", row.rowid)?;
+                    scan(&speaker, &query, &raw_terms, context)?.is_some()
+                };
+                if speaker_hit {
+                    let body = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+                    let (_, text) =
+                        body.window(0, super::chunking::LEXICAL_BYTES, false, context)?;
+                    Some((0, text.len()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let Some((start, end)) = hit else {
+                return Ok(None);
+            };
+            let body = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+            let begin = if body.len <= super::chunking::LEXICAL_BYTES {
+                0
+            } else {
+                start.saturating_sub(super::chunking::LEXICAL_BYTES.saturating_sub(end - start) / 2)
+            };
+            let (begin, text) =
+                body.window(begin, super::chunking::LEXICAL_BYTES, true, context)?;
+            Ok(Some(LocatedHit {
+                start,
+                end,
+                lexical: TextSpan {
+                    transcript_id: id,
+                    start_byte: begin,
+                    end_byte: begin + text.len(),
+                },
+            }))
+        },
+    )
+    .await
+}
+fn scan(
+    blob: &TextBlob<'_>,
+    query: &str,
+    terms: &[String],
+    context: &ReadContext,
+) -> Result<Option<(usize, usize)>, KnowledgeError> {
+    let mut terms = terms.to_vec();
+    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
+    let mut patterns = vec![query.trim().to_lowercase()];
+    patterns.extend(terms.into_iter().map(|term| term.to_lowercase()));
+    let mut best: Option<(usize, usize, usize)> = None;
+    let mut start = 0;
+    while start < blob.len {
+        let (_, text) = blob.window(start, READ_BYTES, false, context)?;
+        if text.is_empty() {
+            break;
+        }
+        let mut folded = String::with_capacity(text.len() * 3);
+        let mut map = Vec::with_capacity(text.len() * 3);
+        for (offset, ch) in text.char_indices() {
+            for lower in ch.to_lowercase() {
+                folded.push(lower);
+                for _ in 0..lower.len_utf8() {
+                    map.push((start + offset, start + offset + ch.len_utf8()));
+                }
+            }
+        }
+        #[cfg(test)]
+        super::retrieval::MAPPING_PEAK.fetch_max(
+            map.capacity() * std::mem::size_of::<(usize, usize)>(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        for (rank, pattern) in patterns.iter().enumerate() {
+            if pattern.is_empty() {
+                continue;
+            }
+            if let Some(offset) = folded.find(pattern) {
+                if best.is_none_or(|found| rank < found.0) {
+                    best = Some((rank, map[offset].0, map[offset + pattern.len() - 1].1));
+                }
+            }
+        }
+        if best.is_some_and(|hit| hit.0 == 0) || start + text.len() == blob.len {
+            break;
+        }
+        let mut advance = text.len().saturating_sub(4096);
+        while !text.is_char_boundary(advance) {
+            advance += 1;
+        }
+        if advance == 0 {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        start += advance;
+    }
+    Ok(best.map(|(_, start, end)| (start, end)))
+}
+struct HashWriter<'a>(&'a mut Sha256);
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn hash_value(hash: &mut Sha256, value: &impl serde::Serialize) -> Result<(), KnowledgeError> {
+    serde_json::to_writer(HashWriter(hash), value).map_err(|_| KnowledgeError::InvalidInput)
+}
+fn hash_text(
+    hash: &mut Sha256,
+    blob: &TextBlob<'_>,
+    context: &ReadContext,
+) -> Result<(), KnowledgeError> {
+    hash.update(b"\"");
+    let mut start = 0;
+    while start < blob.len {
+        let (_, text) = blob.window(start, READ_BYTES, false, context)?;
+        if text.is_empty() {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        start += text.len();
+        let bytes = text.as_bytes();
+        let mut begin = 0;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if byte == b'"' || byte == b'\\' || byte < 32 {
+                hash.update(&bytes[begin..index]);
+                match byte {
+                    b'"' => hash.update(b"\\\""),
+                    b'\\' => hash.update(b"\\\\"),
+                    8 => hash.update(b"\\b"),
+                    12 => hash.update(b"\\f"),
+                    10 => hash.update(b"\\n"),
+                    13 => hash.update(b"\\r"),
+                    9 => hash.update(b"\\t"),
+                    _ => {
+                        const HEX: &[u8] = b"0123456789abcdef";
+                        hash.update([
+                            b'\\',
+                            b'u',
+                            b'0',
+                            b'0',
+                            HEX[(byte >> 4) as usize],
+                            HEX[(byte & 15) as usize],
+                        ]);
+                    }
+                }
+                begin = index + 1;
+            }
+        }
+        hash.update(&bytes[begin..]);
+    }
+    hash.update(b"\"");
+    Ok(())
+}
+fn display(
+    handle: &mut sqlx::sqlite::LockedSqliteHandle<'_>,
+    table: &std::ffi::CStr,
+    column: &std::ffi::CStr,
+    rowid: i64,
+    context: &ReadContext,
+) -> Result<(String, bool), KnowledgeError> {
+    let blob = TextBlob::open(handle, table, column, rowid)?;
+    let (_, text) = blob.window(0, DISPLAY_BYTES, false, context)?;
+    let clipped = text.len() < blob.len;
+    Ok((text, clipped))
+}
+pub async fn materialize(
+    pool: &SqlitePool,
+    selected: &SelectedRow,
+    span: TextSpan,
+    background: bool,
+) -> Result<Passage, KnowledgeError> {
+    let selected = selected.clone();
+    let pinned = selected.clone();
+    read_snapshot(pool, pinned, background, move |handle, row, context| {
+        if span.transcript_id != selected.transcript_id
+            || span.end_byte < span.start_byte
+            || span.end_byte - span.start_byte > READ_BYTES
+        {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        let text = {
+            let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+            let (_, text) = blob.window(
+                span.start_byte,
+                span.end_byte - span.start_byte,
+                false,
+                context,
+            )?;
+            if text.len() != span.end_byte - span.start_byte {
+                return Err(KnowledgeError::Superseded);
+            }
+            text
+        };
+        let mut hash = Sha256::new();
+        hash.update(b"[");
+        hash_value(&mut hash, &"canonical-transcript-v1")?;
+        hash.update(b",");
+        hash_value(&mut hash, &selected.transcript_id)?;
+        hash.update(b",");
+        hash_value(&mut hash, &selected.meeting_id)?;
+        hash.update(b",");
+        hash_value(&mut hash, &span)?;
+        hash.update(b",");
+        hash_value(&mut hash, &text)?;
+        hash.update(b",");
+        if row.speaker_null {
+            hash.update(b"null");
+        } else {
+            let blob = TextBlob::open(handle, c"transcripts", c"speaker", row.rowid)?;
+            hash_text(&mut hash, &blob, context)?;
+        }
+        hash.update(b",");
+        {
+            let blob = TextBlob::open(handle, c"transcripts", c"timestamp", row.rowid)?;
+            hash_text(&mut hash, &blob, context)?;
+        }
+        hash.update(b",");
+        hash_value(&mut hash, &row.audio_start_time)?;
+        hash.update(b",");
+        hash_value(&mut hash, &row.audio_end_time)?;
+        hash.update(b",");
+        hash_value(&mut hash, &row.duration)?;
+        hash.update(b",");
+        if row.words_null {
+            hash.update(b"null");
+        } else {
+            let blob = TextBlob::open(handle, c"transcripts", c"word_timestamps_json", row.rowid)?;
+            hash_text(&mut hash, &blob, context)?;
+        }
+        hash.update(b"]");
+        let fingerprint = format!("{:x}", hash.finalize());
+        let identity = serde_json::to_vec(&(
+            "evidence-v1",
+            &selected.source_id,
+            selected.revision,
+            &span,
+            &fingerprint,
+        ))
+        .map_err(|_| KnowledgeError::InvalidInput)?;
+        let (title, title_clipped) =
+            display(handle, c"meetings", c"title", row.meeting_rowid, context)?;
+        let (date, date_clipped) = display(
+            handle,
+            c"meetings",
+            c"created_at",
+            row.meeting_rowid,
+            context,
+        )?;
+        let (speaker, speaker_clipped) = if row.speaker_null {
+            (None, false)
+        } else {
+            let (value, clipped) = display(handle, c"transcripts", c"speaker", row.rowid, context)?;
+            (Some(value), clipped)
+        };
+        Ok(Passage {
+            evidence: EvidenceRef {
+                source_id: selected.source_id,
+                source_revision: selected.revision,
+                chunk_id: format!("{:x}", Sha256::digest(identity)),
+                fingerprint,
+                locator: EvidenceLocator::Transcript {
+                    meeting_id: selected.meeting_id.clone(),
+                    transcript_ids: vec![selected.transcript_id],
+                    spans: vec![span],
+                    start_seconds: row.audio_start_time,
+                },
+            },
+            meeting_id: selected.meeting_id,
+            title,
+            date,
+            speaker,
+            metadata_truncated: title_clipped || date_clipped || speaker_clipped,
+            text,
+            rank: 0.,
+        })
+    })
+    .await
+}
 #[cfg(test)]
 pub(crate) static BODY_PEAK: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -98,6 +641,7 @@ pub async fn next_job(pool: &SqlitePool) -> Result<Option<SourceJob>, KnowledgeE
 pub async fn current(pool: &SqlitePool, job: &SourceJob) -> Result<bool, KnowledgeError> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_sources s JOIN knowledge_index_jobs j ON j.source_id=s.id WHERE s.id=? AND s.revision=? AND s.generation=? AND j.generation=s.generation AND j.paused=0").bind(&job.source_id).bind(job.revision).bind(job.generation).fetch_one(pool).await? == 1)
 }
+#[cfg(test)]
 pub async fn rows_page(
     pool: &SqlitePool,
     job: &SourceJob,
@@ -114,6 +658,7 @@ pub async fn rows_page(
     }
     Ok(rows)
 }
+#[cfg(test)]
 pub async fn stage(
     pool: &SqlitePool,
     job: &SourceJob,
@@ -123,8 +668,38 @@ pub async fn stage(
     vector: &[f32],
     space: &str,
 ) -> Result<(), KnowledgeError> {
-    let vector = super::embedding::normalize(vector.to_vec())?;
     let reference = evidence(job, row, span)?;
+    stage_evidence(
+        pool,
+        job,
+        &reference,
+        &row.transcript[span.start_byte..span.end_byte],
+        ordinal,
+        vector,
+        space,
+    )
+    .await
+}
+pub async fn stage_evidence(
+    pool: &SqlitePool,
+    job: &SourceJob,
+    reference: &EvidenceRef,
+    text: &str,
+    ordinal: i64,
+    vector: &[f32],
+    space: &str,
+) -> Result<(), KnowledgeError> {
+    let EvidenceLocator::Transcript { spans, .. } = &reference.locator else {
+        return Err(KnowledgeError::InvalidInput);
+    };
+    if spans.len() != 1
+        || reference.source_id != job.source_id
+        || reference.source_revision != job.revision
+    {
+        return Err(KnowledgeError::InvalidInput);
+    }
+    let span = &spans[0];
+    let vector = super::embedding::normalize(vector.to_vec())?;
     let mut tx = pool.begin().await?;
     // This conditional write obtains SQLite's writer lock before checking the
     // generation; later commands cannot dirty or replace it during publication.
@@ -133,7 +708,7 @@ pub async fn stage(
         return Err(KnowledgeError::Superseded);
     }
     sqlx::query("INSERT INTO knowledge_chunks(id,source_id,revision,generation,ordinal,transcript_id,start_byte,end_byte,fingerprint,text) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,ordinal=excluded.ordinal")
-        .bind(&reference.chunk_id).bind(&job.source_id).bind(job.revision).bind(job.generation).bind(ordinal).bind(&row.id).bind(span.start_byte as i64).bind(span.end_byte as i64).bind(&reference.fingerprint).bind(&row.transcript[span.start_byte..span.end_byte]).execute(&mut *tx).await?;
+        .bind(&reference.chunk_id).bind(&job.source_id).bind(job.revision).bind(job.generation).bind(ordinal).bind(&span.transcript_id).bind(span.start_byte as i64).bind(span.end_byte as i64).bind(&reference.fingerprint).bind(text).execute(&mut *tx).await?;
     let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
     sqlx::query("INSERT INTO knowledge_vectors(chunk_id,space,dimensions,vector) VALUES(?,?,384,?) ON CONFLICT(chunk_id) DO UPDATE SET space=excluded.space,vector=excluded.vector")
         .bind(&reference.chunk_id).bind(space).bind(bytes).execute(&mut *tx).await?;
@@ -249,6 +824,106 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn aborted_blob_reader_keeps_lease_owned_and_releases_for_recreation_and_close() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        transcript(&pool).await;
+        let job = next_job(&pool).await.unwrap().unwrap();
+        let selected = SelectedRow::for_job(&job, "row".into());
+        let entered = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let pool = pool.clone();
+            let selected = selected.clone();
+            let entered = entered.clone();
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                read_snapshot(&pool, selected, false, move |handle, row, context| {
+                    let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+                    assert!(blob.len > 0);
+                    entered.store(true, Ordering::Release);
+                    while !context.cancelled.load(Ordering::Acquire) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    drop(blob);
+                    closed.store(true, Ordering::Release);
+                    context.check()
+                })
+                .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            pool.try_acquire().is_none(),
+            "worker owns the only connection while its BLOB is open"
+        );
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            sqlx::query("DELETE FROM transcripts WHERE id='row'").execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO transcripts(rowid,id,meeting_id,transcript,timestamp) VALUES(901,'row','one','Recreated BOREAL-731','00:01')").execute(&pool).await.unwrap();
+        }).await.unwrap();
+        assert!(
+            closed.load(Ordering::Acquire),
+            "BLOB closes before the connection is reused"
+        );
+        let span = TextSpan {
+            transcript_id: "row".into(),
+            start_byte: 0,
+            end_byte: 20,
+        };
+        assert!(matches!(
+            materialize(&pool, &selected, span.clone(), false).await,
+            Err(KnowledgeError::Superseded)
+        ));
+        let current = next_job(&pool).await.unwrap().unwrap();
+        let selected = SelectedRow::for_job(&current, "row".into());
+        let (text, total) = body_window(&pool, &selected, 0).await.unwrap();
+        assert_eq!(text, "Recreated BOREAL-731");
+        assert_eq!(text.len(), total);
+        let passage = materialize(
+            &pool,
+            &selected,
+            TextSpan {
+                end_byte: total,
+                ..span
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        stage_evidence(
+            &pool,
+            &current,
+            &passage.evidence,
+            &passage.text,
+            0,
+            &vec![1.; 384],
+            "test-space",
+        )
+        .await
+        .unwrap();
+        let failed = read_snapshot(&pool, selected, false, |handle, row, context| {
+            let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+            blob.window(0, READ_BYTES + 1, false, context)
+        })
+        .await;
+        assert!(matches!(failed, Err(KnowledgeError::InvalidInput)));
+        tokio::time::timeout(std::time::Duration::from_secs(5), pool.close())
+            .await
+            .unwrap();
+    }
     #[tokio::test]
     async fn fts_row_identity_survives_gaps_moves_and_recreated_rows() {
         let pool = database().await;
