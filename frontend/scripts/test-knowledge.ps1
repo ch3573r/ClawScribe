@@ -6,9 +6,12 @@ if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
     $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER) { throw 'Designated build runner required.' }
 . (Join-Path $PSScriptRoot 'configure-windows-portability.ps1')
 $env:LIBCLANG_PATH = Join-Path $env:ProgramFiles 'LLVM/bin'
-$pinnedSdk = 'C:/VulkanSDK/1.4.309.0'
-if (Test-Path -LiteralPath $pinnedSdk) { $env:VULKAN_SDK = $pinnedSdk }
-else { throw 'The repository-pinned Vulkan SDK 1.4.309.0 is required.' }
+if ([string]::IsNullOrWhiteSpace($env:VULKAN_SDK)) { throw 'The pinned Vulkan SDK is required.' }
+$header = Join-Path $env:VULKAN_SDK 'Include/vulkan/vulkan_core.h'
+if (-not (Test-Path -LiteralPath $header) -or
+    -not (Select-String -LiteralPath $header -Pattern '^#define VK_HEADER_VERSION 309$' -Quiet)) {
+    throw 'The repository-pinned Vulkan SDK 1.4.309.0 is required.'
+}
 ./frontend/scripts/ensure-windows-vulkan-runtime.ps1
 node scripts/verify-public-repo-safety.mjs
 cargo fmt --all -- --check

@@ -87,6 +87,11 @@ jobs:
         with:
           python-version: '3.11'
           cache: ''
+      - uses: humbletim/install-vulkan-sdk@v1.2
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge }}
+        with:
+          version: 1.4.309.0
+          cache: false
       - name: Run knowledge validation
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge }}
         env:
