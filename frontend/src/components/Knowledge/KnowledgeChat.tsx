@@ -31,7 +31,7 @@ function sourceTime(reply: AssistantReply, tag: number) {
 function Citation({ reply, state, tag }: { reply: AssistantReply; state: KnowledgeSearchState; tag: number }) {
   return <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="sm"
     className="mx-0.5 inline-flex h-5 min-w-5 align-super rounded px-1 text-xs text-primary"
-    aria-label={`Open source ${tag}`} onClick={() => void state.inspect(reply.evidence[tag - 1], reply.evidence_metadata[tag - 1])}>{tag}</Button></TooltipTrigger>
+    aria-label={`Open source ${tag}`} onClick={event => { event.preventDefault(); event.stopPropagation(); void state.inspect(reply.evidence[tag - 1], reply.evidence_metadata[tag - 1]); }}>{tag}</Button></TooltipTrigger>
     <TooltipContent>{reply.evidence_metadata[tag - 1].title} · {sourceTime(reply, tag)}</TooltipContent></Tooltip>;
 }
 function CitedAnswer({ reply, state }: { reply: AssistantReply; state: KnowledgeSearchState }) {
@@ -73,7 +73,7 @@ function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Knowledge
   </TooltipProvider>;
 }
 function conversationName(messages: HistoryMessage[]) {
-  const first = messages.find(message => message.role === "user");
+  const first = messages.find(message => message.role === "user" && message.content.trim());
   if (!first) return "New conversation";
   const date = new Date(first.created_at);
   const label = first.content.replace(/\s+/g, " ").trim().slice(0, 60);
@@ -153,6 +153,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       <div className="space-y-4 p-5" aria-live="polite">
         {secondary}
         {state.historyLoading && <p role="status" className="text-sm text-muted-foreground">Loading conversation…</p>}
+        {state.creating && !state.sending && <p role="status" className="text-sm text-muted-foreground">Creating conversation…</p>}
         {!state.messages.length && !state.historyLoading && <p className="text-sm text-muted-foreground">Ask about decisions, action items, or what was said.</p>}
         {state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
           <p className="mb-1 text-xs font-medium text-muted-foreground">{message.role === "user" ? "You" : "Assistant"}{message.status !== "completed" ? ` · ${message.status === "failed" ? "Failed" : message.status === "cancelled" ? "Cancelled" : "Pending"}` : ""}</p>

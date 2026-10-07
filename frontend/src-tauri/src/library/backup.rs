@@ -1436,8 +1436,11 @@ mod tests {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 owner: conversations::create_library(&source).await.unwrap(),
                 search: SearchRequest {
-                    scope: KnowledgeScope::Meeting {
-                        meeting_id: meeting.clone(),
+                    scope: KnowledgeScope::Library {
+                        filter: MeetingFilter {
+                            meeting_ids: vec![meeting.clone()],
+                            ..Default::default()
+                        },
                     },
                     query: "What was approved?".into(),
                     document_ids: vec![],
