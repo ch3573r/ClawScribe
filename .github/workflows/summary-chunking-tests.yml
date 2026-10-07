@@ -36,6 +36,10 @@ on:
         description: 'Measure synthetic 10000-row FTS updates and deletes'
         type: boolean
         default: false
+      answer-acceptance:
+        description: 'Run the fixed public synthetic answer corpus with the pinned local provider'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -112,4 +116,6 @@ jobs:
           FULL_SUITE: ${{ inputs['full-suite'] }}
           RETRIEVAL_ACCEPTANCE: ${{ inputs['retrieval-acceptance'] }}
           MUTATION_ACCEPTANCE: ${{ inputs['mutation-acceptance'] }}
-        run: ./frontend/scripts/test-knowledge.ps1 -Acceptance:($env:RUN_ACCEPTANCE -eq 'true') -FullSuite:($env:FULL_SUITE -ne 'false') -RetrievalAcceptance:($env:RETRIEVAL_ACCEPTANCE -eq 'true') -MutationAcceptance:($env:MUTATION_ACCEPTANCE -eq 'true')
+          ANSWER_ACCEPTANCE: ${{ inputs['answer-acceptance'] }}
+          CLAWSCRIBE_VALIDATION_ROOT: ${{ vars.CLAWSCRIBE_VALIDATION_ROOT }}
+        run: ./frontend/scripts/test-knowledge.ps1 -Acceptance:($env:RUN_ACCEPTANCE -eq 'true') -FullSuite:($env:FULL_SUITE -ne 'false') -RetrievalAcceptance:($env:RETRIEVAL_ACCEPTANCE -eq 'true') -MutationAcceptance:($env:MUTATION_ACCEPTANCE -eq 'true') -AnswerAcceptance:($env:ANSWER_ACCEPTANCE -eq 'true')

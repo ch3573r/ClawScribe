@@ -9,6 +9,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 pub struct AnswerRegistry {
     active: std::sync::Mutex<HashMap<String, (String, CancellationToken)>>,
+    #[cfg(test)]
+    inspected_prompts: std::sync::Mutex<HashMap<String, String>>,
 }
 impl AnswerRegistry {
     fn claim(
@@ -190,6 +192,13 @@ where
     // Final source check directly precedes dispatch. The monitor also cancels
     // provider admission waits when deletion or scope changes are detected.
     conversations::check_ready(pool, &request.request_id, &frozen).await?;
+    #[cfg(test)]
+    {
+        let mut inspected = runtime.answers.inspected_prompts.lock().unwrap();
+        if inspected.len() < 16 {
+            inspected.insert(request.request_id.clone(), prompt.clone());
+        }
+    }
     let output = dispatch(resolved, SYSTEM.into(), prompt, operation_token).await;
     if changed.load(std::sync::atomic::Ordering::Acquire) {
         return Err("Selected sources changed during generation".into());
@@ -311,6 +320,252 @@ pub fn build_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Actual first-attempt model outputs are written only to the explicitly
+    /// selected public synthetic review summary, never to diagnostics or Git.
+    #[tokio::test]
+    #[ignore = "requires designated runner, packaged helper and verified catalog model"]
+    async fn fixed_actual_answer_acceptance() {
+        use crate::summary::summary_engine::{client, model_manager::ModelManager, models};
+        use std::io::Write;
+        let expected = std::env::var("EXPECTED_BUILD_RUNNER").expect("Designated runner required");
+        assert!(!expected.is_empty());
+        for name in ["RUNNER_NAME", "COMPUTERNAME"] {
+            assert!(
+                std::env::var(name).unwrap().eq_ignore_ascii_case(&expected),
+                "Designated runner required"
+            );
+        }
+        let root = std::path::PathBuf::from(
+            std::env::var("CLAWSCRIBE_ANSWER_QA_ROOT")
+                .expect("Isolated synthetic profile required"),
+        );
+        let validation_root = std::path::PathBuf::from(
+            std::env::var("CLAWSCRIBE_VALIDATION_ROOT")
+                .expect("Explicit isolated validation root required"),
+        );
+        assert!(
+            root.parent() == Some(validation_root.as_path())
+                && root.file_name().unwrap() == "clawscribe-answer-qa",
+            "Isolated runner profile required"
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        let summary = std::env::var("GITHUB_STEP_SUMMARY")
+            .expect("Explicit public synthetic review output required");
+        let mut review = std::fs::OpenOptions::new()
+            .append(true)
+            .open(summary)
+            .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/knowledge-answer-qa.json"
+        ))
+        .unwrap();
+        let mut report_bytes = 0usize;
+        let mut write_record = |value: serde_json::Value| {
+            let encoded = serde_json::to_string_pretty(&value).unwrap();
+            report_bytes += encoded.len();
+            assert!(
+                report_bytes < 700 * 1024,
+                "Synthetic evaluation exceeds review bound"
+            );
+            writeln!(review, "\n```json\n{encoded}\n```\n").unwrap();
+            review.flush().unwrap();
+        };
+        let model = models::get_model_by_name("qwen3.5:4b").unwrap();
+        write_record(
+            serde_json::json!({"label":"PUBLIC SYNTHETIC EVALUATION — actual first attempts; independent factual review pending","fixture":fixture,"system":SYSTEM,"model_catalog":model,"answer_timeout_seconds":900,"cleanup_allowance_seconds":5,"context_budget":16384,"output_tokens":4096}),
+        );
+        let manager =
+            ModelManager::new_with_models_dir(Some(models::get_models_directory(&root))).unwrap();
+        assert!(
+            manager
+                .download_model_detailed("qwen3.5:4b", None)
+                .await
+                .is_ok(),
+            "Catalog model provisioning failed"
+        );
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for meeting in fixture["meetings"].as_array().unwrap() {
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,?,?,?)")
+                .bind(meeting["id"].as_str().unwrap())
+                .bind(meeting["title"].as_str().unwrap())
+                .bind(meeting["date"].as_str().unwrap())
+                .bind(meeting["date"].as_str().unwrap())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES (?,?)")
+                .bind(meeting["id"].as_str().unwrap())
+                .bind(meeting["tag"].as_str().unwrap())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for row in fixture["transcripts"].as_array().unwrap() {
+            let meeting = fixture["meetings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|meeting| meeting["id"] == row["meeting_id"])
+                .unwrap();
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,speaker,audio_start_time) VALUES (?,?,?,?,?,?)").bind(row["id"].as_str().unwrap()).bind(row["meeting_id"].as_str().unwrap()).bind(row["text"].as_str().unwrap()).bind(meeting["date"].as_str().unwrap()).bind(row["speaker"].as_str().unwrap()).bind(row["offset_ms"].as_f64().unwrap()/1000.).execute(&pool).await.unwrap();
+        }
+        crate::database::repositories::setting::SettingsRepository::save_model_config(
+            &pool,
+            "builtin-ai",
+            "qwen3.5:4b",
+            "base",
+            None,
+        )
+        .await
+        .unwrap();
+        let runtime = super::super::KnowledgeState::default();
+        let shared = conversations::create_library(&pool).await.unwrap();
+        let mut precursor_completed = false;
+        let mut failed = 0;
+        for case in fixture["cases"].as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            if id == "10" && !precursor_completed {
+                failed += 1;
+                write_record(
+                    serde_json::json!({"case":id,"runtime":"blocked_missing_real_precursor"}),
+                );
+                continue;
+            }
+            let owner = if matches!(id, "09" | "10") {
+                shared.clone()
+            } else {
+                conversations::create_library(&pool).await.unwrap()
+            };
+            let request = AskRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                owner: owner.clone(),
+                search: SearchRequest {
+                    scope: KnowledgeScope::Library {
+                        filter: serde_json::from_value(case["filter"].clone()).unwrap(),
+                    },
+                    query: case["query"].as_str().unwrap().into(),
+                    document_ids: vec![],
+                    mode: SearchMode::Keyword,
+                },
+            };
+            let frozen = retrieval::freeze_scope(&pool, &request.search.scope)
+                .await
+                .unwrap();
+            let allowed: Vec<String> =
+                serde_json::from_value(case["allowed_meetings"].clone()).unwrap();
+            assert_eq!(
+                frozen.meeting_ids, allowed,
+                "Fixed scope must match before actual generation"
+            );
+            let started = std::time::Instant::now();
+            let result = ask(&pool, &runtime, request.clone(), |_| {
+                Ok(TextEnvironment::local(root.clone()))
+            })
+            .await;
+            let elapsed = started.elapsed().as_millis();
+            let prompt = runtime
+                .answers
+                .inspected_prompts
+                .lock()
+                .unwrap()
+                .remove(&request.request_id);
+            match result {
+                Err(_) => {
+                    failed += 1;
+                    write_record(
+                        serde_json::json!({"case":id,"request":request,"runtime":"generation_failed","elapsed_ms":elapsed,"dispatched_prompt":prompt}),
+                    );
+                    println!("answer_qa case={id} runtime=failed");
+                }
+                Ok(reply) => {
+                    if id == "09" {
+                        precursor_completed = true;
+                    }
+                    let envelope: serde_json::Value =
+                        serde_json::from_str(prompt.as_deref().unwrap()).unwrap();
+                    let history_omitted = id != "10"
+                        || (envelope["prior_conversation"] == ""
+                            && !prompt.as_deref().unwrap().contains("MOB-DESK-44")
+                            && !prompt.as_deref().unwrap().contains("Nia Brook"));
+                    let mut resolutions = Vec::new();
+                    let mut valid = true;
+                    let mut rows = Vec::new();
+                    for reference in &reply.evidence {
+                        let resolution = super::super::evidence::resolve(&pool, reference)
+                            .await
+                            .unwrap();
+                        valid &=
+                            resolution.status == super::super::evidence::EvidenceStatus::Current;
+                        if let EvidenceLocator::Transcript {
+                            meeting_id,
+                            transcript_ids,
+                            spans,
+                            start_seconds,
+                        } = &reference.locator
+                        {
+                            valid &= allowed.contains(meeting_id);
+                            for row in transcript_ids {
+                                rows.push(row.clone());
+                                let original = fixture["transcripts"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|item| item["id"] == *row)
+                                    .unwrap();
+                                valid &= *start_seconds
+                                    == Some(original["offset_ms"].as_f64().unwrap() / 1000.)
+                                    && original["meeting_id"] == *meeting_id
+                                    && spans.iter().any(|span| {
+                                        span.transcript_id == *row
+                                            && span.start_byte == 0
+                                            && span.end_byte
+                                                == original["text"].as_str().unwrap().len()
+                                    });
+                            }
+                        } else {
+                            valid = false;
+                        }
+                        resolutions.push(serde_json::to_value(resolution).unwrap());
+                    }
+                    valid &= super::super::evidence::tag_numbers(&reply.content, 999)
+                        .iter()
+                        .all(|ordinal| *ordinal <= reply.evidence.len());
+                    let context = case["required_context"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|row| rows.iter().any(|id| row == id));
+                    let assistants:i64=sqlx::query_scalar("SELECT count(*) FROM knowledge_messages WHERE request_id=? AND role='assistant'").bind(&request.request_id).fetch_one(&pool).await.unwrap();
+                    let gates = valid
+                        && context
+                        && history_omitted
+                        && assistants == 1
+                        && reply.provider == "builtin-ai"
+                        && reply.model == "qwen3.5:4b";
+                    if !gates {
+                        failed += 1;
+                    }
+                    write_record(
+                        serde_json::json!({"case":id,"request":request,"frozen":frozen.meeting_ids,"actual_reply":reply,"dispatched_prompt":envelope,"canonical_resolutions":resolutions,"elapsed_ms":elapsed,"required_context_present":context,"history_isolated":history_omitted,"assistant_count":assistants,"automated_gate":gates,"factual_review":"pending"}),
+                    );
+                    println!("answer_qa case={id} runtime=completed automated_gate={gates}");
+                }
+            }
+        }
+        let cleanup =
+            tokio::time::timeout(Duration::from_secs(5), client::force_shutdown_sidecar()).await;
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "Synthetic provider cleanup failed"
+        );
+        assert_eq!(failed,0,"Actual-answer runtime/context/resolution gates failed; inspect synthetic review summary");
+    }
 
     async fn answer_fixture() -> (SqlitePool, AskRequest, tempfile::TempDir) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

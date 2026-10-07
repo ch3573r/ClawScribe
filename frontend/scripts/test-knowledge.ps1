@@ -1,4 +1,4 @@
-param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$RetrievalAcceptance, [switch]$MutationAcceptance)
+param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$RetrievalAcceptance, [switch]$MutationAcceptance, [switch]$AnswerAcceptance)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
@@ -51,6 +51,44 @@ $PSNativeCommandUseErrorActionPreference = $true
 if ($focusedFailures -ne 0) { throw "$focusedFailures focused native suites failed." }
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }
+if ($AnswerAcceptance) {
+    if ([string]::IsNullOrWhiteSpace($env:CLAWSCRIBE_VALIDATION_ROOT)) { throw 'An explicit isolated validation root is required.' }
+    $validationRoot = [System.IO.Path]::GetFullPath($env:CLAWSCRIBE_VALIDATION_ROOT)
+    if (-not (Test-Path -LiteralPath $validationRoot -PathType Container)) { throw 'The isolated validation root must be provisioned first.' }
+    $validationItem = Get-Item -LiteralPath $validationRoot
+    for ($ancestor = $validationItem; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+        if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root cannot traverse a reparse point.' }
+    }
+    $qaRoot = [System.IO.Path]::GetFullPath((Join-Path $validationRoot 'clawscribe-answer-qa'))
+    if ([IO.Path]::GetDirectoryName($qaRoot) -ine $validationRoot.TrimEnd('\')) { throw 'Invalid isolated profile boundary.' }
+    $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($qaRoot))
+    if (-not $volume.IsReady -or $volume.DriveType -ne [IO.DriveType]::Fixed -or $volume.AvailableFreeSpace -lt 4GB) { throw 'A fixed local volume with at least 4 GiB free is required for isolated answer validation.' }
+    if (Test-Path -LiteralPath $qaRoot) {
+        if ((Get-Item -LiteralPath $qaRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Synthetic profile cannot be a reparse point.' }
+        if (Get-ChildItem -LiteralPath $qaRoot -Force -Recurse -Attributes ReparsePoint | Select-Object -First 1) { throw 'Synthetic profile contains a reparse point.' }
+    }
+    New-Item -ItemType Directory -Force -Path $qaRoot | Out-Null
+    $probe = Join-Path $qaRoot ([guid]::NewGuid().ToString() + '.probe')
+    [IO.File]::WriteAllText($probe, 'isolated validation write probe')
+    Remove-Item -LiteralPath $probe
+    $env:CLAWSCRIBE_VALIDATION_ROOT = $validationRoot.TrimEnd('\')
+    $env:CLAWSCRIBE_ANSWER_QA_ROOT = $qaRoot
+    cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
+    $helperSource = 'target/x86_64-pc-windows-msvc/release/llama-helper.exe'
+    $helperDestination = Join-Path $testDirectory 'llama-helper.exe'
+    Copy-Item -LiteralPath $helperSource -Destination $helperDestination -Force
+    if ((Get-FileHash -LiteralPath $helperSource -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $helperDestination -Algorithm SHA256).Hash) { throw 'Packaged helper copy verification failed.' }
+    $PSNativeCommandUseErrorActionPreference = $false
+    # Native helper stderr includes local model paths. Emit only this test's
+    # explicitly sanitized outcomes; detailed invented text goes to step summary.
+    & $executables[0] knowledge::answers::tests::fixed_actual_answer_acceptance --ignored --exact --test-threads=1 --nocapture 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        if ($line -match '^answer_qa case=\d{2} runtime=(completed|failed)( automated_gate=(true|false))?$' -or $line -match '^test result:') { Write-Output $line }
+    }
+    $qaExit = $LASTEXITCODE
+    $PSNativeCommandUseErrorActionPreference = $true
+    if ($qaExit -ne 0) { throw 'Actual answer acceptance failed; inspect the bounded public synthetic evaluation summary.' }
+}
 if ($RetrievalAcceptance) {
     $cache = Join-Path $env:RUNNER_TEMP 'clawscribe-knowledge-acceptance'
     New-Item -ItemType Directory -Force $cache | Out-Null
