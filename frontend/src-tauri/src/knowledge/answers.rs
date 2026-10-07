@@ -424,6 +424,9 @@ async fn small_selection_context(
                         return Ok(None);
                     }
                     context.push(passage);
+                    if context.len() > super::evidence::MAX_EVIDENCE_ENTRIES {
+                        return Ok(None);
+                    }
                     if end >= total {
                         break;
                     }
@@ -607,7 +610,10 @@ pub fn build_prompt(
     history: &str,
     budget: usize,
 ) -> Result<(String, Vec<Passage>), String> {
-    if question.len() > 1024 || budget > 512 * 1024 {
+    if question.len() > 1024
+        || passages.len() > super::evidence::MAX_EVIDENCE_ENTRIES
+        || budget > 512 * 1024
+    {
         return Err("Invalid answer prompt limits".into());
     }
     let mut selected = Vec::new();

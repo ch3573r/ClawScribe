@@ -3,6 +3,18 @@ import test from 'node:test';
 import fs from 'node:fs';
 import { loadTsModule } from './load-ts-module.mjs';
 function helpers() { const m = fs.existsSync('src/lib/knowledge-state.ts') ? loadTsModule('src/lib/knowledge-state.ts') : {}; assert.equal(typeof m.libraryScope, 'function', 'meeting scope helpers must exist'); return m; }
+test('native and UI evidence limits agree and large maps preserve literal and question citations', () => {
+  const {MAX_EVIDENCE_ENTRIES,citationParts,contextLinks}=helpers();
+  const native=fs.readFileSync('src-tauri/src/knowledge/evidence.rs','utf8');
+  assert.equal(MAX_EVIDENCE_ENTRIES,1024);
+  assert.equal(Number(/pub const MAX_EVIDENCE_ENTRIES: usize = (\d+);/.exec(native)[1]),MAX_EVIDENCE_ENTRIES);
+  assert.deepEqual([...citationParts('[K700][K1024]',1024,[700,1024]).flatMap(part=>part.tags??[])],[700,1024]);
+  assert.equal(citationParts('[K1025]',1025,[1025]).flatMap(part=>part.tags??[]).length,0);
+  const evidence=Array.from({length:700},(_,i)=>({source_id:'meeting:a',source_revision:1,locator:{kind:'transcript',meeting_id:'a',transcript_ids:[`row-${i}`],spans:[{transcript_id:`row-${i}`,start_byte:0,end_byte:5}]}}));
+  const metadata=Array.from({length:700},()=>({}));metadata[699]={preceding_question_tag:699};
+  const result=contextLinks({evidence,evidence_metadata:metadata,cited_tags:[700],context_links:[{kind:'preceding_question',cited_tag:700,context_tag:699}]});
+  assert.equal(result.length,1);assert.equal(result[0].context_tag,699);
+});
 test('scope_and_project_filter_stay_synchronized', () => {
   const {libraryScope} = helpers(); const filter = {tags:['Öffnung'],untagged:false,mode:'all'};
   const result = libraryScope(['a'], false, filter, '2026-10-01','2026-10-07');

@@ -805,7 +805,7 @@ async fn import_conversations(
         let ordinal = row
             .get("ordinal")
             .and_then(Value::as_i64)
-            .filter(|n| (1..=64).contains(n))
+            .filter(|n| (1..=crate::knowledge::evidence::MAX_EVIDENCE_ENTRIES as i64).contains(n))
             .ok_or("Invalid citation ordinal")?;
         ordinals.entry(id.into()).or_default().push(ordinal);
         let reference: EvidenceRef =
@@ -1381,6 +1381,77 @@ mod tests {
             .await
             .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn conversation_round_trip_keeps_seven_hundred_evidence_entries() {
+        use crate::knowledge::{conversations, retrieval, store, types::*};
+        let (source, mut request) = conversation_fixture().await;
+        let text = "Launch plan remains approved.";
+        for index in 0..700 {
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,'archive-source',?,'2026-09-01')")
+                .bind(format!("large-{index:04}")).bind(text).execute(&source).await.unwrap();
+        }
+        request.request_id = uuid::Uuid::new_v4().to_string();
+        conversations::reserve(&source, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        let frozen = retrieval::freeze_scope(&source, &request.search.scope)
+            .await
+            .unwrap();
+        let job: store::SourceJob = sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id='archive-source'").fetch_one(&source).await.unwrap();
+        let mut passages = Vec::new();
+        for index in 0..700 {
+            let id = format!("large-{index:04}");
+            passages.push(
+                store::materialize(
+                    &source,
+                    &store::SelectedRow::for_job(&job, id.clone()),
+                    TextSpan {
+                        transcript_id: id,
+                        start_byte: 0,
+                        end_byte: text.len(),
+                    },
+                    false,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        conversations::prepare(
+            &source,
+            &request.request_id,
+            &frozen,
+            &passages,
+            &BTreeMap::new(),
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        conversations::finish(
+            &source,
+            &request.request_id,
+            &frozen,
+            "Launch approved [K1][K700].",
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (manifest, _) = snapshot(&source).await.unwrap();
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        let reply = conversations::history(&destination, &request.owner)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+            .reply
+            .unwrap();
+        assert_eq!(reply.evidence.len(), 700);
+        assert_eq!(reply.evidence_metadata.len(), 700);
+        assert_eq!(reply.cited_tags, vec![1, 700]);
     }
 
     #[tokio::test]

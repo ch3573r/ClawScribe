@@ -38,9 +38,9 @@ test('raw answer HTML remains visible text, never executable markup',()=>{
   assert.match(html,/&lt;img/);
 });
 test('budget-sized evidence maps retain citations after the former 64-row limit',()=>{
-  const html=rendered(reply('Both meetings are covered [K1][K331].',660));
-  assert.match(html,/aria-label="Open source 331"/);
-  assert.doesNotMatch(html,/\[K331\]/);
+  const html=rendered(reply('Both meetings are covered [K1][K700].',700));
+  assert.match(html,/aria-label="Open source 700"/);
+  assert.doesNotMatch(html,/\[K700\]/);
 });
 const jsx=(type,props)=>({type,props});
 const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
