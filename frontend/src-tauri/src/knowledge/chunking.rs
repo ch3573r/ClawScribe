@@ -6,16 +6,97 @@ pub const OVERLAP_TOKENS: usize = 48;
 pub const LEXICAL_BYTES: usize = 2048;
 pub const OVERLAP_BYTES: usize = 128;
 
-pub fn lexical_spans(_id: &str, _text: &str) -> Vec<TextSpan> {
-    Vec::new()
+pub fn floor_boundary(text: &str, mut end: usize) -> usize {
+    end = end.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+pub fn lexical_spans(id: &str, text: &str) -> Vec<TextSpan> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let end = floor_boundary(text, start + LEXICAL_BYTES);
+        result.push(TextSpan {
+            transcript_id: id.into(),
+            start_byte: start,
+            end_byte: end,
+        });
+        if end == text.len() {
+            break;
+        }
+        let mut next = end.saturating_sub(OVERLAP_BYTES);
+        while !text.is_char_boundary(next) {
+            next += 1;
+        }
+        start = next.max(start + 1);
+    }
+    result
 }
 
 pub fn semantic_spans(
-    _tokenizer: &tokenizers::Tokenizer,
-    _id: &str,
-    _text: &str,
+    tokenizer: &tokenizers::Tokenizer,
+    id: &str,
+    text: &str,
 ) -> Result<Vec<TextSpan>, super::types::KnowledgeError> {
-    Ok(Vec::new())
+    use super::types::KnowledgeError;
+    if text.len() > 16 * 1024 {
+        return Err(KnowledgeError::InvalidInput);
+    }
+    let mut result = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let encoded = tokenizer
+            .encode(&text[start..], false)
+            .map_err(|_| KnowledgeError::InvalidInput)?;
+        if encoded.is_empty() {
+            break;
+        }
+        let mut end = if encoded.len() <= BODY_TOKENS {
+            text.len()
+        } else {
+            start + encoded.get_offsets()[BODY_TOKENS - 1].1
+        };
+        end = floor_boundary(text, end);
+        // Retokenize the canonical slice: SentencePiece boundary normalization
+        // can change token count when a long row becomes a standalone passage.
+        let body = loop {
+            if end <= start {
+                return Err(KnowledgeError::InvalidInput);
+            }
+            let body = tokenizer
+                .encode(&text[start..end], false)
+                .map_err(|_| KnowledgeError::InvalidInput)?;
+            if body.len() <= BODY_TOKENS {
+                break body;
+            }
+            end = floor_boundary(text, end - 1);
+        };
+        let total = tokenizer
+            .encode(format!("passage: {}", &text[start..end]), true)
+            .map_err(|_| KnowledgeError::InvalidInput)?;
+        if total.len() > 512 {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        result.push(TextSpan {
+            transcript_id: id.into(),
+            start_byte: start,
+            end_byte: end,
+        });
+        if end == text.len() {
+            break;
+        }
+        let mut next = start + body.get_offsets()[body.len().saturating_sub(OVERLAP_TOKENS)].0;
+        while !text.is_char_boundary(next) {
+            next += 1;
+        }
+        if next <= start || next >= end {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        start = next;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

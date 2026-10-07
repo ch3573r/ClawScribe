@@ -18,6 +18,8 @@ pub enum KnowledgeError {
     Busy,
     #[error("Knowledge work was cancelled")]
     Cancelled,
+    #[error("Knowledge source changed")]
+    Superseded,
     #[error("Invalid embedding input")]
     InvalidInput,
     #[error("Document extraction failed")]
