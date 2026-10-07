@@ -529,6 +529,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_navigation_uses_canonical_page_position_and_never_stale_position() {
+        let (pool, _) = fixture().await;
+        for number in 0..205 {
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES (?, 'fixture','Public earlier row','00:01',1)")
+                .bind(format!("before-{number:03}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let frozen = retrieval::freeze_scope(&pool, &KnowledgeScope::Meeting { meeting_id: "fixture".into() }).await.unwrap();
+        let passage = retrieval::search_channels(&pool, &frozen, "Test", None).await.unwrap().remove(0);
+        let resolved = serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
+        assert_eq!(resolved["navigation"]["transcript_index"], 205);
+        assert_eq!(resolved["navigation"]["transcript_id"], "row");
+        assert_eq!(resolved["navigation"]["meeting_id"], "fixture");
+        sqlx::query("DELETE FROM transcripts WHERE id='before-000'").execute(&pool).await.unwrap();
+        let stale = serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
+        assert_eq!(stale["status"], "stale");
+        assert!(stale["navigation"].is_null());
+        let current = retrieval::search_channels(&pool, &retrieval::freeze_scope(&pool, &KnowledgeScope::Meeting { meeting_id: "fixture".into() }).await.unwrap(), "Test", None).await.unwrap().remove(0);
+        let resolved = serde_json::to_value(resolve(&pool, &current.evidence).await.unwrap()).unwrap();
+        assert_eq!(resolved["navigation"]["transcript_index"], 204);
+    }
+
+    #[tokio::test]
     async fn changed_passage_resolves_stale() {
         let (pool, passage) = fixture().await;
         assert_eq!(
