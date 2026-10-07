@@ -33,7 +33,7 @@
         "verify:public-repo": "node ../scripts/verify-public-repo-safety.mjs",
         "verify:icons": "powershell -ExecutionPolicy Bypass -File scripts/verify-brand-icons.ps1",
         "lint": "next lint",
-        "test": "node --test tests/lib/*.test.mjs",
+        "test": "node --test --test-concurrency=1 tests/lib/*.test.mjs",
         "test:cloud-live": "cargo test --manifest-path src-tauri/Cargo.toml --lib audio::transcription::cloud::live_smoke::hosted_api_transcription_live_smoke -- --ignored --nocapture --test-threads=1",
         "typecheck": "tsc --noEmit"
     },

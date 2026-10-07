@@ -6,6 +6,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      diagnose-timeline-worker:
+        description: 'Compare timeline tests without worker isolation and serial/full workers'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -112,8 +117,25 @@ jobs:
         run: pnpm typecheck
 
       - name: Test frontend helpers
+        if: ${{ !inputs['diagnose-timeline-worker'] }}
         working-directory: frontend
         run: pnpm test
+
+      - name: Diagnose timeline test worker
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs['diagnose-timeline-worker'] }}
+        working-directory: frontend
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failures = 0
+          node --version
+          node --test --test-isolation=none tests/lib/speaker-timeline.test.mjs
+          if ($LASTEXITCODE -ne 0) { $failures++ }
+          node --test tests/lib/speaker-timeline.test.mjs
+          if ($LASTEXITCODE -ne 0) { $failures++ }
+          node --test --test-concurrency=1 tests/lib/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { $failures++ }
+          if ($failures -ne 0) { throw "$failures frontend diagnostic variants failed." }
 
       - name: Generate validation summary
         env:
