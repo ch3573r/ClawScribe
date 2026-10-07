@@ -538,18 +538,48 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let frozen = retrieval::freeze_scope(&pool, &KnowledgeScope::Meeting { meeting_id: "fixture".into() }).await.unwrap();
-        let passage = retrieval::search_channels(&pool, &frozen, "Test", None).await.unwrap().remove(0);
-        let resolved = serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
+        let frozen = retrieval::freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "fixture".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let passage = retrieval::search_channels(&pool, &frozen, "Test", None)
+            .await
+            .unwrap()
+            .remove(0);
+        let resolved =
+            serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
         assert_eq!(resolved["navigation"]["transcript_index"], 205);
         assert_eq!(resolved["navigation"]["transcript_id"], "row");
         assert_eq!(resolved["navigation"]["meeting_id"], "fixture");
-        sqlx::query("DELETE FROM transcripts WHERE id='before-000'").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM transcripts WHERE id='before-000'")
+            .execute(&pool)
+            .await
+            .unwrap();
         let stale = serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
         assert_eq!(stale["status"], "stale");
         assert!(stale["navigation"].is_null());
-        let current = retrieval::search_channels(&pool, &retrieval::freeze_scope(&pool, &KnowledgeScope::Meeting { meeting_id: "fixture".into() }).await.unwrap(), "Test", None).await.unwrap().remove(0);
-        let resolved = serde_json::to_value(resolve(&pool, &current.evidence).await.unwrap()).unwrap();
+        let current = retrieval::search_channels(
+            &pool,
+            &retrieval::freeze_scope(
+                &pool,
+                &KnowledgeScope::Meeting {
+                    meeting_id: "fixture".into(),
+                },
+            )
+            .await
+            .unwrap(),
+            "Test",
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+        let resolved =
+            serde_json::to_value(resolve(&pool, &current.evidence).await.unwrap()).unwrap();
         assert_eq!(resolved["navigation"]["transcript_index"], 204);
     }
 
