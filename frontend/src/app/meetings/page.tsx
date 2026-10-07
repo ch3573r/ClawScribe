@@ -137,7 +137,7 @@ export default function MeetingsPage() {
   const shownCount = visibleMeetings.length;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto bg-background text-foreground">
+    <div className="h-full min-h-0 overflow-y-auto bg-background text-foreground">
       <div className="mx-auto flex min-h-full w-full max-w-[1600px] flex-col gap-6 px-8 py-7">
         <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
