@@ -1,6 +1,8 @@
 //! Opt-in local knowledge resources; meeting persistence remains in AppState.
+pub mod chunking;
 pub mod embedding;
 pub mod model;
+pub mod retrieval;
 pub mod scheduler;
 pub mod store;
 pub mod types;
