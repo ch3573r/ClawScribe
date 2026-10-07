@@ -31,6 +31,23 @@ pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
 pub(crate) async fn claim_job_preempting_local_summary(
     reason: &'static str,
 ) -> Result<OwnedSemaphorePermit, String> {
+    // Block new indexing claims before cancelling the current input. Native FFI
+    // retains both permits until it actually completes.
+    let priority = crate::knowledge::scheduler::ForegroundPriority::enter();
+    if priority.preempted {
+        if let Ok(permit) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(permit) = claim_job() {
+                    break permit;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        {
+            return Ok(permit);
+        }
+    }
     let original = match claim_job() {
         Ok(permit) => return Ok(permit),
         Err(error) => error,

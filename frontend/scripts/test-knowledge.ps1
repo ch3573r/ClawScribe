@@ -12,6 +12,8 @@ if (-not $env:VULKAN_SDK) {
 }
 ./frontend/scripts/ensure-windows-vulkan-runtime.ps1
 node scripts/verify-public-repo-safety.mjs
+cargo fmt --all -- --check
+cargo check -p clawscribe --locked --features windows-gpu
 ./frontend/scripts/stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml
 $runtime = (Resolve-Path 'frontend/src-tauri/binaries/sherpa-onnx').Path
 $env:PATH = "$runtime;$env:PATH"
@@ -30,3 +32,19 @@ Get-ChildItem -LiteralPath $runtime -Filter '*.dll' -File | ForEach-Object {
 $ffmpeg = 'frontend/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe'
 if (Test-Path $ffmpeg) { Copy-Item $ffmpeg (Join-Path $testDirectory 'ffmpeg.exe') -Force }
 & $executables[0] knowledge:: --test-threads=1
+
+& $executables[0] --test-threads=1
+if ($Acceptance) {
+    $cache = Join-Path $env:RUNNER_TEMP 'clawscribe-knowledge-acceptance'
+    New-Item -ItemType Directory -Force $cache | Out-Null
+    $venv = Join-Path $cache 'reference-venv'
+    $python = Join-Path $venv 'Scripts/python.exe'
+    if (-not (Test-Path $python)) { python -m venv $venv }
+    & $python -m pip install --disable-pip-version-check --index-url https://download.pytorch.org/whl/cpu torch==2.6.0
+    & $python -m pip install --disable-pip-version-check transformers==4.51.3 tokenizers==0.21.4 numpy==2.2.6 safetensors==0.5.3 huggingface-hub==0.30.2
+    $reference = Join-Path $cache 'reference.json'
+    & $python frontend/scripts/knowledge-reference.py (Join-Path $cache 'pytorch') $reference
+    $env:CLAWSCRIBE_KNOWLEDGE_MODEL = Join-Path $cache 'onnx'
+    $env:CLAWSCRIBE_KNOWLEDGE_REFERENCE = $reference
+    & $executables[0] knowledge::embedding::acceptance::pinned_onnx_reference_and_resource_gate --ignored --exact --test-threads=1 --nocapture
+}

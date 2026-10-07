@@ -570,6 +570,7 @@ pub fn run() {
         .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
         .manage(summary::edit_exit::SummaryEditsState::default())
+        .manage(knowledge::KnowledgeState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
