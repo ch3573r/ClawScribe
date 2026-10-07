@@ -119,6 +119,48 @@ mod tests {
     use super::*;
     use crate::knowledge::{retrieval, store};
 
+    #[test]
+    fn grouped_citations_retain_every_explicit_original_ordinal() {
+        assert_eq!(
+            tag_numbers("Changed [K3, K1]. Repeated [K3].", 3),
+            vec![1, 3]
+        );
+        assert_eq!(
+            tag_numbers("Context [K1-K4]. Limit [K6, K5].", 6),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            tag_numbers("Facts [K2,K1] and [K3 - K4].", 4),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn malformed_or_out_of_map_groups_never_create_links() {
+        for content in [
+            "[K1, K999]",
+            "[K0-K3]",
+            "[K3-K1]",
+            "[K1-K999]",
+            "[K01, K2]",
+            "[K1,2]",
+            "[K1,,K2]",
+            "[K1-K2-K3]",
+            "[K1, K2-K3]",
+            "[K1; K2]",
+            "[K1 and K2]",
+            "[K1[K2]",
+            "[K1, K2",
+        ] {
+            assert!(
+                tag_numbers(content, 3).is_empty(),
+                "Invalid citation group: {content}"
+            );
+        }
+        assert!(tag_numbers("[K1, K2]", 1).is_empty());
+        assert_eq!(tag_numbers("Unknown [K999]. Known [K1].", 1), vec![1]);
+    }
+
     async fn fixture() -> (SqlitePool, Passage) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
