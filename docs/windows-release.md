@@ -186,6 +186,20 @@ and verification metadata remain in the local runner checkout's
 copy needed outputs locally before a later build replaces them. Dependency,
 SDK, and build caches also remain local, with Actions caching disabled.
 Draft builds upload to an explicitly requested draft GitHub Release instead.
+For disk pressure, manually dispatch **Summary chunking regression tests** with
+`inspect-runner-storage` enabled to report generated build sizes without tests.
+Its optional `prune-generated-caches` input clears only the workspace's Rust
+debug incremental cache and Next.js cache after rejecting paths or contents
+that contain links. Source, models, credentials, installers, and other build
+outputs remain intact; subsequent checks recreate these caches locally.
+If more space is needed, `prune-debug-build` removes the generated Rust debug
+tree using the same path checks. The next debug check recompiles it; release
+build output and installers remain intact.
+An alternative `compress-release-dependencies` input applies native filesystem
+compression only to regular Rust `.rlib`/`.rmeta` files in the release dependency
+directory after checking every parent for links. It preserves those files and
+does not compress models, executables, installers, or source. Use another local
+volume for large evaluation model caches when available.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
 installers, and then runs the required native regression suites before staging

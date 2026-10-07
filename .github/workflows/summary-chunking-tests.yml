@@ -40,6 +40,22 @@ on:
         description: 'Run the fixed public synthetic answer corpus with the pinned local provider'
         type: boolean
         default: false
+      inspect-runner-storage:
+        description: 'Inspect local generated build storage without running tests'
+        type: boolean
+        default: false
+      prune-generated-caches:
+        description: 'Remove only Rust incremental and Next.js caches before inspection'
+        type: boolean
+        default: false
+      prune-debug-build:
+        description: 'Remove the regenerable Rust debug build tree before inspection'
+        type: boolean
+        default: false
+      compress-release-dependencies:
+        description: 'Compress regular Rust release .rlib/.rmeta files without deleting them'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -80,12 +96,89 @@ jobs:
           ref: ${{ inputs.knowledge && inputs['build-ref'] || github.sha }}
           clean: false
           persist-credentials: false
+      - name: Inspect generated build storage
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs['inspect-runner-storage'] }}
+        env:
+          PRUNE_GENERATED_CACHES: ${{ inputs['prune-generated-caches'] }}
+          PRUNE_DEBUG_BUILD: ${{ inputs['prune-debug-build'] }}
+          COMPRESS_RELEASE_DEPENDENCIES: ${{ inputs['compress-release-dependencies'] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          $prune = @()
+          if ($env:PRUNE_DEBUG_BUILD -eq 'true') { $prune += 'target/debug' }
+          if ($env:PRUNE_GENERATED_CACHES -eq 'true') { $prune += @('target/debug/incremental', 'frontend/.next/cache') }
+          if ($prune.Count -gt 0) {
+            $prefix = $workspace.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+            foreach ($relative in $prune) {
+              $candidate = Join-Path $workspace $relative
+              if (Test-Path -LiteralPath $candidate -PathType Container) {
+                $resolved = (Resolve-Path -LiteralPath $candidate).Path
+                if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Cache is outside the workspace.' }
+                $entry = Get-Item -LiteralPath $resolved
+                while ($null -ne $entry) {
+                  if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw 'Cache path contains a link.' }
+                  $entry = $entry.Parent
+                }
+                if (Get-ChildItem -LiteralPath $resolved -Recurse -Force | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }) { throw 'Cache contains a link.' }
+                Remove-Item -LiteralPath $resolved -Recurse -Force
+                Write-Host "Removed regenerable cache: $relative"
+              }
+            }
+          }
+          if ($env:COMPRESS_RELEASE_DEPENDENCIES -eq 'true') {
+            $candidate = Join-Path $workspace 'target/release/deps'
+            $resolved = (Resolve-Path -LiteralPath $candidate).Path
+            $prefix = $workspace.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Dependencies are outside the workspace.' }
+            $entry = Get-Item -LiteralPath $resolved
+            while ($null -ne $entry) {
+              if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw 'Dependency path contains a link.' }
+              $entry = $entry.Parent
+            }
+            $files = @(Get-ChildItem -LiteralPath $resolved -File | Where-Object { $_.Extension -in @('.rlib', '.rmeta') })
+            if ($files | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }) { throw 'Dependency file is a link.' }
+            $compact = Join-Path $env:SystemRoot 'System32/compact.exe'
+            for ($offset = 0; $offset -lt $files.Count; $offset += 32) {
+              $last = [Math]::Min($offset + 31, $files.Count - 1)
+              $batch = @($files[$offset..$last] | ForEach-Object FullName)
+              & $compact /C /I /Q @batch | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'Generated dependency compression failed.' }
+            }
+            Write-Host "Compressed $($files.Count) regular Rust release dependency files without deletion."
+          }
+          $drive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot($workspace).Substring(0, 1))
+          Write-Host "Workspace volume: free=$($drive.Free) used=$($drive.Used) bytes"
+          Get-PSDrive -PSProvider FileSystem | ForEach-Object { Write-Host "Volume $($_.Name): free=$($_.Free) used=$($_.Used) bytes" }
+          $debug = Join-Path $workspace 'target/debug'
+          if (Test-Path -LiteralPath $debug -PathType Container) {
+            Get-ChildItem -LiteralPath $debug -Recurse -Force | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint } | ForEach-Object {
+              Write-Host "Debug link: $([System.IO.Path]::GetRelativePath($debug, $_.FullName))"
+            }
+          }
+          foreach ($relative in @('target/debug', 'target/release', 'frontend/src-tauri/target/debug', 'frontend/src-tauri/target/release', 'frontend/node_modules', 'frontend/.next')) {
+            $directory = Join-Path $workspace $relative
+            if (Test-Path -LiteralPath $directory -PathType Container) {
+              foreach ($entry in Get-ChildItem -LiteralPath $directory -Directory) {
+                $bytes = (Get-ChildItem -LiteralPath $entry.FullName -File -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                Write-Host "$relative/$($entry.Name): $bytes bytes"
+              }
+              $bytes = (Get-ChildItem -LiteralPath $directory -File | Measure-Object Length -Sum).Sum
+              Write-Host "$relative root files: $bytes bytes"
+            }
+          }
+          $dependencies = Join-Path $workspace 'target/release/deps'
+          if (Test-Path -LiteralPath $dependencies -PathType Container) {
+            Get-ChildItem -LiteralPath $dependencies -File | Sort-Object Length -Descending | Select-Object -First 20 | ForEach-Object {
+              Write-Host "Release dependency $($_.Name): $($_.Length) bytes, modified $($_.LastWriteTimeUtc.ToString('o'))"
+            }
+          }
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ !inputs.knowledge }}
+        if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] }}
         with:
           targets: x86_64-pc-windows-msvc
       - name: Compile production chunker and its unit tests without desktop dependencies
-        if: ${{ !inputs.knowledge }}
+        if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -93,7 +186,7 @@ jobs:
           rustc --version
           rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o $testExe
       - name: Verify source coverage, Unicode, overlap, and token budgets
-        if: ${{ !inputs.knowledge }}
+        if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
