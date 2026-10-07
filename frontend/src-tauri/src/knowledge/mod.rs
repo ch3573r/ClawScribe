@@ -2,6 +2,7 @@
 pub mod chunking;
 pub mod conversations;
 pub mod embedding;
+pub mod evidence;
 pub mod indexer;
 pub mod model;
 pub mod retrieval;
