@@ -24,6 +24,10 @@ on:
         description: 'Remove the regenerable Rust debug build tree before inspection'
         type: boolean
         default: false
+      compress-release-dependencies:
+        description: 'Compress regular Rust release .rlib/.rmeta files without deleting them'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,6 +67,7 @@ jobs:
         env:
           PRUNE_GENERATED_CACHES: ${{ inputs['prune-generated-caches'] }}
           PRUNE_DEBUG_BUILD: ${{ inputs['prune-debug-build'] }}
+          COMPRESS_RELEASE_DEPENDENCIES: ${{ inputs['compress-release-dependencies'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
@@ -77,16 +82,36 @@ jobs:
                 $resolved = (Resolve-Path -LiteralPath $candidate).Path
                 if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Cache is outside the workspace.' }
                 $entry = Get-Item -LiteralPath $resolved
-                while ($entry.FullName -ine $workspace) {
+                while ($null -ne $entry) {
                   if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw 'Cache path contains a link.' }
                   $entry = $entry.Parent
-                  if ($null -eq $entry) { throw 'Cache path escaped the workspace.' }
                 }
                 if (Get-ChildItem -LiteralPath $resolved -Recurse -Force | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }) { throw 'Cache contains a link.' }
                 Remove-Item -LiteralPath $resolved -Recurse -Force
                 Write-Host "Removed regenerable cache: $relative"
               }
             }
+          }
+          if ($env:COMPRESS_RELEASE_DEPENDENCIES -eq 'true') {
+            $candidate = Join-Path $workspace 'target/release/deps'
+            $resolved = (Resolve-Path -LiteralPath $candidate).Path
+            $prefix = $workspace.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Dependencies are outside the workspace.' }
+            $entry = Get-Item -LiteralPath $resolved
+            while ($null -ne $entry) {
+              if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw 'Dependency path contains a link.' }
+              $entry = $entry.Parent
+            }
+            $files = @(Get-ChildItem -LiteralPath $resolved -File | Where-Object { $_.Extension -in @('.rlib', '.rmeta') })
+            if ($files | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }) { throw 'Dependency file is a link.' }
+            $compact = Join-Path $env:SystemRoot 'System32/compact.exe'
+            for ($offset = 0; $offset -lt $files.Count; $offset += 32) {
+              $last = [Math]::Min($offset + 31, $files.Count - 1)
+              $batch = @($files[$offset..$last] | ForEach-Object FullName)
+              & $compact /C /I /Q @batch | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'Generated dependency compression failed.' }
+            }
+            Write-Host "Compressed $($files.Count) regular Rust release dependency files without deletion."
           }
           $drive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot($workspace).Substring(0, 1))
           Write-Host "Workspace volume: free=$($drive.Free) used=$($drive.Used) bytes"

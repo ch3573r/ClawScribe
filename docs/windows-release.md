@@ -195,6 +195,11 @@ outputs remain intact; subsequent checks recreate these caches locally.
 If more space is needed, `prune-debug-build` removes the generated Rust debug
 tree using the same path checks. The next debug check recompiles it; release
 build output and installers remain intact.
+An alternative `compress-release-dependencies` input applies native filesystem
+compression only to regular Rust `.rlib`/`.rmeta` files in the release dependency
+directory after checking every parent for links. It preserves those files and
+does not compress models, executables, installers, or source. Use another local
+volume for large evaluation model caches when available.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
 installers, and then runs the required native regression suites before staging
