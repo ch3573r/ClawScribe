@@ -6,12 +6,13 @@ CREATE TABLE knowledge_settings (
 INSERT INTO knowledge_settings(singleton) VALUES (1);
 CREATE TABLE knowledge_sources (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL DEFAULT 'meeting' CHECK(kind = 'meeting'),
-    meeting_id TEXT NOT NULL UNIQUE REFERENCES meetings(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'meeting' CHECK(kind IN ('meeting','document')),
+    meeting_id TEXT UNIQUE REFERENCES meetings(id) ON DELETE CASCADE,
     revision INTEGER NOT NULL DEFAULT 1,
     generation INTEGER NOT NULL DEFAULT 1,
     semantic_revision INTEGER,
-    semantic_space TEXT
+    semantic_space TEXT,
+    CHECK((kind='meeting' AND meeting_id IS NOT NULL) OR (kind='document' AND meeting_id IS NULL))
 );
 CREATE TABLE knowledge_chunks (
     id TEXT PRIMARY KEY,
@@ -42,14 +43,14 @@ CREATE TABLE knowledge_index_jobs (
     paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1))
 );
 CREATE VIRTUAL TABLE knowledge_fts USING fts5(
-    transcript_id UNINDEXED, source_id UNINDEXED, text,
+    transcript_id UNINDEXED, source_id UNINDEXED, text, speaker,
     tokenize = 'unicode61 remove_diacritics 0'
 );
 
 INSERT INTO knowledge_sources(id,meeting_id) SELECT 'meeting:' || id,id FROM meetings;
 INSERT INTO knowledge_index_jobs(source_id,revision) SELECT id,revision FROM knowledge_sources;
-INSERT INTO knowledge_fts(transcript_id,source_id,text)
-    SELECT id,'meeting:' || meeting_id,transcript FROM transcripts;
+INSERT INTO knowledge_fts(transcript_id,source_id,text,speaker)
+    SELECT id,'meeting:' || meeting_id,transcript,speaker FROM transcripts;
 
 CREATE TRIGGER knowledge_meeting_insert AFTER INSERT ON meetings BEGIN
     INSERT INTO knowledge_sources(id,meeting_id) VALUES ('meeting:' || NEW.id,NEW.id);
@@ -67,7 +68,7 @@ WHEN NEW.revision != OLD.revision BEGIN
 END;
 CREATE TRIGGER knowledge_transcript_insert AFTER INSERT ON transcripts BEGIN
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=NEW.meeting_id;
-    INSERT INTO knowledge_fts(transcript_id,source_id,text) VALUES (NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript);
+    INSERT INTO knowledge_fts(transcript_id,source_id,text,speaker) VALUES (NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript,NEW.speaker);
 END;
 CREATE TRIGGER knowledge_transcript_delete AFTER DELETE ON transcripts BEGIN
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=OLD.meeting_id;
@@ -83,5 +84,5 @@ WHEN NEW.id IS NOT OLD.id OR NEW.meeting_id IS NOT OLD.meeting_id OR
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=OLD.meeting_id;
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=NEW.meeting_id AND NEW.meeting_id != OLD.meeting_id;
     DELETE FROM knowledge_fts WHERE transcript_id=OLD.id;
-    INSERT INTO knowledge_fts(transcript_id,source_id,text) VALUES (NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript);
+    INSERT INTO knowledge_fts(transcript_id,source_id,text,speaker) VALUES (NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript,NEW.speaker);
 END;

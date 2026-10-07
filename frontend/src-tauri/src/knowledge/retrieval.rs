@@ -217,22 +217,45 @@ pub async fn search_channels(
         })
         .collect();
     let terms = if content_terms.is_empty() {
-        raw_terms
+        raw_terms.clone()
     } else {
         content_terms
     };
     if !terms.is_empty() {
-        let expression = terms
+        let body_expression = terms
             .iter()
             .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
+        // Speaker names can also be ordinary function words (for example Will).
+        // Search their dedicated metadata column with the unfiltered tokens.
+        let speaker_expression = raw_terms
+            .iter()
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let expression = format!("text: ({body_expression}) OR speaker: ({speaker_expression})");
         let ids:Vec<String>=sqlx::query_scalar("SELECT f.transcript_id FROM knowledge_fts f JOIN transcripts t ON t.id=f.transcript_id JOIN json_each(?) allowed ON allowed.value=t.meeting_id WHERE knowledge_fts MATCH ? ORDER BY bm25(knowledge_fts),f.transcript_id LIMIT 64").bind(&allowed).bind(expression).fetch_all(pool).await?;
         for id in ids {
             let Some(data) = canonical(pool, &id).await? else {
                 continue;
             };
-            let Some((start, end)) = match_span(&data.0.transcript, query, &terms) else {
+            let hit = match_span(&data.0.transcript, query, &terms).or_else(|| {
+                data.0
+                    .speaker
+                    .as_ref()
+                    .and_then(|speaker| match_span(speaker, query, &raw_terms))
+                    .map(|_| {
+                        (
+                            0,
+                            super::chunking::floor_boundary(
+                                &data.0.transcript,
+                                super::chunking::LEXICAL_BYTES,
+                            ),
+                        )
+                    })
+            });
+            let Some((start, end)) = hit else {
                 continue;
             };
             let covering:Option<(i64,i64)>=sqlx::query_as("SELECT c.start_byte,c.end_byte FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id WHERE c.transcript_id=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.start_byte<=? AND c.end_byte>=? ORDER BY c.ordinal LIMIT 1").bind(&id).bind(&active_space).bind(start as i64).bind(end as i64).fetch_optional(pool).await?;
@@ -517,6 +540,7 @@ pub async fn retrieve(
                     match error {
                         KnowledgeError::Busy => "busy",
                         KnowledgeError::Cancelled => "cancelled",
+                        KnowledgeError::Disabled if status.semantic_enabled => "model_unavailable",
                         KnowledgeError::Disabled => "disabled",
                         KnowledgeError::InvalidInput => "query_token_limit",
                         _ => "model_unavailable",
@@ -596,6 +620,15 @@ mod tests {
         assert!(hits[0].text.len() <= 2048);
         assert_ne!(hits[0].evidence.fingerprint, old.fingerprint);
         assert!(hits[0].evidence.source_revision > old.source_revision);
+        sqlx::query("UPDATE transcripts SET speaker='Will' WHERE id='speaker-row'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hits = search_channels(&pool, &scope, "What did Will decide?", None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].speaker.as_deref(), Some("Will"));
     }
     #[tokio::test]
     async fn date_scope_rejects_partial_invalid_timestamp_and_reversed_bounds() {
@@ -869,6 +902,10 @@ mod tests {
                 }
             })
         };
+        sqlx::query("UPDATE knowledge_settings SET enabled=1 WHERE singleton=1")
+            .execute(&pool)
+            .await
+            .unwrap();
         runtime.scheduler.enable(verified).unwrap();
         let started = Instant::now();
         while let Some(job) = store::next_job(&pool).await.unwrap() {
@@ -945,6 +982,28 @@ mod tests {
                 .take(5)
                 .any(|p| p.meeting_id == format!("target-{n:02}"));
             hits += usize::from(found);
+            if !found {
+                let frozen = freeze_scope(&pool, &request.scope).await.unwrap();
+                let allowed = serde_json::to_string(&frozen.meeting_ids).unwrap();
+                let vector = runtime
+                    .scheduler
+                    .embed(request.query.clone(), EmbeddingPurpose::Query)
+                    .await
+                    .unwrap();
+                let semantic = semantic_candidates(
+                    &pool,
+                    &allowed,
+                    &super::super::model::PINS.space().id,
+                    &vector,
+                )
+                .await
+                .unwrap();
+                let lexical = search_channels(&pool, &frozen, &request.query, None)
+                    .await
+                    .unwrap();
+                let expected = format!("target-{n:02}");
+                println!("KNOWLEDGE_MISS case={n} semantic_expected_rank={:?} semantic_top10={:?} lexical_top12={:?} fused_top12={:?}",semantic.iter().position(|p|p.meeting_id==expected).map(|rank|rank+1),semantic.iter().take(10).map(|p|p.meeting_id.as_str()).collect::<Vec<_>>(),lexical.iter().map(|p|p.meeting_id.as_str()).collect::<Vec<_>>(),result.passages.iter().map(|p|p.meeting_id.as_str()).collect::<Vec<_>>());
+            }
             println!(
                 "KNOWLEDGE_QUERY case={n} expected_top5={found} elapsed_ms={}",
                 times.last().unwrap()

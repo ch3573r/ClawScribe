@@ -499,6 +499,13 @@ inside the existing transaction; model tokenization and inference run in the
 background. FTS deletion is explicit because virtual tables do not inherit
 ordinary foreign-key cascades.
 
+FTS indexes current speaker labels in their own column. Speaker-only hits return
+real transcript spans with visible speaker metadata; semantic bodies remain
+canonical transcript text. Speaker renames invalidate both lexical and semantic
+generations. The source schema reserves document kind and nullable meeting
+ownership for later migrations, while the current worker accepts meeting sources
+only and all document inputs remain rejected.
+
 One worker starts after the installed database pool is available, across normal,
 fresh and legacy-import initialization. It polls durable jobs even if a bounded
 notification was dropped. Publication and cleanup compare both source revision
@@ -530,6 +537,8 @@ Lexical rank transfers to a published semantic chunk only when that chunk
 covers the complete match. Containment deduplication stays within one source
 revision and preserves distinct dated meetings. Missing models or recording
 contention return keyword results with a visible fallback reason.
+The saved semantic opt-in is distinct from runtime readiness: an enabled
+preference with missing model files reports `model_unavailable`, not `disabled`.
 
 The command surface also includes `knowledge_index_status`, `knowledge_reindex`,
 `knowledge_cancel_index`, `knowledge_model_enable`, `knowledge_model_status`,

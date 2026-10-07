@@ -77,7 +77,7 @@ pub fn evidence(
     })
 }
 pub async fn next_job(pool: &SqlitePool) -> Result<Option<SourceJob>, KnowledgeError> {
-    Ok(sqlx::query_as("SELECT j.source_id,s.meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
+    Ok(sqlx::query_as("SELECT j.source_id,s.meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE s.kind='meeting' AND j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
 }
 pub async fn current(pool: &SqlitePool, job: &SourceJob) -> Result<bool, KnowledgeError> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_sources s JOIN knowledge_index_jobs j ON j.source_id=s.id WHERE s.id=? AND s.revision=? AND s.generation=? AND j.generation=s.generation AND j.paused=0").bind(&job.source_id).bind(job.revision).bind(job.generation).fetch_one(pool).await? == 1)
@@ -173,7 +173,7 @@ pub async fn requeue(pool: &SqlitePool, ids: &[String]) -> Result<(), KnowledgeE
     Ok(())
 }
 pub async fn invalidate_other_spaces(pool: &SqlitePool, space: &str) -> Result<(), KnowledgeError> {
-    let ids:Vec<String>=sqlx::query_scalar("SELECT meeting_id FROM knowledge_sources WHERE semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
+    let ids:Vec<String>=sqlx::query_scalar("SELECT meeting_id FROM knowledge_sources WHERE kind='meeting' AND semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
     if !ids.is_empty() {
         requeue(pool, &ids).await?;
     }
@@ -181,9 +181,14 @@ pub async fn invalidate_other_spaces(pool: &SqlitePool, space: &str) -> Result<(
 }
 pub async fn status(
     pool: &SqlitePool,
-    enabled: bool,
+    runtime_ready: bool,
     space: &str,
 ) -> Result<IndexStatus, KnowledgeError> {
+    let enabled =
+        sqlx::query_scalar::<_, i64>("SELECT enabled FROM knowledge_settings WHERE singleton=1")
+            .fetch_one(pool)
+            .await?
+            == 1;
     let ready:i64=sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_sources WHERE semantic_revision=revision AND semantic_space=?").bind(space).fetch_one(pool).await?;
     let pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM knowledge_index_jobs WHERE attempts<3 AND paused=0",
@@ -206,6 +211,8 @@ pub async fn status(
         failed: failed as usize,
         reason: if !enabled {
             Some("disabled".into())
+        } else if !runtime_ready {
+            Some("model_unavailable".into())
         } else if failed > 0 {
             Some("indexing_failed".into())
         } else if paused > 0 {
