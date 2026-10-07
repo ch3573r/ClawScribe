@@ -44,9 +44,6 @@ function component(file, name, props, invoke) {
       }),
     },
     "@/components/ui/button": { Button: "button" },
-    "@/components/ui/textarea": { Textarea: "textarea" },
-    "@/components/ui/scroll-area": { ScrollArea: "scroll-area" },
-    "@/components/ui/tooltip": {},
     "@/components/ui/popover": { Popover: "popover", PopoverTrigger: "trigger", PopoverContent: "content" },
     "@/components/ui/dialog": {
       Dialog: "dialog",
