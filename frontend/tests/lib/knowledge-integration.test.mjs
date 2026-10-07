@@ -9,7 +9,7 @@ const nodes = (node) =>
     ? []
     : Array.isArray(node)
       ? node.flatMap(nodes)
-      : [node, ...nodes(node.props?.children)];
+      : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions)];
 const text = (node) =>
   typeof node === "string" || typeof node === "number"
     ? String(node)
@@ -47,6 +47,11 @@ function component(file, name, props, invoke) {
     "@/components/ui/textarea": { Textarea: "textarea" },
     "@/components/ui/scroll-area": { ScrollArea: "scroll-area" },
     "@/components/ui/tooltip": {},
+    "@/components/ui/input": { Input: "input" },
+    "@/components/ui/checkbox": { Checkbox: "checkbox" },
+    "@/components/ui/switch": { Switch: "switch" },
+    "@/components/ui/progress": { Progress: "progress" },
+    "@/components/ui/select": {},
     "@/components/ui/popover": { Popover: "popover", PopoverTrigger: "trigger", PopoverContent: "content" },
     "@/components/ui/dialog": {
       Dialog: "dialog",
@@ -69,9 +74,9 @@ function component(file, name, props, invoke) {
       const row = nodes(render()).find(
         (node) => node.type === "label" && text(node) === label,
       );
-      nodes(row)
-        .find((node) => node.type === "input")
-        .props.onChange({ target: { checked } });
+      const control=nodes(row).find(node=>["input","checkbox","switch"].includes(node.type));
+      if(control.props.onCheckedChange) control.props.onCheckedChange(checked);
+      else control.props.onChange({target:{checked}});
     },
     button(label) {
       return nodes(render()).find(
