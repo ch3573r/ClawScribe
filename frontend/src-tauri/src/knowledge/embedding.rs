@@ -1,6 +1,6 @@
 //! The official E5 ONNX CPU baseline. No network access occurs during inference.
 use super::{
-    model::{VerifiedModel, LOADING_POLICY, PINS},
+    model::{VerifiedModel, PINS},
     types::{EmbeddingPurpose, EmbeddingSpace, KnowledgeError},
 };
 use ort::{
@@ -220,7 +220,7 @@ mod tests {
 mod acceptance {
     use super::*;
     use crate::knowledge::{
-        model::{ModelDownloads, VerifiedModel},
+        model::{ModelDownloads, VerifiedModel, LOADING_POLICY},
         scheduler::{run_indexing, CancellationRegistry},
     };
     use std::{
