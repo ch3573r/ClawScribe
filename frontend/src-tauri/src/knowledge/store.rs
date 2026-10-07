@@ -51,6 +51,9 @@ pub fn evidence(
     row: &CanonicalRow,
     span: &TextSpan,
 ) -> Result<EvidenceRef, KnowledgeError> {
+    if job.meeting_id != row.meeting_id || job.source_id != format!("meeting:{}", row.meeting_id) {
+        return Err(KnowledgeError::InvalidInput);
+    }
     let fingerprint = fingerprint(row, span)?;
     let identity = serde_json::to_vec(&(
         "evidence-v1",
@@ -99,9 +102,7 @@ pub async fn stage(
     vector: &[f32],
     space: &str,
 ) -> Result<(), KnowledgeError> {
-    if vector.len() != 384 || vector.iter().any(|v| !v.is_finite()) {
-        return Err(KnowledgeError::InvalidInput);
-    }
+    let vector = super::embedding::normalize(vector.to_vec())?;
     let reference = evidence(job, row, span)?;
     let mut tx = pool.begin().await?;
     // This conditional write obtains SQLite's writer lock before checking the
@@ -220,6 +221,60 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn model_space_change_requires_reindex_and_supersedes_same_revision_worker() {
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        transcript(&pool).await;
+        let old = next_job(&pool).await.unwrap().unwrap();
+        publish(&pool, &old, "old-space").await.unwrap();
+        invalidate_other_spaces(&pool, "new-space").await.unwrap();
+        let new = next_job(&pool).await.unwrap().unwrap();
+        assert_eq!(new.revision, old.revision);
+        assert!(new.generation > old.generation);
+        assert_eq!(
+            publish(&pool, &old, "old-space").await,
+            Err(KnowledgeError::Superseded)
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM knowledge_sources WHERE semantic_revision IS NOT NULL"
+            )
+            .await,
+            0
+        );
+        assert!(current(&pool, &new).await.unwrap());
+    }
+    #[tokio::test]
+    async fn evidence_identity_survives_cache_rebuild_and_tracks_speaker_timing() {
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        transcript(&pool).await;
+        let job = next_job(&pool).await.unwrap().unwrap();
+        let row = rows_page(&pool, &job, None).await.unwrap().remove(0);
+        let span = TextSpan {
+            transcript_id: row.id.clone(),
+            start_byte: 0,
+            end_byte: row.transcript.len(),
+        };
+        let original = evidence(&job, &row, &span).unwrap();
+        requeue(&pool, &["one".into()]).await.unwrap();
+        let again = next_job(&pool).await.unwrap().unwrap();
+        assert_eq!(original, evidence(&again, &row, &span).unwrap());
+        let mut changed = row.clone();
+        changed.speaker = Some("Speaker B".into());
+        assert_ne!(
+            fingerprint(&row, &span).unwrap(),
+            fingerprint(&changed, &span).unwrap()
+        );
+        changed = row.clone();
+        changed.audio_start_time = Some(10.);
+        assert_ne!(
+            fingerprint(&row, &span).unwrap(),
+            fingerprint(&changed, &span).unwrap()
+        );
+    }
     use sqlx::SqlitePool;
 
     async fn database() -> SqlitePool {

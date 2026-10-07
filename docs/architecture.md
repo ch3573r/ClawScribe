@@ -487,3 +487,60 @@ existing locked `2.0.0-rc.10`. Dependency validation uses the supported stable
 runner toolchain: the repository's declared Rust 1.77 floor is already older
 than ORT's Rust 1.81 and existing `time`/`serde_with` Rust 1.88 requirements.
 This change does not claim compatibility with Rust 1.77.
+
+### Canonical knowledge indexing and retrieval
+
+The knowledge backend uses an additive SQLite migration to seed a stable source
+for every saved meeting, including empty meetings. Canonical transcript changes
+advance the source revision, immediately invalidate semantic publication and
+coalesce one durable job. Speaker, timing, row identity/order and moves between
+meetings participate in invalidation. SQLite FTS5 projects only the changed row
+inside the existing transaction; model tokenization and inference run in the
+background. FTS deletion is explicit because virtual tables do not inherit
+ordinary foreign-key cascades.
+
+One worker starts after the installed database pool is available, across normal,
+fresh and legacy-import initialization. It polls durable jobs even if a bounded
+notification was dropped. Publication and cleanup compare both source revision
+and indexing generation under a write transaction. Reindexing the same revision
+therefore supersedes older work. Recording contention, disabled indexing,
+cancellation and superseded jobs do not consume the three real-failure attempts.
+The worker borrows the existing scheduler tokenizer inside bounded calls; it
+does not retain a second tokenizer or a handle across recording backoff.
+
+Keyword evidence uses exact canonical UTF-8 windows of at most 2,048 bytes with
+at most 128 bytes of overlap. Semantic bodies use at most 320 model tokens and
+48-token overlap, with prefixes/special tokens separately checked against 512.
+Evidence identities hash source/revision, canonical row/span and a fingerprint
+including current speaker and time metadata. They do not depend on derived
+cache rows. Titles and meeting dates are joined from current metadata.
+
+Library scope requires selected meeting IDs, project/date/untagged constraints,
+or explicit `all_meetings`. Unicode-lowercase tag equality and Any/All/Untagged
+semantics match the library. Scope resolves before ranking and can be frozen and
+rechecked on a caller-owned SQLite transaction. A frozen scope never acquires
+new meetings. Live and document inputs remain rejected at this phase.
+
+`knowledge_search` accepts a scope, query, document IDs and `keyword`/`hybrid`
+mode. It returns actual mode, index status and canonical passages. Questions are
+limited to 1,024 UTF-8 bytes. Quoted lexical queries and a local cosine scan each
+retain at most 64 candidates; vector pages hold at most 512 rows and scoring
+runs on blocking workers. RRF uses constant 60 and returns at most 12 passages.
+Lexical rank transfers to a published semantic chunk only when that chunk
+covers the complete match. Containment deduplication stays within one source
+revision and preserves distinct dated meetings. Missing models or recording
+contention return keyword results with a visible fallback reason.
+
+The command surface also includes `knowledge_index_status`, `knowledge_reindex`,
+`knowledge_cancel_index`, `knowledge_model_enable`, `knowledge_model_status`,
+`knowledge_model_download` and `knowledge_model_cancel_download`. Semantic
+enablement is an explicit persisted preference, initially off; a missing model
+never triggers an automatic download. These backend commands precede the
+meeting-intelligence UI and do not change the existing archive search UI.
+
+The guarded manual workflow has a separate retrieval-acceptance switch. It runs
+production indexing and end-to-end searches over 10,000 distinct synthetic
+passages and 30 fixed English/German queries, including nonlexical paraphrases,
+cross-language questions, identifiers and project/date conflicts. It reports
+bulk insertion/coalescing, indexing time, process-memory growth, top-five recall
+and warm p95. Models and measurements remain local to the designated runner.

@@ -18,6 +18,12 @@ pub async fn freeze_scope(
     pool: &SqlitePool,
     scope: &KnowledgeScope,
 ) -> Result<FrozenScope, KnowledgeError> {
+    freeze_scope_in_connection(&mut *pool.acquire().await?, scope).await
+}
+pub async fn freeze_scope_in_connection(
+    connection: &mut sqlx::SqliteConnection,
+    scope: &KnowledgeScope,
+) -> Result<FrozenScope, KnowledgeError> {
     let filter = match scope {
         KnowledgeScope::Meeting { meeting_id } => MeetingFilter {
             meeting_ids: vec![meeting_id.clone()],
@@ -37,13 +43,18 @@ pub async fn freeze_scope(
     }
     if filter.meeting_ids.iter().any(|id| id.trim().is_empty())
         || filter.tags.iter().any(|tag| tag.trim().is_empty())
-        || filter.from.as_ref().is_some_and(|v| v.len() < 10)
-        || filter.to.as_ref().is_some_and(|v| v.len() < 10)
+        || filter.from.as_ref().is_some_and(|v| {
+            v.len() != 10 || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_err()
+        })
+        || filter.to.as_ref().is_some_and(|v| {
+            v.len() != 10 || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_err()
+        })
+        || matches!((&filter.from,&filter.to),(Some(from),Some(to)) if from>to)
     {
         return Err(KnowledgeError::InvalidInput);
     }
     let mut ids = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
-    let rows=sqlx::query("SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id ORDER BY m.id").fetch_all(pool).await?;
+    let rows=sqlx::query("SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id ORDER BY m.id").fetch_all(&mut *connection).await?;
     for row in rows {
         let id: String = row.try_get("id")?;
         let date: String = row.try_get("created_at")?;
@@ -90,7 +101,13 @@ pub async fn freeze_scope(
 }
 
 pub async fn recheck_scope(pool: &SqlitePool, frozen: &FrozenScope) -> Result<(), KnowledgeError> {
-    let current = freeze_scope(pool, &frozen.scope).await?;
+    recheck_scope_in_connection(&mut *pool.acquire().await?, frozen).await
+}
+pub async fn recheck_scope_in_connection(
+    connection: &mut sqlx::SqliteConnection,
+    frozen: &FrozenScope,
+) -> Result<(), KnowledgeError> {
+    let current = freeze_scope_in_connection(connection, &frozen.scope).await?;
     if frozen
         .meeting_ids
         .iter()
@@ -119,11 +136,91 @@ pub async fn search_channels(
         .map(|(space, _)| space.to_owned())
         .unwrap_or_else(|| super::model::PINS.space().id);
     let mut lexical = Vec::new();
-    let terms: Vec<&str> = query
+    let raw_terms: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
         .filter(|term| !term.is_empty())
         .take(64)
         .collect();
+    let content_terms: Vec<&str> = raw_terms
+        .iter()
+        .copied()
+        .filter(|term| {
+            !matches!(
+                term.to_lowercase().as_str(),
+                "the"
+                    | "a"
+                    | "an"
+                    | "of"
+                    | "to"
+                    | "in"
+                    | "on"
+                    | "at"
+                    | "and"
+                    | "or"
+                    | "for"
+                    | "is"
+                    | "are"
+                    | "was"
+                    | "were"
+                    | "will"
+                    | "would"
+                    | "can"
+                    | "could"
+                    | "should"
+                    | "must"
+                    | "be"
+                    | "been"
+                    | "do"
+                    | "does"
+                    | "did"
+                    | "what"
+                    | "which"
+                    | "where"
+                    | "when"
+                    | "who"
+                    | "how"
+                    | "der"
+                    | "die"
+                    | "das"
+                    | "den"
+                    | "dem"
+                    | "des"
+                    | "ein"
+                    | "eine"
+                    | "einer"
+                    | "einem"
+                    | "einen"
+                    | "und"
+                    | "oder"
+                    | "für"
+                    | "im"
+                    | "am"
+                    | "ist"
+                    | "sind"
+                    | "wird"
+                    | "werden"
+                    | "wurde"
+                    | "wurden"
+                    | "wie"
+                    | "wo"
+                    | "wann"
+                    | "wer"
+                    | "welche"
+                    | "welcher"
+                    | "welches"
+                    | "mit"
+                    | "von"
+                    | "zu"
+                    | "zum"
+                    | "zur"
+            )
+        })
+        .collect();
+    let terms = if content_terms.is_empty() {
+        raw_terms
+    } else {
+        content_terms
+    };
     if !terms.is_empty() {
         let expression = terms
             .iter()
@@ -345,6 +442,7 @@ async fn semantic_candidates(
         if page.is_empty() {
             break;
         }
+        debug_assert!(page.len() <= 512);
         after = page.last().unwrap().0.clone();
         let query = query.clone();
         heap = tokio::task::spawn_blocking(move || {
@@ -453,6 +551,335 @@ pub async fn retrieve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn vector_scan_reaches_last_page_with_bounded_candidates_and_results() {
+        let pool = fixture().await;
+        for n in 0..600 {
+            add_text(
+                &pool,
+                &format!("row-{n:03}"),
+                "one",
+                &format!("Public fixture item {n}"),
+            )
+            .await;
+        }
+        let job:SourceJob=sqlx::query_as("SELECT j.source_id,s.meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id WHERE s.meeting_id='one'").fetch_one(&pool).await.unwrap();
+        let rows:Vec<CanonicalRow>=sqlx::query_as("SELECT id,meeting_id,transcript,speaker,timestamp,audio_start_time,audio_end_time,duration,word_timestamps_json FROM transcripts WHERE meeting_id='one' ORDER BY id").fetch_all(&pool).await.unwrap();
+        let spans: Vec<_> = rows
+            .iter()
+            .map(|row| TextSpan {
+                transcript_id: row.id.clone(),
+                start_byte: 0,
+                end_byte: row.transcript.len(),
+            })
+            .collect();
+        let ids: Vec<_> = rows
+            .iter()
+            .zip(&spans)
+            .map(|(row, span)| store::evidence(&job, row, span).unwrap().chunk_id)
+            .collect();
+        let last = ids.iter().max().unwrap();
+        for (n, ((row, span), id)) in rows.iter().zip(&spans).zip(&ids).enumerate() {
+            let mut vector = vec![0.; 384];
+            vector[usize::from(id != last)] = 1.;
+            store::stage(&pool, &job, row, span, n as i64, &vector, "test-space")
+                .await
+                .unwrap();
+        }
+        store::publish(&pool, &job, "test-space").await.unwrap();
+        let mut query = vec![0.; 384];
+        query[0] = 1.;
+        let candidates = semantic_candidates(&pool, "[\"one\"]", "test-space", &query)
+            .await
+            .unwrap();
+        assert_eq!(candidates.len(), 64);
+        assert_eq!(&candidates[0].evidence.chunk_id, last);
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let results = search_channels(
+            &pool,
+            &scope,
+            "nonmatchingword",
+            Some(("test-space", &query)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 12);
+        assert_eq!(&results[0].evidence.chunk_id, last);
+    }
+    #[tokio::test]
+    async fn identical_dated_meetings_and_short_german_replies_remain_distinct() {
+        let pool = fixture().await;
+        add_text(&pool, "a", "one", "Ja. İ Äpfel bestätigen.").await;
+        add_text(&pool, "b", "two", "Ja. İ Äpfel bestätigen.").await;
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    all_meetings: true,
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let hits = search_channels(&pool, &scope, "Ja", None).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_ne!(hits[0].evidence.chunk_id, hits[1].evidence.chunk_id);
+        assert_ne!(hits[0].date, hits[1].date);
+        assert_eq!(folded_match("İ Äpfel", "äpfel"), Some((3, 9)));
+    }
+    #[tokio::test]
+    async fn covering_chunk_receives_both_channel_ranks() {
+        let pool = fixture().await;
+        add_text(&pool, "a", "one", "ATLAS-42 ships Friday").await;
+        let job:SourceJob=sqlx::query_as("SELECT j.source_id,s.meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id WHERE s.meeting_id='one'").fetch_one(&pool).await.unwrap();
+        let row = store::rows_page(&pool, &job, None).await.unwrap().remove(0);
+        let span = TextSpan {
+            transcript_id: row.id.clone(),
+            start_byte: 0,
+            end_byte: row.transcript.len(),
+        };
+        let vector = super::super::embedding::normalize(vec![1.; 384]).unwrap();
+        store::stage(&pool, &job, &row, &span, 0, &vector, "test-space")
+            .await
+            .unwrap();
+        store::publish(&pool, &job, "test-space").await.unwrap();
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let hits = search_channels(&pool, &scope, "ATLAS-42", Some(("test-space", &vector)))
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!((hits[0].rank - 2. / 61.).abs() < 1e-12);
+        assert_eq!(
+            hits[0].evidence,
+            store::evidence(&job, &row, &span).unwrap()
+        );
+    }
+    #[tokio::test]
+    #[ignore = "manual trusted-runner 10000-passage native retrieval acceptance"]
+    async fn synthetic_retrieval_workload() {
+        use std::{
+            sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                Arc,
+            },
+            time::{Duration, Instant},
+        };
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let fixtures=[
+            ("Sicherungskopien werden neunzig Tage lang im Rechenzentrum Dublin aufbewahrt.","How long are backup copies retained?"),
+            ("Lieferantenrechnungen benötigen zwei unabhängige Freigaben durch Einkauf und Finanzabteilung.","Who must authorize payment of vendor invoices?"),
+            ("Die Blutproben müssen im Labor bei minus achtzig Grad Celsius gelagert werden.","At what temperature should biological samples be stored?"),
+            ("Auf dem Dach des Verwaltungsgebäudes installieren wir Solarmodule zur Stromerzeugung.","Where will the renewable electricity panels be mounted?"),
+            ("Während der Bahnsperrung fahren Ersatzbusse zwischen Bahnhof und Messegelände.","How will visitors travel during the railway closure?"),
+            ("Vergessene Passwörter können Kunden über einen zeitlich begrenzten Link per E-Mail zurücksetzen.","How does an account holder regain access after forgetting their secret?"),
+            ("Für Beschäftigte werden überdachte Fahrradstellplätze neben dem Haupteingang gebaut.","What sheltered parking will be provided for staff who cycle?"),
+            ("Bei Dienstreisen sind rollstuhlgerechte Hotelzimmer ohne Stufen verbindlich zu buchen.","What accessibility requirement applies to overnight business accommodation?"),
+            ("Wegen dichten Nebels dürfen Flugzeuge erst nach Verbesserung der Sicht starten.","What weather condition is preventing aircraft departures?"),
+            ("Die Kantine muss Milch, Eier und Nüsse in jedem Tagesgericht als Allergene kennzeichnen.","Which food sensitivities must the cafeteria disclose?"),
+            ("Customer records must be encrypted before they leave the device, using keys held by the organization.","Wie werden Kundendaten vor dem Verlassen des Geräts geschützt?"),
+            ("Fire evacuation drills are scheduled twice each year, and the assembly point is the north car park.","Wo sollen sich Mitarbeitende bei einer Brandübung versammeln?"),
+            ("The museum will loan the bronze sculpture for six months, provided transport is insured.","Unter welcher Bedingung darf die Bronzeskulptur ausgeliehen werden?"),
+            ("The orchard irrigation system opens at dawn and uses collected rainwater instead of drinking water.","Womit und wann werden die Obstbäume bewässert?"),
+            ("The scholarship covers tuition fees but excludes accommodation and daily meals.","Welche Kosten übernimmt das Stipendium nicht?"),
+            ("We postponed the launch until the independent penetration assessment is complete.","Which security review is blocking shipment of the product?"),
+            ("The reception desk will lend reusable umbrellas to guests caught in bad weather.","What can visitors borrow when it starts raining?"),
+            ("New hires receive a mentor from a different department during their first three months.","Who helps recently recruited employees settle into the organization?"),
+            ("The cardiology clinic reserves urgent appointments for patients reporting chest pain.","Which symptoms qualify for priority assessment at the heart service?"),
+            ("The auditorium will replace its old seats with adjustable chairs to accommodate different body sizes.","How is the venue improving audience seating comfort?"),
+            ("Incident ATLAS-42 requires replacing the expired gateway certificate on Friday.","ATLAS-42"),
+            ("Ticket BOREAL-731 assigns the database migration to the evening maintenance window.","BOREAL-731"),
+            ("Der Fehler FALKE-908 wird durch ein Update des Druckertreibers behoben.","FALKE-908"),
+            ("Purchase order PO-88217 includes laboratory glassware and protective gloves.","PO-88217"),
+            ("Die Anlage mit Seriennummer XR-6619 benötigt einen neuen Temperatursensor.","XR-6619"),
+            ("Apollo deploys its payments service in the Frankfurt region after the resilience review.","Where will Apollo host payment processing?"),
+            ("Apollo deploys its payments service in the Stockholm region after the resilience review.","Where will Apollo host payment processing?"),
+            ("The earlier decision used paper tickets for entry to the conference.","How are attendees admitted to the conference?"),
+            ("The revised decision uses digital QR codes for entry to the conference.","How are attendees admitted to the conference?"),
+            ("Unassigned research approved a reusable glass container for specimen transport.","Which packaging was approved for moving samples?")
+        ];
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let seeded = Instant::now();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES('noise','Synthetic inventory','2026-01-01','2026-01-01')").execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES('noise','Inventory')")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        for n in 0..9970 {
+            let text = if n % 2 == 0 {
+                format!("Warehouse inventory report {n}: aisle {}, shelf {} holds {} ordinary cardboard cartons. The stock clerk completed a routine count.",n%71,n%23,n%119)
+            } else {
+                format!("Lagerbestandsmeldung {n}: Gang {}, Regal {} enthält {} gewöhnliche Kartons. Die Bestandszählung wurde abgeschlossen.",n%71,n%23,n%119)
+            };
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES(?,'noise',?,'00:01')").bind(format!("noise-{n:05}")).bind(text).execute(&mut *tx).await.unwrap();
+        }
+        for (n, (text, _)) in fixtures.iter().enumerate() {
+            let id = format!("target-{n:02}");
+            let date = format!("2026-09-{:02}", n + 1);
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES(?, 'Public acceptance fixture',?,?)").bind(&id).bind(&date).bind(&date).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES(?,?,?,'00:01',1)").bind(&id).bind(&id).bind(text).execute(&mut *tx).await.unwrap();
+            if n != 29 {
+                sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES(?,?)")
+                    .bind(&id)
+                    .bind(if n == 25 {
+                        "Äpfel"
+                    } else if n == 26 {
+                        "Beta"
+                    } else {
+                        "Research"
+                    })
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+        }
+        tx.commit().await.unwrap();
+        let bulk_ms = seeded.elapsed().as_millis();
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_index_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 31);
+        println!("KNOWLEDGE_BULK rows=10000 sources=31 jobs={jobs} elapsed_ms={bulk_ms}");
+        let root = std::path::PathBuf::from(
+            std::env::var_os("CLAWSCRIBE_KNOWLEDGE_MODEL").expect("manual runner model directory"),
+        );
+        super::super::model::ModelDownloads::default()
+            .download(&root, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        let verified = super::super::model::VerifiedModel::verify(&root)
+            .await
+            .unwrap();
+        let runtime = super::super::KnowledgeState::default();
+        let baseline = memory_stats::memory_stats().unwrap();
+        let peak = Arc::new(AtomicUsize::new(baseline.virtual_mem));
+        let running = Arc::new(AtomicBool::new(true));
+        let monitor = {
+            let peak = peak.clone();
+            let running = running.clone();
+            std::thread::spawn(move || {
+                while running.load(Ordering::Acquire) {
+                    if let Some(m) = memory_stats::memory_stats() {
+                        peak.fetch_max(m.virtual_mem, Ordering::AcqRel);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        runtime.scheduler.enable(verified).unwrap();
+        let started = Instant::now();
+        while let Some(job) = store::next_job(&pool).await.unwrap() {
+            super::super::indexer::index_source(&pool, &runtime.scheduler, &job)
+                .await
+                .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(2400),
+                "index workload exceeded bounded deadline"
+            );
+        }
+        let index_ms = started.elapsed().as_millis();
+        let chunks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(chunks, 10000);
+        let unicode = "Äpfel e\u{301} 🙂 bestätigen die Änderung. ".repeat(150);
+        let spans = runtime
+            .scheduler
+            .spans("unicode".into(), unicode.clone())
+            .await
+            .unwrap();
+        assert!(spans.len() > 1);
+        assert_eq!(spans[0].start_byte, 0);
+        assert_eq!(spans.last().unwrap().end_byte, unicode.len());
+        for span in spans {
+            assert!(unicode.get(span.start_byte..span.end_byte).is_some());
+        }
+        let mut times = Vec::new();
+        let mut hits = 0;
+        for (n, (_, query)) in fixtures.iter().enumerate() {
+            let filter = match n {
+                25 => MeetingFilter {
+                    tags: vec!["äpfel".into()],
+                    ..Default::default()
+                },
+                26 => MeetingFilter {
+                    tags: vec!["Beta".into()],
+                    ..Default::default()
+                },
+                27 => MeetingFilter {
+                    from: Some("2026-09-28".into()),
+                    to: Some("2026-09-28".into()),
+                    ..Default::default()
+                },
+                28 => MeetingFilter {
+                    meeting_ids: vec!["target-28".into()],
+                    ..Default::default()
+                },
+                29 => MeetingFilter {
+                    untagged: true,
+                    ..Default::default()
+                },
+                _ => MeetingFilter {
+                    all_meetings: true,
+                    ..Default::default()
+                },
+            };
+            let request = SearchRequest {
+                scope: KnowledgeScope::Library { filter },
+                query: (*query).into(),
+                document_ids: Vec::new(),
+                mode: SearchMode::Hybrid,
+            };
+            let started = Instant::now();
+            let result = retrieve(&pool, &runtime, &request).await.unwrap();
+            times.push(started.elapsed().as_millis());
+            assert_eq!(result.mode, SearchMode::Hybrid);
+            assert!(result.passages.len() <= 12);
+            let found = result
+                .passages
+                .iter()
+                .take(5)
+                .any(|p| p.meeting_id == format!("target-{n:02}"));
+            hits += usize::from(found);
+            println!(
+                "KNOWLEDGE_QUERY case={n} expected_top5={found} elapsed_ms={}",
+                times.last().unwrap()
+            );
+        }
+        running.store(false, Ordering::Release);
+        monitor.join().unwrap();
+        let private_delta = peak
+            .load(Ordering::Acquire)
+            .saturating_sub(baseline.virtual_mem);
+        times.sort_unstable();
+        let p95 = times[28];
+        println!("KNOWLEDGE_RETRIEVAL passages={chunks} queries=30 expected_top5={hits} warm_p95_ms={p95} indexing_ms={index_ms} peak_private_delta_bytes={private_delta} engine=onnx backend=cpu threads=2 batch=1");
+        runtime.scheduler.disable().await;
+        assert!(hits >= 27, "retrieval recall gate failed");
+        assert!(p95 <= 2000, "warm retrieval p95 gate failed");
+    }
     async fn add_text(pool: &SqlitePool, id: &str, meeting: &str, text: &str) {
         sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES(?,?,?,'00:01',1)").bind(id).bind(meeting).bind(text).execute(pool).await.unwrap();
     }
