@@ -182,6 +182,12 @@ inputs from replaying an unrelated result. Deletion dependencies include any
 prior-turn evidence actually sent in a later prompt. Clearing history cancels
 pending requests before deleting both legacy and new turns.
 
+The current request's scope also constrains inherited prompt history. Omit
+prior turns whose scope or evidence cannot be validated within the frozen
+allowed meeting and selected-document set; changing a project or date filter
+must not resend older information from outside that scope. Saved history
+remains readable under its original conversation owner.
+
 Portable conversation restore follows owner/request/message/evidence dependency
 order with table-specific validation. Library turns do not acquire a fictitious
 meeting ID. Old version-1 archives remain readable; that does not promise that

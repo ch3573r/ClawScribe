@@ -97,13 +97,13 @@ job/native permits for embeddings and releases the native permit only inside
 the completed blocking call. Extend recording preemption to cancel indexing
 before trying to claim its job; preserve local-summary preemption behavior.
 
-- [ ] Add tests `rejects_bad_dimensions_and_nonfinite_vectors`, `query_and_passage_prefixes`, `cancel_retains_native_permit`, and `recording_preempts_indexing`. Assert 384 finite normalized values, the correct prefix, and no overlap between native calls.
-- [ ] Run `cargo test -p clawscribe --lib knowledge::`; the new behavior tests must fail before implementation.
-- [ ] Implement CPU inference, masked mean pooling, normalization, two-thread configuration, one-input batches, idle unload, and the bounded/coalesced scheduler. Validate disabled graph optimization/prepacking on the unchanged float32 artifact before accepting the revised loading policy.
-- [ ] Pin the candidate model revision from the design, required files and actual SHA-256 values. Reuse `model_download.rs`; add a Rust tokenizer dependency with an exact tested version and compatible license/MSRV. Preserve the existing ORT version.
-- [ ] On the designated runner, compare embeddings with independently generated model-card reference outputs. Measure warm single-input completion, model memory, and start-recording preemption. Require a native input/preemption bound of two seconds and incremental worker memory no greater than 1 GiB.
-- [ ] If the baseline misses these bounds, stop Phase 1 implementation and revise the model artifact/scheduling design with measured results. Do not silently select an unsupported quantized export.
-- [ ] Run targeted tests, `cargo fmt --all -- --check`, `cargo check -p clawscribe --features windows-gpu`, and the safety scan; commit `feat: add local knowledge embedding runtime`.
+- [x] Add tests `rejects_bad_dimensions_and_nonfinite_vectors`, `query_and_passage_prefixes`, `cancel_retains_native_permit`, and `recording_preempts_indexing`. Assert 384 finite normalized values, the correct prefix, and no overlap between native calls.
+- [x] Run `cargo test -p clawscribe --lib knowledge::`; the new behavior tests must fail before implementation.
+- [x] Implement CPU inference, masked mean pooling, normalization, two-thread configuration, one-input batches, idle unload, and the bounded/coalesced scheduler. Validate disabled graph optimization/prepacking on the unchanged float32 artifact before accepting the revised loading policy.
+- [x] Pin the candidate model revision from the design, required files and actual SHA-256 values. Reuse `model_download.rs`; add a Rust tokenizer dependency with an exact tested version and compatible license/MSRV. Preserve the existing ORT version.
+- [x] On the designated runner, compare embeddings with independently generated model-card reference outputs. Measure warm single-input completion, model memory, and start-recording preemption. Require a native input/preemption bound of two seconds and incremental worker memory no greater than 1 GiB.
+- [x] If the baseline misses these bounds, stop Phase 1 implementation and revise the model artifact/scheduling design with measured results. Do not silently select an unsupported quantized export.
+- [x] Run targeted tests, `cargo fmt --all -- --check`, `cargo check -p clawscribe --features windows-gpu`, and the safety scan; commit `feat: add local knowledge embedding runtime`.
 
 ### Task 2 Source generations, chunking, and hybrid search
 
@@ -192,6 +192,7 @@ in-memory when enabled in Task 7.
 - [ ] Implement backend-owned `[K1]` maps and fingerprint resolution. Preserve saved summary-source links. Recheck source revisions immediately before dispatch and transactionally before persisting a reply; redact invalidated dependent conversation turns on source deletion.
 - [ ] Add request/message tables with a unique owner/request identity and normalized evidence associations. Existing `ai_chat_messages` remain readable; merge legacy history for a meeting deterministically while writing new knowledge turns only once.
 - [ ] Add durable library owner rows, globally unique request UUIDs, immutable input fingerprints, and create/list/clear lifecycle commands. Clear cancels pending work and removes legacy/new history together. Normalize dependencies inherited from any history sent to the provider; source deletion redacts dependent turns before association cascades.
+- [ ] Constrain inherited prompt history to the current frozen scope as well as its evidence dependencies. Omit out-of-scope or unverifiable prior turns after a project/date/document selection changes; add a filter-change regression while preserving readable saved history.
 - [ ] Add `generate_configured_text_cancellable` beside the current helper with the existing app/state/provider/model/system/user inputs plus `&CancellationToken`, returning `Result<ConfiguredTextReply, String>`. Keep the existing helper as a compatibility wrapper returning only text. Report the actual resolved provider/model and propagate cancellation/deadlines through every existing provider, including bundled Codex, without creating a second credential path.
 - [ ] Build bounded prompts using `summary/context_budget.rs`, meeting titles/dates, distinct transcript/document sections, and only selected evidence. A latest-decision question must retain conflicting dated evidence and qualify incomplete retrieval. Persist user turns before generation; failed requests keep a retryable status and their request identity.
 - [ ] Extend version-1 backup optional tables for authoritative knowledge conversations and exclude derived indexes; restore requeues sources. Add round-trip tests with pre-feature archives.
