@@ -730,6 +730,226 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
 mod tests {
     use super::*;
 
+    async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest) {
+        use crate::knowledge::{conversations, retrieval, store, types::*};
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('archive-source','Public archive fixture','2026-09-01','2026-09-01')").execute(&pool).await.unwrap();
+        for (id, text) in [
+            ("archive-first", "Approved: 21 September."),
+            ("archive-second", "Budget unchanged."),
+        ] {
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,'archive-source',?,'2026-09-01')").bind(id).bind(text).execute(&pool).await.unwrap();
+        }
+        let request = AskRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            owner: conversations::create_library(&pool).await.unwrap(),
+            search: SearchRequest {
+                scope: KnowledgeScope::Library {
+                    filter: MeetingFilter {
+                        all_meetings: true,
+                        ..Default::default()
+                    },
+                },
+                query: "What was approved?".into(),
+                document_ids: vec![],
+                mode: SearchMode::Keyword,
+            },
+        };
+        conversations::reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        let frozen = retrieval::freeze_scope(&pool, &request.search.scope)
+            .await
+            .unwrap();
+        let job:store::SourceJob=sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id='archive-source'").fetch_one(&pool).await.unwrap();
+        let passage = store::materialize(
+            &pool,
+            &store::SelectedRow::for_job(&job, "archive-first".into()),
+            TextSpan {
+                transcript_id: "archive-first".into(),
+                start_byte: 0,
+                end_byte: "Approved: 21 September.".len(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        conversations::prepare(
+            &pool,
+            &request.request_id,
+            &frozen,
+            &[passage],
+            &BTreeMap::new(),
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        conversations::finish(
+            &pool,
+            &request.request_id,
+            &frozen,
+            "21 September [K1].",
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        (pool, request)
+    }
+
+    async fn empty_conversation_destination() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn conversation_round_trip_preserves_stale_refs_when_revision_counters_match() {
+        use crate::knowledge::{conversations, evidence};
+        let (source, request) = conversation_fixture().await;
+        let original = conversations::history(&source, &request.owner)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+            .reply
+            .unwrap()
+            .evidence[0]
+            .clone();
+        sqlx::query("UPDATE transcripts SET transcript='Budget changed after the answer.' WHERE id='archive-second'").execute(&source).await.unwrap();
+        let (manifest, _) = snapshot(&source).await.unwrap();
+        assert!(manifest.tables.contains_key("knowledge_owners"));
+        assert!(!manifest.tables.contains_key("knowledge_chunks"));
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM knowledge_sources WHERE meeting_id='archive-source'",
+        )
+        .fetch_one(&destination)
+        .await
+        .unwrap();
+        assert_eq!(
+            revision, original.source_revision,
+            "Fixture must prove coincidentally matching restored counters"
+        );
+        let history = conversations::history(&destination, &request.owner)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        let restored = &history[1].reply.as_ref().unwrap().evidence[0];
+        assert!(restored.historical);
+        assert_eq!(restored.fingerprint, original.fingerprint);
+        assert_eq!(restored.chunk_id, original.chunk_id);
+        assert_eq!(restored.locator, original.locator);
+        assert_eq!(
+            evidence::resolve(&destination, restored)
+                .await
+                .unwrap()
+                .status,
+            evidence::EvidenceStatus::Stale
+        );
+        let frozen = crate::knowledge::retrieval::freeze_scope(&destination, &request.search.scope)
+            .await
+            .unwrap();
+        assert!(
+            conversations::eligible_history(&destination, &request.owner, &frozen, 8192)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_restore_keeps_library_owner_and_interrupts_pending_work() {
+        use crate::knowledge::conversations;
+        let (source, mut request) = conversation_fixture().await;
+        let empty_owner = conversations::create_library(&source).await.unwrap();
+        request.request_id = uuid::Uuid::new_v4().to_string();
+        conversations::reserve(&source, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        let (manifest, _) = snapshot(&source).await.unwrap();
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        assert!(conversations::list_libraries(&destination)
+            .await
+            .unwrap()
+            .contains(&empty_owner));
+        let status: String = sqlx::query_scalar("SELECT status FROM knowledge_requests WHERE id=?")
+            .bind(&request.request_id)
+            .fetch_one(&destination)
+            .await
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_requests WHERE status IN ('preparing','running')",
+        )
+        .fetch_one(&destination)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn conversation_restore_skips_colliding_owner_without_overwriting_history() {
+        use crate::knowledge::conversations;
+        let (pool, request) = conversation_fixture().await;
+        let (manifest, _) = snapshot(&pool).await.unwrap();
+        import_manifest(&pool, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        let history = conversations::history(&pool, &request.owner).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(!history[1].reply.as_ref().unwrap().evidence[0].historical);
+    }
+
+    #[tokio::test]
+    async fn conversation_restore_redacts_changed_skipped_source_but_keeps_identical_source() {
+        use crate::knowledge::conversations;
+        for changed in [false, true] {
+            let (source, request) = conversation_fixture().await;
+            let (manifest, _) = snapshot(&source).await.unwrap();
+            let destination = empty_conversation_destination().await;
+            let (mut canonical, _) = snapshot(&source).await.unwrap();
+            canonical
+                .tables
+                .retain(|table, _| !table.starts_with("knowledge_"));
+            import_manifest(&destination, canonical, tempfile::tempdir().unwrap())
+                .await
+                .unwrap();
+            if changed {
+                sqlx::query("UPDATE transcripts SET transcript='Different destination evidence.' WHERE id='archive-second'").execute(&destination).await.unwrap();
+            }
+            import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+                .await
+                .unwrap();
+            let history = conversations::history(&destination, &request.owner)
+                .await
+                .unwrap();
+            assert_eq!(history.len(), 2);
+            if changed {
+                assert!(history
+                    .iter()
+                    .all(|message| message.status == "invalidated" && message.content.is_empty()));
+            } else {
+                assert_eq!(history[1].content, "21 September [K1].");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn mixed_restore_keeps_only_new_meetings_audio() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
