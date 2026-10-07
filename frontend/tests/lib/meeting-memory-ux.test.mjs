@@ -37,7 +37,7 @@ test('meeting picker searches titles and exposes selected chips without broadeni
   const state=nodes(tree).find(node=>node.type==='chat').props.state;assert.deepEqual([...state.scope.filter.meeting_ids],['b']);assert.equal(state.scope.filter.all_meetings,false);app.unmount();
 });
 test('configured library chat enables the first question before a conversation exists',()=>{
-  const state={scope:{kind:'library'},owner:null,messages:[],threads:[],historyLoading:false,sending:false,creating:false};
+  const state={scope:{kind:'library',filter:{all_meetings:false,meeting_ids:['a'],tags:[],tag_mode:'any',untagged:false,from:null,to:null}},owner:null,messages:[],threads:[],historyLoading:false,sending:false,creating:false};
   const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture'});
   nodes(app.render()).find(node=>node.type==='textarea').props.onChange({target:{value:'Decision?'}});
   assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);app.unmount();
