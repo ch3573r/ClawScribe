@@ -791,6 +791,39 @@ Start-Sleep -Milliseconds 700
     }
 
     #[tokio::test]
+    async fn cancellation_reaps_a_helper_that_does_not_read_stdin() {
+        let (manager, _stderr) = fake_sidecar("Start-Sleep -Seconds 60").await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let running = manager.clone();
+        let running_token = token.clone();
+        let task = tokio::spawn(async move {
+            running
+                .send_request_cancellable(
+                    "x".repeat(2 * 1024 * 1024),
+                    Duration::from_secs(60),
+                    None,
+                    Some(&running_token),
+                )
+                .await
+        });
+        // A full pipe makes the generation write pending, independently of inference.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(manager.request_lock.try_lock().is_err());
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("Cancellation cleanup must not perform an unbounded polite stdin write")
+            .unwrap();
+        assert!(result.is_err());
+        assert!(
+            manager.child_process.lock().await.is_none(),
+            "Only an actually reaped child may release the exchange"
+        );
+        assert_eq!(manager.active_request_count.load(Ordering::SeqCst), 0);
+        assert!(manager.request_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
     async fn health_check_and_generation_cannot_overlap_jsonl_exchanges() {
         let script = r#"
 $reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput())
