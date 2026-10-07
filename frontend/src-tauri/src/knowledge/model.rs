@@ -88,6 +88,8 @@ pub enum DownloadStage {
 }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DownloadStatus {
+    #[serde(skip)]
+    generation: u64,
     pub stage: DownloadStage,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
@@ -97,6 +99,7 @@ pub struct DownloadStatus {
 impl Default for DownloadStatus {
     fn default() -> Self {
         Self {
+            generation: 0,
             stage: DownloadStage::Idle,
             downloaded_bytes: 0,
             total_bytes: PINS.files.iter().map(|file| file.size).sum(),
@@ -145,6 +148,7 @@ impl ModelDownloads {
             .start("knowledge-e5")
             .map_err(|_| KnowledgeError::Busy)?;
         *self.status.lock().unwrap() = DownloadStatus {
+            generation: reservation.generation(),
             stage: DownloadStage::Checking,
             total_bytes: pins.files.iter().map(|file| file.size).sum(),
             ..DownloadStatus::default()
@@ -234,11 +238,22 @@ impl ModelDownloads {
         result
     }
     pub async fn cancel(&self) -> Result<(), KnowledgeError> {
-        if self.downloads.is_active("knowledge-e5") {
-            self.status.lock().unwrap().stage = DownloadStage::Cancelling;
-        }
+        let generation = {
+            let mut status = self.status.lock().unwrap();
+            if !matches!(
+                status.stage,
+                DownloadStage::Checking
+                    | DownloadStage::Downloading
+                    | DownloadStage::Verifying
+                    | DownloadStage::Cancelling
+            ) {
+                return Ok(());
+            }
+            status.stage = DownloadStage::Cancelling;
+            status.generation
+        };
         self.downloads
-            .cancel("knowledge-e5")
+            .cancel_generation("knowledge-e5", generation)
             .await
             .map_err(|_| KnowledgeError::Busy)
     }

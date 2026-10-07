@@ -23,6 +23,7 @@ struct Registry {
     generation: u64,
 }
 struct Transfer {
+    generation: u64,
     token: CancellationToken,
     done: watch::Sender<bool>,
 }
@@ -42,12 +43,13 @@ impl Downloads {
                 "A model operation is already in progress; wait for it to finish before retrying"
             );
         }
+        active.generation = active.generation.wrapping_add(1);
         let transfer = Arc::new(Transfer {
+            generation: active.generation,
             token: CancellationToken::new(),
             done: watch::channel(false).0,
         });
         active.active.insert(name.into(), transfer.clone());
-        active.generation = active.generation.wrapping_add(1);
         Ok(Reservation {
             registry: self.0.clone(),
             name: name.into(),
@@ -58,11 +60,23 @@ impl Downloads {
         self.0.lock().unwrap().active.contains_key(name)
     }
     pub async fn cancel(&self, name: &str) -> Result<()> {
+        self.cancel_matching_generation(name, None).await
+    }
+    /// Match the reservation identity rather than the registry change counter:
+    /// unrelated model operations must not invalidate cancellation ownership.
+    pub async fn cancel_generation(&self, name: &str, generation: u64) -> Result<()> {
+        self.cancel_matching_generation(name, Some(generation))
+            .await
+    }
+    async fn cancel_matching_generation(&self, name: &str, generation: Option<u64>) -> Result<()> {
         let mut done = {
             let active = self.0.lock().unwrap();
             let Some(transfer) = active.active.get(name) else {
                 return Ok(());
             };
+            if generation.is_some_and(|expected| transfer.generation != expected) {
+                return Ok(());
+            }
             transfer.token.cancel();
             transfer.done.subscribe()
         };
@@ -77,11 +91,11 @@ impl Downloads {
         .await
         .map_err(|_| anyhow!("Download cancellation is still pending; wait before retrying"))?
     }
-    pub async fn cancel_generation(&self, name: &str, _generation: u64) -> Result<()> {
-        self.cancel(name).await
-    }
 }
 impl Reservation {
+    pub fn generation(&self) -> u64 {
+        self.transfer.generation
+    }
     pub fn token(&self) -> &CancellationToken {
         &self.transfer.token
     }
