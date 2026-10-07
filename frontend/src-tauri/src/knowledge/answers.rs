@@ -769,6 +769,153 @@ mod tests {
         .await
         .unwrap()
     }
+
+    async fn long_selection_fixture() -> (SqlitePool, AskRequest, tempfile::TempDir) {
+        let (pool, mut request, dir) = answer_fixture().await;
+        sqlx::query("DELETE FROM transcripts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('second-long','Second meeting','2026-09-02','2026-09-02')")
+            .execute(&pool).await.unwrap();
+        for (meeting, prefix) in [("answer-fixture", "alpha"), ("second-long", "beta")] {
+            for index in 0..330 {
+                sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES (?,?,?,?,?)")
+                    .bind(format!("{prefix}-{index:04}"))
+                    .bind(meeting)
+                    .bind(format!("Launch {prefix} plan, item {index}."))
+                    .bind(format!("00:{index:04}"))
+                    .bind(index as f64)
+                    .execute(&pool).await.unwrap();
+            }
+        }
+        request.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                meeting_ids: vec!["answer-fixture".into(), "second-long".into()],
+                ..Default::default()
+            },
+        };
+        (pool, request, dir)
+    }
+
+    #[tokio::test]
+    async fn provider_budget_preserves_both_complete_long_meetings_in_date_order() {
+        let (pool, mut request, dir) = long_selection_fixture().await;
+        request.search.query = "What were these meetings about?".into();
+        let mut configuration = resolved(&pool, dir.path()).await;
+        configuration.budget.context_tokens = 128_000;
+        configuration.budget.output_tokens = 4096;
+        let reply = ask_resolved(
+            &pool,
+            &super::super::KnowledgeState::default(),
+            &request,
+            configuration,
+            &CancellationToken::new(),
+            |resolved, _, prompt, _| async move {
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                let rows = envelope["transcript_evidence"].as_array().unwrap();
+                assert_eq!(rows.len(), 660, "a fitting selection must retain every row");
+                assert!(rows[..330]
+                    .iter()
+                    .all(|row| row["text"].as_str().unwrap().contains("alpha")));
+                assert!(rows[330..]
+                    .iter()
+                    .all(|row| row["text"].as_str().unwrap().contains("beta")));
+                assert_eq!(rows[0]["date"], "2026-09-01");
+                assert_eq!(rows[330]["date"], "2026-09-02");
+                Ok(ConfiguredTextReply {
+                    text: "Both launch plans are covered [K1][K331].".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.evidence.len(), 660);
+        assert_eq!(reply.cited_tags, vec![1, 331]);
+    }
+
+    #[tokio::test]
+    async fn small_provider_budget_reserves_matches_for_each_long_meeting() {
+        let (pool, mut request, dir) = long_selection_fixture().await;
+        request.search.query = "Launch".into();
+        let mut configuration = resolved(&pool, dir.path()).await;
+        configuration.budget.context_tokens = 8192;
+        configuration.budget.output_tokens = 1024;
+        ask_resolved(
+            &pool,
+            &super::super::KnowledgeState::default(),
+            &request,
+            configuration,
+            &CancellationToken::new(),
+            |resolved, _, prompt, _| async move {
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                let rows = envelope["transcript_evidence"].as_array().unwrap();
+                assert!(rows.len() <= retrieval::RESULT_LIMIT);
+                for topic in ["alpha", "beta"] {
+                    assert!(
+                        rows.iter()
+                            .filter(|row| row["text"].as_str().unwrap().contains(topic))
+                            .count()
+                            >= 3,
+                        "retrieval must reserve three available matches for each selected meeting"
+                    );
+                }
+                Ok(ConfiguredTextReply {
+                    text: "Both plans [K1][K4].".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unmatched_selected_meeting_has_a_non_citable_saved_overview() {
+        let (pool, mut request, dir) = long_selection_fixture().await;
+        sqlx::query("UPDATE transcripts SET transcript='Budget discussion without the query term' WHERE meeting_id='second-long'")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO summary_processes(meeting_id,status,created_at,updated_at,result) VALUES ('second-long','completed',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'{\"markdown\":\"Saved budget overview.\"}')")
+            .execute(&pool).await.unwrap();
+        request.search.query = "Launch".into();
+        let mut configuration = resolved(&pool, dir.path()).await;
+        configuration.budget.context_tokens = 8192;
+        configuration.budget.output_tokens = 1024;
+        let reply = ask_resolved(
+            &pool,
+            &super::super::KnowledgeState::default(),
+            &request,
+            configuration,
+            &CancellationToken::new(),
+            |resolved, _, prompt, _| async move {
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                let overview = &envelope["overview_context"][0];
+                assert_eq!(overview["text"], "Saved budget overview.");
+                assert_eq!(overview["citable"], false);
+                assert!(overview.get("tag").is_none());
+                assert!(envelope["transcript_evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| !row["text"].as_str().unwrap().contains("Budget")));
+                Ok(ConfiguredTextReply {
+                    text: "Launch plan [K1]. The saved overview describes a budget discussion."
+                        .into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert!(reply
+            .evidence_metadata
+            .iter()
+            .all(|metadata| metadata.title != "Second meeting"));
+    }
     #[tokio::test]
     async fn public_saved_ask_exposes_verified_question_context_before_dispatch() {
         let (pool, request, dir) = answer_fixture().await;
