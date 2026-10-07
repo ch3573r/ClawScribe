@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.49
+
+- Add memory across saved meetings: keyword search without a model download, optional local multilingual E5 semantic retrieval, and explicit selected-meeting/project/date scopes. Local embeddings run on CPU; recording takes priority over background indexing and active transcript reads.
+- Add durable library conversations using the configured summary provider, with bounded selected context and request-specific citations. Expanded meeting chat uses a separate library conversation; returning to meeting-only mode restores its existing history. Answers display the actual provider, model and retrieval mode.
+- Preview cited sources, reveal the canonical transcript line and seek saved audio. Corrections, deletion and restore label old evidence stale or historical. Short-answer question context is shown separately from literal model citations. Late replies/navigation cannot replace a newer owner or scope; failed playback and recovered status reads are visible.
+- Advance installer/runtime/updater version to 0.5.49 for a Windows GPU preview. Stable remains 0.5.48; enable **Include prereleases** after publication or install manually. Draft candidates are excluded. Published NSIS and MSI installers must include Tauri updater signatures; Windows publisher signing is separate.
+- Automated feature validation passed frontend typecheck/build and 250 tests, plus native Windows GPU checks, 92 knowledge tests and seven conversation backup tests. The fixed CPU Qwen3.5 4B answer evaluation passed 12 required assertions; the 10,000-meeting retrieval fixture hit 27/30 expected results. These are bounded evidence, not blanket answer quality or installed acceptance. Exact-build offline/provider failure/citation/focus/playback, recording/upgrade/update discovery and endurance checks remain pending. Documents and live assistance remain the follow-up plan. See `docs/releases/0.5.49.md`.
+
 ## 0.5.48
 
 - Update the optional Advanced: Codex app-server provider from Codex 0.157.0 to 0.159.2, whose catalog includes GPT-6.1 Sol (`gpt-6.1-sol`). Choose **Check bundled runtime** in Summary settings after upgrading to refresh models. Saved model selections are preserved; model access depends on the signed-in account and workspace.
