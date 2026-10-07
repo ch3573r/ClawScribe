@@ -1282,6 +1282,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_question_context_round_trips_and_rejects_invalid_links() {
+        use crate::knowledge::{conversations, types::SearchMode};
+        let (source, request, frozen, passages) =
+            conversations::tests::question_pair_fixture("Nein.").await;
+        conversations::prepare(
+            &source,
+            &request.request_id,
+            &frozen,
+            &passages,
+            &BTreeMap::new(),
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        conversations::finish(
+            &source,
+            &request.request_id,
+            &frozen,
+            "Abgelehnt [K2].",
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (manifest, _) = snapshot(&source).await.unwrap();
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        let history = conversations::history(&destination, &request.owner)
+            .await
+            .unwrap();
+        let reply = history[1].reply.as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(reply).unwrap()["context_links"],
+            serde_json::json!([{"kind":"preceding_question","cited_tag":2,"context_tag":1}])
+        );
+        assert_eq!(reply.content, "Abgelehnt [K2].");
+        assert!(reply.evidence.iter().all(|r| r.historical));
+        for tag in [0, 2, 999] {
+            let (mut malformed, _) = snapshot(&source).await.unwrap();
+            for row in malformed
+                .tables
+                .get_mut("knowledge_request_evidence")
+                .unwrap()
+            {
+                if row["ordinal"] == 2 {
+                    let mut display: Value =
+                        serde_json::from_str(row["display_json"].as_str().unwrap()).unwrap();
+                    display["preceding_question_tag"] = Value::from(tag);
+                    row.insert("display_json".into(), Value::String(display.to_string()));
+                }
+            }
+            assert!(import_manifest(
+                &empty_conversation_destination().await,
+                malformed,
+                tempfile::tempdir().unwrap()
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn conversation_round_trip_preserves_stale_refs_when_revision_counters_match() {
         use crate::knowledge::{conversations, evidence};
         let (source, request) = conversation_fixture().await;

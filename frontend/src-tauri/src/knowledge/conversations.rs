@@ -561,7 +561,7 @@ pub async fn eligible_history(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sqlx::SqlitePool;
 
@@ -575,6 +575,151 @@ mod tests {
         sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('fixture','Public fixture','2026-09-01','2026-09-01')")
             .execute(&pool).await.unwrap();
         pool
+    }
+
+    pub(crate) async fn question_pair_fixture(
+        reply: &str,
+    ) -> (SqlitePool, AskRequest, retrieval::FrozenScope, Vec<Passage>) {
+        use crate::knowledge::store;
+        let pool = database().await;
+        for (id, text, timestamp) in [
+            ("context-question", "Darf der Versuch beginnen?", "00:01"),
+            ("context-reply", reply, "00:02"),
+        ] {
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,'fixture',?,?)").bind(id).bind(text).bind(timestamp).execute(&pool).await.unwrap();
+        }
+        let request = request(create_library(&pool).await.unwrap());
+        reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        let frozen = frozen_scope(&pool, &request.request_id).await.unwrap();
+        let job:store::SourceJob=sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id='fixture'").fetch_one(&pool).await.unwrap();
+        let mut passages = Vec::new();
+        for (id, text) in [
+            ("context-question", "Darf der Versuch beginnen?"),
+            ("context-reply", reply),
+        ] {
+            passages.push(
+                store::materialize(
+                    &pool,
+                    &store::SelectedRow::for_job(&job, id.into()),
+                    TextSpan {
+                        transcript_id: id.into(),
+                        start_byte: 0,
+                        end_byte: text.len(),
+                    },
+                    false,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        (pool, request, frozen, passages)
+    }
+
+    #[tokio::test]
+    async fn preceding_question_context_persists_without_rewriting_literal_citations() {
+        let (pool, request, frozen, passages) = question_pair_fixture("Nein.").await;
+        prepare(
+            &pool,
+            &request.request_id,
+            &frozen,
+            &passages,
+            &BTreeMap::new(),
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        let reply = finish(
+            &pool,
+            &request.request_id,
+            &frozen,
+            "Nicht freigegeben [K2].",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let expected =
+            serde_json::json!([{"kind":"preceding_question","cited_tag":2,"context_tag":1}]);
+        let original = serde_json::to_value(&reply).unwrap();
+        assert_eq!(original["context_links"], expected);
+        assert_eq!(reply.cited_tags, vec![2]);
+        assert_eq!(reply.content, "Nicht freigegeben [K2].");
+        assert_eq!(
+            original["evidence_metadata"][1]["preceding_question_tag"],
+            1
+        );
+        let again = completed_reply(&pool, &request).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(again).unwrap(), original);
+        let saved = history(&pool, &request.owner).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(saved[1].reply.as_ref().unwrap()).unwrap(),
+            original
+        );
+        sqlx::query("UPDATE knowledge_request_evidence SET display_json=json_remove(display_json,'$.preceding_question_tag')").execute(&pool).await.unwrap();
+        let legacy = history(&pool, &request.owner).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(legacy[1].reply.as_ref().unwrap()).unwrap()["context_links"],
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    async fn question_context_uses_complete_selected_rows_and_utf8_reply_limit() {
+        for (reply, selected_question, expected) in [
+            ("ä".repeat(32), true, Some(1)),
+            ("ä".repeat(33), true, None),
+            ("Ja.".into(), false, None),
+        ] {
+            let (pool, request, frozen, mut passages) = question_pair_fixture(&reply).await;
+            if !selected_question {
+                passages.remove(0);
+            }
+            prepare(
+                &pool,
+                &request.request_id,
+                &frozen,
+                &passages,
+                &BTreeMap::new(),
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+            let display:String=sqlx::query_scalar("SELECT display_json FROM knowledge_request_evidence WHERE request_id=? ORDER BY ordinal DESC LIMIT 1").bind(&request.request_id).fetch_one(&pool).await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&display).unwrap();
+            assert_eq!(value["preceding_question_tag"].as_u64(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_context_rejects_forged_map_links() {
+        for tag in [0, 2, 999] {
+            let (pool, request, frozen, passages) = question_pair_fixture("Ja.").await;
+            prepare(
+                &pool,
+                &request.request_id,
+                &frozen,
+                &passages,
+                &BTreeMap::new(),
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+            finish(
+                &pool,
+                &request.request_id,
+                &frozen,
+                "Ja [K2].",
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE knowledge_request_evidence SET display_json=json_set(display_json,'$.preceding_question_tag',?) WHERE request_id=? AND ordinal=2").bind(tag).bind(&request.request_id).execute(&pool).await.unwrap();
+            assert!(
+                history(&pool, &request.owner).await.is_err(),
+                "Forged context tag {tag}"
+            );
+        }
     }
 
     #[tokio::test]

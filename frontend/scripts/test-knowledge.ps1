@@ -1,4 +1,4 @@
-param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$RetrievalAcceptance, [switch]$MutationAcceptance, [switch]$AnswerAcceptance)
+param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$ConversationOnly, [switch]$RetrievalAcceptance, [switch]$MutationAcceptance, [switch]$AnswerAcceptance)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
@@ -73,11 +73,10 @@ if ($MutationAcceptance) {
 }
 $focusedFailures = 0
 $PSNativeCommandUseErrorActionPreference = $false
-$focusedFilters = @('knowledge::')
-if (-not $AnswerAcceptance) { $focusedFilters += @('summary::llm_client::response_tests::',
+$focusedFilters = @('knowledge::', 'library::backup::tests::conversation_')
+if (-not $AnswerAcceptance -and -not $ConversationOnly) { $focusedFilters += @('summary::llm_client::response_tests::',
     'summary::openai_provider::tests::', 'summary::codex_provider::app_server_tests::',
     'summary::summary_engine::sidecar::protocol_tests::',
-    'library::backup::tests::conversation_',
     'database::manager::tests::gapped_canonical_rows_keep_fts_alignment_through_snapshot_and_import') }
 foreach ($filter in $focusedFilters) {
     & $executables[0] $filter --test-threads=1 --show-output

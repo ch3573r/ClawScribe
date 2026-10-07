@@ -171,6 +171,14 @@ mod tests {
     }
 
     #[test]
+    fn nested_sibling_groups_never_salvage_inner_tags() {
+        for malformed in ["[K1[K2][K3]]", "[[K1][K2]]", "[K1[K2][K3]"] {
+            assert!(tag_numbers(malformed, 3).is_empty());
+        }
+        assert_eq!(tag_numbers("[K1[K2][K3]] then [K2]", 3), vec![2]);
+    }
+
+    #[test]
     fn malformed_or_out_of_map_groups_never_create_links() {
         for content in [
             "[K1, K999]",
