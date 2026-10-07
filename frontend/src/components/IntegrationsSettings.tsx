@@ -37,8 +37,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import {
   teamsDetectionService,
   TeamsDetectionStatus,
@@ -376,6 +387,7 @@ function OneNotePanel() {
   const [creatingNotebook, setCreatingNotebook] = useState(false);
   const [newNotebookName, setNewNotebookName] = useState("");
   const [savingNotebook, setSavingNotebook] = useState(false);
+  const newNotebookInputRef = useRef<HTMLInputElement>(null);
 
   const submitNewNotebook = async () => {
     const name = sanitizeNotebookName(newNotebookName).trim();
@@ -437,7 +449,7 @@ function OneNotePanel() {
               <Button
                 variant="ghost"
                 type="button"
-                className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                className="h-auto p-0 flex items-center gap-1 font-normal [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                 onClick={() => void ms.loadNotebooks()}
                 disabled={ms.loadingNotebooks}
               >
@@ -460,10 +472,16 @@ function OneNotePanel() {
               }}
               disabled={ms.loadingNotebooks}
             >
-              <SelectTrigger aria-label="Notebook" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+              <SelectTrigger aria-label="Notebook" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent onCloseAutoFocus={(event) => {
+                const input = newNotebookInputRef.current;
+                if (input) {
+                  event.preventDefault();
+                  input.focus();
+                }
+              }}>
                 <SelectItem value={EMPTY_OPTION}>
                   {ms.loadingNotebooks ? "Loading…" : "Select a notebook"}
                 </SelectItem>
@@ -497,6 +515,7 @@ function OneNotePanel() {
                 <Input
                   type="text"
                   autoFocus
+                  ref={newNotebookInputRef}
                   value={newNotebookName}
                   onChange={(e) =>
                     setNewNotebookName(sanitizeNotebookName(e.target.value))
@@ -507,7 +526,7 @@ function OneNotePanel() {
                   }}
                   placeholder="e.g. Meeting notes"
                   maxLength={128}
-                  className="h-auto w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                  className="h-auto shadow-none w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
                 />
                 <Button
                   type="button"
@@ -576,6 +595,7 @@ function PlannerPanel() {
   const [creatingBucket, setCreatingBucket] = useState(false);
   const [newBucketName, setNewBucketName] = useState("");
   const [savingBucket, setSavingBucket] = useState(false);
+  const newBucketInputRef = useRef<HTMLInputElement>(null);
   const [aiPolish, setAiPolish] = useState<boolean>(saved.plannerAiPolish ?? false);
 
   const toggleAiPolish = () => {
@@ -645,7 +665,7 @@ function PlannerPanel() {
                 <Button
                   variant="ghost"
                   type="button"
-                  className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  className="h-auto p-0 flex items-center gap-1 font-normal [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                   onClick={() => void ms.loadPlans()}
                   disabled={ms.loadingPlans}
                 >
@@ -664,8 +684,12 @@ function PlannerPanel() {
                 }}
                 disabled={ms.loadingPlans}
               >
-                <SelectTrigger aria-label="Plan" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
-                  <SelectValue />
+                <SelectTrigger aria-label="Plan" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                  <SelectValue>
+                    {selectedPlan && !ms.plans.some((plan) => plan.id === selectedPlan)
+                      ? ms.loadingPlans ? "Loading…" : "Select a plan"
+                      : undefined}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={EMPTY_OPTION}>
@@ -696,10 +720,24 @@ function PlannerPanel() {
                 }}
                 disabled={!selectedPlan || ms.loadingBuckets}
               >
-                <SelectTrigger aria-label="Default bucket" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
-                  <SelectValue />
+                <SelectTrigger aria-label="Default bucket" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                  <SelectValue>
+                    {!creatingBucket && selectedBucket && !ms.buckets.some((bucket) => bucket.id === selectedBucket)
+                      ? ms.loadingBuckets
+                        ? "Loading…"
+                        : !selectedPlan
+                          ? "Select a plan first"
+                          : "Select a bucket"
+                      : undefined}
+                  </SelectValue>
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent onCloseAutoFocus={(event) => {
+                  const input = newBucketInputRef.current;
+                  if (input) {
+                    event.preventDefault();
+                    input.focus();
+                  }
+                }}>
                   <SelectItem value={EMPTY_OPTION}>
                     {ms.loadingBuckets
                       ? "Loading…"
@@ -729,6 +767,7 @@ function PlannerPanel() {
                 <Input
                   type="text"
                   autoFocus
+                  ref={newBucketInputRef}
                   value={newBucketName}
                   onChange={(e) => setNewBucketName(e.target.value.slice(0, 255))}
                   onKeyDown={(e) => {
@@ -737,7 +776,7 @@ function PlannerPanel() {
                   }}
                   placeholder="e.g. Action items"
                   maxLength={255}
-                  className="h-auto w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                  className="h-auto shadow-none w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
                 />
                 <Button
                   type="button"
@@ -778,7 +817,7 @@ function PlannerPanel() {
               checked={aiPolish}
               onCheckedChange={toggleAiPolish}
               aria-label="AI-generate task titles & notes"
-              className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+              className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 shadow-none transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:shadow [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
             />
           </label>
 
@@ -818,6 +857,7 @@ function ToDoPanel() {
   const [creatingList, setCreatingList] = useState(false);
   const [newListName, setNewListName] = useState("");
   const [savingList, setSavingList] = useState(false);
+  const newListInputRef = useRef<HTMLInputElement>(null);
   const savingListRef = useRef(false);
   const isConnected = ms.connection.state === "connected";
 
@@ -879,7 +919,7 @@ function ToDoPanel() {
               <Button
                 variant="ghost"
                 type="button"
-                className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                className="h-auto p-0 flex items-center gap-1 font-normal [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                 onClick={() => void ms.loadToDoLists()}
                 disabled={ms.loadingToDoLists}
               >
@@ -902,10 +942,16 @@ function ToDoPanel() {
               }}
               disabled={ms.loadingToDoLists}
             >
-              <SelectTrigger aria-label="To Do list" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+              <SelectTrigger aria-label="To Do list" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent onCloseAutoFocus={(event) => {
+                const input = newListInputRef.current;
+                if (input) {
+                  event.preventDefault();
+                  input.focus();
+                }
+              }}>
                 <SelectItem value={EMPTY_OPTION}>
                   {ms.loadingToDoLists ? "Loading…" : "Select a To Do list"}
                 </SelectItem>
@@ -933,6 +979,7 @@ function ToDoPanel() {
                 <Input
                   type="text"
                   autoFocus
+                  ref={newListInputRef}
                   value={newListName}
                   onChange={(e) =>
                     setNewListName(sanitizeToDoListName(e.target.value))
@@ -943,7 +990,7 @@ function ToDoPanel() {
                   }}
                   placeholder="e.g. Meeting action items"
                   maxLength={255}
-                  className="h-auto w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                  className="h-auto shadow-none w-auto flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
                 />
                 <Button
                   type="button"
@@ -1145,7 +1192,7 @@ function OneDrivePanel() {
                 if (e.key === "Enter") void resolveSharingUrl();
               }}
               placeholder="Paste OneDrive or SharePoint folder link"
-              className="h-auto min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              className="h-auto shadow-none min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
               disabled={resolvingUrl}
             />
             <Button
@@ -1169,7 +1216,7 @@ function OneDrivePanel() {
               }}
               placeholder="Create subfolder, e.g. ClawScribe"
               maxLength={120}
-              className="h-auto min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              className="h-auto shadow-none min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
               disabled={creatingFolder}
             />
             <Button
@@ -1195,7 +1242,7 @@ function OneDrivePanel() {
                 checked={includePdf}
                 onCheckedChange={() => setIncludePdf((value) => !value)}
                 aria-label="Include PDF"
-                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 shadow-none transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:shadow [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
               />
             </label>
 
@@ -1210,7 +1257,7 @@ function OneDrivePanel() {
                 checked={createOrgLink}
                 onCheckedChange={() => setCreateOrgLink((value) => !value)}
                 aria-label="Create org links"
-                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 shadow-none transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:shadow [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
               />
             </label>
           </div>
@@ -1448,7 +1495,7 @@ function ConfluencePanel() {
             <span className="block text-sm font-medium text-foreground">
               Browser draft
             </span>
-            <span className="mt-1 block text-xs text-muted-foreground">
+            <span className="mt-1 block text-xs font-normal text-muted-foreground">
               Copy rich text and open Confluence in your existing browser
               session. No API token is used.
             </span>
@@ -1466,7 +1513,7 @@ function ConfluencePanel() {
             <span className="block text-sm font-medium text-foreground">
               Direct REST
             </span>
-            <span className="mt-1 block text-xs text-muted-foreground">
+            <span className="mt-1 block text-xs font-normal text-muted-foreground">
               Create pages through a reachable self-hosted Confluence Server or
               Data Center instance.
             </span>
@@ -1484,7 +1531,7 @@ function ConfluencePanel() {
                 value={createUrl}
                 onChange={(e) => setCreateUrl(e.target.value)}
                 placeholder="https://confluence.example.com/confluence/pages/createpage.action?spaceKey=TEAM"
-                className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
               />
               <p className="mt-1 text-xs text-muted-foreground">
                 For Jira/Confluence behind SSO or App Proxy, this opens in your
@@ -1506,7 +1553,7 @@ function ConfluencePanel() {
                 checked={openAfterCopy}
                 onCheckedChange={() => setOpenAfterCopy((v) => !v)}
                 aria-label="Open Confluence after copying"
-                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
+                className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 shadow-none transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:shadow [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
               />
             </label>
           </>
@@ -1534,7 +1581,7 @@ function ConfluencePanel() {
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                   placeholder="https://confluence.example.com/confluence"
-                  className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
               <UnencryptedHttpOptIn destinationProblem={status?.destinationProblem} urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
@@ -1549,7 +1596,7 @@ function ConfluencePanel() {
                   value={spaceKey}
                   onChange={(e) => setSpaceKey(e.target.value)}
                   placeholder="TEAM"
-                  className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
               <div>
@@ -1560,7 +1607,7 @@ function ConfluencePanel() {
                   value={parentId}
                   onChange={(e) => setParentId(e.target.value)}
                   placeholder="123456789"
-                  className="h-auto w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
             </div>
@@ -1575,7 +1622,7 @@ function ConfluencePanel() {
                   value={patInput}
                   onChange={(e) => setPatInput(e.target.value)}
                   placeholder="Paste PAT to save in OS credentials"
-                  className="h-auto w-auto min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
+                  className="h-auto shadow-none w-auto min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
                 <Button
                   type="button"
@@ -1855,7 +1902,7 @@ function TeamsAutoStartPanel() {
           value={mode}
           onValueChange={(value) => onChange(value as TeamsDetectionMode)}
         >
-          <SelectTrigger aria-label="When a meeting is detected" className="h-auto w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+          <SelectTrigger aria-label="When a meeting is detected" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -2150,7 +2197,7 @@ function CalendarPanel() {
             <Button
               variant="ghost"
               type="button"
-              className="h-auto p-0 flex items-center gap-1 [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              className="h-auto p-0 flex items-center gap-1 font-normal [&_svg]:size-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
               onClick={() => void ms.loadCalendar()}
               disabled={ms.loadingCalendar}
             >
