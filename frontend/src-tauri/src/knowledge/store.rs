@@ -38,6 +38,20 @@ struct Snapshot {
 }
 static READERS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+#[cfg(test)]
+static SETUP_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+async fn observe_pending<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let state = future.as_mut().poll(cx);
+        if state.is_pending() {
+            SETUP_PENDING.store(true, std::sync::atomic::Ordering::Release);
+        }
+        state
+    })
+    .await
+}
 struct CancelRead(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelRead {
     fn drop(&mut self) {
@@ -92,6 +106,9 @@ async fn read_snapshot<T: Send + 'static>(
         context.check()?;
         let _priority=if background { Some(super::scheduler::claim_snapshot()?) } else { None };
         runtime.block_on(async move {
+            #[cfg(test)]
+            let mut tx=observe_pending(pool.begin()).await?;
+            #[cfg(not(test))]
             let mut tx=pool.begin().await?;
             let row:Snapshot=sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
                 .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx).await?.ok_or(KnowledgeError::Superseded)?;
@@ -824,6 +841,117 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn pending_setup_releases_before_connection_return(materialized: bool, preempt: bool) {
+        use std::{
+            sync::atomic::Ordering,
+            time::{Duration, Instant},
+        };
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        transcript(&pool).await;
+        let selected = SelectedRow::for_job(&next_job(&pool).await.unwrap().unwrap(), "row".into());
+        let held = pool.acquire().await.unwrap();
+        SETUP_PENDING.store(false, Ordering::Release);
+        BODY_PEAK.store(0, Ordering::Relaxed);
+        let reader = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                if materialized {
+                    materialize(
+                        &pool,
+                        &selected,
+                        TextSpan {
+                            transcript_id: "row".into(),
+                            start_byte: 0,
+                            end_byte: 1,
+                        },
+                        true,
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    body_window(&pool, &selected, 0).await.map(|_| ())
+                }
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !SETUP_PENDING.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // The pool-acquire future was actually polled Pending while the only
+        // lease remains in this test. No inference permit is needed yet.
+        let admission_while_waiting = crate::audio::inference::claim_job().is_ok();
+        let started = Instant::now();
+        let foreground = if preempt {
+            Some(super::super::scheduler::ForegroundPriority::enter())
+        } else {
+            reader.abort();
+            None
+        };
+        let released = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if let Ok(slot) = READERS.clone().try_acquire_owned() {
+                    if let Ok(admission) = crate::audio::inference::claim_job() {
+                        drop((slot, admission));
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let elapsed = started.elapsed().as_micros();
+        let body = BODY_PEAK.load(Ordering::Relaxed);
+        println!("KNOWLEDGE_PENDING_SETUP materialized={materialized} foreground_preemption={preempt} released_before_connection={released} elapsed_us={elapsed} bound_ms=500 body_bytes={body} admission_free_while_waiting={admission_while_waiting}");
+        // Clean up even on RED; the assertions describe observations taken
+        // BEFORE returning the held connection, not eventual SQL timeout.
+        drop(held);
+        let outcome = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .unwrap();
+        drop(foreground);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            drop(READERS.clone().acquire_owned().await.unwrap());
+            pool.close().await;
+        })
+        .await
+        .unwrap();
+        assert!(released, "setup must release reader and inference admission within 500 ms while the only database connection is still held");
+        assert!(
+            admission_while_waiting,
+            "blocked acquisition must not hold inference admission"
+        );
+        assert_eq!(body, 0);
+        if preempt {
+            assert!(matches!(
+                outcome.unwrap(),
+                Err(KnowledgeError::Cancelled) | Err(KnowledgeError::Busy)
+            ));
+        } else {
+            assert!(outcome.unwrap_err().is_cancelled());
+        }
+    }
+    #[tokio::test]
+    async fn aborted_pending_body_read_releases_admission_and_slot() {
+        pending_setup_releases_before_connection_return(false, false).await;
+    }
+    #[tokio::test]
+    async fn preempted_pending_body_read_releases_admission_and_slot() {
+        pending_setup_releases_before_connection_return(false, true).await;
+    }
+    #[tokio::test]
+    async fn aborted_pending_materialization_releases_admission_and_slot() {
+        pending_setup_releases_before_connection_return(true, false).await;
+    }
+    #[tokio::test]
+    async fn preempted_pending_materialization_releases_admission_and_slot() {
+        pending_setup_releases_before_connection_return(true, true).await;
+    }
     #[tokio::test]
     async fn aborted_blob_reader_keeps_lease_owned_and_releases_for_recreation_and_close() {
         use std::sync::{
