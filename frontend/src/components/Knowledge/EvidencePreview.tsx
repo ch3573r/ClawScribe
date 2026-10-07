@@ -30,6 +30,7 @@ export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;o
       <DialogTitle>Source passage</DialogTitle><DialogDescription>Review the original evidence, then reveal the current transcript or play its saved recording.</DialogDescription>
     </DialogHeader>
     {preview&&<><h3 className="break-words font-semibold">{preview.metadata.title}</h3><p className="text-xs text-muted-foreground">Original source · {preview.metadata.date}{preview.metadata.speaker?` · ${preview.metadata.speaker}`:''}</p></>}
+    {(preview?.metadata.metadata_truncated||resolved?.passage?.metadata_truncated)&&<p className="text-xs text-muted-foreground">Source labels were shortened. Inspect the transcript for the complete meeting context.</p>}
     {state.previewBusy&&<p role="status">Resolving canonical source…</p>}
     {state.error&&<p role="alert" className="text-sm text-destructive">{state.error}</p>}
     {resolved&&<p role="status" className="text-sm text-muted-foreground">{resolved.status==='current'?'Current verified source.':resolved.status==='stale'?'This reference is historical or the source changed. Ask again to retrieve fresh evidence.':resolved.status==='missing'?'The source was deleted or is unavailable. Ask again using the remaining meetings.':'This source reference could not be verified. It cannot navigate.'}</p>}
