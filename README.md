@@ -7,8 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.50**. This Windows GPU preview fixes Meetings scrolling and includes memory across saved
-meetings, filtered keyword/semantic search, and cited conversations. See the
+Source version: **0.5.50**. This Windows GPU preview simplifies meeting selection,
+fixes chat with indexed meetings, shows model-download progress, and restores
+Meetings scrolling. It includes local keyword/semantic search and cited
+conversations across saved meetings. See the
 [0.5.50 preview notes](docs/releases/0.5.50.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
