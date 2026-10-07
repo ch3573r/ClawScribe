@@ -70,7 +70,7 @@ test('search model details can open and dismiss without changing semantic search
   details().props.onOpenChange(true);
   assert.equal(details().props.open,true);
   const content=nodes(details()).find(node=>node.type==='popover-content');
-  assert.match(text(content),/intfloat/multilingual-e5-small/);
+  assert.ok(text(content).includes('intfloat/multilingual-e5-small'));
   assert.match(text(content),/ONNX/);
   assert.match(text(content),/CPU/);
   details().props.onOpenChange(false);
