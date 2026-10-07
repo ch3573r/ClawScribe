@@ -1,5 +1,6 @@
 //! Opt-in local knowledge resources; meeting persistence remains in AppState.
 pub mod chunking;
+pub mod conversations;
 pub mod embedding;
 pub mod indexer;
 pub mod model;
