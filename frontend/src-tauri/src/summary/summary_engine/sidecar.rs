@@ -41,6 +41,9 @@ pub struct SidecarManager {
     /// Shutdown flag
     should_shutdown: Arc<AtomicBool>,
 
+    /// A resource whose cleanup has not actually completed cannot be reused.
+    quarantined: Arc<AtomicBool>,
+
     /// Active request count (for graceful shutdown)
     active_request_count: Arc<AtomicUsize>,
 
@@ -153,6 +156,7 @@ impl SidecarManager {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
+            quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
             current_model_path: Arc::new(RwLock::new(None)),
@@ -220,6 +224,7 @@ impl SidecarManager {
         command.arg("-n").arg("10").arg(&self.helper_binary_path);
 
         command
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // Log stderr to main process
@@ -233,6 +238,8 @@ impl SidecarManager {
             command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
 
+        // Retain the manager slot before spawning; no await may lose a new child.
+        let mut child_lock = self.child_process.lock().await;
         let mut child = command.spawn().with_context(|| {
             format!(
                 "Failed to spawn llama-helper at {:?}",
@@ -250,10 +257,8 @@ impl SidecarManager {
             .ok_or_else(|| anyhow!("Failed to get stdout"))?;
 
         // Store handles
-        {
-            let mut child_lock = self.child_process.lock().await;
-            *child_lock = Some(child);
-        }
+        *child_lock = Some(child);
+        drop(child_lock);
 
         {
             let mut stdin_lock = self.stdin_writer.lock().await;
@@ -297,6 +302,11 @@ impl SidecarManager {
         model: Option<PathBuf>,
         token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<String> {
+        if self.quarantined.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "Local summary helper is quarantined until cleanup completes"
+            ));
+        }
         let _guard = RequestGuard::new(self.active_request_count.clone());
         let fallback_token = tokio_util::sync::CancellationToken::new();
         let token = token.unwrap_or(&fallback_token);
@@ -306,6 +316,11 @@ impl SidecarManager {
             _ = token.cancelled() => return Err(anyhow!("Generation cancelled while queued")),
             lock = self.request_lock.lock() => lock,
         };
+        if self.quarantined.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "Local summary helper is quarantined until cleanup completes"
+            ));
+        }
         let result = tokio::select! {
             biased;
             _ = token.cancelled() => None,
@@ -467,69 +482,31 @@ impl SidecarManager {
 
     /// Force shutdown the sidecar
     pub async fn shutdown(&self) -> Result<()> {
-        // Set shutdown flag
         self.should_shutdown.store(true, Ordering::SeqCst);
-
-        // Send shutdown command
-        if self.is_healthy() {
-            let request = serde_json::json!({"type": "shutdown"}).to_string();
-            let _timeout = Duration::from_secs(5);
-
-            // Try to send shutdown command, but ignore errors
-            // We don't use send_request to avoid incrementing counter
-            let _ = async {
-                let mut stdin_lock = self.stdin_writer.lock().await;
-                if let Some(stdin) = stdin_lock.as_mut() {
-                    stdin.write_all(request.as_bytes()).await?;
-                    stdin.write_all(b"\n").await?;
-                    stdin.flush().await?;
-                }
-                Ok::<(), anyhow::Error>(())
-            }
-            .await;
-        }
-
-        // Kill process if still running
+        self.quarantined.store(true, Ordering::SeqCst);
+        self.is_healthy.store(false, Ordering::SeqCst);
+        // Do not write a polite message into a potentially full stdin pipe.
+        // Keep the child in its manager slot across every await. If startup's
+        // waiter is cancelled, the next cleanup owner still has the actual child.
         {
             let mut child_lock = self.child_process.lock().await;
-            if let Some(mut child) = child_lock.take() {
-                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                    Ok(Ok(status)) => {
-                        log::info!("Sidecar exited with status: {}", status);
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("Failed to wait for sidecar: {}", e);
-                    }
-                    Err(_) => {
-                        log::warn!("Sidecar didn't exit gracefully, killing");
-                        let _ = child.kill().await;
+            if let Some(child) = child_lock.as_mut() {
+                loop {
+                    let _ = child.start_kill();
+                    match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+                        Ok(Ok(_)) => break,
+                        _ => tokio::time::sleep(Duration::from_millis(50)).await,
                     }
                 }
             }
+            *child_lock = None;
         }
-
-        // Clear handles
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            *stdin_lock = None;
-        }
-
-        {
-            let mut stdout_lock = self.stdout_reader.lock().await;
-            *stdout_lock = None;
-        }
-
-        {
-            let mut current_model = self.current_model_path.write().await;
-            *current_model = None;
-        }
-
-        self.is_healthy.store(false, Ordering::SeqCst);
-
-        log::info!("Sidecar shutdown complete");
+        *self.stdin_writer.lock().await = None;
+        *self.stdout_reader.lock().await = None;
+        *self.current_model_path.write().await = None;
+        self.quarantined.store(false, Ordering::SeqCst);
         Ok(())
     }
-
     /// Check if sidecar is healthy
     pub fn is_healthy(&self) -> bool {
         self.is_healthy.load(Ordering::SeqCst)
@@ -705,6 +682,7 @@ mod protocol_tests {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(true)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
+            quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path: PathBuf::new(),
             current_model_path: Arc::new(RwLock::new(None)),

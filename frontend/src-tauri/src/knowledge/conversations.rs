@@ -408,12 +408,52 @@ pub async fn history(
 
 /// Only verifiable completed turns within the new frozen selection may be sent.
 pub async fn eligible_history(
-    _pool: &SqlitePool,
-    _owner: &ConversationOwner,
-    _frozen: &retrieval::FrozenScope,
-    _budget: usize,
+    pool: &SqlitePool,
+    owner: &ConversationOwner,
+    frozen: &retrieval::FrozenScope,
+    budget: usize,
 ) -> Result<(String, BTreeMap<String, i64>), String> {
-    todo!("Constrain inherited turns and normalize their source dependencies")
+    let rows=sqlx::query("SELECT id,frozen_ids_json FROM knowledge_requests WHERE owner_id=? AND status='completed' AND restored=0 ORDER BY created_at DESC,id DESC LIMIT 20")
+        .bind(owner_key(owner)?).fetch_all(pool).await.map_err(failure)?;
+    let mut history = Vec::new();
+    let mut dependencies = BTreeMap::new();
+    let mut used = 0;
+    for row in rows {
+        let id: String = row.get("id");
+        let prior_ids: Vec<String> = serde_json::from_str(row.get("frozen_ids_json"))
+            .map_err(|_| "Invalid saved history scope")?;
+        if prior_ids.iter().any(|id| !frozen.meeting_ids.contains(id)) {
+            continue;
+        }
+        let sources=sqlx::query("SELECT d.source_id,d.revision,s.revision AS current_revision,s.meeting_id FROM knowledge_request_sources d LEFT JOIN knowledge_sources s ON s.id=d.source_id WHERE d.request_id=?")
+            .bind(&id).fetch_all(pool).await.map_err(failure)?;
+        if sources.is_empty()
+            || sources.iter().any(|source| {
+                source.get::<Option<i64>, _>("current_revision") != Some(source.get("revision"))
+                    || !source
+                        .get::<Option<String>, _>("meeting_id")
+                        .is_some_and(|id| frozen.meeting_ids.contains(&id))
+            })
+        {
+            continue;
+        }
+        let bytes:i64=sqlx::query_scalar("SELECT coalesce(sum(length(CAST(content AS BLOB))),0) FROM knowledge_messages WHERE request_id=?").bind(&id).fetch_one(pool).await.map_err(failure)?;
+        if bytes < 0 || bytes as usize > budget.saturating_sub(used) {
+            continue;
+        }
+        let messages=sqlx::query("SELECT role,content FROM knowledge_messages WHERE request_id=? ORDER BY CASE role WHEN 'user' THEN 0 ELSE 1 END").bind(&id).fetch_all(pool).await.map_err(failure)?;
+        let turn=serde_json::to_string(&messages.iter().map(|message|serde_json::json!({"role":message.get::<String,_>("role"),"content":message.get::<String,_>("content").replace("[K","[previous citation ")})).collect::<Vec<_>>()).map_err(|_|"Invalid saved history")?;
+        if used + turn.len() + 1 > budget {
+            continue;
+        }
+        used += turn.len() + 1;
+        history.push(turn);
+        for source in sources {
+            dependencies.insert(source.get("source_id"), source.get("revision"));
+        }
+    }
+    history.reverse();
+    Ok((history.join("\n"), dependencies))
 }
 
 #[cfg(test)]

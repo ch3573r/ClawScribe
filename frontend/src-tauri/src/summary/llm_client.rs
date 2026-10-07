@@ -10,17 +10,57 @@ const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 /// A saved-answer waiter may end before cleanup; the supervised operation owns
 /// its native resources until cleanup actually finishes.
 pub(crate) async fn supervise<T, F, Fut>(
-    _token: &CancellationToken,
-    _deadline: tokio::time::Instant,
-    _cleanup: Duration,
-    _operation: F,
+    token: &CancellationToken,
+    deadline: tokio::time::Instant,
+    cleanup: Duration,
+    operation: F,
 ) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
 {
-    todo!("Retain saved-answer ownership through cancellation and cleanup")
+    static OWNERS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
+        once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(16)));
+    if token.is_cancelled() {
+        return Err("Answer cancelled before dispatch".into());
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err("Answer deadline expired before dispatch".into());
+    }
+    let permit = tokio::select! {
+        biased;
+        _=token.cancelled()=>return Err("Answer cancelled while queued".into()),
+        _=tokio::time::sleep_until(deadline)=>return Err("Answer deadline expired while queued".into()),
+        permit=OWNERS.clone().acquire_owned()=>permit.map_err(|_|"Answer supervisor unavailable")?,
+    };
+    let owned_token = token.child_token();
+    let cancellation_on_drop = owned_token.clone().drop_guard();
+    let task_token = owned_token.clone();
+    let mut task = tokio::spawn(async move {
+        let _permit = permit;
+        operation(task_token).await
+    });
+    let reason = tokio::select! {
+        biased;
+        _=token.cancelled()=>"Answer cancelled",
+        _=tokio::time::sleep_until(deadline)=>"Answer deadline expired",
+        result=&mut task=>{
+            if token.is_cancelled() {return Err("Answer cancelled".into());}
+            if tokio::time::Instant::now()>=deadline {return Err("Answer deadline expired".into());}
+            cancellation_on_drop.disarm();
+            return result.map_err(|_|"Answer operation failed")?;
+        },
+    };
+    owned_token.cancel();
+    // Dropping this JoinHandle detaches, never aborts, the resource owner. The
+    // operation retains its permit and native exchange while cleanup continues.
+    match tokio::time::timeout(cleanup, &mut task).await {
+        Ok(_) => Err(reason.into()),
+        Err(_) => Err(format!(
+            "{reason}; cleanup is still quarantined pending actual resource release"
+        )),
+    }
 }
 /// Current Claude models think adaptively by default, and thinking counts toward
 /// `max_tokens`; this cap leaves room for it while staying non-streaming.

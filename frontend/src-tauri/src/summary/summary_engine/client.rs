@@ -137,13 +137,13 @@ pub async fn generate_with_builtin(
     max_tokens: Option<u32>,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<String> {
-    let _job = crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?;
     // Check cancellation at start
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
             return Err(anyhow!("Generation cancelled before starting"));
         }
     }
+    let _job = crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?;
 
     log::info!("Built-in AI generation request");
     log::info!("Model: {}", model_name);
