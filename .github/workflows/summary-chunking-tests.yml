@@ -90,6 +90,13 @@ jobs:
           }
           $drive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot($workspace).Substring(0, 1))
           Write-Host "Workspace volume: free=$($drive.Free) used=$($drive.Used) bytes"
+          Get-PSDrive -PSProvider FileSystem | ForEach-Object { Write-Host "Volume $($_.Name): free=$($_.Free) used=$($_.Used) bytes" }
+          $debug = Join-Path $workspace 'target/debug'
+          if (Test-Path -LiteralPath $debug -PathType Container) {
+            Get-ChildItem -LiteralPath $debug -Recurse -Force | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint } | ForEach-Object {
+              Write-Host "Debug link: $([System.IO.Path]::GetRelativePath($debug, $_.FullName))"
+            }
+          }
           foreach ($relative in @('target/debug', 'target/release', 'frontend/src-tauri/target/debug', 'frontend/src-tauri/target/release', 'frontend/node_modules', 'frontend/.next')) {
             $directory = Join-Path $workspace $relative
             if (Test-Path -LiteralPath $directory -PathType Container) {
