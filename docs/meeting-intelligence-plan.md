@@ -24,7 +24,7 @@ document parsers only through the compatibility tasks below.
 - Windows is the supported release target. Keep the Tauri application runtime.
 - Recording remains the highest-priority workload; inference runs on blocking workers.
 - Local embeddings are opt-in; cloud embeddings are outside the initial scope.
-- Chunk size is at most 320 model tokens; overlap is 48 tokens; query limit is 1,024 UTF-8 bytes.
+- Semantic chunk bodies are at most 320 model tokens with 48-token overlap; keyword-only windows are at most 2,048 UTF-8 bytes with at most 128-byte overlap. Query limit is 1,024 UTF-8 bytes.
 - Retrieval uses 64 candidates per channel, reciprocal rank fusion constant 60, and at most 12 passages.
 - One embedding input at a time, at most two inference threads, a 32-entry coalesced notification queue, and 60-second idle unload.
 - Reference limits: 25 MiB input, 2 MiB extracted text, 500 PDF pages, 10-second extraction, 512 MiB child memory, 32 MiB DOCX decompression, and 5 MiB per XML entry.
@@ -99,7 +99,7 @@ before trying to claim its job; preserve local-summary preemption behavior.
 
 - [ ] Add tests `rejects_bad_dimensions_and_nonfinite_vectors`, `query_and_passage_prefixes`, `cancel_retains_native_permit`, and `recording_preempts_indexing`. Assert 384 finite normalized values, the correct prefix, and no overlap between native calls.
 - [ ] Run `cargo test -p clawscribe --lib knowledge::`; the new behavior tests must fail before implementation.
-- [ ] Implement CPU inference, masked mean pooling, normalization, two-thread configuration, one-input batches, idle unload, and the bounded/coalesced scheduler.
+- [ ] Implement CPU inference, masked mean pooling, normalization, two-thread configuration, one-input batches, idle unload, and the bounded/coalesced scheduler. Validate disabled graph optimization/prepacking on the unchanged float32 artifact before accepting the revised loading policy.
 - [ ] Pin the candidate model revision from the design, required files and actual SHA-256 values. Reuse `model_download.rs`; add a Rust tokenizer dependency with an exact tested version and compatible license/MSRV. Preserve the existing ORT version.
 - [ ] On the designated runner, compare embeddings with independently generated model-card reference outputs. Measure warm single-input completion, model memory, and start-recording preemption. Require a native input/preemption bound of two seconds and incremental worker memory no greater than 1 GiB.
 - [ ] If the baseline misses these bounds, stop Phase 1 implementation and revise the model artifact/scheduling design with measured results. Do not silently select an unsupported quantized export.
@@ -123,7 +123,7 @@ enum KnowledgeScope {
     Live { session_id: String },
 }
 struct MeetingFilter {
-    meeting_ids: Vec<String>, tags: Vec<String>,
+    all_meetings: bool, meeting_ids: Vec<String>, tags: Vec<String>,
     tag_mode: TagMatch, untagged: bool,
     from: Option<String>, to: Option<String>,
 }
@@ -152,11 +152,13 @@ the existing tag semantics. Live is rejected until Task 7 supplies its source.
 
 - [ ] Write clean/upgrade database tests and retrieval tests: `edited_source_cannot_publish_old_generation`, `delete_cascades_index`, `restore_requeues_index`, `tag_scope_applies_before_ranking`, `hybrid_preserves_identifier_hits`, `unicode_chunk_spans_roundtrip`, and `model_space_change_requires_reindex`.
 - [ ] Pin assertions: 320-token maximum, 48-token overlap, vector pages of at most 512 rows, 64 candidates per channel, and at most 12 final passages. Verify sources outside the selected meetings/tags never appear.
+- [ ] Keep tokenizer-free lexical windows separate from model chunks: 2,048-byte maximum, at most 128-byte overlap, exact canonical UTF-8 spans. Never estimate model-token counts or require a tokenizer download for keyword readiness. Fuse only actual matching evidence identities, preserve identifier hits, and resolve citations without a foreign key to derived chunks.
 - [ ] Run the new tests and confirm the absent behavior fails.
 - [ ] Add the source/chunk/vector/job tables and FTS5 table. Test FTS5 availability in the supported bundled SQLite runtime. Add transcript mutation triggers and source deletion cascades in the new migration.
 - [ ] Implement streaming chunk construction with transcript IDs/byte spans, durable coalesced jobs, three-attempt retry limit, and conditional generation publication. Restarted jobs remain recoverable.
 - [ ] Implement quoted/sanitized lexical queries and normalized cosine search with a bounded heap; combine ranks using constant 60. Return keyword-only status when semantic work cannot run.
 - [ ] Register `knowledge_search`, `knowledge_index_status`, `knowledge_reindex`, `knowledge_cancel_index`, and model enable/download/status commands. Commands never accept a client-provided SQL filter or embedding-space identity.
+- [ ] Require explicit `all_meetings` for unconstrained library scope; freeze allowed meeting IDs for an answer and recheck metadata/tag membership before dispatch and persistence. Start exactly one worker for the current pool across normal and first-run database initialization.
 - [ ] Run targeted tests and the 10,000-passage/30-question English-German acceptance corpus on the designated runner: at least 27 expected top-five hits and warm p95 no greater than two seconds. Commit after Rust checks and the safety scan: `feat: add hybrid meeting retrieval`.
 
 ### Task 3 Evidence, answer requests, and conversation persistence
@@ -189,9 +191,11 @@ in-memory when enabled in Task 7.
 - [ ] Assert one assistant message per owner/request, zero navigable links for invented tags, no provider dispatch after detected source deletion, and an insufficient-evidence answer for unsupported questions. Run tests and observe failure before implementation.
 - [ ] Implement backend-owned `[K1]` maps and fingerprint resolution. Preserve saved summary-source links. Recheck source revisions immediately before dispatch and transactionally before persisting a reply; redact invalidated dependent conversation turns on source deletion.
 - [ ] Add request/message tables with a unique owner/request identity and normalized evidence associations. Existing `ai_chat_messages` remain readable; merge legacy history for a meeting deterministically while writing new knowledge turns only once.
+- [ ] Add durable library owner rows, globally unique request UUIDs, immutable input fingerprints, and create/list/clear lifecycle commands. Clear cancels pending work and removes legacy/new history together. Normalize dependencies inherited from any history sent to the provider; source deletion redacts dependent turns before association cascades.
 - [ ] Add `generate_configured_text_cancellable` beside the current helper with the existing app/state/provider/model/system/user inputs plus `&CancellationToken`, returning `Result<ConfiguredTextReply, String>`. Keep the existing helper as a compatibility wrapper returning only text. Report the actual resolved provider/model and propagate cancellation/deadlines through every existing provider, including bundled Codex, without creating a second credential path.
 - [ ] Build bounded prompts using `summary/context_budget.rs`, meeting titles/dates, distinct transcript/document sections, and only selected evidence. A latest-decision question must retain conflicting dated evidence and qualify incomplete retrieval. Persist user turns before generation; failed requests keep a retryable status and their request identity.
 - [ ] Extend version-1 backup optional tables for authoritative knowledge conversations and exclude derived indexes; restore requeues sources. Add round-trip tests with pre-feature archives.
+- [ ] Import owner/request/message/evidence tables in dependency order using table-specific validation instead of the existing generic `meeting_id` assumption. Test library-only histories, mixed restored/skipped sources, thread-ID collisions, interrupted requests, and stale canonical references without restored chunk rows.
 - [ ] On the designated runner, review the design's 12-case synthetic answer set with the configured provider/model: supported facts, absent evidence, changed decisions, project collisions, and short German responses. Require correct source navigation and no unsupported claims; record sanitized outcome metadata only.
 - [ ] Run relevant `knowledge::`, summary-provider cancellation/reconciliation tests, Rust checks, and the safety scan; commit `feat: add cited knowledge conversations`.
 

@@ -64,17 +64,34 @@ reference-output parity, and the resource gate before this candidate becomes
 the product default. Download only the required files, using the existing
 resumable transfer and integrity-check patterns. Never commit model binaries.
 
+Validate a conservative CPU loading policy with graph optimizations and
+weight prepacking disabled, while retaining the same pinned float32 artifact,
+two-thread limit, and independent reference comparison. The initial optimized
+loading candidate exceeded the worker memory budget despite passing timing and
+numerical parity. Neither a larger memory allowance nor an alternative quantized
+artifact is an automatic fallback; accept the revised policy only after the
+unchanged resource gate passes.
+
 Retrieval rules:
 
 - Semantic indexing is disabled until the user enables it and downloads the
   model. Keyword search remains available without it.
-- Chunk to at most 320 model tokens with a 48-token overlap. Split oversized
+- Semantic chunks contain at most 320 body tokens with a 48-token overlap. Split oversized
   rows without losing their transcript IDs and byte spans. Account for special
   tokens and prefixes within the 512-token input limit.
+- Before the tokenizer download, keyword evidence uses canonical UTF-8 windows
+  of at most 2,048 bytes with at most 128 bytes of overlap, split on character
+  boundaries. These are byte limits, not estimated model-token counts. Preserve
+  row IDs, exact byte spans, speakers, and recording times. After semantic
+  publication, transfer a lexical hit to a real current model chunk only when
+  its spans cover the complete match; otherwise keep the lexical evidence.
 - Index current corrected transcript text and speaker labels. Generated
   summaries and assistant messages are not primary evidence.
 - Apply meeting, date, and project-tag scope in the backend before ranking.
   Document context is limited to explicitly selected attachments in that scope.
+- A library request selects meeting IDs or project/date/untagged constraints,
+  or explicitly opts into all meetings. An empty selection never silently
+  broadens an answer. Meeting-owned requests keep that meeting as their scope.
 - Retrieve up to 64 candidates from each of lexical and semantic search, merge
   with reciprocal rank fusion using constant 60, and return at most 12 passages.
   Vector scans read at most 512 rows per page and retain only the best candidates.
@@ -155,6 +172,21 @@ evidence must remain distinguishable from what someone said in a meeting.
 Use the existing summary source UI behavior as a reference, but introduce an
 evidence resolver that handles more than one meeting and documents. Do not
 reinterpret existing saved summary links or change their identifiers.
+
+Evidence identities are backend-owned canonical units. Resolving a reference
+uses its locator and fingerprint independently of the derived chunk/vector
+cache, so rebuilding the index does not erase conversation history. A changed
+source revision remains stale. Library threads have durable owner rows;
+request UUIDs are globally unique and an input fingerprint prevents changed
+inputs from replaying an unrelated result. Deletion dependencies include any
+prior-turn evidence actually sent in a later prompt. Clearing history cancels
+pending requests before deleting both legacy and new turns.
+
+Portable conversation restore follows owner/request/message/evidence dependency
+order with table-specific validation. Library turns do not acquire a fictitious
+meeting ID. Old version-1 archives remain readable; that does not promise that
+older applications can read newly added tables. Index caches are rebuilt and
+historical references may remain stale after restoration.
 
 Conversation owners are a saved meeting, a library thread, or a live session.
 Existing `ai_chat_messages` history remains readable. New knowledge requests
