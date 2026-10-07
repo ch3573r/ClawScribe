@@ -63,6 +63,26 @@ struct ReadContext {
     background: bool,
 }
 impl ReadContext {
+    /// Setup has no application-owned raw SQLite resource yet. Dropping its
+    /// future follows SQLx's cancellation/transaction rollback paths. Poll the
+    /// shared cancellation/foreground state even while SQLx cannot make progress.
+    async fn setup<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, sqlx::Error>>,
+    ) -> Result<T, KnowledgeError> {
+        let mut future = std::pin::pin!(future);
+        loop {
+            self.check()?;
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+                result = &mut future => {
+                    self.check()?;
+                    return result.map_err(Into::into);
+                }
+            }
+        }
+    }
     fn check(&self) -> Result<(), KnowledgeError> {
         if self.cancelled.load(std::sync::atomic::Ordering::Acquire)
             || (self.background && super::scheduler::foreground_waiting())
@@ -104,16 +124,19 @@ async fn read_snapshot<T: Send + 'static>(
     let result=tokio::task::spawn_blocking(move || {
         let _permit=permit;
         context.check()?;
-        let _priority=if background { Some(super::scheduler::claim_snapshot()?) } else { None };
         runtime.block_on(async move {
             #[cfg(test)]
-            let mut tx=observe_pending(pool.begin()).await?;
+            let mut tx=context.setup(observe_pending(pool.begin())).await?;
             #[cfg(not(test))]
-            let mut tx=pool.begin().await?;
-            let row:Snapshot=sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
-                .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx).await?.ok_or(KnowledgeError::Superseded)?;
+            let mut tx=context.setup(pool.begin()).await?;
+            let row:Snapshot=context.setup(sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
+                .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx)).await?.ok_or(KnowledgeError::Superseded)?;
             let result={
-                let mut handle=(&mut *tx).lock_handle().await?;
+                let mut handle=context.setup((&mut *tx).lock_handle()).await?;
+                context.check()?;
+                // Admission covers only synchronous native reads/hashing. Never
+                // retain it during acquisition, identity lookup or handle waits.
+                let _priority=if background { Some(super::scheduler::claim_snapshot()?) } else { None };
                 context.check()?;
                 work(&mut handle,&row,&context)
             };

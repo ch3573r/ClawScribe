@@ -531,7 +531,12 @@ row pages contain IDs only. Bodies and complete speaker/timing metadata use
 16 KiB incremental SQLite reads, with hashing and keyword matching on one
 bounded blocking reader. Each reader owns its connection, read transaction,
 locked handle and BLOBs until completion or acknowledged cancellation, and
-releases them before model inference or writes. Recording prevents background
+releases them before model inference or writes. Connection acquisition, identity
+lookup and locked-handle setup check cancellation/foreground priority at
+five-millisecond intervals while pending. Shared inference admission is acquired
+only for synchronous native work after setup, and is released before transaction
+completion awaits. Setup cancellation follows SQLx ownership/rollback; an active
+BLOB still closes in its owning blocking worker. Recording prevents background
 reads and preempts them between windows; keyword reads remain available.
 
 The reusable canonical reader is `knowledge::store`: carry a `SelectedRow`
