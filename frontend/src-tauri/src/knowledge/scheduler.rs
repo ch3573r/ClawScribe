@@ -56,10 +56,14 @@ impl Drop for ForegroundPriority {
 struct ActiveCall {
     registry: Arc<CancellationRegistry>,
     token: Arc<AtomicBool>,
+    job: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl Drop for ActiveCall {
     fn drop(&mut self) {
         let mut priority = PRIORITY.lock().unwrap();
+        // NATIVE has already released. Keep admission and the priority marker
+        // synchronized so foreground callers never observe a false idle gap.
+        drop(self.job.take());
         let mut active = self.registry.active.lock().unwrap();
         if active.as_ref().is_some_and(|v| Arc::ptr_eq(v, &self.token)) {
             *active = None;
@@ -92,10 +96,9 @@ pub async fn run_indexing<T: Send + 'static>(
     let active = ActiveCall {
         registry,
         token: token.clone(),
+        job: Some(job),
     };
-    let result = inference::run_cancellable(token.clone(), move |_| {
-        let _job = job;
-        let _active = active;
+    let result = inference::run_cancellable_with_guard(token.clone(), active, move |_| {
         // Preserve typed failures; the shared inference layer owns cancellation.
         Ok(work())
     })
@@ -103,7 +106,12 @@ pub async fn run_indexing<T: Send + 'static>(
     if token.load(Ordering::Acquire) {
         return Err(KnowledgeError::Cancelled);
     }
-    result.map_err(|_| KnowledgeError::Busy)?
+    result.map_err(
+        |error| match error.downcast_ref::<inference::NativeRunFailure>() {
+            Some(inference::NativeRunFailure::Busy) => KnowledgeError::Busy,
+            _ => KnowledgeError::ProviderFailure,
+        },
+    )?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,24 +377,30 @@ mod tests {
     #[tokio::test]
     async fn recording_waits_through_native_teardown() {
         let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
-        let registry = Arc::new(CancellationRegistry::default());
-        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        *inference::NATIVE_TEARDOWN_TEST_PAUSE.lock().unwrap() = Some((paused_tx, release_rx));
-        let indexing = tokio::spawn(run_indexing(registry, || Ok(())));
-        paused_rx.await.unwrap();
-        let foreground = tokio::spawn(inference::claim_job_preempting_local_summary("recording"));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let returned_before_native_release = foreground.is_finished();
-        // Always release the blocking thread before assertions, including RED.
-        release_tx.send(()).unwrap();
-        let _ = indexing.await;
-        let acquired = foreground.await.unwrap();
-        assert!(
-            !returned_before_native_release,
-            "recording must wait through indexing's native teardown"
-        );
-        assert!(acquired.is_ok());
+        for abort_waiter in [false, true] {
+            let registry = Arc::new(CancellationRegistry::default());
+            let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *inference::NATIVE_TEARDOWN_TEST_PAUSE.lock().unwrap() = Some((paused_tx, release_rx));
+            let indexing = tokio::spawn(run_indexing(registry, || Ok(())));
+            paused_rx.await.unwrap();
+            if abort_waiter {
+                indexing.abort();
+            }
+            let foreground =
+                tokio::spawn(inference::claim_job_preempting_local_summary("recording"));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let returned_before_native_release = foreground.is_finished();
+            // Always release the blocking thread before assertions, including RED.
+            release_tx.send(()).unwrap();
+            let _ = indexing.await;
+            let acquired = foreground.await.unwrap();
+            assert!(
+                !returned_before_native_release,
+                "recording must wait through indexing's native teardown"
+            );
+            assert!(acquired.is_ok());
+        }
     }
     #[tokio::test]
     async fn indexing_panic_releases_permits_and_priority() {

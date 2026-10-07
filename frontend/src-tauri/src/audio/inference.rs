@@ -84,6 +84,14 @@ impl Drop for CancelOnDrop {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NativeRunFailure {
+    #[error("Speech engine is still busy with a previous native call")]
+    Busy,
+    #[error("Native speech engine task failed")]
+    WorkerFailed,
+}
+
 pub(crate) async fn run<T: Send + 'static>(
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
 ) -> Result<T> {
@@ -94,12 +102,25 @@ pub(crate) async fn run_cancellable<T: Send + 'static>(
     cancelled: Arc<AtomicBool>,
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    run_cancellable_with_guard(cancelled, (), work).await
+}
+
+/// The completion guard outlives the native permit, including cancellation and
+/// unwinding. Indexing uses it to keep foreground preemption visible until all
+/// of its resources are available again.
+pub(crate) async fn run_cancellable_with_guard<T: Send + 'static>(
+    cancelled: Arc<AtomicBool>,
+    completion: impl Send + 'static,
+    work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let permit = NATIVE
         .clone()
         .try_acquire_owned()
-        .map_err(|_| anyhow!("Speech engine is still busy with a previous native call"))?;
+        .map_err(|_| NativeRunFailure::Busy)?;
     let mut cancel_on_drop = CancelOnDrop(Some(cancelled.clone()));
     let result = tokio::task::spawn_blocking(move || {
+        // Locals drop in reverse order: release NATIVE before completion.
+        let _completion = completion;
         let _permit = permit;
         if cancelled.load(Ordering::Acquire) {
             return Err(anyhow!("Transcription cancelled"));
@@ -118,10 +139,10 @@ pub(crate) async fn run_cancellable<T: Send + 'static>(
         }
         Ok(result)
     })
-    .await
-    .map_err(|_| anyhow!("Native speech engine task failed"))?;
+    .await;
+    // A completed worker failure is not cancellation of the async waiter.
     cancel_on_drop.0 = None;
-    result
+    result.map_err(|_| NativeRunFailure::WorkerFailed)?
 }
 
 #[cfg(test)]
