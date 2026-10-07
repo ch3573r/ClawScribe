@@ -638,7 +638,9 @@ mod response_tests {
             )
             .await
         });
-        entered.cancelled().await;
+        tokio::time::timeout(Duration::from_secs(1), entered.cancelled())
+            .await
+            .expect("The supervised operation must start before its caller can be dropped");
         task.abort();
         tokio::time::timeout(Duration::from_secs(1), cleaned.cancelled())
             .await

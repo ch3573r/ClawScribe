@@ -210,6 +210,20 @@ meeting ID. Old version-1 archives remain readable; that does not promise that
 older applications can read newly added tables. Index caches are rebuilt and
 historical references may remain stale after restoration.
 
+Restored conversation evidence is explicitly historical and remains non-current,
+even if its saved revision counter happens to equal a newly recreated source
+counter. Restore preserves the original canonical IDs, spans, fingerprints and
+display metadata; it does not invent cache rows or rewrite source counters.
+Readable restored history is excluded from future prompts until fresh evidence
+is established. This conservative policy avoids upgrading references that were
+already stale when the backup was created.
+
+Changing a meeting title or start date advances its source revision. The existing
+source-generation trigger invalidates and requeues semantic indexing, so a
+metadata edit can temporarily leave Keyword mode as the available channel.
+This ensures a dated prompt snapshot is rechecked alongside transcript content
+before dispatch and persistence; historical citation metadata is not overwritten.
+
 Conversation owners are a saved meeting, a library thread, or a live session.
 Existing `ai_chat_messages` history remains readable. New knowledge requests
 use UUID request identities and a unique owner/request constraint. A retry
@@ -227,6 +241,13 @@ retain resource ownership until actual termination and reaping, or quarantine
 the resource explicitly. Keep native admission and shared helper locks owned
 through cleanup. Live assistance uses its separate 30-second deadline; stopping
 a recording never awaits assistance cleanup.
+
+The configured-text supervisor owns each operation independently of its waiting
+caller. Dropping the caller signals cancellation; it does not drop the native
+operation. If cleanup exceeds five seconds, report the cleanup error while the
+supervised owner retains the child, exchange lock and native admission until
+actual reaping. A helper awaiting cleanup is quarantined from reuse. Bound the
+number of supervised owners so failed cleanup cannot accumulate unbounded work.
 
 Scope is visible beside the input: This meeting, Selected meetings, or Current
 recording, plus selected reference documents. A saved meeting remains the
