@@ -20,6 +20,10 @@ on:
         description: 'Remove only Rust incremental and Next.js caches before inspection'
         type: boolean
         default: false
+      prune-debug-build:
+        description: 'Remove the regenerable Rust debug build tree before inspection'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,12 +62,16 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs['inspect-runner-storage'] }}
         env:
           PRUNE_GENERATED_CACHES: ${{ inputs['prune-generated-caches'] }}
+          PRUNE_DEBUG_BUILD: ${{ inputs['prune-debug-build'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
-          if ($env:PRUNE_GENERATED_CACHES -eq 'true') {
+          $prune = @()
+          if ($env:PRUNE_DEBUG_BUILD -eq 'true') { $prune += 'target/debug' }
+          if ($env:PRUNE_GENERATED_CACHES -eq 'true') { $prune += @('target/debug/incremental', 'frontend/.next/cache') }
+          if ($prune.Count -gt 0) {
             $prefix = $workspace.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
-            foreach ($relative in @('target/debug/incremental', 'frontend/.next/cache')) {
+            foreach ($relative in $prune) {
               $candidate = Join-Path $workspace $relative
               if (Test-Path -LiteralPath $candidate -PathType Container) {
                 $resolved = (Resolve-Path -LiteralPath $candidate).Path
