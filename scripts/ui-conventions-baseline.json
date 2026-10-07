@@ -1,0 +1,346 @@
+{
+  "schema": 1,
+  "sourceCommit": "9178fb2828844c5599b61a23b540775c65e61c08",
+  "files": {
+    "frontend/src/app/_components/SettingsModal.tsx": {
+      "paletteColors": 21,
+      "hexColors": 0,
+      "nativeControls": 3
+    },
+    "frontend/src/app/meeting-details/page.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/AISummary/Block.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/AISummary/index.tsx": {
+      "paletteColors": 9,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/AudioBackendSelector.tsx": {
+      "paletteColors": 3,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/AudioLevelMeter.tsx": {
+      "paletteColors": 8,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/BetaSettings.tsx": {
+      "paletteColors": 10,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/BlockNoteEditor/BasicBlockNoteTest.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/BluetoothPlaybackWarning.tsx": {
+      "paletteColors": 10,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/BuiltInModelManager.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ChunkProgressDisplay.tsx": {
+      "paletteColors": 24,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ComplianceNotification.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ConfidenceIndicator.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ConfirmationModel/confirmation-modal.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/DatabaseImport/HomebrewDatabaseDetector.tsx": {
+      "paletteColors": 3,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/DatabaseImport/LegacyDatabaseImport.tsx": {
+      "paletteColors": 13,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/DeviceSelection.tsx": {
+      "paletteColors": 15,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/EditableTitle.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/EmptyStateSummary.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/HomeDashboard.tsx": {
+      "paletteColors": 13,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ImportAudio/ImportAudioDialog.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ImportAudio/ImportDropOverlay.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/IntegrationIcons.tsx": {
+      "paletteColors": 0,
+      "hexColors": 43,
+      "nativeControls": 0
+    },
+    "frontend/src/components/IntegrationsSettings.tsx": {
+      "paletteColors": 71,
+      "hexColors": 0,
+      "nativeControls": 8
+    },
+    "frontend/src/components/KeyboardShortcutsSettings.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/LanguagePickerPopover.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/LanguageSelection.tsx": {
+      "paletteColors": 9,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/LibraryBackup.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/MeetingDetails/ExportContentOptions.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 3
+    },
+    "frontend/src/components/MeetingDetails/MeetingBookmarks.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/MeetingDetails/MeetingChat.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 7
+    },
+    "frontend/src/components/MeetingDetails/MeetingExportButtons.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/MeetingDetails/PlannerExportPreview.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 2
+    },
+    "frontend/src/components/MeetingDetails/RetranscribeDialog.tsx": {
+      "paletteColors": 5,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/MeetingDetails/SpeakerDiarizationDialog.tsx": {
+      "paletteColors": 3,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/MeetingDetails/SpeakerLaneTimeline.tsx": {
+      "paletteColors": 0,
+      "hexColors": 7,
+      "nativeControls": 0
+    },
+    "frontend/src/components/MeetingDetails/SummaryGeneratorButtonGroup.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/MeetingDetails/SummaryPanel.tsx": {
+      "paletteColors": 6,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/MeetingDetails/SummarySources.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/MeetingDetails/TextReplaceDialog.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/MeetingDetails/ToDoExportPreview.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/MeetingDetails/TranscriptCorrections.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/MeetingDetails/TranscriptPanel.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/ModelDownloadProgress.tsx": {
+      "paletteColors": 2,
+      "hexColors": 2,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ModelSettingsModal.tsx": {
+      "paletteColors": 23,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/NemotronModelManager.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/ParakeetModelManager.tsx": {
+      "paletteColors": 20,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/PermissionWarning.tsx": {
+      "paletteColors": 12,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/RecordingControls.tsx": {
+      "paletteColors": 17,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/RecordingHealthBanner.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/RecordingModeSelect.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/RecordingSettings.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/RecordingStatusBar.tsx": {
+      "paletteColors": 3,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/Sidebar/index.tsx": {
+      "paletteColors": 34,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/SummaryTemplateSettings.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 3
+    },
+    "frontend/src/components/TranscriptRecovery/TranscriptRecovery.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/TranscriptSettings.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/UnencryptedHttpOptIn.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 1
+    },
+    "frontend/src/components/VirtualizedTranscriptView.tsx": {
+      "paletteColors": 3,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/WhisperAccelerationStatus.tsx": {
+      "paletteColors": 7,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/WhisperModelManager.tsx": {
+      "paletteColors": 23,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/molecules/form-components/form-select-item.tsx": {
+      "paletteColors": 1,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/onboarding/shared/PermissionRow.tsx": {
+      "paletteColors": 12,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/onboarding/shared/ProgressIndicator.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/onboarding/shared/StatusIndicator.tsx": {
+      "paletteColors": 4,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/onboarding/steps/DownloadProgressStep.tsx": {
+      "paletteColors": 7,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/components/onboarding/steps/PermissionsStep.tsx": {
+      "paletteColors": 2,
+      "hexColors": 0,
+      "nativeControls": 0
+    },
+    "frontend/src/lib/recordingNotification.tsx": {
+      "paletteColors": 0,
+      "hexColors": 0,
+      "nativeControls": 1
+    }
+  }
+}

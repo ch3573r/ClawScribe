@@ -1,8 +1,10 @@
 'use client';
 import { Button } from '@/components/ui/button';
+import { PageSection } from '@/components/ui/page-section';
 import type { KnowledgeSearchState } from '@/hooks/useKnowledgeSearch';
 export function SearchResults({state}:{state:KnowledgeSearchState}) {
-  return <section aria-label="Ranked transcript passages" className="rounded-lg border border-border bg-card">
+  if (!state.loading && !state.response) return null;
+  return <PageSection aria-label="Transcript passages">
     <div className="border-b border-border p-4"><h2 className="font-semibold">Transcript passages</h2>
       <p className="mt-1 text-xs text-muted-foreground" role="status">{state.loading?'Searching locally…':state.response?`${state.response.passages.length} passages · ${state.response.mode==='hybrid'?'Semantic + keyword':'Keyword'} retrieval`:'Search your selected meetings to find supporting passages.'}</p>
       {state.response?.index_status.reason&&<p className="mt-2 text-sm text-muted-foreground">{state.response.index_status.reason}</p>}
@@ -15,5 +17,5 @@ export function SearchResults({state}:{state:KnowledgeSearchState}) {
       <blockquote className="whitespace-pre-wrap break-words border-l-2 border-primary pl-3 text-sm leading-6">{passage.text}</blockquote>
       {passage.metadata_truncated&&<p className="text-xs text-muted-foreground">Source labels were shortened.</p>}
     </li>)}</ol>
-  </section>;
+  </PageSection>;
 }

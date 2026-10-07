@@ -9,7 +9,7 @@ const nodes = (node) =>
     ? []
     : Array.isArray(node)
       ? node.flatMap(nodes)
-      : [node, ...nodes(node.props?.children)];
+      : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions)];
 const text = (node) =>
   typeof node === "string" || typeof node === "number"
     ? String(node)
@@ -44,6 +44,14 @@ function component(file, name, props, invoke) {
       }),
     },
     "@/components/ui/button": { Button: "button" },
+    "@/components/ui/textarea": { Textarea: "textarea" },
+    "@/components/ui/scroll-area": { ScrollArea: "scroll-area" },
+    "@/components/ui/tooltip": {},
+    "@/components/ui/input": { Input: "input" },
+    "@/components/ui/checkbox": { Checkbox: "checkbox" },
+    "@/components/ui/switch": { Switch: "switch" },
+    "@/components/ui/progress": { Progress: "progress" },
+    "@/components/ui/select": {},
     "@/components/ui/popover": { Popover: "popover", PopoverTrigger: "trigger", PopoverContent: "content" },
     "@/components/ui/dialog": {
       Dialog: "dialog",
@@ -66,9 +74,9 @@ function component(file, name, props, invoke) {
       const row = nodes(render()).find(
         (node) => node.type === "label" && text(node) === label,
       );
-      nodes(row)
-        .find((node) => node.type === "input")
-        .props.onChange({ target: { checked } });
+      const control=nodes(row).find(node=>["input","checkbox","switch"].includes(node.type));
+      if(control.props.onCheckedChange) control.props.onCheckedChange(checked);
+      else control.props.onChange({target:{checked}});
     },
     button(label) {
       return nodes(render()).find(
@@ -266,13 +274,13 @@ test("status polling clears a recovered read error without clearing a failed act
   try {
     app.render();
     await flush();
-    assert.match(text(app.render()), /Retry to reconnect/);
+    assert.match(text(app.render()), /Could not read meeting memory status/);
     // Invoke the scheduled poll itself; manual Refresh previously hid the bug.
     // The same refresh closure is captured by the component's interval.
     failRead = false;
     await new Promise((resolve) => setTimeout(resolve, 2600));
-    assert.doesNotMatch(text(app.render()), /Retry to reconnect/);
-    app.button("Download embedding model").props.onClick();
+    assert.doesNotMatch(text(app.render()), /Could not read meeting memory status/);
+    app.button("Download search model").props.onClick();
     await flush();
     assert.match(text(app.render()), /Download failed/);
     await new Promise((resolve) => setTimeout(resolve, 2600));

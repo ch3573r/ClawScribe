@@ -76,6 +76,9 @@ jobs:
       - name: Reject private paths and committed secrets
         run: node scripts/verify-public-repo-safety.mjs
 
+      - name: Enforce UI conventions against the existing debt baseline
+        run: node scripts/verify-ui-conventions.mjs --self-test
+
       - name: Verify local build and storage policy
         run: node --test scripts/verify-workflow-policy.test.mjs
 
