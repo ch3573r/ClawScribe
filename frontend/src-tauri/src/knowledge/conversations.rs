@@ -631,6 +631,22 @@ mod tests {
             .await
             .is_err());
     }
+
+    #[tokio::test]
+    async fn deletion_invalidates_a_preparing_request_before_retrieval_finishes() {
+        let pool = database().await;
+        let request = request(create_library(&pool).await.unwrap());
+        reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM meetings WHERE id='fixture'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let messages = history(&pool, &request.owner).await.unwrap();
+        assert_eq!(messages[0].status, "invalidated");
+        assert!(messages[0].content.is_empty());
+    }
     #[tokio::test]
     async fn deleted_source_discards_completed_answer() {
         let pool = database().await;
