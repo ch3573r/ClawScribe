@@ -4,6 +4,40 @@ $PSNativeCommandUseErrorActionPreference = $true
 if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
     $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER -or
     $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER) { throw 'Designated build runner required.' }
+function Initialize-AnswerQaProfile {
+    if ([string]::IsNullOrWhiteSpace($env:CLAWSCRIBE_VALIDATION_ROOT)) { throw 'An explicit isolated validation root is required.' }
+    $validationRoot = [System.IO.Path]::GetFullPath($env:CLAWSCRIBE_VALIDATION_ROOT)
+    $rootVolume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($validationRoot))
+    if (-not $rootVolume.IsReady -or $rootVolume.DriveType -ne [IO.DriveType]::Fixed -or $rootVolume.AvailableFreeSpace -lt 4GB) { throw 'Isolated validation requires a fixed local volume with at least 4 GiB free.' }
+    if (-not (Test-Path -LiteralPath $validationRoot)) {
+        $rootParent = [IO.Directory]::GetParent($validationRoot)
+        if ($null -eq $rootParent -or -not (Test-Path -LiteralPath $rootParent.FullName -PathType Container)) { throw 'The explicitly configured validation root requires an existing local parent.' }
+        for ($ancestor = Get-Item -LiteralPath $rootParent.FullName; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+            if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root parent cannot traverse a reparse point.' }
+        }
+        New-Item -ItemType Directory -Path $validationRoot | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $validationRoot -PathType Container)) { throw 'Invalid isolated validation root.' }
+    $validationItem = Get-Item -LiteralPath $validationRoot
+    for ($ancestor = $validationItem; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+        if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root cannot traverse a reparse point.' }
+    }
+    $qaRoot = [System.IO.Path]::GetFullPath((Join-Path $validationRoot 'clawscribe-answer-qa'))
+    if ([IO.Path]::GetDirectoryName($qaRoot) -ine $validationRoot.TrimEnd('\')) { throw 'Invalid isolated profile boundary.' }
+    $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($qaRoot))
+    if (-not $volume.IsReady -or $volume.DriveType -ne [IO.DriveType]::Fixed -or $volume.AvailableFreeSpace -lt 4GB) { throw 'A fixed local volume with at least 4 GiB free is required for isolated answer validation.' }
+    if (Test-Path -LiteralPath $qaRoot) {
+        if ((Get-Item -LiteralPath $qaRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Synthetic profile cannot be a reparse point.' }
+        if (Get-ChildItem -LiteralPath $qaRoot -Force -Recurse -Attributes ReparsePoint | Select-Object -First 1) { throw 'Synthetic profile contains a reparse point.' }
+    }
+    New-Item -ItemType Directory -Force -Path $qaRoot | Out-Null
+    $probe = Join-Path $qaRoot ([guid]::NewGuid().ToString() + '.probe')
+    [IO.File]::WriteAllText($probe, 'isolated validation write probe')
+    Remove-Item -LiteralPath $probe
+    $env:CLAWSCRIBE_VALIDATION_ROOT = $validationRoot.TrimEnd('\')
+    $env:CLAWSCRIBE_ANSWER_QA_ROOT = $qaRoot
+}
+if ($AnswerAcceptance) { Initialize-AnswerQaProfile }
 . (Join-Path $PSScriptRoot 'configure-windows-portability.ps1')
 $env:LIBCLANG_PATH = Join-Path $env:ProgramFiles 'LLVM/bin'
 if ([string]::IsNullOrWhiteSpace($env:VULKAN_SDK)) { throw 'The pinned Vulkan SDK is required.' }
@@ -52,37 +86,6 @@ if ($focusedFailures -ne 0) { throw "$focusedFailures focused native suites fail
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }
 if ($AnswerAcceptance) {
-    if ([string]::IsNullOrWhiteSpace($env:CLAWSCRIBE_VALIDATION_ROOT)) { throw 'An explicit isolated validation root is required.' }
-    $validationRoot = [System.IO.Path]::GetFullPath($env:CLAWSCRIBE_VALIDATION_ROOT)
-    $rootVolume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($validationRoot))
-    if (-not $rootVolume.IsReady -or $rootVolume.DriveType -ne [IO.DriveType]::Fixed -or $rootVolume.AvailableFreeSpace -lt 4GB) { throw 'Isolated validation requires a fixed local volume with at least 4 GiB free.' }
-    if (-not (Test-Path -LiteralPath $validationRoot)) {
-        $rootParent = [IO.Directory]::GetParent($validationRoot)
-        if ($null -eq $rootParent -or -not (Test-Path -LiteralPath $rootParent.FullName -PathType Container)) { throw 'The explicitly configured validation root requires an existing local parent.' }
-        for ($ancestor = Get-Item -LiteralPath $rootParent.FullName; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
-            if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root parent cannot traverse a reparse point.' }
-        }
-        New-Item -ItemType Directory -Path $validationRoot | Out-Null
-    }
-    if (-not (Test-Path -LiteralPath $validationRoot -PathType Container)) { throw 'Invalid isolated validation root.' }
-    $validationItem = Get-Item -LiteralPath $validationRoot
-    for ($ancestor = $validationItem; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
-        if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root cannot traverse a reparse point.' }
-    }
-    $qaRoot = [System.IO.Path]::GetFullPath((Join-Path $validationRoot 'clawscribe-answer-qa'))
-    if ([IO.Path]::GetDirectoryName($qaRoot) -ine $validationRoot.TrimEnd('\')) { throw 'Invalid isolated profile boundary.' }
-    $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($qaRoot))
-    if (-not $volume.IsReady -or $volume.DriveType -ne [IO.DriveType]::Fixed -or $volume.AvailableFreeSpace -lt 4GB) { throw 'A fixed local volume with at least 4 GiB free is required for isolated answer validation.' }
-    if (Test-Path -LiteralPath $qaRoot) {
-        if ((Get-Item -LiteralPath $qaRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Synthetic profile cannot be a reparse point.' }
-        if (Get-ChildItem -LiteralPath $qaRoot -Force -Recurse -Attributes ReparsePoint | Select-Object -First 1) { throw 'Synthetic profile contains a reparse point.' }
-    }
-    New-Item -ItemType Directory -Force -Path $qaRoot | Out-Null
-    $probe = Join-Path $qaRoot ([guid]::NewGuid().ToString() + '.probe')
-    [IO.File]::WriteAllText($probe, 'isolated validation write probe')
-    Remove-Item -LiteralPath $probe
-    $env:CLAWSCRIBE_VALIDATION_ROOT = $validationRoot.TrimEnd('\')
-    $env:CLAWSCRIBE_ANSWER_QA_ROOT = $qaRoot
     cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
     $helperSource = 'target/x86_64-pc-windows-msvc/release/llama-helper.exe'
     $helperDestination = Join-Path $testDirectory 'llama-helper.exe'
