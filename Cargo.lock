@@ -969,7 +969,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clawscribe"
-version = "0.5.48"
+version = "0.5.49"
 dependencies = [
  "anyhow",
  "async-trait",

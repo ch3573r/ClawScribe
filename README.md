@@ -7,12 +7,13 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.48**. This stable Windows GPU release updates the bundled Codex
-provider and model catalog for GPT-6.1 Sol. See the
-[0.5.48 release notes](docs/releases/0.5.48.md) and the
+Source version: **0.5.49**. This Windows GPU preview adds memory across saved
+meetings, filtered keyword/semantic search, and cited conversations. See the
+[0.5.49 preview notes](docs/releases/0.5.49.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
-Enable **Include prereleases** to discover published previews; drafts are
-excluded from updates. Stable promotion follows real-device acceptance.
+Stable remains **0.5.48**. Enable **Include prereleases** to discover published
+previews; drafts are excluded from updates. Installed acceptance remains
+pending for this preview; stable promotion follows real-device acceptance.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -219,14 +220,17 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.48
+## What Changed In 0.5.49 Preview
 
-- Bundle Codex app-server 0.159.2 with GPT-6.1 Sol in the live model picker.
-- Include GPT-6.1 Sol among OpenAI API fallback model choices.
-- Verify the staged Codex catalog and signed-out auth in Windows release checks.
+- Search saved meetings by keyword, or enable optional local multilingual E5
+  semantic retrieval. Filter by selected meetings, project tags and dates.
+- Save separate library conversations with request-specific citations and
+  canonical transcript reveal/playback. Existing meeting history is retained.
+- Give recording priority over background indexing and active transcript reads.
+  Document attachments and live assistance remain the follow-up plan.
 
-See the [release notes](docs/releases/0.5.48.md), the
-[Codex runtime guide](docs/codex-runtime.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.49.md), the
+[implementation plan](docs/meeting-intelligence-plan.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 
