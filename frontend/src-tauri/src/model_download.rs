@@ -77,6 +77,9 @@ impl Downloads {
         .await
         .map_err(|_| anyhow!("Download cancellation is still pending; wait before retrying"))?
     }
+    pub async fn cancel_generation(&self, name: &str, _generation: u64) -> Result<()> {
+        self.cancel(name).await
+    }
 }
 impl Reservation {
     pub fn token(&self) -> &CancellationToken {
@@ -741,6 +744,26 @@ mod tests {
         drop(reservation);
         cancelling.await.unwrap().unwrap();
         assert!(downloads.start("first").is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cancellation_preserves_a_new_transfer() {
+        let downloads = Downloads::default();
+        let old = downloads.start("model").unwrap();
+        let old_generation = downloads.generation();
+        drop(old);
+        let current = downloads.start("model").unwrap();
+        let cancelling = downloads.cancel_generation("model", old_generation);
+        tokio::pin!(cancelling);
+        tokio::select! {
+            biased;
+            result = &mut cancelling => result.unwrap(),
+            _ = tokio::task::yield_now() => {},
+        }
+        assert!(
+            !current.token().is_cancelled(),
+            "late cancellation must not target a newer reservation"
+        );
     }
 
     #[tokio::test]

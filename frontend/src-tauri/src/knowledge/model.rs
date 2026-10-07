@@ -251,6 +251,21 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[tokio::test]
+    async fn cancellation_during_completion_preserves_terminal_ready_state() {
+        let downloads = ModelDownloads::default();
+        let reservation = downloads.downloads.start("knowledge-e5").unwrap();
+        downloads.status.lock().unwrap().stage = DownloadStage::Ready;
+        // The completed worker publishes Ready just before its reservation drops.
+        // Poll cancellation first while the registry still contains that worker.
+        let (result, ()) = tokio::join!(downloads.cancel(), async move {
+            tokio::task::yield_now().await;
+            drop(reservation);
+        });
+        result.unwrap();
+        assert_eq!(downloads.snapshot().stage, DownloadStage::Ready);
+    }
+
     fn pins() -> ModelPins {
         ModelPins {
             model: "synthetic".into(),
