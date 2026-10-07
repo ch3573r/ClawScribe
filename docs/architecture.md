@@ -536,7 +536,12 @@ lookup and locked-handle setup check cancellation/foreground priority at
 five-millisecond intervals while pending. Shared inference admission is acquired
 only for synchronous native work after setup, and is released before transaction
 completion awaits. Setup cancellation follows SQLx ownership/rollback; an active
-BLOB still closes in its owning blocking worker. Recording prevents background
+BLOB still closes in its owning blocking worker. Active background reads register
+their cancellation token with foreground priority under the same lock as job
+admission. The worker-owned guard retains that marker until the shared job permit
+is released, even if the async waiter is aborted. Recording's existing bounded
+preemption wait therefore recognizes active readers as well as embeddings;
+another user recording still receives an immediate busy response. Recording prevents background
 reads and preempts them between windows; keyword reads remain available.
 
 The reusable canonical reader is `knowledge::store`: carry a `SelectedRow`
@@ -671,6 +676,12 @@ timestamp, historical IDs, or UTF-8 byte offsets.
 
 The meeting-memory frontend has one native wrapper (`knowledgeService`) and
 one generation owner per search/conversation surface (`useKnowledgeSearch`).
+Meeting-only chat uses its meeting owner. Expanded chat explicitly creates or
+selects a durable library owner; toggling back restores the meeting history and
+retains the selected library owner for the next expansion. Owner changes invalidate
+pending work before late results can enter the new view. All-meetings mode clears
+the frontend ID restriction while retaining project/date/untagged filters and the
+UI's saved selection. The backend still intersects explicit ID restrictions.
 Synchronous pending guards retain a UUID through answer and durable-history
 reconciliation. Scope, owner, query cancellation, and unmount invalidate awaited
 search, ask, history, clear, resolver, route, reveal and player stages. The

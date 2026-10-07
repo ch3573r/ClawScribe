@@ -1401,6 +1401,37 @@ mod tests {
         pool
     }
     #[tokio::test]
+    async fn explicit_ids_still_intersect_all_permission_and_empty_ids_include_other_eligible_meetings(
+    ) {
+        let pool = fixture().await;
+        add_text(&pool, "a", "one", "ATLAS-42 first decision").await;
+        add_text(&pool, "b", "two", "ATLAS-42 second decision").await;
+        add_text(&pool, "c", "three", "ATLAS-42 excluded project").await;
+        for (ids, expected) in [
+            (vec!["one".into()], vec!["one"]),
+            (vec![], vec!["one", "two"]),
+        ] {
+            let scope = KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    all_meetings: true,
+                    meeting_ids: ids,
+                    tags: vec!["äpfel".into()],
+                    from: Some("2026-01-01".into()),
+                    to: Some("2026-09-30".into()),
+                    ..Default::default()
+                },
+            };
+            let frozen = freeze_scope(&pool, &scope).await.unwrap();
+            assert_eq!(frozen.meeting_ids, expected);
+            let hits = search_channels(&pool, &frozen, "ATLAS-42", None)
+                .await
+                .unwrap();
+            let mut actual: Vec<_> = hits.into_iter().map(|hit| hit.meeting_id).collect();
+            actual.sort();
+            assert_eq!(actual, expected);
+        }
+    }
+    #[tokio::test]
     async fn tag_scope_applies_before_ranking() {
         let pool = fixture().await;
         let scope = KnowledgeScope::Library {

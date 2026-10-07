@@ -6,7 +6,8 @@ On **Meetings**, ordinary title filtering remains separate from **Meeting
 memory** transcript retrieval. Select meetings explicitly, or check **Search
 all saved meetings**. The shared Project filter applies Any/All/Untagged
 semantics to title browsing and retrieval; **From** and **To** dates are
-inclusive. Empty constrained meeting selections never broaden into a library
+inclusive. All-meetings mode searches every meeting eligible under those filters;
+turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
 search. Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
@@ -19,7 +20,10 @@ invalidate pending work; retries reuse the pending request identity. Clear
 removes the selected conversation's history. Existing saved meeting chat,
 including legacy messages, remains readable. In a meeting, chat defaults to
 only that meeting; **Include other saved meetings** is an explicit expansion
-with independent meeting and project controls.
+with independent meeting and project controls. Expanded questions use a separate
+saved library conversation: create or choose one in the chat. Turning off the
+expansion restores this meeting's own history. The library conversation remains
+available when expanding again or through the saved conversation selector.
 
 Citation tags retain their immutable request-local numbering, including grouped
 and range syntax. Select a grouped citation to choose its individual source.

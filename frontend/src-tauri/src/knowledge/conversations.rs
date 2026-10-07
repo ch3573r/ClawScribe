@@ -936,6 +936,55 @@ pub(crate) mod tests {
         (request, frozen)
     }
     #[tokio::test]
+    async fn meeting_and_expanded_library_histories_remain_independently_readable() {
+        let pool = database().await;
+        let library = create_library(&pool).await.unwrap();
+        let meeting = ConversationOwner::Meeting("fixture".into());
+        for (owner, answer) in [
+            (meeting.clone(), "Meeting-only answer"),
+            (library.clone(), "Expanded answer"),
+        ] {
+            let mut input = request(owner.clone());
+            if matches!(owner, ConversationOwner::Meeting(_)) {
+                input.search.scope = KnowledgeScope::Meeting {
+                    meeting_id: "fixture".into(),
+                };
+            }
+            reserve(&pool, &input, "builtin-ai", "fixture")
+                .await
+                .unwrap();
+            let frozen = frozen_scope(&pool, &input.request_id).await.unwrap();
+            prepare(
+                &pool,
+                &input.request_id,
+                &frozen,
+                &[],
+                &BTreeMap::new(),
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+            finish(
+                &pool,
+                &input.request_id,
+                &frozen,
+                answer,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            history(&pool, &meeting).await.unwrap()[1].content,
+            "Meeting-only answer"
+        );
+        assert_eq!(
+            history(&pool, &library).await.unwrap()[1].content,
+            "Expanded answer"
+        );
+        assert_eq!(list_libraries(&pool).await.unwrap().len(), 1);
+    }
+    #[tokio::test]
     async fn duplicate_request_returns_same_reply() {
         let pool = database().await;
         let (mut request, frozen) = active(&pool).await;

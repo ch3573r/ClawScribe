@@ -113,6 +113,8 @@ Open citations to inspect evidence, reveal its current transcript position, or
 play saved audio at a verified recording offset. Historical, changed, missing,
 and invalid sources remain explicitly identified and cannot navigate as current
 evidence. Existing meeting chat is preserved and defaults to this meeting only.
+Expanding to other meetings uses a separate saved library conversation; switching
+back restores the meeting's history.
 Document attachments and live assistance are planned separately and have no
 controls in this preview. Installed offline, provider-failure, focus, citation,
 and playback acceptance remains pending; see the

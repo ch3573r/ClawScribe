@@ -35,12 +35,18 @@ static PRIORITY: Lazy<Mutex<Priority>> = Lazy::new(|| Mutex::new(Priority::defau
 pub(crate) fn foreground_waiting() -> bool {
     PRIORITY.lock().unwrap().foreground > 0
 }
-pub(crate) fn claim_snapshot() -> Result<tokio::sync::OwnedSemaphorePermit, KnowledgeError> {
-    let priority = PRIORITY.lock().unwrap();
+pub(crate) fn claim_snapshot(token: Arc<AtomicBool>) -> Result<ActiveCall, KnowledgeError> {
+    let mut priority = PRIORITY.lock().unwrap();
     if priority.foreground > 0 {
         return Err(KnowledgeError::Busy);
     }
-    inference::claim_job().map_err(|_| KnowledgeError::Busy)
+    let job = inference::claim_job().map_err(|_| KnowledgeError::Busy)?;
+    priority.active = Some(Arc::downgrade(&token));
+    Ok(ActiveCall {
+        registry: None,
+        token,
+        job: Some(job),
+    })
 }
 pub(crate) struct ForegroundPriority {
     pub preempted: bool,
@@ -63,20 +69,23 @@ impl Drop for ForegroundPriority {
         PRIORITY.lock().unwrap().foreground -= 1;
     }
 }
-struct ActiveCall {
-    registry: Arc<CancellationRegistry>,
+pub(crate) struct ActiveCall {
+    registry: Option<Arc<CancellationRegistry>>,
     token: Arc<AtomicBool>,
     job: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl Drop for ActiveCall {
     fn drop(&mut self) {
         let mut priority = PRIORITY.lock().unwrap();
-        // NATIVE has already released. Keep admission and the priority marker
-        // synchronized so foreground callers never observe a false idle gap.
+        // The native call or synchronous BLOB read has completed. Keep
+        // admission and its priority marker synchronized through permit release,
+        // including when the async waiter was aborted.
         drop(self.job.take());
-        let mut active = self.registry.active.lock().unwrap();
-        if active.as_ref().is_some_and(|v| Arc::ptr_eq(v, &self.token)) {
-            *active = None;
+        if let Some(registry) = &self.registry {
+            let mut active = registry.active.lock().unwrap();
+            if active.as_ref().is_some_and(|v| Arc::ptr_eq(v, &self.token)) {
+                *active = None;
+            }
         }
         if priority
             .active
@@ -104,7 +113,7 @@ pub async fn run_indexing<T: Send + 'static>(
         job
     };
     let active = ActiveCall {
-        registry,
+        registry: Some(registry),
         token: token.clone(),
         job: Some(job),
     };

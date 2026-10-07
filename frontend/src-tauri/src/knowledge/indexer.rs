@@ -73,7 +73,9 @@ pub async fn index_source(
         if !runtime.is_enabled() {
             return Err(KnowledgeError::Disabled);
         }
-        drop(super::scheduler::claim_snapshot()?);
+        drop(super::scheduler::claim_snapshot(Arc::new(
+            AtomicBool::new(false),
+        ))?);
         let rows = store::row_ids_page(pool, job, after.as_deref()).await?;
         if rows.is_empty() {
             break;

@@ -144,7 +144,7 @@ async fn read_snapshot<T: Send + 'static>(
                 context.check()?;
                 // Admission covers only synchronous native reads/hashing. Never
                 // retain it during acquisition, identity lookup or handle waits.
-                let _priority=if background { Some(super::scheduler::claim_snapshot()?) } else { None };
+                let _priority=if background { Some(super::scheduler::claim_snapshot(context.cancelled.clone())?) } else { None };
                 context.check()?;
                 work(&mut handle,&row,&context)
             };
