@@ -1,7 +1,7 @@
 # GitHub Actions Workflows
 
-ClawScribe uses one designated local Windows x64 runner for application
-installers and native Windows diagnostics. The release workflow has no hosted
+ClawScribe uses one designated local Windows x64 runner for every CI validation
+job, application installer, and native Windows diagnostic. There is no hosted
 fallback. Its `clawscribe` label and `CLAWSCRIBE_BUILD_RUNNER` repository variable
 must identify that machine. The workflow verifies both the registered runner
 name and Windows computer name before checking out code. Keep real machine names
@@ -10,17 +10,25 @@ in repository settings, never in committed files.
 | Workflow | Trigger | Execution and output |
 | --- | --- | --- |
 | `clawscribe-windows-release.yml` | Manual or reusable call | Local Windows runner; checks or installers; explicit draft/publish options |
-| `windows-candidate.yml` | `release/**` push or manual | Standard Ubuntu frontend checks, then the local Windows GPU build and a draft release |
+| `windows-candidate.yml` | `release/**` push or manual | Local Windows frontend checks, then the Windows GPU build and a draft release |
 | `windows-native-loader-diagnostics.yml` | Selected trusted branch pushes or manual | Local Windows runner; native Vulkan loader fixture |
-| `pr-main-check.yml` | Pull request, `main` push, or manual | Standard Ubuntu safety, version, frontend typecheck and helper tests |
-| `release-readiness.yml` | Selected pushes, pull-request paths, or manual | Standard Ubuntu isolated Rust module regressions |
-| `summary-chunking-tests.yml` | Relevant pull-request/`main` paths or manual | Standard Ubuntu isolated chunker tests |
-| `windows-script-validation.yml` | Relevant pull-request paths or release branch pushes | Standard Ubuntu PowerShell syntax and repository safety checks |
+| `pr-main-check.yml` | Trusted pull request, `main` push, or manual | Local Windows safety, version, frontend typecheck and helper tests |
+| `release-readiness.yml` | Selected pushes, trusted pull-request paths, or manual | Local Windows isolated Rust module regressions |
+| `summary-chunking-tests.yml` | Relevant trusted pull-request/`main` paths or manual | Local Windows isolated chunker tests |
+| `windows-script-validation.yml` | Relevant trusted pull-request paths or release branch pushes | Local Windows PowerShell syntax and repository safety checks |
 
-Standard hosted validation is free for this public repository and does not
-produce application installers. Do not run untrusted pull-request code on the
-persistent local runner. Reassess hosted validation before making the repository
-private or selecting larger runners.
+Hosted validation is disabled as a cost policy, including for this public
+repository. PR jobs are scheduled only for same-repository branches authored by
+an owner, member, or collaborator. Forks and untrusted authors are skipped before
+runner allocation. Maintainers must review external changes and transfer the
+approved code to a trusted repository branch before local validation. Do not
+use `pull_request_target` to execute PR code on the persistent runner.
+Require repository-level approval for all external contributors' fork workflows
+and do not approve those runs locally; a fork can edit its own job conditions.
+
+The workflow policy tests reject hosted or unresolved runner selections and
+require the identity guard independently in every local job before checkout.
+Jobs wait when the designated runner is offline; there is no fallback.
 
 The legacy DevTest, cross-platform, and standalone hosted installer workflows
 have been retired. Disable their GitHub workflow entries and historical branch

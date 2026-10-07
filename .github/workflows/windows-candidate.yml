@@ -8,27 +8,67 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: pwsh
+
 concurrency:
   group: windows-candidate-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows, X64, clawscribe]
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
       - uses: actions/checkout@v4
+        with:
+          clean: false
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
           version: 10
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
       - run: node scripts/verify-public-repo-safety.mjs
-      - run: pnpm install --frozen-lockfile
+      - name: Install frontend dependencies and clear stale route types
         working-directory: frontend
-      - run: pnpm typecheck && pnpm test
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $generatedRouteTypes = Join-Path $PWD.Path '.next/types'
+          if (Test-Path -LiteralPath $generatedRouteTypes) {
+            $resolved = (Resolve-Path -LiteralPath $generatedRouteTypes).Path
+            $prefix = $PWD.Path.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Generated route types are outside the frontend workspace.'
+            }
+            Remove-Item -LiteralPath $resolved -Recurse -Force
+          }
+          pnpm install --frozen-lockfile
+      - name: Typecheck and test frontend
         working-directory: frontend
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          pnpm typecheck
+          pnpm test
   stage:
     needs: validate
     uses: ./.github/workflows/clawscribe-windows-release.yml

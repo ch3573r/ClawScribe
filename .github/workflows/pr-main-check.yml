@@ -1,14 +1,18 @@
 name: "Validation Check"
 
-# This workflow runs basic validation checks without building
-# Use this to verify version and configuration before a release
-
 on:
   pull_request:
   push:
     branches:
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,10 +21,28 @@ concurrency:
 jobs:
   validation-check:
     name: Validation Check
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
+    timeout-minutes: 15
     steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          clean: false
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -39,55 +61,51 @@ jobs:
       - name: Verify local build and storage policy
         run: node --test scripts/verify-workflow-policy.test.mjs
 
-      - name: Install frontend dependencies
+      - name: Install frontend dependencies and clear stale route types
         working-directory: frontend
-        run: pnpm install --frozen-lockfile
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $generatedRouteTypes = Join-Path $PWD.Path '.next/types'
+          if (Test-Path -LiteralPath $generatedRouteTypes) {
+            $resolved = (Resolve-Path -LiteralPath $generatedRouteTypes).Path
+            $prefix = $PWD.Path.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Generated route types are outside the frontend workspace.'
+            }
+            Remove-Item -LiteralPath $resolved -Recurse -Force
+          }
+          pnpm install --frozen-lockfile
 
       - name: Get version from tauri.conf.json
         id: get-version
         run: |
-          VERSION=$(grep -o '"version": "[^"]*"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION"
-
-      - name: Check current branch
-        run: |
-          CURRENT_BRANCH="${{ github.ref_name }}"
-          echo "Current branch: $CURRENT_BRANCH"
-
-          if [[ "$CURRENT_BRANCH" == "main" ]]; then
-            echo "On main branch - ready for release"
-          elif [[ "$CURRENT_BRANCH" == "devtest" ]]; then
-            echo "On devtest branch - ready for testing"
-          else
-            echo "On feature branch: $CURRENT_BRANCH"
-          fi
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath 'frontend/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Version: $version"
 
       - name: Guard removed legacy backend
         run: |
-          if [[ -e backend ]]; then
-            echo "::error::The legacy backend/ directory was removed and must not be reintroduced."
-            exit 1
-          fi
-
-          forbidden="$(git grep -n -E 'backend/|whisper-server-package|jfk\.(wav|mp3)' -- ':!backend/**' ':!.github/workflows/pr-main-check.yml' || true)"
-          if [[ -n "$forbidden" ]]; then
-            echo "::error::Removed backend references were found."
-            echo "$forbidden"
-            exit 1
-          fi
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath 'backend') {
+            throw 'The legacy backend directory was removed and must not be reintroduced.'
+          }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $forbidden = @(git grep -n -E 'backend/|whisper-server-package|jfk\.(wav|mp3)' -- ':!backend/**' ':!.github/workflows/pr-main-check.yml')
+          if ($LASTEXITCODE -gt 1) { throw 'Legacy reference search failed.' }
+          if ($forbidden.Count -gt 0) { throw 'Removed backend references were found.' }
+          exit 0
 
       - name: Validate version format
+        env:
+          SOURCE_VERSION: ${{ steps.get-version.outputs.version }}
         run: |
-          VERSION="${{ steps.get-version.outputs.version }}"
-
-          # Check if version matches semantic versioning pattern
-          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version format is valid: $VERSION"
-          else
-            echo "Warning: Version '$VERSION' may not be in standard semver format"
-            echo "Expected format: X.Y.Z (e.g., 1.0.0)"
-          fi
+          if ($env:SOURCE_VERSION -match '^\d+\.\d+\.\d+$') {
+            Write-Host "Version format is valid: $env:SOURCE_VERSION"
+          } else {
+            Write-Warning 'Version may not be in X.Y.Z format.'
+          }
 
       - name: Typecheck frontend
         working-directory: frontend
@@ -98,21 +116,17 @@ jobs:
         run: pnpm test
 
       - name: Generate validation summary
+        env:
+          SOURCE_VERSION: ${{ steps.get-version.outputs.version }}
         run: |
-          echo "## Validation Check Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ steps.get-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Checks" >> $GITHUB_STEP_SUMMARY
-          echo "- Public repository safety scan completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Removed legacy backend guard completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Frontend typecheck completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Frontend helper tests completed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Run **ClawScribe Windows Release** on the designated local runner for validation or installers" >> $GITHUB_STEP_SUMMARY
-          echo "2. Test installers remain on the build machine; request a draft release when distribution is needed" >> $GITHUB_STEP_SUMMARY
-          echo "3. Publish only after completing the Windows release checklist" >> $GITHUB_STEP_SUMMARY
+          @(
+            '## Validation Check Summary',
+            '',
+            "**Version:** $env:SOURCE_VERSION",
+            "**Commit:** $env:GITHUB_SHA",
+            '',
+            '- Designated local runner identity verified',
+            '- Public repository safety and workflow policy checks completed',
+            '- Removed legacy backend guard completed',
+            '- Frontend typecheck and helper tests completed'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

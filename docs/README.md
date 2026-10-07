@@ -38,6 +38,13 @@ from the source version.
 - [OpenAI authentication paths](auth/openai-login.md)
 - [Bundled Codex runtime](codex-runtime.md)
 
+## Proposed Capabilities
+
+- [Meeting intelligence design](meeting-intelligence-design.md)
+- [Meeting intelligence implementation plan](meeting-intelligence-plan.md)
+
+These documents describe proposed work, not currently available features.
+
 ## Microsoft 365 Exports
 
 - [Microsoft Graph integration](integrations/microsoft-graph.md)

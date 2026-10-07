@@ -136,24 +136,38 @@ with `--ignored --exact` in an interactive session with the required hardware.
 
 ## GitHub Actions
 
-**ClawScribe Windows Release** is the manual/reusable build workflow. Installer
-builds and native Windows diagnostics run exclusively on the designated local
-Windows x64 machine. There is no GitHub-hosted fallback: if the runner is
-offline, jobs wait for it.
+**ClawScribe Windows Release** is the manual/reusable build workflow. All CI
+validation, installer builds, and native Windows diagnostics run exclusively on
+the designated local Windows x64 machine. GitHub-hosted runners are disabled as
+a cost policy, including for this public repository. If the runner is offline,
+jobs wait for it.
 
 Assign the `clawscribe` label only to that machine's repository runner. Set the
 repository Actions variable `CLAWSCRIBE_BUILD_RUNNER` to both its registered
 runner name and Windows computer name. Before checking out any source, the
-workflow requires a self-hosted environment and verifies both names against
+job requires a self-hosted environment and verifies both names against
 that variable. Missing or mismatched configuration stops the job. Keep actual
 machine names in repository settings, never in committed configuration.
 
-Only trusted maintainer code may run on this persistent machine. Native Windows
-diagnostics use manual dispatch and trusted branch pushes; pull requests run
-the separate syntax and regression checks on standard GitHub-hosted Ubuntu
-runners. Those validation jobs are free while the repository is public and do
-not produce application installers. Reassess this policy before changing
-repository visibility or using larger runners.
+Only trusted code may run on this persistent machine. PR validation jobs use a
+job-level condition that requires a branch in this repository and an author
+association of `OWNER`, `MEMBER`, or `COLLABORATOR`. Fork PRs and untrusted authors
+are skipped before runner allocation. For an external contribution, a maintainer
+must review the exact code and transfer the approved changes to a trusted
+repository branch before running validation. Manual dispatch must likewise use
+reviewed code. Never use `pull_request_target` to run untrusted PR code locally.
+
+In repository Settings > Actions > General, require approval for all external
+contributors' fork workflows (`all_external_contributors`). PRs can modify their
+own workflow definitions, so the job condition alone cannot protect against a
+fork removing that condition. Do not approve fork workflow runs on this runner;
+transfer reviewed code to a trusted repository branch instead.
+
+Every job uses `[self-hosted, Windows, X64, clawscribe]`, checks the configured
+machine before checkout, and retains local build caches. Validation uses
+PowerShell 7; isolated Rust checks use the Windows MSVC toolchain. The workflow
+policy tests reject hosted runners, unresolved runner expressions, missing
+per-job identity guards, and unguarded PR execution.
 
 Important inputs:
 
@@ -172,6 +186,20 @@ and verification metadata remain in the local runner checkout's
 copy needed outputs locally before a later build replaces them. Dependency,
 SDK, and build caches also remain local, with Actions caching disabled.
 Draft builds upload to an explicitly requested draft GitHub Release instead.
+For disk pressure, manually dispatch **Summary chunking regression tests** with
+`inspect-runner-storage` enabled to report generated build sizes without tests.
+Its optional `prune-generated-caches` input clears only the workspace's Rust
+debug incremental cache and Next.js cache after rejecting paths or contents
+that contain links. Source, models, credentials, installers, and other build
+outputs remain intact; subsequent checks recreate these caches locally.
+If more space is needed, `prune-debug-build` removes the generated Rust debug
+tree using the same path checks. The next debug check recompiles it; release
+build output and installers remain intact.
+An alternative `compress-release-dependencies` input applies native filesystem
+compression only to regular Rust `.rlib`/`.rmeta` files in the release dependency
+directory after checking every parent for links. It preserves those files and
+does not compress models, executables, installers, or source. Use another local
+volume for large evaluation model caches when available.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
 installers, and then runs the required native regression suites before staging

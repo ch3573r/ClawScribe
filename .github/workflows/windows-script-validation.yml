@@ -6,12 +6,34 @@ on:
     branches: ['release/**']
 permissions:
   contents: read
+defaults:
+  run:
+    shell: pwsh
 jobs:
   syntax:
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
     timeout-minutes: 5
     steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
       - uses: actions/checkout@v4
+        with:
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Parse native test and packaging scripts
         shell: pwsh
         run: |
