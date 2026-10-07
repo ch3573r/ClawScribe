@@ -6,6 +6,22 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
+
+/// A saved-answer waiter may end before cleanup; the supervised operation owns
+/// its native resources until cleanup actually finishes.
+pub(crate) async fn supervise<T, F, Fut>(
+    _token: &CancellationToken,
+    _deadline: tokio::time::Instant,
+    _cleanup: Duration,
+    _operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+{
+    todo!("Retain saved-answer ownership through cancellation and cleanup")
+}
 /// Current Claude models think adaptively by default, and thinking counts toward
 /// `max_tokens`; this cap leaves room for it while staying non-streaming.
 
@@ -541,6 +557,93 @@ mod response_tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct LifetimeFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for LifetimeFlag {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_answer_precancel_never_dispatches() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = dispatched.clone();
+        let result = supervise(
+            &token,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(20),
+            move |_| async move {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!dispatched.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn saved_answer_deadline_retains_owner_past_cleanup_allowance() {
+        let owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let observed = owner.clone();
+        let release = CancellationToken::new();
+        let child_release = release.clone();
+        let result = supervise(
+            &CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_millis(20),
+            Duration::from_millis(20),
+            move |token| async move {
+                let _owner = LifetimeFlag(observed);
+                token.cancelled().await;
+                child_release.cancelled().await;
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().contains("cleanup"));
+        assert!(
+            owner.load(std::sync::atomic::Ordering::SeqCst),
+            "Timeout must not release native ownership"
+        );
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while owner.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_saved_answer_waiter_signals_owned_cleanup() {
+        let entered = CancellationToken::new();
+        let started = entered.clone();
+        let cleaned = CancellationToken::new();
+        let finished = cleaned.clone();
+        let task = tokio::spawn(async move {
+            supervise(
+                &CancellationToken::new(),
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                Duration::from_millis(20),
+                move |token| async move {
+                    started.cancel();
+                    token.cancelled().await;
+                    finished.cancel();
+                    Ok(())
+                },
+            )
+            .await
+        });
+        entered.cancelled().await;
+        task.abort();
+        tokio::time::timeout(Duration::from_secs(1), cleaned.cancelled())
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn incomplete_outputs_are_never_reported_as_complete() {
