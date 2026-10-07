@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.50
+
+- Fix Meetings scrolling after the meeting-memory controls extended the page beyond the window. Constrain the page to the content area's height so saved meetings and expanded content remain reachable.
+- Retain meeting-memory search, optional local semantic retrieval, saved library chat, and cited transcript/audio navigation from 0.5.49. Knowledge settings and expanded chat inside individual meetings are also included; document attachments and live assistance remain planned.
+- Advance the installer/runtime/updater version to 0.5.50 for a Windows GPU preview. Stable remains 0.5.48; enable **Include prereleases** after publication or install manually. Existing 0.5.49 assets remain unchanged. Published NSIS and MSI installers must include Tauri updater signatures; Windows publisher signing is separate.
+- The scroll fix passed independent source review, frontend typecheck/build and all 250 tests. Exact-build installed scrolling, offline/provider/citation/playback, recording/upgrade/update discovery and endurance acceptance remain pending. Installer preflight, native checks and artifact integrity are separate publication gates. See `docs/releases/0.5.50.md`.
+
 ## 0.5.49
 
 - Add memory across saved meetings: keyword search without a model download, optional local multilingual E5 semantic retrieval, and explicit selected-meeting/project/date scopes. Local embeddings run on CPU; recording takes priority over background indexing and active transcript reads.
