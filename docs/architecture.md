@@ -533,6 +533,11 @@ mode. It returns actual mode, index status and canonical passages. Questions are
 limited to 1,024 UTF-8 bytes. Quoted lexical queries and a local cosine scan each
 retain at most 64 candidates; vector pages hold at most 512 rows and scoring
 runs on blocking workers. RRF uses constant 60 and returns at most 12 passages.
+When multiple current indexed sources are eligible, the semantic heap keeps
+at most three candidates per source. A sole eligible source retains all 64
+slots. This limits single-source crowding without merging or deleting stored
+passages; lexical selection retains its full budget. Actual hybrid mode requires
+current vectors inside the selected scope.
 Lexical rank transfers to a published semantic chunk only when that chunk
 covers the complete match. Containment deduplication stays within one source
 revision and preserves distinct dated meetings. Missing models or recording

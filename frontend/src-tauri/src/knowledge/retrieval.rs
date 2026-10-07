@@ -431,6 +431,7 @@ fn passage(
 struct Scored {
     score: f64,
     id: String,
+    source_id: String,
 }
 impl PartialEq for Scored {
     fn eq(&self, other: &Self) -> bool {
@@ -458,10 +459,14 @@ async fn semantic_candidates(
     query: &[f32],
 ) -> Result<Vec<Passage>, KnowledgeError> {
     let query = super::embedding::normalize(query.to_vec())?;
+    // Empty or stale generations do not reduce another source's budget.
+    let eligible: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT s.id) FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space")
+        .bind(allowed).bind(space).fetch_one(pool).await?;
+    let per_source = if eligible >= 2 { 3 } else { CANDIDATES };
     let mut heap = BinaryHeap::<Scored>::new();
     let mut after = String::new();
     loop {
-        let page:Vec<(String,Vec<u8>)>=sqlx::query_as("SELECT c.id,v.vector FROM knowledge_vectors v JOIN knowledge_chunks c ON c.id=v.chunk_id JOIN knowledge_sources s ON s.id=c.source_id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE v.space=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND c.id>? ORDER BY c.id LIMIT ?").bind(allowed).bind(space).bind(space).bind(&after).bind(VECTOR_PAGE as i64).fetch_all(pool).await?;
+        let page:Vec<(String,Vec<u8>,String)>=sqlx::query_as("SELECT c.id,v.vector,s.id FROM knowledge_vectors v JOIN knowledge_chunks c ON c.id=v.chunk_id JOIN knowledge_sources s ON s.id=c.source_id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE v.space=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND c.id>? ORDER BY c.id LIMIT ?").bind(allowed).bind(space).bind(space).bind(&after).bind(VECTOR_PAGE as i64).fetch_all(pool).await?;
         if page.is_empty() {
             break;
         }
@@ -469,7 +474,7 @@ async fn semantic_candidates(
         after = page.last().unwrap().0.clone();
         let query = query.clone();
         heap = tokio::task::spawn_blocking(move || {
-            for (id, bytes) in page {
+            for (id, bytes, source_id) in page {
                 if bytes.len() != 384 * 4 {
                     continue;
                 }
@@ -480,7 +485,23 @@ async fn semantic_candidates(
                 if !score.is_finite() {
                     continue;
                 }
-                heap.push(Scored { score, id });
+                let hit = Scored {
+                    score,
+                    id,
+                    source_id,
+                };
+                if per_source < CANDIDATES {
+                    let same_source = || heap.iter().filter(|item| item.source_id == hit.source_id);
+                    if same_source().count() >= per_source {
+                        let weakest = same_source().max().unwrap();
+                        if hit >= *weakest {
+                            continue;
+                        }
+                        let remove = weakest.id.clone();
+                        heap.retain(|item| item.id != remove);
+                    }
+                }
+                heap.push(hit);
                 if heap.len() > CANDIDATES {
                     heap.pop();
                 }
@@ -528,7 +549,11 @@ pub async fn retrieve(
     let scope = freeze_scope(pool, &request.scope).await?;
     let space = super::model::PINS.space();
     let mut status = super::store::status(pool, runtime.scheduler.is_enabled(), &space.id).await?;
-    let vector = if request.mode == SearchMode::Hybrid {
+    let allowed =
+        serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
+    let scoped_ready: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)")
+        .bind(allowed).bind(&space.id).fetch_one(pool).await?;
+    let vector = if request.mode == SearchMode::Hybrid && scoped_ready {
         match runtime
             .scheduler
             .embed(request.query.clone(), EmbeddingPurpose::Query)
@@ -563,7 +588,7 @@ pub async fn retrieve(
     recheck_scope(pool, &scope).await?;
     Ok(SearchResponse {
         passages,
-        mode: if vector.is_some() && status.semantic_ready > 0 {
+        mode: if vector.is_some() {
             SearchMode::Hybrid
         } else {
             SearchMode::Keyword
