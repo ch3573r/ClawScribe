@@ -11,6 +11,19 @@ on:
       - 'frontend/src-tauri/src/summary/**'
       - '.github/workflows/summary-chunking-tests.yml'
   workflow_dispatch:
+    inputs:
+      knowledge:
+        description: 'Run manual local embedding validation'
+        type: boolean
+        default: false
+      build-ref:
+        description: 'Exact reviewed commit SHA for knowledge validation'
+        type: string
+        default: ''
+      acceptance:
+        description: 'Download pinned model and run native resource/parity gate'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,7 +38,7 @@ concurrency:
 
 jobs:
   chunking:
-    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    if: ${{ !inputs.knowledge && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))) }}
     runs-on: [self-hosted, Windows, X64, clawscribe]
     timeout-minutes: 5
     steps:
@@ -60,3 +73,33 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           & (Join-Path $env:RUNNER_TEMP "summary-chunking-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.exe")
+
+  knowledge:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
+    timeout-minutes: 60
+    steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
+          if ($env:BUILD_REF -notmatch '^[0-9a-f]{40}$') { throw 'An immutable reviewed commit SHA is required.' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs['build-ref'] }}
+          clean: false
+          persist-credentials: false
+      - name: Run knowledge validation
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUN_ACCEPTANCE: ${{ inputs.acceptance }}
+        run: ./frontend/scripts/test-knowledge.ps1 -Acceptance:($env:RUN_ACCEPTANCE -eq 'true')

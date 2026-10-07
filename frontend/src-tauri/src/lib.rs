@@ -49,6 +49,7 @@ pub mod diagnostics;
 pub mod exports;
 mod external_url;
 pub mod groq;
+pub mod knowledge;
 pub mod library;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
