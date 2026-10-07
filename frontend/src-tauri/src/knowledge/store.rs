@@ -163,6 +163,60 @@ pub async fn record_failure(
     Ok(())
 }
 
+pub async fn requeue(pool: &SqlitePool, ids: &[String]) -> Result<(), KnowledgeError> {
+    let ids = serde_json::to_string(ids).map_err(|_| KnowledgeError::InvalidInput)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE knowledge_sources SET generation=generation+1,semantic_revision=NULL,semantic_space=NULL WHERE meeting_id IN(SELECT value FROM json_each(?))").bind(&ids).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO knowledge_index_jobs(source_id,revision,generation) SELECT id,revision,generation FROM knowledge_sources WHERE meeting_id IN(SELECT value FROM json_each(?)) ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision,generation=excluded.generation,attempts=0,failure=NULL,paused=0").bind(ids).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub async fn invalidate_other_spaces(pool: &SqlitePool, space: &str) -> Result<(), KnowledgeError> {
+    let ids:Vec<String>=sqlx::query_scalar("SELECT meeting_id FROM knowledge_sources WHERE semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
+    if !ids.is_empty() {
+        requeue(pool, &ids).await?;
+    }
+    Ok(())
+}
+pub async fn status(
+    pool: &SqlitePool,
+    enabled: bool,
+    space: &str,
+) -> Result<IndexStatus, KnowledgeError> {
+    let ready:i64=sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_sources WHERE semantic_revision=revision AND semantic_space=?").bind(space).fetch_one(pool).await?;
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM knowledge_index_jobs WHERE attempts<3 AND paused=0",
+    )
+    .fetch_one(pool)
+    .await?;
+    let failed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_index_jobs WHERE attempts>=3")
+            .fetch_one(pool)
+            .await?;
+    let paused: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_index_jobs WHERE paused=1")
+            .fetch_one(pool)
+            .await?;
+    Ok(IndexStatus {
+        keyword_ready: true,
+        semantic_enabled: enabled,
+        semantic_ready: ready as usize,
+        pending: pending as usize,
+        failed: failed as usize,
+        reason: if !enabled {
+            Some("disabled".into())
+        } else if failed > 0 {
+            Some("indexing_failed".into())
+        } else if paused > 0 {
+            Some("paused".into())
+        } else if pending > 0 {
+            Some("indexing".into())
+        } else {
+            None
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

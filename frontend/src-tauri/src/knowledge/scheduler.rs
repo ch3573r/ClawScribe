@@ -241,10 +241,31 @@ impl Scheduler {
         text: String,
         purpose: EmbeddingPurpose,
     ) -> Result<Vec<f32>, KnowledgeError> {
+        super::embedding::prefixed_input(&text, purpose)?;
+        self.with_backend(move |backend| backend.embed(&text, purpose))
+            .await
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+    pub async fn spans(
+        self: &Arc<Self>,
+        id: String,
+        text: String,
+    ) -> Result<Vec<super::types::TextSpan>, KnowledgeError> {
+        if text.len() > 16 * 1024 {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        self.with_backend(move |backend| backend.spans(&id, &text))
+            .await
+    }
+    async fn with_backend<T: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(&mut dyn EmbeddingBackend) -> Result<T, KnowledgeError> + Send + 'static,
+    ) -> Result<T, KnowledgeError> {
         if !self.enabled.load(Ordering::Acquire) {
             return Err(KnowledgeError::Disabled);
         }
-        super::embedding::prefixed_input(&text, purpose)?;
         let scheduler = self.clone();
         run_indexing(self.cancellation.clone(), move || {
             if !scheduler.enabled.load(Ordering::Acquire) {
@@ -270,7 +291,7 @@ impl Scheduler {
                     return Err(KnowledgeError::Cancelled);
                 }
             }
-            let result = worker.model.as_mut().unwrap().embed(&text, purpose);
+            let result = work(worker.model.as_mut().unwrap().as_mut());
             worker.last_used = Instant::now();
             result
         })

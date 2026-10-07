@@ -1,4 +1,4 @@
-param([switch]$Acceptance, [bool]$FullSuite = $true)
+param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$RetrievalAcceptance)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
@@ -37,6 +37,12 @@ if (Test-Path $ffmpeg) { Copy-Item $ffmpeg (Join-Path $testDirectory 'ffmpeg.exe
 & $executables[0] knowledge:: --test-threads=1
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }
+if ($RetrievalAcceptance) {
+    $cache = Join-Path $env:RUNNER_TEMP 'clawscribe-knowledge-acceptance'
+    New-Item -ItemType Directory -Force $cache | Out-Null
+    $env:CLAWSCRIBE_KNOWLEDGE_MODEL = Join-Path $cache 'onnx'
+    & $executables[0] knowledge::retrieval::tests::synthetic_retrieval_workload --ignored --exact --test-threads=1 --nocapture
+}
 if ($Acceptance) {
     $cache = Join-Path $env:RUNNER_TEMP 'clawscribe-knowledge-acceptance'
     New-Item -ItemType Directory -Force $cache | Out-Null

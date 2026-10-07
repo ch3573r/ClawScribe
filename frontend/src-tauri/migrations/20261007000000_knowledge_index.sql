@@ -1,4 +1,9 @@
 -- Derived indexes. Canonical transcript rows remain authoritative evidence.
+CREATE TABLE knowledge_settings (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1))
+);
+INSERT INTO knowledge_settings(singleton) VALUES (1);
 CREATE TABLE knowledge_sources (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL DEFAULT 'meeting' CHECK(kind = 'meeting'),

@@ -13,6 +13,9 @@ use tokenizers::Tokenizer;
 pub trait EmbeddingBackend: Send {
     fn space(&self) -> EmbeddingSpace;
     fn embed(&mut self, text: &str, purpose: EmbeddingPurpose) -> Result<Vec<f32>, KnowledgeError>;
+    fn spans(&self, _id: &str, _text: &str) -> Result<Vec<super::types::TextSpan>, KnowledgeError> {
+        Err(KnowledgeError::ModelUnavailable)
+    }
 }
 
 pub fn prefixed_input(text: &str, purpose: EmbeddingPurpose) -> Result<String, KnowledgeError> {
@@ -142,6 +145,9 @@ impl OnnxEmbedding {
     }
 }
 impl EmbeddingBackend for OnnxEmbedding {
+    fn spans(&self, id: &str, text: &str) -> Result<Vec<super::types::TextSpan>, KnowledgeError> {
+        super::chunking::semantic_spans(&self.tokenizer, id, text)
+    }
     fn space(&self) -> EmbeddingSpace {
         PINS.space()
     }
