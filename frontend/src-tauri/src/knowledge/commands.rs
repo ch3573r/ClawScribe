@@ -21,10 +21,19 @@ pub async fn knowledge_cancel_request(
     runtime: State<'_, KnowledgeState>,
     request_id: String,
 ) -> Result<(), String> {
-    conversations::cancel(state.db_manager.pool(), &request_id).await?;
-    runtime.answers.cancel(&request_id);
+    cancel_request(state.db_manager.pool(), &runtime, &request_id).await
+}
+/// Shared actual cancellation boundary, independently testable without a window.
+pub(crate) async fn cancel_request(
+    pool: &sqlx::SqlitePool,
+    runtime: &KnowledgeState,
+    request_id: &str,
+) -> Result<(), String> {
+    conversations::cancel(pool, request_id).await?;
+    runtime.answers.cancel(request_id);
     Ok(())
 }
+
 #[tauri::command]
 pub async fn knowledge_history(
     state: State<'_, AppState>,

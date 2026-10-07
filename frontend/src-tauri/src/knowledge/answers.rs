@@ -11,6 +11,8 @@ pub struct AnswerRegistry {
     active: std::sync::Mutex<HashMap<String, (String, CancellationToken)>>,
     #[cfg(test)]
     inspected_prompts: std::sync::Mutex<HashMap<String, String>>,
+    #[cfg(test)]
+    cleanup_budget: std::sync::Mutex<Option<Duration>>,
 }
 impl AnswerRegistry {
     fn claim(
@@ -615,6 +617,187 @@ mod tests {
         .await
         .unwrap()
     }
+    #[tokio::test]
+    async fn saved_ask_terminal_status_wait_respects_overall_cleanup_deadline() {
+        let (pool, request, _) = answer_fixture().await;
+        let runtime = Arc::new(super::super::KnowledgeState::default());
+        *runtime.answers.cleanup_budget.lock().unwrap() = Some(Duration::from_millis(50));
+        let held = pool.acquire().await.unwrap();
+        let ask_pool = pool.clone();
+        let ask_runtime = runtime.clone();
+        let ask_request = request.clone();
+        let mut operation = tokio::spawn(async move {
+            ask(&ask_pool, &ask_runtime, ask_request, |_| {
+                panic!("Blocked setup must never dispatch")
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !runtime
+                .answers
+                .active
+                .lock()
+                .unwrap()
+                .contains_key(&request.request_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        runtime.answers.cancel(&request.request_id);
+        let result = tokio::time::timeout(Duration::from_millis(250), &mut operation).await;
+        if result.is_err() {
+            operation.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), operation).await;
+        }
+        // The sole connection is still held during this assertion. Releasing it
+        // before measuring the public return would hide the unbounded write.
+        assert!(
+            result.is_ok(),
+            "Terminal persistence exceeded the overall cleanup allowance"
+        );
+        assert!(result.unwrap().unwrap().unwrap_err().contains("cleanup"));
+        assert!(
+            runtime
+                .answers
+                .active
+                .lock()
+                .unwrap()
+                .contains_key(&request.request_id),
+            "Pending durable cleanup must retain bounded request ownership"
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime
+                .answers
+                .active
+                .lock()
+                .unwrap()
+                .contains_key(&request.request_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_request_signals_owned_generation_before_database_release() {
+        let (pool, request, _) = answer_fixture().await;
+        let runtime = Arc::new(super::super::KnowledgeState::default());
+        *runtime.answers.cleanup_budget.lock().unwrap() = Some(Duration::from_millis(50));
+        let mut lease = runtime.answers.claim(&pool, &request).unwrap();
+        let token = lease.token.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (cleaned, cleanup) = tokio::sync::oneshot::channel();
+        let mut generation = tokio::spawn(async move {
+            llm_client::supervise(
+                &token,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+                Duration::from_millis(50),
+                move |token| async move {
+                    let _ = started.send(());
+                    token.cancelled().await;
+                    let _ = cleaned.send(());
+                    Err::<(), String>("Cancelled synthetic provider".into())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        let held = pool.acquire().await.unwrap();
+        let cancel_pool = pool.clone();
+        let cancel_runtime = runtime.clone();
+        let id = request.request_id.clone();
+        let cancellation = tokio::spawn(async move {
+            super::super::commands::cancel_request(&cancel_pool, &cancel_runtime, &id).await
+        });
+        let observed = tokio::time::timeout(Duration::from_millis(250), cleanup).await;
+        // Always clean the test task even when RED prevented its token signal.
+        lease.token.cancel();
+        let exited = tokio::time::timeout(Duration::from_secs(1), &mut generation).await;
+        if exited.is_err() {
+            generation.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), generation).await;
+        }
+        cancellation.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), cancellation).await;
+        lease.settled = true;
+        assert!(exited.is_ok(), "Synthetic owned provider must exit");
+        assert!(
+            matches!(observed, Ok(Ok(()))),
+            "Cancellation must reach owned generation before database release"
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn completed_public_ask_returns_original_after_provider_disconnect_or_change() {
+        let (pool, request, dir) = answer_fixture().await;
+        let runtime = super::super::KnowledgeState::default();
+        let first = ask_resolved(
+            &pool,
+            &runtime,
+            &request,
+            resolved(&pool, dir.path()).await,
+            &CancellationToken::new(),
+            |resolved, _, _, _| async move {
+                Ok(ConfiguredTextReply {
+                    text: "Nein [K2].".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let original = serde_json::to_value(&first).unwrap();
+        for (provider, model) in [
+            ("openai", "public-disconnected-model"),
+            ("builtin-ai", "changed-local-model"),
+        ] {
+            crate::database::repositories::setting::SettingsRepository::save_model_config(
+                &pool, provider, model, "base", None,
+            )
+            .await
+            .unwrap();
+            let environment_calls = std::sync::atomic::AtomicUsize::new(0);
+            let repeated = ask(&pool, &runtime, request.clone(), |_| {
+                environment_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("Disconnected provider must not be resolved for completed history".into())
+            })
+            .await;
+            assert!(
+                repeated.is_ok(),
+                "A completed identical request must not require the currently configured provider"
+            );
+            assert_eq!(serde_json::to_value(repeated.unwrap()).unwrap(), original);
+            assert_eq!(
+                environment_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        }
+        let mut changed = request.clone();
+        changed.search.query = "A different question".into();
+        assert!(ask(&pool, &runtime, changed, |_| panic!(
+            "Changed identity must be rejected before provider resolution"
+        ))
+        .await
+        .is_err());
+        assert_eq!(
+            conversations::history(&pool, &request.owner)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn saved_ask_uses_canonical_small_context_and_returns_one_durable_reply() {
         let (pool, request, dir) = answer_fixture().await;
