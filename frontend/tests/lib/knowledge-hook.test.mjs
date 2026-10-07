@@ -55,7 +55,20 @@ test('cancelled first library question never submits after late conversation cre
   app.render();await flush();const first=app.render().ask('Decision?','keyword');app.render().cancel();creation.resolve({kind:'library',id:'late'});await first;
   assert.equal(asks,0);assert.equal(app.render().owner,null);app.unmount();
 });
+test('changing scope during first conversation creation never submits or adopts its late owner',async()=>{
+  const creation=deferred();let asks=0;
+  const app=view({createConversation:()=>creation.promise,ask:async()=>{asks++;}},{scope:libraryScope,owner:null});
+  app.render();await flush();const first=app.render().ask('Decision?','keyword');app.navigate('two');app.render();await flush();
+  creation.resolve({kind:'library',id:'late-library'});await first;assert.equal(asks,0);assert.equal(app.render().owner.id,'two');app.unmount();
+});
 test('empty library scope never creates a conversation on first question',async()=>{
   let creates=0;const app=view({createConversation:async()=>{creates++;return {kind:'library',id:'wrong'};}},{scope:{...libraryScope,filter:{...libraryScope.filter,meeting_ids:[]}},owner:null});
   app.render();await flush();await app.render().ask('Decision?','keyword');assert.equal(creates,0);assert.match(app.render().error,/Select one/);app.unmount();
+});
+test('failed first answer retains the new durable conversation and actionable error for retry',async()=>{
+  let creates=0,asks=0;const requests=[];
+  const app=view({createConversation:async()=>{creates++;return {kind:'library',id:'saved-failure'};},ask:async request=>{requests.push(request);if(++asks===1)throw new Error('Provider unavailable; retry');},history:async()=>[{id:'failed',role:'assistant',content:'Provider unavailable',status:'failed'}]},{scope:libraryScope,owner:null});
+  app.render();await flush();await app.render().ask('Decision?','keyword');app.render();await flush();
+  assert.equal(app.render().owner.id,'saved-failure');assert.match(app.render().error,/Provider unavailable/);assert.equal(app.render().messages[0].status,'failed');
+  await app.render().ask('Decision?','keyword');assert.equal(creates,1);assert.equal(requests.length,2);assert.equal(requests[1].owner.id,'saved-failure');app.unmount();
 });

@@ -51,6 +51,7 @@ export function useKnowledgeSearch(
   const [libraryRevision, setLibraryRevision] = useState(0);
   const [creating, setCreating] = useState(false);
   const createPending = useRef(false);
+  const adoptionError = useRef<{ ownerId: string; error: string } | null>(null);
   const [preview, setPreview] = useState<{
     reference: EvidenceRef;
     metadata: EvidenceDisplay;
@@ -86,7 +87,8 @@ export function useKnowledgeSearch(
     setLoading(false);
     setSending(false);
     setCreating(false);
-    setError("");
+    setError(adoptionError.current && adoptionError.current.ownerId === owner?.id ? adoptionError.current.error : "");
+    adoptionError.current = null;
     if (!owner) {
       setHistoryLoading(false);
       return () => controller.invalidate();
@@ -194,8 +196,8 @@ export function useKnowledgeSearch(
     }
   }
   async function ask(question: string, mode: SearchMode) {
-    if (!question.trim() || !owner || historyLoading) return;
-    if (controller.pendingRequest()) return;
+    if (!question.trim() || historyLoading) return;
+    if (controller.pendingRequest() || createPending.current) return;
     if (!scopeReady(scope)) {
       setError(
         "Select one or more meetings, or explicitly choose all saved meetings. Check the date range.",
@@ -205,17 +207,33 @@ export function useKnowledgeSearch(
     setSending(true);
     setError("");
     const current = controller.ticket("ask-operation");
+    let createdOwner: ConversationOwner | null = null;
+    let submissionError = "";
     try {
       await controller.submit(
         question.trim(),
         async (request_id) => {
+          let requestOwner = owner;
+          if (!requestOwner && scope.kind === "library") {
+            createPending.current = true;
+            setCreating(true);
+            try {
+              requestOwner = await knowledgeService.createConversation();
+            } finally {
+              createPending.current = false;
+              if (current()) setCreating(false);
+            }
+            if (!current()) return null;
+            createdOwner = requestOwner;
+          }
+          if (!requestOwner || !current()) return null;
           await knowledgeService.ask({
             request_id,
-            owner,
+            owner: requestOwner,
             search: { scope, query: question.trim(), mode, document_ids: [] },
           });
           if (!current()) return null;
-          const history = await knowledgeService.history(owner);
+          const history = await knowledgeService.history(requestOwner);
           if (!current()) return null;
           return history;
         },
@@ -225,9 +243,22 @@ export function useKnowledgeSearch(
         },
       );
     } catch (e) {
-      if (current()) setError(errorText(e));
+      if (current()) {
+        submissionError = errorText(e);
+        setError(submissionError);
+      }
     } finally {
-      if (current()) setSending(false);
+      if (current()) {
+        setSending(false);
+        // Adopt after reconciliation so an owner change cannot cancel its first turn.
+        // Failed answers retain the durable owner and error for a retry in this thread.
+        if (createdOwner) {
+          const value: ConversationOwner = createdOwner;
+          if (submissionError) adoptionError.current = { ownerId: value.id, error: submissionError };
+          setThreads((rows) => [value, ...rows.filter((row) => row.id !== value.id)]);
+          setOwner(value);
+        }
+      }
     }
   }
   async function clear() {

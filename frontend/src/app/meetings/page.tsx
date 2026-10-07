@@ -3,7 +3,6 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   ArrowRight,
-  CalendarDays,
   ChevronDown,
   Clock3,
   FileText,
@@ -74,6 +73,7 @@ export default function MeetingsPage() {
     refreshProjectTags,
   } = useSidebar();
   const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<"archive" | "memory">("archive");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("newest");
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>({ tags: [], untagged: false, mode: 'any' });
@@ -161,9 +161,28 @@ export default function MeetingsPage() {
           </div>
         </header>
 
+        <div role="tablist" aria-label="Meetings views" className="flex gap-6 border-b border-border">
+          {(["archive", "memory"] as const).map((value) => (
+            <button key={value} id={`meetings-${value}-tab`} type="button" role="tab"
+              aria-selected={tab === value} aria-controls={value === "memory" ? "meeting-memory-panel" : "meetings-archive-panel"}
+              tabIndex={tab === value ? 0 : -1}
+              onClick={() => setTab(value)}
+              onKeyDown={(event) => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const next = event.key === "Home" ? "archive" : event.key === "End" ? "memory" : tab === "archive" ? "memory" : "archive";
+                  setTab(next);
+                  document.getElementById(`meetings-${next}-tab`)?.focus();
+                }
+              }}
+              className={`border-b-2 px-1 py-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${tab === value ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+            >{value === "archive" ? "Archive" : "Meeting memory"}</button>
+          ))}
+        </div>
+
         <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
           <div className="grid gap-4 xl:grid-cols-[1fr_auto] xl:items-center">
-            <InputGroup className="rounded-md border-border bg-background text-foreground shadow-none">
+            <div hidden={tab !== "archive"}><InputGroup className="rounded-md border-border bg-background text-foreground shadow-none">
               <InputGroupInput
                 id="meetings-search"
                 placeholder="Filter meeting titles..."
@@ -181,7 +200,7 @@ export default function MeetingsPage() {
                   </InputGroupButton>
                 </InputGroupAddon>
               )}
-            </InputGroup>
+            </InputGroup></div>
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
               <div className="flex items-center gap-2">Project
@@ -231,7 +250,7 @@ export default function MeetingsPage() {
               </div>
               {projectTagsLoading && <span role="status">Loading project tags…</span>}
               {projectTagsError && <button className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</button>}
-              <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
+              <div hidden={tab !== "archive"}><Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
                 <SelectTrigger className="h-9 w-36 bg-background">
                   <SelectValue />
                 </SelectTrigger>
@@ -240,17 +259,20 @@ export default function MeetingsPage() {
                   <SelectItem value="oldest">Oldest first</SelectItem>
                   <SelectItem value="title">Title A-Z</SelectItem>
                 </SelectContent>
-              </Select>
+              </Select></div>
               <span>{meetings.length} total</span>
               <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
-              <span>{shownCount} shown</span>
+              <span>{tab === "archive" ? shownCount : sortedMeetings.length} shown</span>
             </div>
           </div>
         </section>
 
-        <KnowledgeArchive meetings={sortedMeetings} projectFilter={projectFilter} />
+        <div id="meeting-memory-panel" role="tabpanel" aria-labelledby="meetings-memory-tab" hidden={tab !== "memory"}>
+          <KnowledgeArchive meetings={sortedMeetings} projectFilter={projectFilter} />
+        </div>
 
-        <div className="grid min-h-0 gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+        <div id="meetings-archive-panel" role="tabpanel" aria-labelledby="meetings-archive-tab" hidden={tab !== "archive"}>
+        <div className="min-h-0">
           <section className="min-w-0 rounded-lg border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between gap-4 border-b border-border px-6 py-5">
               <div>
@@ -311,27 +333,7 @@ export default function MeetingsPage() {
             )}
           </section>
 
-          <aside className="space-y-5">
-            <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
-              <h2 className="text-base font-semibold text-foreground">
-                Archive
-              </h2>
-              <div className="mt-4 divide-y divide-border text-sm">
-                <div className="flex items-center justify-between py-3">
-                  <span className="text-muted-foreground">Saved meetings</span>
-                  <span className="font-semibold text-foreground">
-                    {meetings.length}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between py-3">
-                  <span className="text-muted-foreground">Current results</span>
-                  <span className="font-semibold text-foreground">
-                    {shownCount}
-                  </span>
-                </div>
-              </div>
-            </section>
-          </aside>
+        </div>
         </div>
       </div>
     </div>
