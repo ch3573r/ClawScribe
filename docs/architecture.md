@@ -449,7 +449,13 @@ The optional knowledge state is disabled on startup and does not load/download
 models implicitly. Its CPU ONNX candidate and SHA-256 manifest live under
 `knowledge/`; explicit downloads use the existing resumable transfer registry.
 The embedding-space identity includes the model revision, both artifact hashes,
-tokenizer version, prefixes, and pooling version. Inference handles one input
+tokenizer version, prefixes, pooling version, and CPU loading policy. The revised
+candidate disables graph optimizations and weight prepacking to reduce peak
+loading memory while keeping the exact float32 artifact. ORT defines the latter
+as `session.disable_prepacking=1` in its
+[session configuration reference](https://github.com/microsoft/onnxruntime/blob/v1.22.0/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h).
+The model-space identity distinguishes this loading policy from the earlier
+optimized candidate. Inference handles one input
 at a time with two intra-op threads and sequential graph execution. Inputs are
 bounded to 1,024 UTF-8 bytes for questions and 512 model tokens including
 prefix/special tokens for both queries and passages; oversized inputs fail

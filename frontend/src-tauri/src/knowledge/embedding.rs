@@ -1,6 +1,6 @@
 //! The official E5 ONNX CPU baseline. No network access occurs during inference.
 use super::{
-    model::{VerifiedModel, PINS},
+    model::{VerifiedModel, LOADING_POLICY, PINS},
     types::{EmbeddingPurpose, EmbeddingSpace, KnowledgeError},
 };
 use ort::{
@@ -89,7 +89,11 @@ impl OnnxEmbedding {
                 .with_execution_providers([CPUExecutionProvider::default()
                     .with_arena_allocator(false)
                     .build()])?
-                .with_optimization_level(GraphOptimizationLevel::Level3)?
+                // Keep the approved float32 artifact without graph rewrites or
+                // extra packed-weight copies. ORT's documented config uses 1
+                // to disable prepacking (not a disabled-optimization synonym).
+                .with_optimization_level(GraphOptimizationLevel::Disable)?
+                .with_config_entry("session.disable_prepacking", "1")?
                 .with_intra_threads(2)?
                 .with_inter_threads(1)?
                 .with_parallel_execution(false)?
@@ -278,6 +282,12 @@ mod acceptance {
         let cold_acquired = cold_priority.is_ok();
         drop(cold_priority);
         let _ = cold.await;
+        let cold_memory = memory_stats::memory_stats().unwrap();
+        println!("KNOWLEDGE_LOAD policy={LOADING_POLICY} peak_rss_delta_bytes={} peak_private_delta_bytes={} resident_rss_delta_bytes={} resident_private_delta_bytes={}",
+            peak_rss.load(Ordering::Acquire).saturating_sub(baseline.physical_mem),
+            peak_private.load(Ordering::Acquire).saturating_sub(baseline.virtual_mem),
+            cold_memory.physical_mem.saturating_sub(baseline.physical_mem),
+            cold_memory.virtual_mem.saturating_sub(baseline.virtual_mem));
         let mut max_error = 0.0f32;
         let mut min_cosine = 1.0f32;
         let mut max_warm = Duration::ZERO;
@@ -377,7 +387,7 @@ mod acceptance {
         let private_delta = peak_private
             .load(Ordering::Acquire)
             .saturating_sub(baseline.virtual_mem);
-        println!("KNOWLEDGE_GATE model=multilingual-e5-small revision={} engine=onnx backend=cpu intra_threads=2 batch=1 dimensions=384 max_error={max_error:.8} min_cosine={min_cosine:.8} warm_max_ms={} cold_preemption_ms={} warm_preemption_max_ms={} peak_rss_delta_bytes={rss_delta} peak_private_delta_bytes={private_delta}", PINS.revision, max_warm.as_millis(), cold_preemption.as_millis(), max_preemption.as_millis());
+        println!("KNOWLEDGE_GATE policy={LOADING_POLICY} model=multilingual-e5-small revision={} engine=onnx backend=cpu intra_threads=2 batch=1 dimensions=384 max_error={max_error:.8} min_cosine={min_cosine:.8} warm_max_ms={} cold_preemption_ms={} warm_preemption_max_ms={} peak_rss_delta_bytes={rss_delta} peak_private_delta_bytes={private_delta}", PINS.revision, max_warm.as_millis(), cold_preemption.as_millis(), max_preemption.as_millis());
         assert!(
             max_error <= 0.0001 && min_cosine >= 0.9999,
             "independent reference parity failed"

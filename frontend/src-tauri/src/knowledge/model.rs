@@ -5,6 +5,9 @@ use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+/// Conservatively distinguish vectors computed by a different loading policy.
+pub const LOADING_POLICY: &str = "cpu-no-graph-optimization-no-prepacking-v1";
+
 #[derive(serde::Deserialize)]
 pub struct ModelPins {
     pub model: String,
@@ -28,7 +31,7 @@ impl ModelPins {
     pub fn space(&self) -> EmbeddingSpace {
         EmbeddingSpace {
             id: format!(
-                "{}@{}:{}:{}:tokenizers-{}:{}:{}",
+                "{}@{}:{}:{}:tokenizers-{}:{}:{}:{LOADING_POLICY}",
                 self.model,
                 self.revision,
                 self.preprocessing,
