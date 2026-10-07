@@ -1,12 +1,15 @@
 'use client';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { DropdownMenu,DropdownMenuContent,DropdownMenuItem,DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { citationParts,contextLinks } from '@/lib/knowledge-state';
 import type { KnowledgeSearchState } from '@/hooks/useKnowledgeSearch';
 import type { AssistantReply, SearchMode } from '@/types/knowledge';
 function CitedAnswer({reply,state}:{reply:AssistantReply;state:KnowledgeSearchState}) {
-  return <><div className="whitespace-pre-wrap break-words text-sm leading-6">{citationParts(reply.content,reply.evidence.length,reply.cited_tags).map((part,index)=>part.tags?
-    <span key={index} aria-label={part.text}>{part.tags.map((tag,n)=><button key={`${tag}-${n}`} className="mx-0.5 rounded text-primary underline decoration-primary/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={()=>void state.inspect(reply.evidence[tag-1],reply.evidence_metadata[tag-1])}>[K{tag}]</button>)}</span>:<span key={index}>{part.text}</span>)}</div>
+  const count=reply.evidence.length===reply.evidence_metadata.length&&reply.evidence.length<=64?reply.evidence.length:0;
+  return <><div className="whitespace-pre-wrap break-words text-sm leading-6">{citationParts(reply.content,count,reply.cited_tags).map((part,index)=>part.tags?
+    part.tags.length===1?<button key={index} className="rounded text-primary underline decoration-primary/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={()=>void state.inspect(reply.evidence[part.tags![0]-1],reply.evidence_metadata[part.tags![0]-1])}>{part.text}</button>:
+      <DropdownMenu key={index}><DropdownMenuTrigger asChild><button className="rounded text-primary underline decoration-primary/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Inspect source group ${part.text}`}>{part.text}</button></DropdownMenuTrigger><DropdownMenuContent>{part.tags.map((tag,n)=><DropdownMenuItem key={`${tag}-${n}`} onSelect={()=>void state.inspect(reply.evidence[tag-1],reply.evidence_metadata[tag-1])}>[K{tag}] · {reply.evidence_metadata[tag-1].title}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>:<span key={index}>{part.text}</span>)}</div>
     {contextLinks(reply).map((link,index)=><p key={index} className="mt-2 text-xs text-muted-foreground">[K{link.cited_tag}] · <button className="rounded text-primary underline focus-visible:ring-2 focus-visible:ring-ring" onClick={()=>void state.inspect(reply.evidence[link.context_tag-1],reply.evidence_metadata[link.context_tag-1],reply.evidence[link.cited_tag-1])}>Preceding question context [K{link.context_tag}]</button></p>)}
     <p className="mt-2 text-xs text-muted-foreground">Answered by {reply.provider} · {reply.model} · {reply.retrieval_mode==='hybrid'?'Semantic + keyword':'Keyword'} retrieval</p></>;
 }
@@ -20,6 +23,7 @@ export function KnowledgeChat({state,mode,provider,model,title='Ask about these 
       {state.scope.kind==='library'&&<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={state.sending} onClick={()=>void state.newConversation()}>New conversation</Button>
         <label className="flex items-center gap-2 text-xs">Saved conversation <select aria-label="Saved library conversation" className="max-w-40 rounded border border-input bg-background p-2" value={state.owner?.id??''} onChange={e=>{const owner=state.threads.find(row=>row.id===e.target.value);if(owner)state.selectConversation(owner);}}><option value="">Choose a conversation</option>{state.threads.map((owner,index)=><option key={owner.id} value={owner.id}>Conversation {state.threads.length-index}</option>)}</select></label></div>}
       {!!state.messages.length&&<Button variant="ghost" size="sm" disabled={state.historyLoading} onClick={()=>void state.clear()}>Clear conversation</Button>}
+      {!!state.owner&&<Button variant="ghost" size="sm" disabled={state.historyLoading||state.sending} onClick={()=>void state.reloadHistory()}>Reload history</Button>}
     </header>
     <div className="max-h-[30rem] flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite">
       {state.historyLoading&&<p role="status" className="text-sm text-muted-foreground">Loading saved conversation…</p>}

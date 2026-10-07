@@ -662,6 +662,25 @@ and cannot promote a stale reference to current navigation.
 `knowledge_resolve_evidence` reads the current bounded canonical passage
 and checks source revision, content/metadata fingerprint, transcript ID, exact
 UTF-8 span and audio offset. Only a current result supplies a navigation target.
+The additive `navigation` field supplies `meeting_id`, `transcript_id`, the
+current `transcript_index`, and nullable recording-relative `start_seconds`.
+The position lookup uses the paginator's `audio_start_time,id` ordering and
+rechecks source revision/generation in the scalar query. Stale/missing/invalid
+results have no navigation target. The UI never derives a page from rank,
+timestamp, historical IDs, or UTF-8 byte offsets.
+
+The meeting-memory frontend has one native wrapper (`knowledgeService`) and
+one generation owner per search/conversation surface (`useKnowledgeSearch`).
+Synchronous pending guards retain a UUID through answer and durable-history
+reconciliation. Scope, owner, query cancellation, and unmount invalidate awaited
+search, ask, history, clear, resolver, route, reveal and player stages. The
+meeting route receives a bounded ephemeral token with no transcript content or
+file paths in its URL, then re-resolves before using the existing paginated
+reveal/player callbacks. Group menus preserve the raw displayed citation group
+and every original ordinal. Literal links require the backend allowlist;
+separately labeled context links validate both map entries and resolve both
+canonical references independently. Native installed clicks remain a manual
+acceptance gate.
 Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
 date and speaker labels describe the original answer snapshot. Editing a title
 or meeting date advances the source revision, invalidates pending answers and

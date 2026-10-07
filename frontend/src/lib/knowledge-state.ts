@@ -40,18 +40,23 @@ export function createKnowledgeController(onCancel?: (id:string) => void) {
 export function libraryScope(ids:string[], all:boolean, project:ProjectFilter, from='', to=''):KnowledgeScope {
   return {kind:'library',filter:{all_meetings:all,meeting_ids:[...ids],tags:[...project.tags],tag_mode:project.mode,untagged:project.untagged,from:from||null,to:to||null}};
 }
+export function scopeReady(scope:KnowledgeScope):boolean {
+  return scope.kind==='meeting'?!!scope.meeting_id.trim():
+    (scope.filter.all_meetings||scope.filter.meeting_ids.length>0)&&!(scope.filter.from&&scope.filter.to&&scope.filter.from>scope.filter.to);
+}
 export interface CitationPart { text:string; tags?:number[] }
 /** Preserve text and original map ordinals; reject a whole malformed outer group. */
 export function citationParts(content:string,count:number,allow:number[]):CitationPart[] {
   const parts:CitationPart[]=[]; let start=0; let cursor=0;
-  const number=(token:string)=>{const match=/^K([1-9]\d{0,2})$/.exec(token.trim()); const n=match?Number(match[1]):0; return n<=count&&n>0?n:null;};
+  const number=(token:string)=>{const match=/^K([1-9]\d{0,2})$/.exec(token.replace(/^\p{White_Space}+|\p{White_Space}+$/gu,'')); const n=match?Number(match[1]):0; return n<=count&&n>0?n:null;};
   while(cursor<content.length) {
     const open=content.indexOf('[',cursor); if(open<0) break;
     let depth=1;let nested=false;let close=open+1;
     for(;close<content.length;close++){if(content[close]==='['){depth++;nested=true;}if(content[close]===']')depth--;if(depth===0)break;}
     if(depth!==0)break;
     const body=content.slice(open+1,close); let tags:number[]|undefined;
-    if(!nested&&body.length<=1024){
+    const bytes=Array.from(body).reduce((sum,char)=>sum+(char.codePointAt(0)!<=0x7f?1:char.codePointAt(0)!<=0x7ff?2:char.codePointAt(0)!<=0xffff?3:4),0);
+    if(!nested&&bytes<=1024){
       if(body.includes(',')&&!body.includes('-')){const items=body.split(',').map(number);if(items.length<=64&&items.every(n=>n!==null))tags=items as number[];}
       else if(body.includes('-')&&!body.includes(',')){const items=body.split('-').map(number);if(items.length===2&&items[0]!==null&&items[1]!==null&&items[1]>=items[0]&&items[1]-items[0]<64) tags=Array.from({length:items[1]-items[0]+1},(_,i)=>items[0]!+i);}
       else {const n=number(body);if(n!==null) tags=[n];}

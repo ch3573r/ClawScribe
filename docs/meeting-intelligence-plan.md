@@ -8,6 +8,14 @@
 **Goal:** Add semantic meeting search, reference-document context, and manual
 live assistance without compromising recording or local data control.
 
+**Delivery split:** The first preview delivers meeting memory only (Phase 1,
+Tasks 1–4). Reference documents and live assistance remain the follow-up plan
+(Tasks 5–8); their controls are not exposed in this preview. Automated frontend
+and canonical-navigation checks remain mandatory. Installed offline,
+provider-failure, focus, citation-click and playback acceptance is explicitly
+pending until an isolated native desktop test is available, following the
+pending-real-device policy in [Windows releases](windows-release.md).
+
 **Architecture:** One Rust knowledge subsystem owns source revisions, local
 embeddings, hybrid retrieval, evidence, and request identities. It uses the
 existing SQLite database, Tauri commands/events, model downloads, and summary

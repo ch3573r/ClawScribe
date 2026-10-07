@@ -12,15 +12,16 @@ export function EvidencePreview({state}:{state:KnowledgeSearchState}) {
     const preview=state.preview;if(!preview||state.previewBusy)return;
     const current=state.controller.ticket('preview-operation');
     try {
+      if(preview.contextReference){const origin=await knowledgeService.resolve(preview.contextReference);if(!current())return;if(origin.status!=='current'){await state.inspect(preview.reference,preview.metadata,preview.contextReference);return;}}
       // Re-resolve at the action boundary; the preview can have been open during an edit.
       const resolved=await knowledgeService.resolve(preview.reference);if(!current())return;
-      if(resolved.status!=='current'||!resolved.navigation||!resolved.passage){await state.inspect(preview.reference,preview.metadata);return;}
+      if(resolved.status!=='current'||!resolved.navigation||!resolved.passage){await state.inspect(preview.reference,preview.metadata,preview.contextReference);return;}
       if(play&&resolved.navigation.start_seconds===null)return;
-      const token=createEvidenceIntent(preview.reference,play);
+      const token=createEvidenceIntent(preview.reference,play,preview.contextReference);
       setCurrentMeeting({id:resolved.navigation.meeting_id,title:resolved.passage.title});
       router.push(`/meeting-details?id=${encodeURIComponent(resolved.navigation.meeting_id)}&evidence=${encodeURIComponent(token)}`);
       state.closePreview();
-    }catch{if(current())void state.inspect(preview.reference,preview.metadata);}
+    }catch{if(current())void state.inspect(preview.reference,preview.metadata,preview.contextReference);}
   }
   const preview=state.preview;const resolved=preview?.resolved;const valid=resolved?.status==='current'&&!!resolved.navigation;
   return <Dialog open={!!preview} onOpenChange={open=>{if(!open)state.closePreview();}}>
@@ -34,7 +35,7 @@ export function EvidencePreview({state}:{state:KnowledgeSearchState}) {
     {resolved?.passage&&<><p className="text-xs text-muted-foreground">Current source · {resolved.passage.title} · {resolved.passage.date}</p><blockquote className="whitespace-pre-wrap break-words border-l-2 border-primary pl-3 text-sm">{resolved.passage.text}</blockquote></>}
     <div className="flex flex-wrap gap-2"><Button disabled={!valid||state.previewBusy} onClick={()=>void navigate(false)}>Show in transcript</Button>
       <Button variant="outline" disabled={!valid||state.previewBusy||resolved?.navigation?.start_seconds==null} onClick={()=>void navigate(true)}>Play from here</Button>
-      {preview&&<Button variant="ghost" disabled={state.previewBusy} onClick={()=>void state.inspect(preview.reference,preview.metadata)}>Retry</Button>}</div>
+      {preview&&<Button variant="ghost" disabled={state.previewBusy} onClick={()=>void state.inspect(preview.reference,preview.metadata,preview.contextReference)}>Retry</Button>}</div>
     <p className="text-xs text-muted-foreground">Playback requires this meeting’s saved audio. Unknown audio offsets cannot play from a citation.</p>
     </DialogContent>
   </Dialog>;
