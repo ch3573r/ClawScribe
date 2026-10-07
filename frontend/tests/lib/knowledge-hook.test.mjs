@@ -36,3 +36,26 @@ test('empty selected meetings never broaden through a project filter and cancell
   const app=view({search:async()=>{searches++;},resolve:ref=>{refs.push(ref);return origin.promise;}},{scope,owner:null});app.render();await flush();await app.render().search('query','keyword');assert.equal(searches,0);assert.match(app.render().error,/Select one/);
   const inspect=app.render().inspect({source_id:'target'},{title:'Public fixture'},{source_id:'origin'});app.render().cancel();origin.resolve({status:'current'});await inspect;assert.equal(refs.length,1);assert.equal(app.render().preview,null);app.unmount();
 });
+
+const libraryScope={kind:'library',filter:{all_meetings:false,meeting_ids:['one'],tags:[],tag_mode:'any',untagged:false,from:null,to:null}};
+test('first library question creates one durable owner and reconciles one answer despite repeated submission',async()=>{
+  const creation=deferred(),answer=deferred();let creates=0;const requests=[];
+  const owner={kind:'library',id:'saved-first'};
+  const history=[{id:'user',role:'user',content:'Decision?'},{id:'assistant',role:'assistant',content:'Saved answer'}];
+  const app=view({createConversation:()=>{creates++;return creation.promise;},ask:request=>{requests.push(request);return answer.promise;},history:async()=>history},{scope:libraryScope,owner:null});
+  app.render();await flush();const first=app.render().ask('Decision?','hybrid');const duplicate=app.render().ask('Decision?','hybrid');
+  assert.equal(creates,1);creation.resolve(owner);await flush();app.render();await flush();
+  assert.equal(requests.length,1);assert.equal(requests[0].owner.id,'saved-first');assert.deepEqual([...requests[0].search.scope.filter.meeting_ids],['one']);
+  answer.resolve({});await Promise.all([first,duplicate]);await flush();
+  assert.equal(app.render().owner.id,'saved-first');assert.equal(app.render().messages.filter(row=>row.role==='assistant').length,1);app.unmount();
+});
+test('cancelled first library question never submits after late conversation creation',async()=>{
+  const creation=deferred();let asks=0;
+  const app=view({createConversation:()=>creation.promise,ask:async()=>{asks++;}},{scope:libraryScope,owner:null});
+  app.render();await flush();const first=app.render().ask('Decision?','keyword');app.render().cancel();creation.resolve({kind:'library',id:'late'});await first;
+  assert.equal(asks,0);assert.equal(app.render().owner,null);app.unmount();
+});
+test('empty library scope never creates a conversation on first question',async()=>{
+  let creates=0;const app=view({createConversation:async()=>{creates++;return {kind:'library',id:'wrong'};}},{scope:{...libraryScope,filter:{...libraryScope.filter,meeting_ids:[]}},owner:null});
+  app.render();await flush();await app.render().ask('Decision?','keyword');assert.equal(creates,0);assert.match(app.render().error,/Select one/);app.unmount();
+});
