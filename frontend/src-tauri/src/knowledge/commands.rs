@@ -29,9 +29,12 @@ pub(crate) async fn cancel_request(
     runtime: &KnowledgeState,
     request_id: &str,
 ) -> Result<(), String> {
-    conversations::cancel(pool, request_id).await?;
-    runtime.answers.cancel(request_id);
-    Ok(())
+    let deadline = runtime.answers.cancel_with_deadline(request_id);
+    tokio::time::timeout_at(deadline, conversations::cancel(pool, request_id))
+        .await
+        .map_err(|_| {
+            "Active answer cancelled; durable cancellation cleanup timed out".to_string()
+        })?
 }
 
 #[tauri::command]

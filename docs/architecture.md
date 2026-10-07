@@ -683,3 +683,18 @@ actual responses and canonical resolutions for independent factual review, and
 keeps the same report in its step summary. Ordinary validation jobs remain
 read-only. Reports are neutral until factual review; they are never diagnostic
 logs, repository files, Actions artifacts or cache entries.
+
+Completed identical requests validate the saved immutable inputs and return their
+original answer before resolving current provider settings or credentials.
+Cancellation signals the active operation immediately, before database access.
+Terminal status persistence shares the existing overall cleanup allowance; if
+storage remains busy, the caller receives a cleanup error and the bounded
+request registry retains ownership until that write finishes. Caller drop uses
+the same retained cancellation ownership.
+
+Answer instructions distinguish an established action from an unassigned owner
+or missing deadline, require original and replacement source citations when
+comparing dated changes, and pair short answers with their question anchors.
+A later incomplete reopening cannot establish suspension or a replacement
+outcome. Actual-provider factual review remains separate from structural
+citation and persistence checks.

@@ -82,6 +82,32 @@ pub(crate) fn input_fingerprint(
     ))
 }
 
+/// Completed idempotent reads use the original immutable dispatch identity and
+/// do not require any currently connected provider or valid credentials.
+pub(crate) async fn completed_reply(
+    pool: &SqlitePool,
+    request: &AskRequest,
+) -> Result<Option<AssistantReply>, String> {
+    validate_request(request)?;
+    let mut tx = pool.begin().await.map_err(failure)?;
+    let Some(row) = sqlx::query("SELECT owner_id,input_fingerprint,provider,model,status FROM knowledge_requests WHERE id=?").bind(&request.request_id).fetch_optional(&mut *tx).await.map_err(failure)? else {return Ok(None);};
+    if row.get::<String, _>("owner_id") != owner_key(&request.owner)?
+        || input_fingerprint(request, row.get("provider"), row.get("model"))?
+            != row.get::<String, _>("input_fingerprint")
+    {
+        return Err("Request identity was already used with different inputs".into());
+    }
+    match row.get::<String, _>("status").as_str() {
+        "completed" => {
+            let reply = reply_in(&mut tx, &request.request_id).await?;
+            tx.commit().await.map_err(failure)?;
+            Ok(Some(reply))
+        }
+        "failed" | "interrupted" => Ok(None),
+        _ => Err("Request is active, cancelled or invalidated".into()),
+    }
+}
+
 /// Returns the original completed reply or reserves exactly one persisted user turn.
 pub async fn reserve(
     pool: &SqlitePool,
