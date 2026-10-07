@@ -14,6 +14,14 @@ static JOBS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
 #[cfg(test)]
 pub(crate) static GLOBAL_JOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(test)]
+pub(crate) static NATIVE_TEARDOWN_TEST_PAUSE: std::sync::Mutex<
+    Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+
 pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     let permit = JOBS.clone().try_acquire_owned().map_err(|_| {
         if super::diarization::active_speaker_diarization_command().is_some() {
@@ -97,6 +105,14 @@ pub(crate) async fn run_cancellable<T: Send + 'static>(
             return Err(anyhow!("Transcription cancelled"));
         }
         let result = work(cancelled.clone())?;
+        #[cfg(test)]
+        {
+            let pause = NATIVE_TEARDOWN_TEST_PAUSE.lock().unwrap().take();
+            if let Some((started, release)) = pause {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+        }
         if cancelled.load(Ordering::Acquire) {
             return Err(anyhow!("Transcription cancelled"));
         }

@@ -367,6 +367,44 @@ mod tests {
         .unwrap();
     }
     #[tokio::test]
+    async fn recording_waits_through_native_teardown() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let registry = Arc::new(CancellationRegistry::default());
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *inference::NATIVE_TEARDOWN_TEST_PAUSE.lock().unwrap() = Some((paused_tx, release_rx));
+        let indexing = tokio::spawn(run_indexing(registry, || Ok(())));
+        paused_rx.await.unwrap();
+        let foreground = tokio::spawn(inference::claim_job_preempting_local_summary("recording"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let returned_before_native_release = foreground.is_finished();
+        // Always release the blocking thread before assertions, including RED.
+        release_tx.send(()).unwrap();
+        let _ = indexing.await;
+        let acquired = foreground.await.unwrap();
+        assert!(
+            !returned_before_native_release,
+            "recording must wait through indexing's native teardown"
+        );
+        assert!(acquired.is_ok());
+    }
+    #[tokio::test]
+    async fn indexing_panic_releases_permits_and_priority() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let registry = Arc::new(CancellationRegistry::default());
+        let result = run_indexing(registry.clone(), || -> Result<(), KnowledgeError> {
+            panic!("synthetic indexing panic");
+        })
+        .await;
+        assert_eq!(result, Err(KnowledgeError::Busy));
+        assert!(registry.active.lock().unwrap().is_none());
+        let priority = ForegroundPriority::enter();
+        assert!(!priority.preempted);
+        drop(priority);
+        assert!(inference::claim_job().is_ok());
+        assert!(inference::run(|_| Ok(())).await.is_ok());
+    }
+    #[tokio::test]
     async fn recording_preempts_indexing() {
         let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let registry = Arc::new(CancellationRegistry::default());
