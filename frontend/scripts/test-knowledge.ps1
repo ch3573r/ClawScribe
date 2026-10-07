@@ -37,11 +37,16 @@ if (Test-Path $ffmpeg) { Copy-Item $ffmpeg (Join-Path $testDirectory 'ffmpeg.exe
 if ($MutationAcceptance) {
     & $executables[0] knowledge::store::tests::synthetic_fts_mutation_workload --ignored --exact --test-threads=1 --nocapture
 }
-& $executables[0] knowledge:: --test-threads=1 --show-output
-& $executables[0] summary::llm_client::response_tests:: --test-threads=1 --show-output
-& $executables[0] summary::openai_provider::tests:: --test-threads=1
-& $executables[0] summary::codex_provider::app_server_tests:: --test-threads=1
-& $executables[0] summary::summary_engine::sidecar::protocol_tests:: --test-threads=1
+$focusedFailures = 0
+$PSNativeCommandUseErrorActionPreference = $false
+foreach ($filter in @('knowledge::', 'summary::llm_client::response_tests::',
+    'summary::openai_provider::tests::', 'summary::codex_provider::app_server_tests::',
+    'summary::summary_engine::sidecar::protocol_tests::')) {
+    & $executables[0] $filter --test-threads=1 --show-output
+    if ($LASTEXITCODE -ne 0) { $focusedFailures++ }
+}
+$PSNativeCommandUseErrorActionPreference = $true
+if ($focusedFailures -ne 0) { throw "$focusedFailures focused native suites failed." }
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }
 if ($RetrievalAcceptance) {
