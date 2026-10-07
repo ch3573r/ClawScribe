@@ -563,6 +563,7 @@ pub async fn materialize(
         };
         Ok(Passage {
             evidence: EvidenceRef {
+                historical: false,
                 source_id: selected.source_id,
                 source_revision: selected.revision,
                 chunk_id: format!("{:x}", Sha256::digest(identity)),
@@ -663,6 +664,7 @@ pub fn evidence(
     ))
     .map_err(|_| KnowledgeError::InvalidInput)?;
     Ok(EvidenceRef {
+        historical: false,
         source_id: job.source_id.clone(),
         source_revision: job.revision,
         chunk_id: format!("{:x}", Sha256::digest(identity)),

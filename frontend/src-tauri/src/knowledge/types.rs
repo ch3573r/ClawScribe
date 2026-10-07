@@ -69,6 +69,9 @@ pub enum SearchMode {
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct EvidenceRef {
+    /// Portable restores retain historical identities without asserting currentness.
+    #[serde(default)]
+    pub historical: bool,
     pub source_id: String,
     pub source_revision: i64,
     pub chunk_id: String,
@@ -126,6 +129,46 @@ pub struct SearchResponse {
     pub passages: Vec<Passage>,
     pub mode: SearchMode,
     pub index_status: IndexStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ConversationOwner {
+    Meeting(String),
+    Library(String),
+    Live(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AskRequest {
+    pub request_id: String,
+    pub owner: ConversationOwner,
+    pub search: SearchRequest,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssistantReply {
+    pub request_id: String,
+    pub message_id: String,
+    pub content: String,
+    /// Full backend-owned map: index zero is K1; never renumber cited subsets.
+    pub evidence: Vec<EvidenceRef>,
+    pub cited_tags: Vec<usize>,
+    pub retrieval_mode: SearchMode,
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistoryMessage {
+    pub id: String,
+    pub request_id: Option<String>,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+    pub status: String,
+    pub legacy: bool,
+    pub reply: Option<AssistantReply>,
 }
 
 impl From<sqlx::Error> for KnowledgeError {
