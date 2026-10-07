@@ -773,6 +773,8 @@ mod tests {
             (Some("2026-09-01T12:00:00Z"), None),
             (Some("2026-10-01"), Some("2026-09-01")),
             (Some("2026-9-01"), None),
+            (Some("2026- 9-01"), None),
+            (None, Some("2026-09- 1")),
         ] {
             let scope = KnowledgeScope::Library {
                 filter: MeetingFilter {
