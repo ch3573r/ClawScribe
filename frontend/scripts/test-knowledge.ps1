@@ -38,6 +38,10 @@ if ($MutationAcceptance) {
     & $executables[0] knowledge::store::tests::synthetic_fts_mutation_workload --ignored --exact --test-threads=1 --nocapture
 }
 & $executables[0] knowledge:: --test-threads=1 --show-output
+& $executables[0] summary::llm_client::response_tests:: --test-threads=1 --show-output
+& $executables[0] summary::openai_provider::tests:: --test-threads=1
+& $executables[0] summary::codex_provider::app_server_tests:: --test-threads=1
+& $executables[0] summary::summary_engine::sidecar::protocol_tests:: --test-threads=1
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }
 if ($RetrievalAcceptance) {
