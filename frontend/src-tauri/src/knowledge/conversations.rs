@@ -406,6 +406,16 @@ pub async fn history(
     Ok(messages)
 }
 
+/// Only verifiable completed turns within the new frozen selection may be sent.
+pub async fn eligible_history(
+    _pool: &SqlitePool,
+    _owner: &ConversationOwner,
+    _frozen: &retrieval::FrozenScope,
+    _budget: usize,
+) -> Result<(String, BTreeMap<String, i64>), String> {
+    todo!("Constrain inherited turns and normalize their source dependencies")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,5 +711,94 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn filter_change_omits_prior_turn_without_erasing_readable_history() {
+        let pool = database().await;
+        let (request, frozen) = active(&pool).await;
+        finish(
+            &pool,
+            &request.request_id,
+            &frozen,
+            "Original project fact [K1]",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (prior, dependencies) = eligible_history(&pool, &request.owner, &frozen, 4096)
+            .await
+            .unwrap();
+        assert!(prior.contains("Original project fact"));
+        assert!(
+            !prior.contains("[K1]"),
+            "Old request-local tags must not collide with new tags"
+        );
+        assert_eq!(dependencies.get("meeting:fixture"), Some(&1));
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('other','Different project','2026-09-03','2026-09-03')").execute(&pool).await.unwrap();
+        let changed = retrieval::freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "other".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let (prior, dependencies) = eligible_history(&pool, &request.owner, &changed, 4096)
+            .await
+            .unwrap();
+        assert!(prior.is_empty());
+        assert!(dependencies.is_empty());
+        assert_eq!(history(&pool, &request.owner).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inherited_dependencies_redact_a_later_uncited_answer() {
+        let pool = database().await;
+        let (prior, frozen) = active(&pool).await;
+        finish(
+            &pool,
+            &prior.request_id,
+            &frozen,
+            "Prior supported fact",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (_, dependencies) = eligible_history(&pool, &prior.owner, &frozen, 4096)
+            .await
+            .unwrap();
+        let next = request(prior.owner.clone());
+        reserve(&pool, &next, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        prepare(
+            &pool,
+            &next.request_id,
+            &frozen,
+            &[],
+            &dependencies,
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        finish(
+            &pool,
+            &next.request_id,
+            &frozen,
+            "A response using prior history",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM meetings WHERE id='fixture'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(history(&pool, &prior.owner)
+            .await
+            .unwrap()
+            .iter()
+            .all(|message| message.content.is_empty()));
     }
 }
