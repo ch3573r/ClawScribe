@@ -57,3 +57,13 @@ test('configured library chat enables the first question before a conversation e
   nodes(app.render()).find(node=>node.type==='textarea').props.onChange({target:{value:'Decision?'}});
   assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);app.unmount();
 });
+
+test('transcript results omit empty panels and explain fallback without internal status codes',()=>{
+  const state={loading:false,response:null};
+  let app=surface('src/components/Knowledge/SearchResults.tsx','SearchResults',{state});
+  assert.equal(app.render(),null);app.unmount();
+  app=surface('src/components/Knowledge/SearchResults.tsx','SearchResults',{state:{...state,response:{passages:[],mode:'keyword',index_status:{reason:'model_unavailable'}}}});
+  const copy=text(app.render());
+  assert.match(copy,/search model is unavailable/);assert.match(copy,/Results use keyword search/);
+  assert.doesNotMatch(copy,/model_unavailable/);app.unmount();
+});

@@ -84,9 +84,9 @@ export function KnowledgeSettings() {
   return <TooltipProvider><div className="space-y-5">
     <PageSection title="Semantic search" actions={<div className="flex items-center gap-1">
       {model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Search model details"><Info /></Button></TooltipTrigger><TooltipContent>{model.model} · ONNX · CPU</TooltipContent></Tooltip>}
-      <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Semantic search actions" disabled={!model || locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
+      {model?.installed && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Semantic search actions" disabled={locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end"><DropdownMenuItem disabled={!model?.installed} onSelect={() => void action("Verifying search files", knowledgeService.download)}>Verify installed files</DropdownMenuItem></DropdownMenuContent>
-      </DropdownMenu>
+      </DropdownMenu>}
     </div>}>
       <div className="space-y-4 p-5">
         <div className="flex items-start justify-between gap-4"><div>
@@ -106,20 +106,20 @@ export function KnowledgeSettings() {
         {download?.stage === "cancelled" && <p role="status" className="text-sm text-muted-foreground">Download cancelled. Retry to continue from the saved progress.</p>}
       </div>
     </PageSection>
-    <PageSection title="Index" actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Index actions" disabled={!status || locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
+    <PageSection title="Index" actions={model?.ready && status?.semantic_enabled && total > 0 ? <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Index actions" disabled={locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end"><DropdownMenuItem disabled={!model?.ready || !status?.semantic_enabled} onSelect={() => void action("Rebuilding index", () => knowledgeService.reindex(all))}>Rebuild index</DropdownMenuItem></DropdownMenuContent>
-    </DropdownMenu>}>
+    </DropdownMenu> : null}>
       <div className="space-y-4 p-5">
         {!status && !readError && <p role="status" className="text-sm text-muted-foreground">Loading index…</p>}
         {status && <><p className="text-sm">Keyword search is {status.keyword_ready ? "ready" : "preparing"}.</p>
           <p className="text-sm text-muted-foreground">Semantic search: {status.semantic_ready} ready · {status.pending} pending · {status.failed} failed</p>
           {model?.enabled && total > 0 && <Progress aria-label="Semantic index progress" value={status.semantic_ready * 100 / total} aria-valuetext={`${status.semantic_ready} of ${total} meetings ready`} />}
           {status.reason && <p role="status" className="text-sm text-muted-foreground">{indexReason[status.reason] ?? "Index status is unavailable. Trying again…"}</p>}
-          <div className="flex flex-wrap gap-2">
+          {(status.pending > 0 && model?.ready || status.failed > 0 || status.reason === "paused") && <div className="flex flex-wrap gap-2">
             {status.pending > 0 && model?.ready && status.reason !== "paused" && <Button variant="outline" disabled={locked} onClick={() => void action("Pausing index", () => knowledgeService.pause(all))}>Pause</Button>}
             {status.failed > 0 && <Button variant="outline" disabled={locked || !model?.ready} onClick={() => void action("Retrying index", () => knowledgeService.reindex(all))}>Retry</Button>}
             {status.reason === "paused" && <Button variant="outline" disabled={locked || !model?.ready} onClick={() => void action("Resuming index", () => knowledgeService.reindex(all))}>Resume</Button>}
-          </div>
+          </div>}
         </>}
         <p className="text-xs text-muted-foreground">Recording and other AI work take priority. Rebuilding keeps saved citations.</p>
       </div>

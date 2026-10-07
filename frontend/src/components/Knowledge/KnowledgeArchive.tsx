@@ -19,8 +19,8 @@ import { EvidencePreview } from "./EvidencePreview";
 import type { ProjectFilter } from "@/lib/library";
 import type { IndexStatus, SearchMode } from "@/types/knowledge";
 
-export function KnowledgeArchive({ meetings, projectFilter, projectControl }: {
-  meetings: { id: string; title: string }[]; projectFilter: ProjectFilter; projectControl?: ReactNode;
+export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFilter, projectControl }: {
+  meetings: { id: string; title: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; projectControl?: ReactNode;
 }) {
   const { modelConfig } = useConfig();
   const [query, setQuery] = useState("");
@@ -106,7 +106,7 @@ export function KnowledgeArchive({ meetings, projectFilter, projectControl }: {
       </div>
       {!all && selected.length > 0 && <TooltipProvider><div className="flex flex-wrap gap-2" aria-label="Selected meetings">
         {selected.slice(0, 3).map(id => {
-          const title = meetings.find(meeting => meeting.id === id)?.title ?? "Meeting outside project filter";
+          const title = meetingTitles.find(meeting => meeting.id === id)?.title ?? "Unavailable meeting";
           return <Tooltip key={id}><TooltipTrigger asChild><Button type="button" variant="outline" size="sm" className="max-w-52 gap-1 bg-primary/10" aria-label={`Remove ${title}`} onClick={() => setSelected(ids => ids.filter(value => value !== id))}>
             <span className="truncate">{title}</span><X className="h-3 w-3 shrink-0" />
           </Button></TooltipTrigger><TooltipContent>{title}</TooltipContent></Tooltip>;

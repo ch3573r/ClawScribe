@@ -58,7 +58,7 @@ function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Knowledge
     table: ({children}) => <table className="my-2 w-full table-fixed border-collapse">{children}</table>,
     th: ({children}) => <th className="border border-border p-2 text-left">{inline(children)}</th>,
     td: ({children}) => <td className="border border-border p-2">{inline(children)}</td>,
-    a: ({children, href}) => <a href={href} className="text-primary underline" onClick={event => { event.preventDefault(); if (href) void openExternal(href); }}>{inline(children)}</a>,
+    a: ({children, href}) => <Button variant="link" asChild className="inline h-auto whitespace-normal p-0"><a href={href} onClick={event => { event.preventDefault(); if (href) void openExternal(href); }}>{inline(children)}</a></Button>,
     pre: ({children}) => <pre className="my-2 whitespace-pre-wrap rounded bg-background p-3">{children}</pre>,
   };
   return <TooltipProvider><div className="break-words text-sm leading-6"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{reply.content}</ReactMarkdown></div>

@@ -39,7 +39,7 @@ test('integrity verification never displays a completed transfer percentage',asy
 test('failed native download survives a new settings view and offers a retry',async(t)=>{
   const app=settings(t,{enabled:true,ready:false,installed:false,model:'intfloat/multilingual-e5-small',download:{...idle,stage:'error',downloaded_bytes:12000,error:'Local embedding model is unavailable'}});
   app.render();await flush();const tree=app.render();
-  assert(nodes(tree).some(node=>node.props?.role==='alert'&&/Retry/.test(text(node))));
+  assert(nodes(tree).some(node=>node.props?.role==='alert'&&/retry/i.test(text(node))));
   assert(nodes(tree).some(node=>node.type==='button'&&/Retry download/.test(text(node))));app.unmount();
 });
 test('status refresh moves the transfer through verification to readiness',async(t)=>{
