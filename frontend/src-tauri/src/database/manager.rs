@@ -520,6 +520,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gapped_canonical_rows_keep_fts_alignment_through_snapshot_and_import() {
+        use crate::knowledge::{retrieval, types::KnowledgeScope};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.sqlite");
+        let missing = directory.path().join("missing.sqlite");
+        let database = DatabaseManager::new(source.to_str().unwrap(), missing.to_str().unwrap())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('gap','Public gap fixture','2026-09-01','2026-09-01')").execute(database.pool()).await.unwrap();
+        for (id, text) in [
+            ("a", "First retained passage"),
+            ("b", "Middle deleted passage"),
+            ("c", "Last retained passage"),
+        ] {
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,'gap',?,'00:01')").bind(id).bind(text).execute(database.pool()).await.unwrap();
+        }
+        sqlx::query("DELETE FROM transcripts WHERE id='b'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let rowids: Vec<i64> = sqlx::query_scalar("SELECT rowid FROM transcripts ORDER BY rowid")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            rowids,
+            vec![1, 3],
+            "Fixture must contain a real physical rowid gap"
+        );
+        let snapshot = directory.path().join("snapshot.sqlite");
+        snapshot_database(&source, &snapshot).await.unwrap();
+        let imported = directory.path().join("imported.sqlite");
+        // This uses DatabaseManager's actual VACUUM INTO import path a second time.
+        let copy = DatabaseManager::new(imported.to_str().unwrap(), snapshot.to_str().unwrap())
+            .await
+            .unwrap();
+        let misaligned:i64=sqlx::query_scalar("SELECT count(*) FROM transcripts t LEFT JOIN knowledge_fts f ON f.rowid=t.rowid WHERE f.transcript_id IS NOT t.id").fetch_one(copy.pool()).await.unwrap();
+        assert_eq!(
+            misaligned, 0,
+            "Copied derived FTS rowids must still match canonical IDs"
+        );
+        sqlx::query("UPDATE transcripts SET transcript='Updated canonical signal' WHERE id='c'")
+            .execute(copy.pool())
+            .await
+            .unwrap();
+        let scope = retrieval::freeze_scope(
+            copy.pool(),
+            &KnowledgeScope::Meeting {
+                meeting_id: "gap".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let result =
+            retrieval::search_channels(copy.pool(), &scope, "Updated canonical signal", None)
+                .await
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(
+            matches!(&result[0].evidence.locator,crate::knowledge::types::EvidenceLocator::Transcript{transcript_ids,..} if transcript_ids==&["c"])
+        );
+        sqlx::query("DELETE FROM transcripts WHERE id='a'")
+            .execute(copy.pool())
+            .await
+            .unwrap();
+        assert!(
+            retrieval::search_channels(copy.pool(), &scope, "First retained passage", None)
+                .await
+                .unwrap()
+                .iter()
+                .all(|passage| !passage.text.contains("First"))
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_fts")
+            .fetch_one(copy.pool())
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
+        copy.cleanup().await.unwrap();
+        database.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_open_preserves_committed_wal_data() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("recovery.sqlite");

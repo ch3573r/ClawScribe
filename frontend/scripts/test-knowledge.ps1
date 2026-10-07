@@ -41,7 +41,8 @@ $focusedFailures = 0
 $PSNativeCommandUseErrorActionPreference = $false
 foreach ($filter in @('knowledge::', 'summary::llm_client::response_tests::',
     'summary::openai_provider::tests::', 'summary::codex_provider::app_server_tests::',
-    'summary::summary_engine::sidecar::protocol_tests::')) {
+    'summary::summary_engine::sidecar::protocol_tests::',
+    'database::manager::tests::gapped_canonical_rows_keep_fts_alignment_through_snapshot_and_import')) {
     & $executables[0] $filter --test-threads=1 --show-output
     if ($LASTEXITCODE -ne 0) { $focusedFailures++ }
 }
