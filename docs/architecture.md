@@ -609,3 +609,70 @@ passages and 30 fixed English/German queries, including nonlexical paraphrases,
 cross-language questions, identifiers and project/date conflicts. It reports
 bulk insertion/coalescing, indexing time, process-memory growth, top-five recall
 and warm p95. Models and measurements remain local to the designated runner.
+
+### Saved conversations and canonical citations
+
+`knowledge_ask` accepts a globally unique request UUID, a durable meeting or
+library owner, and the same explicit scope used by search. The backend resolves
+the configured provider/model, freezes the selected meeting IDs, and saves one
+user turn before generation. A completed retry with identical inputs returns
+the same assistant message; reusing an identity with different inputs fails.
+Cancelled or invalidated requests cannot accept late output. Startup marks
+interrupted requests without automatically resubmitting them.
+
+Prompts contain bounded JSON sections for the question, eligible prior turns,
+and transcript evidence. Document and live inputs remain rejected. Small
+selections can use complete canonical rows to retain short replies and dated
+contradictions: at most eight meetings, fewer than 32 rows per meeting, 64 rows
+overall, and 2,048 bytes per complete row. Larger selections retain bounded
+search results. Context limits can still omit whole rows; answers must qualify
+incomplete evidence. Source text and metadata are untrusted data. Clipped
+metadata is explicitly marked incomplete.
+
+Each request owns its ordered `[K1]` evidence map. Unknown tags never become
+links. `knowledge_resolve_evidence` reads the current bounded canonical passage
+and checks source revision, content/metadata fingerprint, transcript ID, exact
+UTF-8 span and audio offset. Only a current result supplies a navigation target.
+Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
+date and speaker labels describe the original answer snapshot. Editing a title
+or meeting date advances the source revision, invalidates pending answers and
+requeues semantic indexing; keyword retrieval remains available during rebuild.
+
+Prior turns enter a new prompt only when their frozen scope is contained in the
+current selection and every source dependency is current. Historical tags are
+neutralized so they cannot refer to the new request's map. Normalized dependency
+rows cover inherited context as well as newly selected evidence. Source checks
+run immediately before dispatch, during generation, and within the final write
+transaction. Deleting a source redacts dependent turns before removing its
+associations. Clearing a meeting removes legacy and new history together and
+signals its pending requests to stop.
+
+Configured text generation uses one absolute deadline across setup, queueing,
+retries and reads: HTTP 300 seconds or the compatible endpoint's configured
+duration, bundled Codex's configured duration with its 30-second minimum, and
+Built-in AI 900 seconds. The existing text helper delegates to the cancellable
+path. Reply metadata names the backend-normalized dispatched provider and model;
+it does not claim to observe a gateway's internal model routing.
+
+A bounded supervisor retains each operation when its caller disappears. Stop
+signals cancellation without requiring the UI to await cleanup. Cleanup has a
+separate five-second reporting allowance; expiry reports quarantine and does
+not release a live child's exchange or inference admission. The local helper
+rejects reuse while quarantined. Codex cleanup owns only that request's child
+and bounded readers. Ownership ends after actual reap; runtime pins, executable
+discovery and credential/profile boundaries remain unchanged.
+
+Version 1 portable archives include authoritative owner, request, message,
+evidence and dependency rows in dependency order. They omit semantic caches.
+Restored citations preserve their canonical identities but are explicitly
+historical, even if newly created source revision counters match their old
+values. Readable restored history is excluded from future prompts until fresh
+evidence is established. Source counters are never rewritten to make a
+historical reference appear current.
+
+These native conversation commands precede the meeting-intelligence UI. The
+guarded answer-acceptance workflow uses a fixed invented corpus, an isolated
+validation profile and the catalog-pinned Built-in AI model. Its bounded public
+synthetic step summary contains actual first-attempt answers and prompt/evidence
+records for factual review. Ordinary diagnostics contain outcome metadata only;
+model binaries and generated evaluation files are not uploaded or committed.

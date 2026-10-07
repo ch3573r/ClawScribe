@@ -78,12 +78,15 @@ if ($AnswerAcceptance) {
     $helperDestination = Join-Path $testDirectory 'llama-helper.exe'
     Copy-Item -LiteralPath $helperSource -Destination $helperDestination -Force
     if ((Get-FileHash -LiteralPath $helperSource -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $helperDestination -Algorithm SHA256).Hash) { throw 'Packaged helper copy verification failed.' }
+    $env:CLAWSCRIBE_ANSWER_QA_HELPER_SHA256 = (Get-FileHash -LiteralPath $helperDestination -Algorithm SHA256).Hash.ToLowerInvariant()
+    $env:CLAWSCRIBE_ANSWER_QA_BUILD_SHA = (& git rev-parse HEAD).Trim()
     $PSNativeCommandUseErrorActionPreference = $false
     # Native helper stderr includes local model paths. Emit only this test's
     # explicitly sanitized outcomes; detailed invented text goes to step summary.
     & $executables[0] knowledge::answers::tests::fixed_actual_answer_acceptance --ignored --exact --test-threads=1 --nocapture 2>&1 | ForEach-Object {
         $line = $_.ToString()
-        if ($line -match '^answer_qa case=\d{2} runtime=(completed|failed)( automated_gate=(true|false))?$' -or $line -match '^test result:') { Write-Output $line }
+        if ($line -match '(answer_qa case=\d{2} runtime=(completed|failed)( automated_gate=(true|false))?)$') { Write-Output $Matches[1] }
+        elseif ($line -match '^test result:') { Write-Output $line }
     }
     $qaExit = $LASTEXITCODE
     $PSNativeCommandUseErrorActionPreference = $true

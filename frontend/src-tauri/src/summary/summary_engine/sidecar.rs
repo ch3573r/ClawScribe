@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
 
@@ -331,7 +331,11 @@ impl SidecarManager {
             } => Some(result),
         };
         match result {
-            Some(result) => result,
+            Some(Ok(result)) => Ok(result),
+            Some(Err(error)) => {
+                self.shutdown().await?;
+                Err(error)
+            }
             None => {
                 // Keep the exchange guard until the cancelled worker has stopped.
                 self.shutdown().await?;
@@ -384,17 +388,25 @@ impl SidecarManager {
             .as_mut()
             .ok_or_else(|| anyhow!("Sidecar not running"))?;
 
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
+        const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+        let mut line = Vec::new();
+        (&mut *reader)
+            .take((MAX_RESPONSE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
             .await
             .context("Failed to read response from stdout")?;
+        if line.len() > MAX_RESPONSE_BYTES {
+            return Err(anyhow!("Local helper response exceeds its protocol limit"));
+        }
 
         if line.is_empty() {
             return Err(anyhow!("Sidecar closed stdout (process may have crashed)"));
         }
 
-        Ok(line.trim().to_string())
+        Ok(String::from_utf8(line)
+            .map_err(|_| anyhow!("Local helper response is not UTF-8"))?
+            .trim()
+            .to_string())
     }
 
     /// Send ping to keep sidecar alive

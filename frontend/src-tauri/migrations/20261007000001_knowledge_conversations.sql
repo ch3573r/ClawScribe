@@ -11,6 +11,7 @@ CREATE TABLE knowledge_requests (
     id TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL REFERENCES knowledge_owners(id) ON DELETE CASCADE,
     input_fingerprint TEXT NOT NULL,
+    input_json TEXT NOT NULL DEFAULT '{}',
     question TEXT NOT NULL,
     scope_json TEXT NOT NULL,
     frozen_ids_json TEXT NOT NULL,
@@ -61,7 +62,7 @@ CREATE TRIGGER knowledge_conversation_source_delete BEFORE DELETE ON knowledge_s
         (SELECT request_id FROM knowledge_request_sources WHERE source_id=OLD.id);
     DELETE FROM knowledge_request_evidence WHERE request_id IN
         (SELECT request_id FROM knowledge_request_sources WHERE source_id=OLD.id);
-    UPDATE knowledge_requests SET status='invalidated',question='',scope_json='{}',
+    UPDATE knowledge_requests SET status='invalidated',question='',scope_json='{}',input_json='{}',
         frozen_ids_json='[]',failure='source_deleted' WHERE id IN
         (SELECT request_id FROM knowledge_request_sources WHERE source_id=OLD.id);
     DELETE FROM knowledge_request_sources WHERE request_id IN

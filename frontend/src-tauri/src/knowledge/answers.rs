@@ -94,6 +94,7 @@ where
     F: FnOnce(&llm_client::LLMProvider) -> Result<TextEnvironment, String>,
 {
     let started = tokio::time::Instant::now();
+    conversations::validate_request(&request)?;
     let mut lease = runtime.answers.claim(pool, &request)?;
     let result=async {
         let settings=tokio::select! {
@@ -132,12 +133,14 @@ where
     F: FnOnce(ResolvedText, String, String, CancellationToken) -> Fut,
     Fut: std::future::Future<Output = Result<ConfiguredTextReply, String>>,
 {
+    let deadline = resolved.deadline;
     let provider = llm_client::canonical_provider(&resolved.provider).to_string();
     let model = resolved.model.clone();
-    if let Some(reply) = conversations::reserve(pool, request, &provider, &model).await? {
+    let reserved = tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled before reservation".into()),_=tokio::time::sleep_until(resolved.deadline)=>return Err("Answer deadline expired before reservation".into()),result=conversations::reserve_cancellable(pool,request,&provider,&model,token)=>result?};
+    if let Some(reply) = reserved {
         return Ok(reply);
     }
-    let frozen = conversations::frozen_scope(pool, &request.request_id).await?;
+    let frozen = tokio::select! { biased; _=token.cancelled()=>return Err("Answer cancelled".into()), _=tokio::time::sleep_until(deadline)=>return Err("Answer deadline expired".into()), result=conversations::frozen_scope(pool, &request.request_id)=>result? };
     let preparation = async {
         let response = retrieval::retrieve_frozen(pool, runtime, &request.search, &frozen)
             .await
@@ -191,7 +194,7 @@ where
     });
     // Final source check directly precedes dispatch. The monitor also cancels
     // provider admission waits when deletion or scope changes are detected.
-    conversations::check_ready(pool, &request.request_id, &frozen).await?;
+    tokio::select! { biased; _=token.cancelled()=>return Err("Answer cancelled".into()), _=tokio::time::sleep_until(deadline)=>return Err("Answer deadline expired".into()), result=conversations::check_ready(pool, &request.request_id, &frozen)=>result? };
     #[cfg(test)]
     {
         let mut inspected = runtime.answers.inspected_prompts.lock().unwrap();
@@ -207,7 +210,7 @@ where
     if output.provider != provider || output.model != model {
         return Err("Provider configuration changed during generation".into());
     }
-    conversations::finish(pool, &request.request_id, &frozen, &output.text, token).await
+    tokio::select! { biased; _=token.cancelled()=>Err("Answer cancelled before persistence".into()), _=tokio::time::sleep_until(deadline)=>Err("Answer deadline expired before persistence".into()), result=conversations::finish(pool, &request.request_id, &frozen, &output.text, token)=>result }
 }
 
 /// Preserve complete small selections, including standalone short replies and
@@ -354,6 +357,7 @@ mod tests {
             .expect("Explicit public synthetic review output required");
         let mut review = std::fs::OpenOptions::new()
             .append(true)
+            .create(true)
             .open(summary)
             .unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -373,7 +377,7 @@ mod tests {
         };
         let model = models::get_model_by_name("qwen3.5:4b").unwrap();
         write_record(
-            serde_json::json!({"label":"PUBLIC SYNTHETIC EVALUATION — actual first attempts; independent factual review pending","fixture":fixture,"system":SYSTEM,"model_catalog":model,"answer_timeout_seconds":900,"cleanup_allowance_seconds":5,"context_budget":16384,"output_tokens":4096}),
+            serde_json::json!({"label":"PUBLIC SYNTHETIC EVALUATION — actual first attempts; independent factual review pending","build_sha":std::env::var("CLAWSCRIBE_ANSWER_QA_BUILD_SHA").unwrap(),"helper_sha256":std::env::var("CLAWSCRIBE_ANSWER_QA_HELPER_SHA256").unwrap(),"helper_profile":"standard packaged release build","fixture":fixture,"system":SYSTEM,"model_catalog":model,"answer_timeout_seconds":900,"cleanup_allowance_seconds":5,"context_budget":16384,"output_tokens":4096}),
         );
         let manager =
             ModelManager::new_with_models_dir(Some(models::get_models_directory(&root))).unwrap();
@@ -721,6 +725,32 @@ mod tests {
                 .iter()
                 .all(|message| message.role != "assistant"));
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_before_reserve_cannot_recreate_cleared_history() {
+        let (pool, request, dir) = answer_fixture().await;
+        let runtime = super::super::KnowledgeState::default();
+        let token = CancellationToken::new();
+        token.cancel();
+        conversations::clear(&pool, &request.owner).await.unwrap();
+        let result = ask_resolved(
+            &pool,
+            &runtime,
+            &request,
+            resolved(&pool, dir.path()).await,
+            &token,
+            |_, _, _, _| async { panic!("Cancelled reservation cannot dispatch") },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            conversations::history(&pool, &request.owner)
+                .await
+                .unwrap()
+                .is_empty(),
+            "Clear must win before the user turn is reserved"
+        );
     }
     fn passage(id: &str, date: &str, text: &str) -> Passage {
         Passage {

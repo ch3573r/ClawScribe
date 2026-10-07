@@ -153,10 +153,20 @@ pub struct AssistantReply {
     pub content: String,
     /// Full backend-owned map: index zero is K1; never renumber cited subsets.
     pub evidence: Vec<EvidenceRef>,
+    /// Original bounded labels, in the same request-local order as evidence.
+    pub evidence_metadata: Vec<EvidenceDisplay>,
     pub cited_tags: Vec<usize>,
     pub retrieval_mode: SearchMode,
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceDisplay {
+    pub title: String,
+    pub date: String,
+    pub speaker: Option<String>,
+    pub metadata_truncated: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

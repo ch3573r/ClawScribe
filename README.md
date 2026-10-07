@@ -178,6 +178,9 @@ and recordings. Restore adds missing meetings and skips existing IDs. Backups
 continue when recording folders are missing and report affected meetings,
 excluded recovery files, and unavailable audio. Archives exclude credentials and
 models and are not encrypted.
+Saved knowledge conversations and their original citation labels are included.
+Restored references remain historical until a new question establishes fresh
+evidence; interrupted answers are never resubmitted automatically.
 
 Meeting deletion can also remove its recording folder, including audio,
 transcript copies, metadata, recovery originals, and generated documents. The

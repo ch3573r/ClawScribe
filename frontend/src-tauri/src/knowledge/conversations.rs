@@ -42,7 +42,7 @@ pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<ConversationOwner>,
         })
         .collect())
 }
-fn validate_request(request: &AskRequest) -> Result<(), String> {
+pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
     if uuid::Uuid::parse_str(&request.request_id)
         .map(|id| id.to_string())
         .ok()
@@ -65,16 +65,12 @@ fn validate_request(request: &AskRequest) -> Result<(), String> {
     }
 }
 
-/// Returns the original completed reply or reserves exactly one persisted user turn.
-pub async fn reserve(
-    pool: &SqlitePool,
+pub(crate) fn input_fingerprint(
     request: &AskRequest,
     provider: &str,
     model: &str,
-) -> Result<Option<AssistantReply>, String> {
-    validate_request(request)?;
-    let owner = owner_key(&request.owner)?;
-    let fingerprint = format!(
+) -> Result<String, String> {
+    Ok(format!(
         "{:x}",
         Sha256::digest(json(&(
             "knowledge-input-v1",
@@ -83,7 +79,32 @@ pub async fn reserve(
             provider,
             model
         ))?)
-    );
+    ))
+}
+
+/// Returns the original completed reply or reserves exactly one persisted user turn.
+pub async fn reserve(
+    pool: &SqlitePool,
+    request: &AskRequest,
+    provider: &str,
+    model: &str,
+) -> Result<Option<AssistantReply>, String> {
+    reserve_cancellable(pool, request, provider, model, &CancellationToken::new()).await
+}
+
+pub(crate) async fn reserve_cancellable(
+    pool: &SqlitePool,
+    request: &AskRequest,
+    provider: &str,
+    model: &str,
+    token: &CancellationToken,
+) -> Result<Option<AssistantReply>, String> {
+    validate_request(request)?;
+    if token.is_cancelled() {
+        return Err("Answer cancelled before reservation".into());
+    }
+    let owner = owner_key(&request.owner)?;
+    let fingerprint = input_fingerprint(request, provider, model)?;
     let frozen = retrieval::freeze_scope(pool, &request.search.scope)
         .await
         .map_err(|e| e.to_string())?;
@@ -95,7 +116,7 @@ pub async fn reserve(
         .await
         .map_err(failure)?;
     if let Some(row) =
-        sqlx::query("SELECT owner_id,input_fingerprint,status FROM knowledge_requests WHERE id=?")
+        sqlx::query("SELECT owner_id,input_fingerprint,status,frozen_ids_json FROM knowledge_requests WHERE id=?")
             .bind(&request.request_id)
             .fetch_optional(&mut *tx)
             .await
@@ -109,11 +130,14 @@ pub async fn reserve(
         match row.get::<String, _>("status").as_str() {
             "completed" => {
                 let reply = reply_in(&mut tx, &request.request_id).await?;
+                if token.is_cancelled() {return Err("Answer cancelled".into());}
                 tx.commit().await.map_err(failure)?;
                 return Ok(Some(reply));
             }
             "failed" | "interrupted" => {
-                sqlx::query("UPDATE knowledge_requests SET status='preparing',failure=NULL,restored=0,frozen_ids_json=? WHERE id=?").bind(json(&frozen.meeting_ids)?).bind(&request.request_id).execute(&mut *tx).await.map_err(failure)?;
+                let original:Vec<String>=serde_json::from_str(row.get("frozen_ids_json")).map_err(|_|"Invalid frozen scope")?;
+                if original.iter().any(|id|!frozen.meeting_ids.contains(id)){return Err("Original request scope is no longer available".into());}
+                sqlx::query("UPDATE knowledge_requests SET status='preparing',failure=NULL,restored=0 WHERE id=?").bind(&request.request_id).execute(&mut *tx).await.map_err(failure)?;
                 for table in ["knowledge_request_evidence", "knowledge_request_sources"] {
                     sqlx::query(&format!("DELETE FROM {table} WHERE request_id=?"))
                         .bind(&request.request_id)
@@ -121,6 +145,9 @@ pub async fn reserve(
                         .await
                         .map_err(failure)?;
                 }
+                retrieval::recheck_scope_in_connection(&mut tx, &retrieval::FrozenScope {scope: request.search.scope.clone(), meeting_ids: original.clone()}).await.map_err(|error|error.to_string())?;
+                reserve_dependencies(&mut tx,&request.request_id,&original).await?;
+                if token.is_cancelled() {return Err("Answer cancelled before reservation".into());}
                 tx.commit().await.map_err(failure)?;
                 return Ok(None);
             }
@@ -140,8 +167,12 @@ pub async fn reserve(
     if !exists {
         return Err("Conversation owner does not exist".into());
     }
-    sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,question,scope_json,frozen_ids_json,status,provider,model) VALUES (?,?,?,?,?,?,'preparing',?,?)")
-        .bind(&request.request_id).bind(owner).bind(fingerprint).bind(&request.search.query).bind(json(&request.search.scope)?).bind(json(&frozen.meeting_ids)?).bind(provider).bind(model).execute(&mut *tx).await.map_err(failure)?;
+    retrieval::recheck_scope_in_connection(&mut tx, &frozen)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,input_json,question,scope_json,frozen_ids_json,status,provider,model) VALUES (?,?,?,?,?,?,?,'preparing',?,?)")
+        .bind(&request.request_id).bind(owner).bind(fingerprint).bind(json(request)?).bind(&request.search.query).bind(json(&request.search.scope)?).bind(json(&frozen.meeting_ids)?).bind(provider).bind(model).execute(&mut *tx).await.map_err(failure)?;
+    reserve_dependencies(&mut tx, &request.request_id, &frozen.meeting_ids).await?;
     sqlx::query("INSERT INTO knowledge_messages(id,request_id,role,content) VALUES (?,?,'user',?)")
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&request.request_id)
@@ -149,8 +180,23 @@ pub async fn reserve(
         .execute(&mut *tx)
         .await
         .map_err(failure)?;
+    if token.is_cancelled() {
+        return Err("Answer cancelled before reservation".into());
+    }
     tx.commit().await.map_err(failure)?;
     Ok(None)
+}
+
+async fn reserve_dependencies(
+    connection: &mut SqliteConnection,
+    id: &str,
+    meetings: &[String],
+) -> Result<(), String> {
+    let inserted=sqlx::query("INSERT INTO knowledge_request_sources(request_id,source_id,revision) SELECT ?,s.id,s.revision FROM knowledge_sources s JOIN json_each(?) selected ON selected.value=s.meeting_id WHERE s.kind='meeting'").bind(id).bind(json(&meetings)?).execute(connection).await.map_err(failure)?;
+    if inserted.rows_affected() != meetings.len() as u64 {
+        return Err("Selected source is no longer available".into());
+    }
+    Ok(())
 }
 
 pub async fn frozen_scope(pool: &SqlitePool, id: &str) -> Result<retrieval::FrozenScope, String> {
@@ -198,6 +244,21 @@ pub async fn prepare(
     retrieval::recheck_scope_in_connection(&mut tx, frozen)
         .await
         .map_err(|e| e.to_string())?;
+    let reserved: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT source_id,revision FROM knowledge_request_sources WHERE request_id=?",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(failure)?;
+    for (source, revision) in reserved {
+        if dependencies
+            .insert(source, revision)
+            .is_some_and(|other| other != revision)
+        {
+            return Err("Selected source changed during retrieval".into());
+        }
+    }
     for (source, revision) in dependencies {
         let current: Option<i64> =
             sqlx::query_scalar("SELECT revision FROM knowledge_sources WHERE id=?")
@@ -209,7 +270,7 @@ pub async fn prepare(
             return Err("Evidence changed before provider dispatch".into());
         }
         sqlx::query(
-            "INSERT INTO knowledge_request_sources(request_id,source_id,revision) VALUES (?,?,?)",
+            "INSERT INTO knowledge_request_sources(request_id,source_id,revision) VALUES (?,?,?) ON CONFLICT(request_id,source_id) DO NOTHING",
         )
         .bind(id)
         .bind(source)
@@ -291,19 +352,24 @@ pub async fn finish(
 }
 async fn reply_in(connection: &mut SqliteConnection, id: &str) -> Result<AssistantReply, String> {
     let row=sqlx::query("SELECT m.id,m.content,r.provider,r.model,r.retrieval_mode,r.restored FROM knowledge_messages m JOIN knowledge_requests r ON r.id=m.request_id WHERE r.id=? AND m.role='assistant'").bind(id).fetch_one(&mut *connection).await.map_err(failure)?;
-    let references: Vec<String> = sqlx::query_scalar(
-        "SELECT reference_json FROM knowledge_request_evidence WHERE request_id=? ORDER BY ordinal",
+    let references = sqlx::query(
+        "SELECT reference_json,display_json FROM knowledge_request_evidence WHERE request_id=? ORDER BY ordinal",
     )
     .bind(id)
     .fetch_all(&mut *connection)
     .await
     .map_err(failure)?;
     let mut evidence = Vec::<EvidenceRef>::new();
+    let mut evidence_metadata = Vec::<EvidenceDisplay>::new();
     for reference in references {
-        let mut reference: EvidenceRef =
-            serde_json::from_str(&reference).map_err(|_| "Invalid saved evidence")?;
-        reference.historical |= row.get::<bool, _>("restored");
-        evidence.push(reference);
+        evidence_metadata.push(
+            serde_json::from_str(reference.get("display_json"))
+                .map_err(|_| "Invalid saved evidence labels")?,
+        );
+        let mut value: EvidenceRef = serde_json::from_str(reference.get("reference_json"))
+            .map_err(|_| "Invalid saved evidence")?;
+        value.historical |= row.get::<bool, _>("restored");
+        evidence.push(value);
     }
     let content: String = row.get("content");
     let cited_tags = super::evidence::tag_numbers(&content, evidence.len());
@@ -312,6 +378,7 @@ async fn reply_in(connection: &mut SqliteConnection, id: &str) -> Result<Assista
         message_id: row.get("id"),
         content,
         evidence,
+        evidence_metadata,
         cited_tags,
         retrieval_mode: if row.get::<String, _>("retrieval_mode") == "hybrid" {
             SearchMode::Hybrid
@@ -402,7 +469,18 @@ pub async fn history(
             reply: None,
         }));
     }
-    messages.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    messages.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then(
+                a.request_id
+                    .as_ref()
+                    .unwrap_or(&a.id)
+                    .cmp(b.request_id.as_ref().unwrap_or(&b.id)),
+            )
+            .then((a.role != "user").cmp(&(b.role != "user")))
+            .then(a.id.cmp(&b.id))
+    });
     Ok(messages)
 }
 

@@ -107,8 +107,18 @@ to the original computer.
 Folder references are rewritten for the destination computer. Interrupted summary
 jobs are marked cancelled; their saved output is retained.
 
+Archives also retain saved knowledge conversations, including independent
+library threads and the original citation labels. Existing conversation-owner
+IDs are skipped without overwriting their history. A dependent turn is redacted
+when an archived source is unavailable or conflicts with a skipped destination
+meeting. Interrupted answer requests remain interrupted and require an explicit
+retry. Restored citations are historical and cannot navigate as current evidence
+or enter a future answer prompt, even when a destination revision number happens
+to match. New questions establish fresh canonical evidence. Semantic indexes
+and model downloads are excluded; restored sources are queued for indexing.
+
 Version 1 archives have a JSON manifest and explicitly listed recording files.
-Only meeting-related database tables and known media/metadata files are included.
+Only saved-library database tables and known media/metadata files are included.
 The meetings table is required; missing known child tables are treated as empty
 so adding optional tables does not invalidate older version-1 backups.
 The optional `incomplete_audio` manifest field records omissions by meeting index;

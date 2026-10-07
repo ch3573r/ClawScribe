@@ -23,6 +23,11 @@ const TABLES: &[&str] = &[
     "transcript_file_sync",
     "meeting_tags",
     "meeting_bookmarks",
+    "knowledge_owners",
+    "knowledge_requests",
+    "knowledge_messages",
+    "knowledge_request_evidence",
+    "knowledge_request_sources",
 ];
 const MAX_MANIFEST: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 100_000;
@@ -485,6 +490,467 @@ fn unpack(
     Ok((manifest, stage))
 }
 
+fn text_field<'a>(row: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+    row.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Invalid conversation archive field.".into())
+}
+fn uuid_field(row: &Map<String, Value>, key: &str) -> Result<String, String> {
+    let value = text_field(row, key)?;
+    if uuid::Uuid::parse_str(value)
+        .map(|id| id.to_string())
+        .ok()
+        .as_deref()
+        != Some(value)
+    {
+        return Err("Invalid conversation UUID.".into());
+    }
+    Ok(value.into())
+}
+async fn insert_archive_row(
+    connection: &mut sqlx::SqliteConnection,
+    table: &str,
+    row: &Map<String, Value>,
+) -> Result<(), String> {
+    let names = row
+        .keys()
+        .map(|key| format!("\"{key}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut query =
+        sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!("INSERT INTO {table} ({names}) VALUES ("));
+    let mut values = query.separated(",");
+    for value in row.values() {
+        match value {
+            Value::Null => {
+                values.push_bind(Option::<String>::None);
+            }
+            Value::String(value) => {
+                values.push_bind(value);
+            }
+            Value::Number(value) if value.is_i64() => {
+                values.push_bind(value.as_i64().unwrap());
+            }
+            Value::Number(value) => {
+                values.push_bind(value.as_f64().ok_or("Invalid archive number")?);
+            }
+            _ => return Err("Invalid archive field type.".into()),
+        }
+    }
+    query
+        .push(")")
+        .build()
+        .execute(connection)
+        .await
+        .map_err(failure)?;
+    Ok(())
+}
+
+/// Compare inside the restore transaction without loading canonical body strings.
+/// Archived text is already bounded by the manifest limit; SQLite compares it in place.
+async fn same_archived_source(
+    connection: &mut sqlx::SqliteConnection,
+    meeting: &Map<String, Value>,
+    rows: &[&Map<String, Value>],
+    id: &str,
+) -> Result<bool, String> {
+    let metadata: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM meetings WHERE id=? AND title IS ? AND created_at IS ?)",
+    )
+    .bind(id)
+    .bind(meeting.get("title").and_then(Value::as_str))
+    .bind(meeting.get("created_at").and_then(Value::as_str))
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(failure)?;
+    if !metadata {
+        return Ok(false);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM transcripts WHERE meeting_id=?")
+        .bind(id)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(failure)?;
+    if count != rows.len() as i64 {
+        return Ok(false);
+    }
+    for row in rows {
+        let equal:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transcripts WHERE id=? AND meeting_id=? AND transcript IS ? AND speaker IS ? AND timestamp IS ? AND audio_start_time IS ? AND audio_end_time IS ? AND duration IS ? AND word_timestamps_json IS ?)")
+            .bind(row.get("id").and_then(Value::as_str)).bind(id).bind(row.get("transcript").and_then(Value::as_str)).bind(row.get("speaker").and_then(Value::as_str)).bind(row.get("timestamp").and_then(Value::as_str)).bind(row.get("audio_start_time").and_then(Value::as_f64)).bind(row.get("audio_end_time").and_then(Value::as_f64)).bind(row.get("duration").and_then(Value::as_f64)).bind(row.get("word_timestamps_json").and_then(Value::as_str)).fetch_one(&mut *connection).await.map_err(failure)?;
+        if !equal {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn import_conversations(
+    connection: &mut sqlx::SqliteConnection,
+    manifest: &Manifest,
+    known: &HashSet<String>,
+    selected: &HashSet<String>,
+) -> Result<(), String> {
+    use crate::knowledge::{conversations, types::*};
+    let rows = |table: &str| manifest.tables.get(table).map(Vec::as_slice).unwrap_or(&[]);
+    let canonical_meetings: BTreeMap<_, _> = rows("meetings")
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(|id| (id, row)))
+        .collect();
+    let mut canonical_rows = BTreeMap::<&str, Vec<&Map<String, Value>>>::new();
+    for row in rows("transcripts") {
+        if let Some(id) = row.get("meeting_id").and_then(Value::as_str) {
+            canonical_rows.entry(id).or_default().push(row);
+        }
+    }
+    // Validate even skipped rows. Table-specific identities replace the generic
+    // meeting_id assumption used by the older meeting-only child tables.
+    for table in TABLES
+        .iter()
+        .filter(|table| table.starts_with("knowledge_"))
+    {
+        let columns: HashSet<String> = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(failure)?
+            .iter()
+            .map(|row| row.get("name"))
+            .collect();
+        for row in rows(table) {
+            if row.keys().any(|key| !columns.contains(key))
+                || row.values().any(|value| {
+                    !matches!(value, Value::Null | Value::String(_) | Value::Number(_))
+                })
+            {
+                return Err("Unsupported conversation archive columns or types.".into());
+            }
+        }
+    }
+    let mut owners = BTreeMap::new();
+    for row in rows("knowledge_owners") {
+        let id = text_field(row, "id")?.to_string();
+        let owner = match text_field(row, "kind")? {
+            "meeting" => {
+                let meeting = text_field(row, "meeting_id")?;
+                if !known.contains(meeting) || id != format!("meeting:{meeting}") {
+                    return Err("Invalid conversation meeting owner.".into());
+                }
+                ConversationOwner::Meeting(meeting.into())
+            }
+            "library" => {
+                let value = id
+                    .strip_prefix("library:")
+                    .ok_or("Invalid library conversation owner")?;
+                if uuid::Uuid::parse_str(value)
+                    .map(|id| id.to_string())
+                    .ok()
+                    .as_deref()
+                    != Some(value)
+                    || row.get("meeting_id").is_some_and(|v| !v.is_null())
+                {
+                    return Err("Invalid library conversation owner.".into());
+                }
+                ConversationOwner::Library(value.into())
+            }
+            _ => return Err("Unsupported conversation owner.".into()),
+        };
+        let existing: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_owners WHERE id=?)")
+                .bind(&id)
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(failure)?;
+        if owners.insert(id, (owner, existing)).is_some() {
+            return Err("Duplicate conversation owner.".into());
+        }
+        if !existing {
+            insert_archive_row(connection, "knowledge_owners", row).await?;
+        }
+    }
+    // request -> (skip due to collision, invalidated, original status, question)
+    let mut requests = BTreeMap::<String, (bool, bool, String, String)>::new();
+    let mut frozen_by_request = BTreeMap::<String, Vec<String>>::new();
+    for row in rows("knowledge_requests") {
+        let id = uuid_field(row, "id")?;
+        let owner_id = text_field(row, "owner_id")?;
+        let (owner, owner_collision) = owners.get(owner_id).ok_or("Unknown conversation owner")?;
+        let status = text_field(row, "status")?;
+        if !matches!(
+            status,
+            "preparing"
+                | "running"
+                | "completed"
+                | "failed"
+                | "interrupted"
+                | "cancelled"
+                | "invalidated"
+        ) {
+            return Err("Invalid saved answer state.".into());
+        }
+        let question = text_field(row, "question")?;
+        let provider = text_field(row, "provider")?;
+        let model = text_field(row, "model")?;
+        let parsed_provider = crate::summary::llm_client::LLMProvider::from_str(provider)?;
+        if crate::summary::llm_client::canonical_provider(&parsed_provider) != provider
+            || model.trim().is_empty()
+        {
+            return Err("Invalid saved provider metadata.".into());
+        }
+        let fingerprint = text_field(row, "input_fingerprint")?;
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("Invalid saved request fingerprint.".into());
+        }
+        let frozen: Vec<String> =
+            serde_json::from_str(text_field(row, "frozen_ids_json")?).map_err(failure)?;
+        if frozen.iter().collect::<HashSet<_>>().len() != frozen.len() {
+            return Err("Duplicate frozen source identity.".into());
+        }
+        if status != "invalidated" {
+            let input: AskRequest =
+                serde_json::from_str(text_field(row, "input_json")?).map_err(failure)?;
+            conversations::validate_request(&input)?;
+            let scope: KnowledgeScope =
+                serde_json::from_str(text_field(row, "scope_json")?).map_err(failure)?;
+            if input.request_id != id
+                || &input.owner != owner
+                || input.search.query != question
+                || input.search.scope != scope
+                || conversations::input_fingerprint(&input, provider, model)? != fingerprint
+            {
+                return Err("Saved request inputs do not match their immutable identity.".into());
+            }
+        }
+        let collision: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_requests WHERE id=?)")
+                .bind(&id)
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(failure)?;
+        if requests
+            .insert(
+                id.clone(),
+                (
+                    *owner_collision || collision,
+                    status == "invalidated",
+                    status.into(),
+                    question.into(),
+                ),
+            )
+            .is_some()
+        {
+            return Err("Duplicate saved request UUID.".into());
+        }
+        frozen_by_request.insert(id, frozen);
+    }
+    let mut dependencies = BTreeMap::<String, BTreeMap<String, i64>>::new();
+    let mut comparable = BTreeMap::new();
+    for row in rows("knowledge_request_sources") {
+        let id = text_field(row, "request_id")?;
+        let request = requests.get_mut(id).ok_or("Unknown source request")?;
+        let source = text_field(row, "source_id")?;
+        let meeting = source
+            .strip_prefix("meeting:")
+            .filter(|id| !id.is_empty())
+            .ok_or("Invalid conversation source")?;
+        let revision = row
+            .get("revision")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .ok_or("Invalid source revision")?;
+        if !frozen_by_request[id].iter().any(|id| id == meeting)
+            || dependencies
+                .entry(id.into())
+                .or_default()
+                .insert(source.into(), revision)
+                .is_some()
+        {
+            return Err("Invalid or duplicate conversation dependency.".into());
+        }
+        let same = if let Some(same) = comparable.get(meeting) {
+            *same
+        } else {
+            let same = selected.contains(meeting)
+                || (known.contains(meeting)
+                    && same_archived_source(
+                        connection,
+                        canonical_meetings[meeting],
+                        canonical_rows
+                            .get(meeting)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                        meeting,
+                    )
+                    .await?);
+            comparable.insert(meeting.to_string(), same);
+            same
+        };
+        request.1 |= !same;
+    }
+    for (id, request) in &mut requests {
+        // The selected scope is an absence/deletion dependency even before
+        // retrieval finishes; a stripped dependency cannot resurrect a turn.
+        for meeting in &frozen_by_request[id] {
+            if dependencies
+                .get(id)
+                .is_none_or(|sources| !sources.contains_key(&format!("meeting:{meeting}")))
+            {
+                request.1 = true;
+            }
+        }
+    }
+    let mut ordinals = BTreeMap::<String, Vec<i64>>::new();
+    for row in rows("knowledge_request_evidence") {
+        let id = text_field(row, "request_id")?;
+        requests.get(id).ok_or("Unknown evidence request")?;
+        let ordinal = row
+            .get("ordinal")
+            .and_then(Value::as_i64)
+            .filter(|n| (1..=64).contains(n))
+            .ok_or("Invalid citation ordinal")?;
+        ordinals.entry(id.into()).or_default().push(ordinal);
+        let reference: EvidenceRef =
+            serde_json::from_str(text_field(row, "reference_json")?).map_err(failure)?;
+        let display: EvidenceDisplay =
+            serde_json::from_str(text_field(row, "display_json")?).map_err(failure)?;
+        if display.title.len() > 1024
+            || display.date.len() > 1024
+            || display.speaker.as_ref().is_some_and(|v| v.len() > 1024)
+            || dependencies
+                .get(id)
+                .and_then(|sources| sources.get(&reference.source_id))
+                != Some(&reference.source_revision)
+        {
+            return Err("Invalid saved evidence snapshot.".into());
+        }
+        let EvidenceLocator::Transcript {
+            meeting_id,
+            transcript_ids,
+            spans,
+            start_seconds,
+        } = reference.locator
+        else {
+            return Err("Unsupported archived evidence locator.".into());
+        };
+        if reference.source_id != format!("meeting:{meeting_id}")
+            || transcript_ids.len() != 1
+            || spans.len() != 1
+            || transcript_ids[0] != spans[0].transcript_id
+            || spans[0].end_byte <= spans[0].start_byte
+            || spans[0].end_byte - spans[0].start_byte > crate::knowledge::store::READ_BYTES
+            || start_seconds.is_some_and(|n| !n.is_finite() || n < 0.)
+        {
+            return Err("Invalid archived canonical locator.".into());
+        }
+    }
+    for values in ordinals.values_mut() {
+        values.sort_unstable();
+        if values
+            .iter()
+            .enumerate()
+            .any(|(index, value)| *value != index as i64 + 1)
+        {
+            return Err("Non-contiguous citation map.".into());
+        }
+    }
+    let mut roles = BTreeMap::<String, HashSet<String>>::new();
+    let mut message_ids = HashSet::new();
+    for row in rows("knowledge_messages") {
+        let message = uuid_field(row, "id")?;
+        let id = text_field(row, "request_id")?;
+        let request = requests.get(id).ok_or("Unknown message request")?;
+        let role = text_field(row, "role")?;
+        let content = text_field(row, "content")?;
+        if !matches!(role, "user" | "assistant")
+            || content.len() > 256 * 1024
+            || (role == "user" && !request.1 && content != request.3)
+            || !message_ids.insert(message.clone())
+            || !roles.entry(id.into()).or_default().insert(role.into())
+        {
+            return Err("Invalid or duplicate conversation message.".into());
+        }
+        if !request.0 {
+            let collision: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_messages WHERE id=?)")
+                    .bind(&message)
+                    .fetch_one(&mut *connection)
+                    .await
+                    .map_err(failure)?;
+            if collision {
+                return Err("Conversation message UUID collision.".into());
+            }
+        }
+    }
+    for (id, request) in &requests {
+        let role = roles.get(id).ok_or("Saved request has no user turn")?;
+        if !role.contains("user")
+            || (request.2 == "completed" && !role.contains("assistant"))
+            || (!matches!(request.2.as_str(), "completed" | "invalidated")
+                && role.contains("assistant"))
+        {
+            return Err("Saved answer message state is inconsistent.".into());
+        }
+    }
+    // Insert only after all associations were checked. Invalidated replies use
+    // a temporary completed state inside this transaction to import blank
+    // tombstones without weakening the normal assistant insertion trigger.
+    for source in rows("knowledge_requests") {
+        let id = text_field(source, "id")?;
+        let request = &requests[id];
+        if request.0 {
+            continue;
+        }
+        let mut row = source.clone();
+        row.insert("restored".into(), Value::from(1));
+        if request.1 {
+            row.insert("status".into(), Value::from("completed"));
+            row.insert("question".into(), Value::from(""));
+            row.insert("scope_json".into(), Value::from("{}"));
+            row.insert("input_json".into(), Value::from("{}"));
+            row.insert("frozen_ids_json".into(), Value::from("[]"));
+            row.insert("failure".into(), Value::from("restored_source_unavailable"));
+        } else if matches!(request.2.as_str(), "preparing" | "running") {
+            row.insert("status".into(), Value::from("interrupted"));
+            row.insert("failure".into(), Value::from("restored_interrupted"));
+        }
+        insert_archive_row(connection, "knowledge_requests", &row).await?;
+    }
+    for table in [
+        "knowledge_messages",
+        "knowledge_request_evidence",
+        "knowledge_request_sources",
+    ] {
+        for source in rows(table) {
+            let request = &requests[text_field(source, "request_id")?];
+            if request.0 || (request.1 && table != "knowledge_messages") {
+                continue;
+            }
+            let mut row = source.clone();
+            if request.1 {
+                row.insert("content".into(), Value::from(""));
+            }
+            if table == "knowledge_request_evidence" {
+                let mut reference: EvidenceRef =
+                    serde_json::from_str(text_field(&row, "reference_json")?).map_err(failure)?;
+                reference.historical = true;
+                row.insert(
+                    "reference_json".into(),
+                    Value::from(serde_json::to_string(&reference).map_err(failure)?),
+                );
+            }
+            insert_archive_row(connection, table, &row).await?;
+        }
+    }
+    for (id, request) in requests {
+        if !request.0 && request.1 {
+            sqlx::query("UPDATE knowledge_requests SET status='invalidated' WHERE id=?")
+                .bind(id)
+                .execute(&mut *connection)
+                .await
+                .map_err(failure)?;
+        }
+    }
+    Ok(())
+}
+
 async fn import_manifest(
     pool: &SqlitePool,
     manifest: Manifest,
@@ -514,6 +980,9 @@ async fn import_manifest(
         }
     }
     for table in TABLES {
+        if table.starts_with("knowledge_") {
+            continue;
+        }
         let schema = sqlx::query(&format!("PRAGMA table_info({table})"))
             .fetch_all(&mut *tx)
             .await
@@ -616,6 +1085,7 @@ async fn import_manifest(
                 .map_err(failure)?;
         }
     }
+    import_conversations(&mut tx, &manifest, &known, &selected).await?;
     for (index, incomplete) in &manifest.incomplete_audio {
         if !incomplete.recovery_files_excluded {
             continue;
@@ -918,10 +1388,9 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_redacts_changed_skipped_source_but_keeps_identical_source() {
-        use crate::knowledge::conversations;
+        use crate::knowledge::{conversations, retrieval, types::SearchMode};
         for changed in [false, true] {
             let (source, request) = conversation_fixture().await;
-            let (manifest, _) = snapshot(&source).await.unwrap();
             let destination = empty_conversation_destination().await;
             let (mut canonical, _) = snapshot(&source).await.unwrap();
             canonical
@@ -930,6 +1399,35 @@ mod tests {
             import_manifest(&destination, canonical, tempfile::tempdir().unwrap())
                 .await
                 .unwrap();
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('archive-other','New archive source','2026-09-02','2026-09-02')").execute(&source).await.unwrap();
+            let mut mixed = request.clone();
+            mixed.request_id = uuid::Uuid::new_v4().to_string();
+            conversations::reserve(&source, &mixed, "builtin-ai", "qwen3.5:4b")
+                .await
+                .unwrap();
+            let frozen = retrieval::freeze_scope(&source, &mixed.search.scope)
+                .await
+                .unwrap();
+            conversations::prepare(
+                &source,
+                &mixed.request_id,
+                &frozen,
+                &[],
+                &BTreeMap::new(),
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+            conversations::finish(
+                &source,
+                &mixed.request_id,
+                &frozen,
+                "The selected evidence does not establish another action.",
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let (manifest, _) = snapshot(&source).await.unwrap();
             if changed {
                 sqlx::query("UPDATE transcripts SET transcript='Different destination evidence.' WHERE id='archive-second'").execute(&destination).await.unwrap();
             }
@@ -939,15 +1437,115 @@ mod tests {
             let history = conversations::history(&destination, &request.owner)
                 .await
                 .unwrap();
-            assert_eq!(history.len(), 2);
+            assert_eq!(history.len(), 4);
+            let new_source: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM meetings WHERE id='archive-other')",
+            )
+            .fetch_one(&destination)
+            .await
+            .unwrap();
+            assert!(new_source);
             if changed {
                 assert!(history
                     .iter()
                     .all(|message| message.status == "invalidated" && message.content.is_empty()));
             } else {
-                assert_eq!(history[1].content, "21 September [K1].");
+                assert!(history
+                    .iter()
+                    .any(|message| message.content == "21 September [K1]."));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn conversation_library_only_answer_round_trips_without_meetings() {
+        use crate::knowledge::{conversations, retrieval, types::*};
+        let source = empty_conversation_destination().await;
+        let request = AskRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            owner: conversations::create_library(&source).await.unwrap(),
+            search: SearchRequest {
+                scope: KnowledgeScope::Library {
+                    filter: MeetingFilter {
+                        all_meetings: true,
+                        ..Default::default()
+                    },
+                },
+                query: "What evidence is available?".into(),
+                document_ids: vec![],
+                mode: SearchMode::Keyword,
+            },
+        };
+        conversations::reserve(&source, &request, "builtin-ai", "qwen3.5:4b")
+            .await
+            .unwrap();
+        let frozen = retrieval::freeze_scope(&source, &request.search.scope)
+            .await
+            .unwrap();
+        conversations::prepare(
+            &source,
+            &request.request_id,
+            &frozen,
+            &[],
+            &BTreeMap::new(),
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        conversations::finish(
+            &source,
+            &request.request_id,
+            &frozen,
+            "No evidence is available in the selected library.",
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (manifest, _) = snapshot(&source).await.unwrap();
+        assert!(manifest.tables["meetings"].is_empty());
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            conversations::history(&destination, &request.owner)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_restore_rejects_changed_input_atomically_and_accepts_prefeature_archive()
+    {
+        let (source, _) = conversation_fixture().await;
+        let (mut malformed, _) = snapshot(&source).await.unwrap();
+        malformed.tables.get_mut("knowledge_requests").unwrap()[0]
+            .insert("question".into(), Value::from("Changed immutable question"));
+        let destination = empty_conversation_destination().await;
+        assert!(
+            import_manifest(&destination, malformed, tempfile::tempdir().unwrap())
+                .await
+                .is_err()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM meetings")
+            .fetch_one(&destination)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let (mut old, _) = snapshot(&source).await.unwrap();
+        old.tables
+            .retain(|table, _| !table.starts_with("knowledge_"));
+        import_manifest(&destination, old, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            crate::knowledge::conversations::list_libraries(&destination)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
