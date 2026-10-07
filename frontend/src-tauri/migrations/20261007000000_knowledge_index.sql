@@ -49,8 +49,8 @@ CREATE VIRTUAL TABLE knowledge_fts USING fts5(
 
 INSERT INTO knowledge_sources(id,meeting_id) SELECT 'meeting:' || id,id FROM meetings;
 INSERT INTO knowledge_index_jobs(source_id,revision) SELECT id,revision FROM knowledge_sources;
-INSERT INTO knowledge_fts(transcript_id,source_id,text,speaker)
-    SELECT id,'meeting:' || meeting_id,transcript,speaker FROM transcripts;
+INSERT INTO knowledge_fts(rowid,transcript_id,source_id,text,speaker)
+    SELECT rowid,id,'meeting:' || meeting_id,transcript,speaker FROM transcripts;
 
 CREATE TRIGGER knowledge_meeting_insert AFTER INSERT ON meetings BEGIN
     INSERT INTO knowledge_sources(id,meeting_id) VALUES ('meeting:' || NEW.id,NEW.id);
@@ -68,11 +68,11 @@ WHEN NEW.revision != OLD.revision BEGIN
 END;
 CREATE TRIGGER knowledge_transcript_insert AFTER INSERT ON transcripts BEGIN
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=NEW.meeting_id;
-    INSERT INTO knowledge_fts(transcript_id,source_id,text,speaker) VALUES (NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript,NEW.speaker);
+    INSERT INTO knowledge_fts(rowid,transcript_id,source_id,text,speaker) VALUES (NEW.rowid,NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript,NEW.speaker);
 END;
 CREATE TRIGGER knowledge_transcript_delete AFTER DELETE ON transcripts BEGIN
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=OLD.meeting_id;
-    DELETE FROM knowledge_fts WHERE transcript_id=OLD.id;
+    DELETE FROM knowledge_fts WHERE rowid=OLD.rowid;
 END;
 CREATE TRIGGER knowledge_transcript_update AFTER UPDATE OF
     id,meeting_id,transcript,speaker,timestamp,audio_start_time,audio_end_time,duration,word_timestamps_json ON transcripts
@@ -83,6 +83,6 @@ WHEN NEW.id IS NOT OLD.id OR NEW.meeting_id IS NOT OLD.meeting_id OR
     NEW.word_timestamps_json IS NOT OLD.word_timestamps_json BEGIN
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=OLD.meeting_id;
     UPDATE knowledge_sources SET revision=revision+1 WHERE meeting_id=NEW.meeting_id AND NEW.meeting_id != OLD.meeting_id;
-    DELETE FROM knowledge_fts WHERE transcript_id=OLD.id;
-    INSERT INTO knowledge_fts(transcript_id,source_id,text,speaker) VALUES (NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript,NEW.speaker);
+    DELETE FROM knowledge_fts WHERE rowid=OLD.rowid;
+    INSERT INTO knowledge_fts(rowid,transcript_id,source_id,text,speaker) VALUES (NEW.rowid,NEW.id,'meeting:' || NEW.meeting_id,NEW.transcript,NEW.speaker);
 END;

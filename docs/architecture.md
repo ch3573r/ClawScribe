@@ -498,6 +498,10 @@ meetings participate in invalidation. SQLite FTS5 projects only the changed row
 inside the existing transaction; model tokenization and inference run in the
 background. FTS deletion is explicit because virtual tables do not inherit
 ordinary foreign-key cascades.
+The FTS physical row ID matches the canonical SQLite transcript row ID, so
+per-row updates and deletions use point lookups rather than scanning the full
+FTS table. Evidence identities continue to use canonical transcript IDs and
+spans, independently of that physical projection.
 
 FTS indexes current speaker labels in their own column. Speaker-only hits return
 real transcript spans with visible speaker metadata; semantic bodies remain
