@@ -765,6 +765,186 @@ mod response_tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    async fn config_pool(endpoint: &str) -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let config = super::super::CustomOpenAIConfig {
+            destination_problem: None,
+            allow_unencrypted: false,
+            endpoint: endpoint.into(),
+            api_key: None,
+            model: "saved-model".into(),
+            timeout_seconds: Some(1),
+            organization: Some("public-organization".into()),
+            project: Some("public-project".into()),
+            max_tokens: Some(512),
+            context_window: Some(8192),
+            temperature: None,
+            top_p: None,
+        };
+        crate::database::repositories::setting::SettingsRepository::save_custom_openai_config(
+            &pool, &config,
+        )
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn read_test_request(socket: &mut tokio::net::TcpStream) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut data = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                data.extend_from_slice(&chunk[..count]);
+                assert!(data.len() < 16384);
+                let request = String::from_utf8_lossy(&data);
+                if let Some(end) = request.find("\r\n\r\n") {
+                    let length = request[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|n| n.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= end + 4 + length {
+                        return request.to_string();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_compatible_dispatch_uses_normalized_frozen_settings() {
+        for (input, actual) in [("  public-model  ", "public-model"), ("   ", "gpt-4o-mini")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+            let pool = config_pool(&endpoint).await;
+            let dir = tempfile::tempdir().unwrap();
+            let resolved = resolve_configured_text(
+                &pool,
+                TextEnvironment::local(dir.path().into()),
+                "api-key",
+                input,
+                tokio::time::Instant::now(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolved.model, actual);
+            assert_eq!(resolved.budget.context_tokens, 8192);
+            sqlx::query(
+                "UPDATE settings SET customOpenAIConfig=NULL,model='changed-after-resolution'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let request = read_test_request(&mut socket).await;
+                let body = r#"{"choices":[{"message":{"content":"Public completed answer."},"finish_reason":"stop"}]}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                request
+            });
+            let response = dispatch_resolved_text(
+                resolved,
+                "Public system".into(),
+                "Public question".into(),
+                &CancellationToken::new(),
+            )
+            .await;
+            let request = tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+            let response = response.unwrap();
+            assert_eq!(response.provider, "openai-compatible");
+            assert_eq!(response.model, actual);
+            assert_eq!(response.text, "Public completed answer.");
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("openai-organization: public-organization"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("openai-project: public-project"));
+            let body: serde_json::Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["model"], actual);
+            assert!(body.get("response_format").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_deadline_covers_success_error_trickles_and_retry_backoff() {
+        for status in [200, 400, 503] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let pool = config_pool(&format!("http://{}/v1", listener.local_addr().unwrap())).await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut resolved = resolve_configured_text(
+                &pool,
+                TextEnvironment::local(dir.path().into()),
+                "custom-openai",
+                "public-model",
+                tokio::time::Instant::now(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let (sent, headers) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let _ = read_test_request(&mut socket).await;
+                let response = if status == 503 {
+                    "HTTP/1.1 503 Busy\r\nContent-Length: 2\r\nRetry-After: 60\r\n\r\n{}"
+                        .to_string()
+                } else {
+                    format!("HTTP/1.1 {status} Test\r\nContent-Length: 100000\r\n\r\n{{")
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = sent.send(());
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    if socket.write_all(b" ").await.is_err() {
+                        break;
+                    }
+                }
+            });
+            resolved.deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                dispatch_resolved_text(
+                    resolved,
+                    "Public system".into(),
+                    "Public question".into(),
+                    &CancellationToken::new(),
+                ),
+            )
+            .await;
+            let reached = tokio::time::timeout(Duration::from_secs(1), headers).await;
+            server.abort();
+            let _ = server.await;
+            assert!(reached.is_ok(), "Provider must reach response handling");
+            assert!(result.unwrap().unwrap_err().contains("deadline"));
+        }
+    }
+
     struct LifetimeFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl Drop for LifetimeFlag {
         fn drop(&mut self) {
