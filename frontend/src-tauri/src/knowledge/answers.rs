@@ -666,6 +666,26 @@ mod tests {
                 super::super::evidence::EvidenceStatus::Current
             );
         }
+        sqlx::query("UPDATE meetings SET title='Changed title',created_at='2026-09-02' WHERE id='answer-fixture'").execute(&pool).await.unwrap();
+        let saved = conversations::history(&pool, &request.owner)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|message| message.reply)
+            .unwrap();
+        let display = serde_json::to_value(&saved).unwrap();
+        assert_eq!(
+            display["evidence_metadata"][0]["title"],
+            "Public answer fixture"
+        );
+        assert_eq!(display["evidence_metadata"][0]["date"], "2026-09-01");
+        assert_eq!(
+            super::super::evidence::resolve(&pool, &saved.evidence[0])
+                .await
+                .unwrap()
+                .status,
+            super::super::evidence::EvidenceStatus::Stale
+        );
     }
     #[tokio::test]
     async fn saved_ask_discards_generation_after_metadata_scope_clear_or_cancel() {

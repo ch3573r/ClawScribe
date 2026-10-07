@@ -659,6 +659,25 @@ mod tests {
             .await
             .is_err());
     }
+
+    #[tokio::test]
+    async fn history_keeps_user_before_assistant_when_timestamps_tie() {
+        let pool = database().await;
+        let (request, frozen) = active(&pool).await;
+        finish(
+            &pool,
+            &request.request_id,
+            &frozen,
+            "Bounded answer",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE knowledge_messages SET created_at='2026-09-01T00:00:00Z',id=CASE role WHEN 'user' THEN 'z-user' ELSE 'a-assistant' END").execute(&pool).await.unwrap();
+        let history = history(&pool, &request.owner).await.unwrap();
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].role, "assistant");
+    }
     #[tokio::test]
     async fn deleted_source_aborts_queued_dispatch() {
         let pool = database().await;
