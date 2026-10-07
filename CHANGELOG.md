@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.51
+
+- Improve cross-meeting answer coverage: include complete selected transcripts when the configured provider's context budget permits, otherwise reserve up to three available matches per selected meeting before filling by rank. A meeting with no matches receives clearly labeled, non-citable saved-summary overview context.
+- Raise the shared evidence-map limit to 1024. An additive SQLite migration preserves existing knowledge data, indexes and triggers, and older backups retain their citations.
+- Render answer markdown and clickable numbered source chips, with source title/time tooltips and separate question-context chips. Clear accepted questions, restore failed questions, and simplify saved conversations into one menu with friendly model names.
+- Make Meeting memory chat full-width with a pinned input and compact shared source/project/date controls. Put transcript search in an optional section and default to semantic plus keyword search when the semantic index is ready.
+- Split local search settings into Semantic search and Index cards, show transfer/index progress with shared controls, and offer pause/retry/verify/rebuild actions only where they apply. Enforce shared controls and theme tokens in CI against the existing UI debt baseline.
+- Advance installer/runtime/updater version to 0.5.51 for a Windows GPU preview. Stage a draft, verify uploaded assets, then publish as a prerelease with latest=false. Stable remains 0.5.48; enable **Include prereleases** after publication or install manually.
+- Installed broad-question coverage across two real meetings, markdown/citation interaction, scrolling, keyboard focus and light/dark layouts at 1000 px remain pending. Recording, upgrade, offline/provider/citation/playback, update-discovery and endurance acceptance also remain pending before stable promotion. See `docs/releases/0.5.51.md`.
+
 ## 0.5.50
 
 - Fix Meetings scrolling after the meeting-memory controls extended the page beyond the window. Constrain the page to the content area's height so saved meetings and expanded content remain reachable.
