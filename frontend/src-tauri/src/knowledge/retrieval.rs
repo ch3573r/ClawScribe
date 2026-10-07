@@ -576,6 +576,34 @@ pub async fn retrieve(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn hybrid_mode_requires_a_ready_generation_inside_selected_scope() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = fixture().await;
+        add_text(&pool, "a", "one", "Selected meeting contains ATLAS-42").await;
+        sqlx::query("UPDATE knowledge_settings SET enabled=1 WHERE singleton=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE knowledge_sources SET semantic_revision=revision,semantic_space=? WHERE meeting_id='two'").bind(super::super::model::PINS.space().id).execute(&pool).await.unwrap();
+        let mut runtime = super::super::KnowledgeState::default();
+        runtime.scheduler = super::super::scheduler::synthetic_query_scheduler();
+        let request = SearchRequest {
+            scope: KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+            query: "ATLAS-42".into(),
+            document_ids: Vec::new(),
+            mode: SearchMode::Hybrid,
+        };
+        let result = retrieve(&pool, &runtime, &request).await.unwrap();
+        assert_eq!(result.passages.len(), 1);
+        assert_eq!(
+            result.mode,
+            SearchMode::Keyword,
+            "another meeting's ready index cannot determine this search's mode"
+        );
+    }
+    #[tokio::test]
     async fn renamed_unicode_speaker_search_returns_current_canonical_evidence() {
         let pool = fixture().await;
         add_text(

@@ -300,6 +300,26 @@ impl Scheduler {
 }
 
 #[cfg(test)]
+pub(crate) fn synthetic_query_scheduler() -> Arc<Scheduler> {
+    // Test utility for retrieval control flow, never used by model acceptance.
+    struct UnitVector;
+    impl EmbeddingBackend for UnitVector {
+        fn space(&self) -> super::types::EmbeddingSpace {
+            super::model::PINS.space()
+        }
+        fn embed(&mut self, _: &str, _: EmbeddingPurpose) -> Result<Vec<f32>, KnowledgeError> {
+            let mut vector = vec![0.; 384];
+            vector[0] = 1.;
+            Ok(vector)
+        }
+    }
+    let scheduler = Scheduler::new(Arc::new(CancellationRegistry::default()));
+    scheduler.enabled.store(true, Ordering::Release);
+    scheduler.worker.lock().unwrap().model = Some(Box::new(UnitVector));
+    scheduler
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
