@@ -268,7 +268,7 @@ accepts selected IDs; Task 3 resolves their citations. Add owner-specific
 context-sharing settings rather than a new provider credential/configuration.
 
 - [ ] Add tests `unselected_document_not_retrieved`, `foreign_attachment_rejected`, `external_context_requires_enablement`, `replacement_marks_citation_stale`, `backup_v2_document_roundtrip`, and `restore_v1_without_documents`. Assert no provider receives a reference excerpt before the owner enables sharing.
-- [ ] Run failing backend/helper tests, then add Attach/Preview/Select/Detach/Retry controls and page/paragraph citation previews. Keep errors and actual indexed status visible.
+- [ ] Run failing Rust and frontend helper tests, then add Attach/Preview/Select/Detach/Retry controls and page/paragraph citation previews. Keep errors and actual indexed status visible.
 - [ ] Extend hybrid retrieval to documents after backend attachment-scope validation. Label transcript evidence separately from reference material in prompts and UI.
 - [ ] Add version-2 archive attachment-file metadata and safe relative storage references. Preserve version-1 restore, validate hashes/IDs, restore blocks and originals transactionally, and rebuild derived indexes. Never include model files or credentials.
 - [ ] Verify offline use, mixed meeting/document answers, malicious document text, replacement/detach behavior, and portable restoration on the designated runner. Run Rust checks and frontend typecheck/tests/build.
