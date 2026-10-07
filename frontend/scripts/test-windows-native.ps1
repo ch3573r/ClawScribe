@@ -84,6 +84,7 @@ try {
 
     foreach ($filter in @(
         "summary::",
+        "knowledge::",
         "model_download::tests",
         "audio::decoder::tests",
         "audio::com_anchor::tests",

@@ -124,7 +124,8 @@ without relying on PATH or downloading an encoder at test time.
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
 DLLs, zero matched tests, and failing test results. Required suites cover summary
-providers and sidecar exchanges, audio cancellation and model switching,
+providers and sidecar exchanges, meeting memory and source invalidation,
+audio cancellation and model switching,
 transcript preservation and paging, credentials, Microsoft export persistence,
 and updater selection. It also runs the local summary helper protocol, sampling,
 and stop-sequence tests. Recording suites cover partial audio finalization,
