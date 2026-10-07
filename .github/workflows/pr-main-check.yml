@@ -7,6 +7,14 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      build-ref:
+        description: 'Exact reviewed commit SHA for manual frontend validation'
+        type: string
+        default: ''
+      frontend-build:
+        description: 'Build the frontend only, without staging native installers'
+        type: boolean
+        default: false
       diagnose-timeline-worker:
         description: 'Compare timeline tests without worker isolation and serial/full workers'
         type: boolean
@@ -34,6 +42,7 @@ jobs:
         env:
           EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
@@ -42,10 +51,14 @@ jobs:
               $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
             throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
           }
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch' -and $env:BUILD_REF -notmatch '^[0-9a-f]{40}$') {
+            throw 'Manual validation requires an immutable reviewed commit SHA.'
+          }
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs['build-ref'] || github.sha }}
           clean: false
           persist-credentials: false
 
@@ -115,6 +128,11 @@ jobs:
       - name: Typecheck frontend
         working-directory: frontend
         run: pnpm typecheck
+
+      - name: Build frontend
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs['frontend-build'] }}
+        working-directory: frontend
+        run: pnpm run build
 
       - name: Test frontend helpers
         if: ${{ !inputs['diagnose-timeline-worker'] }}

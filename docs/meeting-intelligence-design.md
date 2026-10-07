@@ -1,7 +1,9 @@
 # Meeting Intelligence Design
 
-Status: proposed architecture for implementation planning. These capabilities
-are not part of the current product.
+Status: Phase 1 meeting memory is implemented in the preview source branch.
+Installed offline, provider-failure and citation/playback acceptance is pending
+under the Windows preview policy. Reference documents and live assistance are
+follow-up design work; their controls are not exposed in the preview.
 
 ClawScribe should help users find decisions across saved meetings, bring their
 own reference documents into meeting questions, and ask for assistance during a
@@ -64,20 +66,48 @@ reference-output parity, and the resource gate before this candidate becomes
 the product default. Download only the required files, using the existing
 resumable transfer and integrity-check patterns. Never commit model binaries.
 
+Validate a conservative CPU loading policy with graph optimizations and
+weight prepacking disabled, while retaining the same pinned float32 artifact,
+two-thread limit, and independent reference comparison. The initial optimized
+loading candidate exceeded the worker memory budget despite passing timing and
+numerical parity. Neither a larger memory allowance nor an alternative quantized
+artifact is an automatic fallback; accept the revised policy only after the
+unchanged resource gate passes.
+
 Retrieval rules:
 
 - Semantic indexing is disabled until the user enables it and downloads the
   model. Keyword search remains available without it.
-- Chunk to at most 320 model tokens with a 48-token overlap. Split oversized
+- Semantic chunks contain at most 320 body tokens with a 48-token overlap. Split oversized
   rows without losing their transcript IDs and byte spans. Account for special
   tokens and prefixes within the 512-token input limit.
+- Before the tokenizer download, keyword evidence uses canonical UTF-8 windows
+  of at most 2,048 bytes with at most 128 bytes of overlap, split on character
+  boundaries. These are byte limits, not estimated model-token counts. Preserve
+  row IDs, exact byte spans, speakers, and recording times. After semantic
+  publication, transfer a lexical hit to a real current model chunk only when
+  its spans cover the complete match; otherwise keep the lexical evidence.
 - Index current corrected transcript text and speaker labels. Generated
   summaries and assistant messages are not primary evidence.
+- Speaker labels have their own lexical index field. Keep semantic embeddings
+  limited to canonical transcript bodies; return speaker-name matches with
+  actual row spans and current speaker metadata, including after label edits.
 - Apply meeting, date, and project-tag scope in the backend before ranking.
   Document context is limited to explicitly selected attachments in that scope.
+- A library request selects meeting IDs or project/date/untagged constraints,
+  or explicitly opts into all meetings. An empty selection never silently
+  broadens an answer. Meeting-owned requests keep that meeting as their scope.
 - Retrieve up to 64 candidates from each of lexical and semantic search, merge
   with reciprocal rank fusion using constant 60, and return at most 12 passages.
   Vector scans read at most 512 rows per page and retain only the best candidates.
+- When at least two currently indexed saved sources are eligible in the frozen
+  scope, retain at most three semantic candidates per source within the overall
+  64-candidate budget. A sole eligible source retains the full budget. This
+  prevents repetitive passages from one large source from crowding out other
+  meetings. Lexical candidates keep their existing budget and exact identifiers.
+  This is candidate selection, not deduplication: preserve every stored passage
+  and its distinct source, date, span, and fingerprint. A question needing more
+  semantic passages from one source can select that source alone.
 - Questions retain the existing 1,024 UTF-8-byte limit. Evidence uses the
   selected provider's context budget; never silently exceed it.
 - Missing models, recording contention, or indexing failures produce a visible
@@ -89,6 +119,11 @@ Retrieval rules:
   when a decision changed, and qualify gaps instead of treating the closest
   semantic match as the current decision. Project scope prevents unrelated
   meetings with similar terminology from being silently combined.
+- Cap each passage display string (speaker, title and date) at 1,024 UTF-8
+  bytes on a character boundary and set `metadata_truncated` when any is
+  incomplete. Canonical metadata is retained and fully fingerprinted. Answer
+  prompts must label incomplete metadata and must not treat a clipped name or
+  date as a complete factual value; source previews must show the indication.
 
 The initial workload gate is 10,000 passages from synthetic meetings and at
 least 30 English/German retrieval questions. At least 27 questions must return
@@ -148,13 +183,58 @@ Every retrieved passage carries a backend-owned reference:
 `locator` identifies saved transcript IDs and recording-relative time,
 document page/paragraph, or live session ID and segment sequence. The model
 receives short tags such as `[K1]`. Resolve tags only through the supplied
-evidence map; unknown tags cannot become navigation links. Citations open a
+evidence map; unknown tags cannot become navigation links. Saved-answer parsing
+also accepts comma groups and bounded ascending ranges, with all-or-nothing
+validation against that request's map. The exact grammar and limits are in
+`architecture.md`; the citation renderer must match it and use backend
+`cited_tags` rather than inferring extra links. Citations open a
 transcript passage/playback or an extracted-document preview. Document
 evidence must remain distinguishable from what someone said in a meeting.
+
+For bounded short replies, the backend can separately expose verified
+preceding-question `context_links` between already-selected complete canonical
+rows. These labeled context links preserve independent evidence identities and
+raw model text; they are not additional model-emitted citations. Render and
+resolve them alongside literal citations using the contract in `architecture.md`.
 
 Use the existing summary source UI behavior as a reference, but introduce an
 evidence resolver that handles more than one meeting and documents. Do not
 reinterpret existing saved summary links or change their identifiers.
+
+Evidence identities are backend-owned canonical units. Resolving a reference
+uses its locator and fingerprint independently of the derived chunk/vector
+cache, so rebuilding the index does not erase conversation history. A changed
+source revision remains stale. Library threads have durable owner rows;
+request UUIDs are globally unique and an input fingerprint prevents changed
+inputs from replaying an unrelated result. Deletion dependencies include any
+prior-turn evidence actually sent in a later prompt. Clearing history cancels
+pending requests before deleting both legacy and new turns.
+
+The current request's scope also constrains inherited prompt history. Omit
+prior turns whose scope or evidence cannot be validated within the frozen
+allowed meeting and selected-document set; changing a project or date filter
+must not resend older information from outside that scope. Saved history
+remains readable under its original conversation owner.
+
+Portable conversation restore follows owner/request/message/evidence dependency
+order with table-specific validation. Library turns do not acquire a fictitious
+meeting ID. Old version-1 archives remain readable; that does not promise that
+older applications can read newly added tables. Index caches are rebuilt and
+historical references may remain stale after restoration.
+
+Restored conversation evidence is explicitly historical and remains non-current,
+even if its saved revision counter happens to equal a newly recreated source
+counter. Restore preserves the original canonical IDs, spans, fingerprints and
+display metadata; it does not invent cache rows or rewrite source counters.
+Readable restored history is excluded from future prompts until fresh evidence
+is established. This conservative policy avoids upgrading references that were
+already stale when the backup was created.
+
+Changing a meeting title or start date advances its source revision. The existing
+source-generation trigger invalidates and requeues semantic indexing, so a
+metadata edit can temporarily leave Keyword mode as the available channel.
+This ensures a dated prompt snapshot is rechecked alongside transcript content
+before dispatch and persistence; historical citation metadata is not overwritten.
 
 Conversation owners are a saved meeting, a library thread, or a live session.
 Existing `ai_chat_messages` history remains readable. New knowledge requests
@@ -162,6 +242,24 @@ use UUID request identities and a unique owner/request constraint. A retry
 returns the existing result; it does not generate another assistant message.
 The first implementation returns a completed reply using the existing provider
 path. Cancellation and timeout are required; streaming is a later improvement.
+
+Saved answers use one absolute request deadline across configuration, startup,
+queueing, writes, retries, and reads. Preserve the existing provider budgets:
+HTTP 300 seconds or the compatible provider's configured timeout; Codex's
+configured duration, default 600 seconds and existing 30-second minimum; and
+Built-in AI 900 seconds. Allow at most five additional seconds for cleanup
+before surfacing a cleanup error. Cancellation never proves a child exited:
+retain resource ownership until actual termination and reaping, or quarantine
+the resource explicitly. Keep native admission and shared helper locks owned
+through cleanup. Live assistance uses its separate 30-second deadline; stopping
+a recording never awaits assistance cleanup.
+
+The configured-text supervisor owns each operation independently of its waiting
+caller. Dropping the caller signals cancellation; it does not drop the native
+operation. If cleanup exceeds five seconds, report the cleanup error while the
+supervised owner retains the child, exchange lock and native admission until
+actual reaping. A helper awaiting cleanup is quarantined from reuse. Bound the
+number of supervised owners so failed cleanup cannot accumulate unbounded work.
 
 Scope is visible beside the input: This meeting, Selected meetings, or Current
 recording, plus selected reference documents. A saved meeting remains the

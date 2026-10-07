@@ -107,6 +107,7 @@ futures-util = "0.3"
 silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
 
 # Parakeet (ONNX-based fast transcription) dependencies
+tokenizers = { version = "=0.21.4", default-features = false, features = ["fancy-regex"] }
 ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models
 thiserror = "2.0.16"                # Error handling for Parakeet
 
@@ -138,7 +139,9 @@ regex = "1.11.0"
 ndarray = "0.16"
 bytes = { version = "1.9.0", features = ["serde"] }
 
-esaxx-rs = "0.1.10"
+# Keep tokenizer training utilities on their Rust fallback: the optional C++
+# backend forces a static CRT that conflicts with the Windows audio runtime.
+esaxx-rs = { version = "0.1.10", default-features = false }
 symphonia = { version = "0.5.4", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "pcm", "wav", "opt-simd"] }
 rand = "0.8.5"
 rayon = "1.10"
@@ -151,7 +154,9 @@ whatlang = "0.16.4"
 
 ffmpeg-sidecar = { git = "https://github.com/nathanbabcock/ffmpeg-sidecar", branch = "main" }
 
-sqlx = { version = "0.8", features = [ "runtime-tokio", "sqlite", "chrono"] }
+sqlx = { version = "=0.8.6", features = [ "runtime-tokio", "sqlite", "chrono"] }
+# SQLx's locked-handle API exposes this exact native ABI; no runtime upgrade.
+libsqlite3-sys = "=0.30.1"
 
 # Common Tauri configuration
 tauri = { version = "2.6.2", features = [ "macos-private-api", "protocol-asset", "tray-icon"] }

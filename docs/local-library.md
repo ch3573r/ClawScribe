@@ -1,5 +1,60 @@
 # Local meeting library
 
+## Meeting memory
+
+On **Meetings**, ordinary title filtering remains separate from **Meeting
+memory** transcript retrieval. Select meetings explicitly, or check **Search
+all saved meetings**. The shared Project filter applies Any/All/Untagged
+semantics to title browsing and retrieval; **From** and **To** dates are
+inclusive. All-meetings mode searches every meeting eligible under those filters;
+turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
+search. Ranked results show the canonical excerpt, original title/date/speaker,
+and actual keyword or semantic + keyword mode. Keyword search stays usable
+without enabling or downloading an embedding model.
+
+Create or choose a saved library conversation under **Ask about these meetings**.
+Questions use the summary provider configured in Settings. That provider may
+be local or cloud; retrieval and embedding inference remain local. Answers
+show the executed provider/model and retrieval mode. Cancel and scope changes
+invalidate pending work; retries reuse the pending request identity. Clear
+removes the selected conversation's history. Existing saved meeting chat,
+including legacy messages, remains readable. In a meeting, chat defaults to
+only that meeting; **Include other saved meetings** is an explicit expansion
+with independent meeting and project controls. Expanded questions use a separate
+saved library conversation: create or choose one in the chat. Turning off the
+expansion restores this meeting's own history. The library conversation remains
+available when expanding again or through the saved conversation selector.
+
+Citation tags retain their immutable request-local numbering, including grouped
+and range syntax. Select a grouped citation to choose its individual source.
+Unknown or malformed tags remain plain text. Short reply citations can offer a
+separate **Preceding question context** link; this is labeled context supplied
+by the backend, not an additional tag emitted by the answer model. Both
+references are independently verified before navigation.
+
+**Source passage** separates original labels from current canonical metadata.
+Changed, historical, deleted, or invalid sources show a reason and cannot
+reveal or play as current evidence. Ask again to retrieve fresh evidence.
+Current citations can **Show in transcript**, including passages beyond the
+first page, or **Play from here** when a verified offset and saved audio are
+available. Unknown offsets never seek to zero. Audio readiness and failure are
+visible; a valid transcript can still be reviewed without playable audio.
+Citation handoffs are ephemeral: after an application restart, reopen the
+source reference instead of reusing a previous navigation URL.
+
+Under **Settings → Meeting memory**, enable the optional local embedding model,
+download or repair it, inspect ready/pending/failed index counts, Pause,
+Retry/resume, or Rebuild. Foreground recording and inference take priority.
+Index rebuilds do not renumber saved citations. Downloads never start
+automatically from a search. Document and live-assistance controls are outside
+this preview.
+
+Automated helper and native resolver checks cover request ownership and
+canonical navigation. Installed offline retrieval, provider-failure recovery,
+native focus/citation clicks, and audio playback still require manual acceptance
+on an isolated profile under the preview policy. They are not established by
+source tests or backend resolver tests.
+
 ## Word documents
 
 Open a saved meeting and select **Export → Word document (.docx)**. Choose the summary, the full
@@ -107,8 +162,18 @@ to the original computer.
 Folder references are rewritten for the destination computer. Interrupted summary
 jobs are marked cancelled; their saved output is retained.
 
+Archives also retain saved knowledge conversations, including independent
+library threads and the original citation labels. Existing conversation-owner
+IDs are skipped without overwriting their history. A dependent turn is redacted
+when an archived source is unavailable or conflicts with a skipped destination
+meeting. Interrupted answer requests remain interrupted and require an explicit
+retry. Restored citations are historical and cannot navigate as current evidence
+or enter a future answer prompt, even when a destination revision number happens
+to match. New questions establish fresh canonical evidence. Semantic indexes
+and model downloads are excluded; restored sources are queued for indexing.
+
 Version 1 archives have a JSON manifest and explicitly listed recording files.
-Only meeting-related database tables and known media/metadata files are included.
+Only saved-library database tables and known media/metadata files are included.
 The meetings table is required; missing known child tables are treated as empty
 so adding optional tables does not invalidate older version-1 backups.
 The optional `incomplete_audio` manifest field records omissions by meeting index;

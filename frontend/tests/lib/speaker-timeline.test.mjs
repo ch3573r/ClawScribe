@@ -98,6 +98,7 @@ async function page(attribution, segments) {
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
     '@/components/MeetingDetails/MeetingChat': { MeetingChat: 'MeetingChat' },
+    '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
   });
   const props = { meeting: { id: 'synthetic-meeting', folder_path: 'synthetic-folder' }, summaryData: null, segments: segments.slice(0, 100), timelineSegments: segments, totalCount: segments.length };

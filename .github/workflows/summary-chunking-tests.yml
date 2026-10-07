@@ -12,6 +12,38 @@ on:
       - '.github/workflows/summary-chunking-tests.yml'
   workflow_dispatch:
     inputs:
+      knowledge:
+        description: 'Run manual local embedding validation'
+        type: boolean
+        default: false
+      build-ref:
+        description: 'Exact reviewed commit SHA for knowledge validation'
+        type: string
+        default: ''
+      full-suite:
+        description: 'Run complete native library suite (disable only for focused acceptance reruns)'
+        type: boolean
+        default: true
+      conversation-only:
+        description: 'Limit focused native checks to knowledge and conversation backup tests'
+        type: boolean
+        default: false
+      acceptance:
+        description: 'Download pinned model and run native resource/parity gate'
+        type: boolean
+        default: false
+      retrieval-acceptance:
+        description: 'Run synthetic 10000-passage local retrieval workload'
+        type: boolean
+        default: false
+      mutation-acceptance:
+        description: 'Measure synthetic 10000-row FTS updates and deletes'
+        type: boolean
+        default: false
+      answer-acceptance:
+        description: 'Run the fixed public synthetic answer corpus with the pinned local provider'
+        type: boolean
+        default: false
       inspect-runner-storage:
         description: 'Inspect local generated build storage without running tests'
         type: boolean
@@ -37,19 +69,22 @@ defaults:
     shell: pwsh
 
 concurrency:
-  group: summary-chunking-${{ github.ref }}
-  cancel-in-progress: true
+  group: summary-chunking-${{ github.ref }}-${{ inputs['answer-acceptance'] }}
+  cancel-in-progress: ${{ !inputs['answer-acceptance'] }}
 
 jobs:
   chunking:
     if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
     runs-on: [self-hosted, Windows, X64, clawscribe]
-    timeout-minutes: 5
+    timeout-minutes: ${{ inputs.knowledge && 60 || 5 }}
     steps:
       - name: Require the designated local build machine
         env:
           EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          KNOWLEDGE: ${{ inputs.knowledge }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
+          ANSWER_ACCEPTANCE: ${{ inputs['answer-acceptance'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
@@ -58,8 +93,12 @@ jobs:
               $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
             throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
           }
+          if ($env:KNOWLEDGE -eq 'true' -and $env:BUILD_REF -notmatch '^[0-9a-f]{40}$') {
+            throw 'An immutable reviewed commit SHA is required.'
+          }
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.knowledge && inputs['build-ref'] || github.sha }}
           clean: false
           persist-credentials: false
       - name: Inspect generated build storage
@@ -140,11 +179,11 @@ jobs:
             }
           }
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ !inputs['inspect-runner-storage'] }}
+        if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] && !inputs['answer-acceptance'] }}
         with:
           targets: x86_64-pc-windows-msvc
       - name: Compile production chunker and its unit tests without desktop dependencies
-        if: ${{ !inputs['inspect-runner-storage'] }}
+        if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] && !inputs['answer-acceptance'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -152,8 +191,87 @@ jobs:
           rustc --version
           rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o $testExe
       - name: Verify source coverage, Unicode, overlap, and token budgets
-        if: ${{ !inputs['inspect-runner-storage'] }}
+        if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] && !inputs['answer-acceptance'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           & (Join-Path $env:RUNNER_TEMP "summary-chunking-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.exe")
+      - uses: actions/setup-python@v5
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && inputs.acceptance && !inputs['answer-acceptance'] }}
+        with:
+          python-version: '3.11'
+          cache: ''
+      - uses: humbletim/install-vulkan-sdk@v1.2
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && !inputs['answer-acceptance'] }}
+        with:
+          version: 1.4.309.0
+          cache: false
+      - name: Run knowledge validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && !inputs['answer-acceptance'] }}
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUN_ACCEPTANCE: ${{ inputs.acceptance }}
+          FULL_SUITE: ${{ inputs['full-suite'] }}
+          CONVERSATION_ONLY: ${{ inputs['conversation-only'] }}
+          RETRIEVAL_ACCEPTANCE: ${{ inputs['retrieval-acceptance'] }}
+          MUTATION_ACCEPTANCE: ${{ inputs['mutation-acceptance'] }}
+          ANSWER_ACCEPTANCE: ${{ inputs['answer-acceptance'] }}
+          CLAWSCRIBE_VALIDATION_ROOT: ${{ vars.CLAWSCRIBE_VALIDATION_ROOT }}
+        run: ./frontend/scripts/test-knowledge.ps1 -Acceptance:($env:RUN_ACCEPTANCE -eq 'true') -FullSuite:($env:FULL_SUITE -ne 'false') -ConversationOnly:($env:CONVERSATION_ONLY -eq 'true') -RetrievalAcceptance:($env:RETRIEVAL_ACCEPTANCE -eq 'true') -MutationAcceptance:($env:MUTATION_ACCEPTANCE -eq 'true') -AnswerAcceptance:($env:ANSWER_ACCEPTANCE -eq 'true')
+
+  answer-qa:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && inputs['answer-acceptance'] }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Validation requires the designated local runner.'
+          }
+          if ($env:BUILD_REF -notmatch '^[0-9a-f]{40}$' -or $env:GITHUB_REPOSITORY -ne 'ch3573r/ClawScribe') {
+            throw 'An immutable reviewed repository commit is required.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs['build-ref'] }}
+          clean: false
+          persist-credentials: false
+      - uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: false
+      - name: Run fixed actual answer evaluation
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          CLAWSCRIBE_VALIDATION_ROOT: ${{ vars.CLAWSCRIBE_VALIDATION_ROOT }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((& git rev-parse HEAD).Trim() -ne $env:BUILD_REF) { throw 'Evaluation checkout mismatch.' }
+          try { ./frontend/scripts/test-knowledge.ps1 -FullSuite:$false -AnswerAcceptance }
+          finally {
+            if (Test-Path -LiteralPath $env:GITHUB_STEP_SUMMARY -PathType Leaf) {
+              $report = Join-Path $env:RUNNER_TEMP "clawscribe-answer-qa-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.md"
+              Copy-Item -LiteralPath $env:GITHUB_STEP_SUMMARY -Destination $report
+            }
+          }
+      - name: Publish bounded invented-only review report
+        if: ${{ always() }}
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/publish-answer-qa.mjs

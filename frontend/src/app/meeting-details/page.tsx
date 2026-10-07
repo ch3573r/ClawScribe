@@ -25,6 +25,7 @@ function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
   const source = searchParams.get('source'); // Check if navigated from recording
+  const evidenceToken = searchParams.get('evidence');
   const { setCurrentMeeting, refetchMeetings, stopSummaryPolling } = useSidebar();
   const { isAutoSummary } = useConfig(); // Get auto-summary toggle state
   const router = useRouter();
@@ -334,6 +335,7 @@ function MeetingDetailsContent() {
     <div className="min-h-0 flex-1"><PageContent
     key={meetingDetails.id}
     meeting={meetingDetails}
+    evidenceToken={evidenceToken}
     summaryData={meetingSummary}
     shouldAutoGenerate={shouldAutoGenerate}
     onAutoGenerateComplete={() => setShouldAutoGenerate(false)}

@@ -42,6 +42,7 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
             crate::summary::codex_provider::cleanup_orphaned_runs(&pool).await;
         });
         app.manage(AppState { db_manager });
+        crate::knowledge::indexer::start_installed_pool(app);
         info!("Database initialized successfully");
     }
 

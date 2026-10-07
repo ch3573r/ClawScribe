@@ -6,6 +6,62 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
+
+/// A saved-answer waiter may end before cleanup; the supervised operation owns
+/// its native resources until cleanup actually finishes.
+pub(crate) async fn supervise<T, F, Fut>(
+    token: &CancellationToken,
+    deadline: tokio::time::Instant,
+    cleanup: Duration,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+{
+    static OWNERS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
+        once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(16)));
+    if token.is_cancelled() {
+        return Err("Answer cancelled before dispatch".into());
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err("Answer deadline expired before dispatch".into());
+    }
+    let permit = tokio::select! {
+        biased;
+        _=token.cancelled()=>return Err("Answer cancelled while queued".into()),
+        _=tokio::time::sleep_until(deadline)=>return Err("Answer deadline expired while queued".into()),
+        permit=OWNERS.clone().acquire_owned()=>permit.map_err(|_|"Answer supervisor unavailable")?,
+    };
+    let owned_token = token.child_token();
+    let cancellation_on_drop = owned_token.clone().drop_guard();
+    let task_token = owned_token.clone();
+    let mut task = tokio::spawn(async move {
+        let _permit = permit;
+        operation(task_token).await
+    });
+    let reason = tokio::select! {
+        biased;
+        _=token.cancelled()=>"Answer cancelled",
+        _=tokio::time::sleep_until(deadline)=>"Answer deadline expired",
+        result=&mut task=>{
+            if token.is_cancelled() {return Err("Answer cancelled".into());}
+            if tokio::time::Instant::now()>=deadline {return Err("Answer deadline expired".into());}
+            cancellation_on_drop.disarm();
+            return result.map_err(|_|"Answer operation failed")?;
+        },
+    };
+    owned_token.cancel();
+    // Dropping this JoinHandle detaches, never aborts, the resource owner. The
+    // operation retains its permit and native exchange while cleanup continues.
+    match tokio::time::timeout(cleanup, &mut task).await {
+        Ok(_) => Err(reason.into()),
+        Err(_) => Err(format!(
+            "{reason}; cleanup is still quarantined pending actual resource release"
+        )),
+    }
+}
 /// Current Claude models think adaptively by default, and thinking counts toward
 /// `max_tokens`; this cap leaves room for it while staying non-streaming.
 
@@ -431,7 +487,232 @@ fn provider_name(provider: &LLMProvider) -> &str {
     }
 }
 
-/// Shared provider resolution for meeting chat and reviewed task polishing.
+/// Public metadata identifies the backend-normalized dispatched configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfiguredTextReply {
+    pub text: String,
+    pub provider: String,
+    pub model: String,
+}
+
+pub(crate) struct TextEnvironment {
+    pub app_data_dir: PathBuf,
+    pub codex: Option<super::codex_provider::CodexAppServerProvider>,
+    pub openclaw: Option<crate::openclaw::OpenClawConfig>,
+}
+impl TextEnvironment {
+    pub fn local(app_data_dir: PathBuf) -> Self {
+        Self {
+            app_data_dir,
+            codex: None,
+            openclaw: None,
+        }
+    }
+    pub fn from_app<R: tauri::Runtime>(
+        app: &tauri::AppHandle<R>,
+        provider: &LLMProvider,
+    ) -> Result<Self, String> {
+        use tauri::Manager;
+        let mut environment = Self::local(
+            app.path()
+                .app_data_dir()
+                .map_err(|_| "App data directory unavailable")?,
+        );
+        if *provider == LLMProvider::Codex {
+            environment.codex = Some(super::codex_provider::provider_from_app(app)?);
+        }
+        if *provider == LLMProvider::OpenClaw {
+            environment.openclaw = Some(crate::openclaw::load_config(app)?);
+        }
+        Ok(environment)
+    }
+}
+// Never serialize or Debug this credential-bearing execution snapshot.
+pub(crate) struct ResolvedText {
+    pub provider: LLMProvider,
+    pub model: String,
+    pub deadline: tokio::time::Instant,
+    pub budget: super::context_budget::ModelBudget,
+    execution: TextExecution,
+}
+enum TextExecution {
+    Compatible(super::openai_provider::OpenAICompatibleProcessingProvider),
+    Codex(super::codex_provider::CodexAppServerProvider),
+    Generic {
+        api_key: String,
+        ollama_endpoint: Option<String>,
+        endpoint: Option<String>,
+        allow_unencrypted: bool,
+        app_data_dir: PathBuf,
+    },
+}
+pub(crate) fn canonical_provider(provider: &LLMProvider) -> &'static str {
+    match provider {
+        LLMProvider::OpenAI => "openai",
+        LLMProvider::Claude => "claude",
+        LLMProvider::Groq => "groq",
+        LLMProvider::Ollama => "ollama",
+        LLMProvider::OpenRouter => "openrouter",
+        LLMProvider::BuiltInAI => "builtin-ai",
+        LLMProvider::OpenAICompatible => "openai-compatible",
+        LLMProvider::CustomOpenAI => "custom-openai",
+        LLMProvider::OpenClaw => "openclaw",
+        LLMProvider::Codex => "codex",
+    }
+}
+pub(crate) async fn resolve_configured_text(
+    pool: &sqlx::SqlitePool,
+    environment: TextEnvironment,
+    provider_name: &str,
+    model_name: &str,
+    started: tokio::time::Instant,
+    token: &CancellationToken,
+) -> Result<ResolvedText, String> {
+    use super::openai_provider::{
+        config_from_custom_openai, config_from_openai_api_key, OpenAICompatibleProcessingProvider,
+    };
+    use crate::database::repositories::setting::SettingsRepository;
+    if token.is_cancelled() {
+        return Err("Answer cancelled before configuration".into());
+    }
+    let provider = LLMProvider::from_str(provider_name)?;
+    // Configuration lookup has a short independent failure bound. Elapsed setup
+    // remains charged to the original absolute request deadline below.
+    let resolution = async {
+        let mut provider = provider;
+        let mut model = model_name.to_string();
+        let mut duration = REQUEST_TIMEOUT_DURATION;
+        let mut context = None;
+        let mut output = None;
+        let execution = if provider == LLMProvider::Codex {
+            let codex = environment
+                .codex
+                .ok_or("Bundled Codex configuration unavailable")?;
+            model = codex.config.model.clone();
+            duration = Duration::from_secs(codex.config.timeout_seconds.max(30));
+            TextExecution::Codex(codex)
+        } else if matches!(
+            provider,
+            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
+        ) {
+            let configured = SettingsRepository::get_custom_openai_config(pool)
+                .await
+                .map_err(|_| "Failed to read compatible provider configuration")?;
+            let mut config = match configured {
+                Some(config) => config_from_custom_openai(config),
+                None if provider == LLMProvider::OpenAICompatible => {
+                    let key = SettingsRepository::get_api_key(pool, "openai")
+                        .await
+                        .map_err(|_| "Failed to read OpenAI credential")?
+                        .filter(|key| !key.trim().is_empty())
+                        .ok_or("OpenAI API key or compatible endpoint is required")?;
+                    provider = LLMProvider::OpenAI;
+                    config_from_openai_api_key(Some(key), model.clone())
+                }
+                None => return Err("No OpenAI-compatible configuration found".into()),
+            };
+            config.model = model;
+            let compatible = OpenAICompatibleProcessingProvider::new(config)?;
+            let (actual, seconds, window, tokens) = compatible.text_settings();
+            model = actual.to_string();
+            duration = Duration::from_secs(seconds);
+            context = Some(window);
+            output = tokens.map(|value| value as usize);
+            TextExecution::Compatible(compatible)
+        } else {
+            let mut api_key = String::new();
+            let mut endpoint = None;
+            let mut allow_unencrypted = false;
+            let mut ollama_endpoint = None;
+            match provider {
+                LLMProvider::BuiltInAI => {
+                    model = super::summary_engine::models::get_model_by_name(&model)
+                        .ok_or("Unknown Built-in AI model")?
+                        .name;
+                    duration = Duration::from_secs(900);
+                }
+                LLMProvider::Ollama => {
+                    ollama_endpoint = SettingsRepository::get_model_config(pool)
+                        .await
+                        .map_err(|_| "Failed to read local provider settings")?
+                        .and_then(|setting| setting.ollama_endpoint);
+                }
+                LLMProvider::OpenClaw => {
+                    let config = environment
+                        .openclaw
+                        .ok_or("OpenClaw configuration unavailable")?;
+                    if !config.enabled || config.bearer_token.trim().is_empty() {
+                        return Err("OpenClaw is disabled or missing its credential".into());
+                    }
+                    endpoint = Some(config.model_endpoint);
+                    api_key = config.bearer_token;
+                    allow_unencrypted = config.allow_unencrypted;
+                }
+                _ => {
+                    api_key = SettingsRepository::get_api_key(pool, canonical_provider(&provider))
+                        .await
+                        .map_err(|_| "Failed to read provider credential")?
+                        .filter(|key| !key.is_empty())
+                        .ok_or("Provider credential is unavailable")?;
+                }
+            }
+            TextExecution::Generic {
+                api_key,
+                ollama_endpoint,
+                endpoint,
+                allow_unencrypted,
+                app_data_dir: environment.app_data_dir,
+            }
+        };
+        let deadline = started
+            .checked_add(duration)
+            .ok_or("Invalid provider timeout")?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Answer deadline expired during configuration".into());
+        }
+        let budget = super::context_budget::resolve(&provider, &model, context, output);
+        Ok(ResolvedText {
+            provider,
+            model,
+            deadline,
+            budget,
+            execution,
+        })
+    };
+    tokio::select! {
+        biased;
+        _=token.cancelled()=>Err("Answer cancelled during configuration".into()),
+        result=tokio::time::timeout(Duration::from_secs(1),resolution)=>result.map_err(|_|"Provider configuration lookup timed out")?,
+    }
+}
+
+pub(crate) async fn dispatch_resolved_text(
+    resolved: ResolvedText,
+    system: String,
+    user: String,
+    token: &CancellationToken,
+) -> Result<ConfiguredTextReply, String> {
+    let deadline = resolved.deadline;
+    supervise(token,deadline,Duration::from_secs(5),move |token|async move {
+        let text=match resolved.execution {
+            TextExecution::Compatible(provider)=>{
+                tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=provider.send_text_prompt_cancellable(&system,&user,&token)=>result?}
+            },
+            TextExecution::Codex(provider)=>provider.run_text_prompt_cancellable(&format!("{system}\n\n{user}"),&token).await?,
+            TextExecution::Generic{api_key,ollama_endpoint,endpoint,allow_unencrypted,app_data_dir}=>{
+                let client=Client::new();
+                let operation=generate_summary(&client,&resolved.provider,&resolved.model,&api_key,&system,&user,ollama_endpoint.as_deref(),endpoint.as_deref(),allow_unencrypted,None,None,None,Some(&app_data_dir),Some(&token));
+                if resolved.provider==LLMProvider::BuiltInAI {operation.await?} else {
+                    tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=operation=>result?}
+                }
+            },
+        };
+        if token.is_cancelled() {return Err("Answer cancelled".into());}
+        Ok(ConfiguredTextReply{text,provider:canonical_provider(&resolved.provider).into(),model:resolved.model})
+    }).await
+}
+
+/// Compatibility entry point for existing meeting chat and reviewed task polish.
 pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &tauri::State<'_, crate::state::AppState>,
@@ -440,107 +721,318 @@ pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    use super::openai_provider::{
-        config_from_custom_openai, config_from_openai_api_key, OpenAICompatibleProcessingProvider,
-    };
-    use crate::database::repositories::setting::SettingsRepository;
-    use tauri::Manager;
-
-    let provider = LLMProvider::from_str(model)?;
-
-    if matches!(provider, LLMProvider::Codex) {
-        let codex = crate::summary::codex_provider::provider_from_app(app)
-            .map_err(|e| format!("Codex app-server unavailable: {e}"))?;
-        return codex.run_text_prompt(&format!("{system}\n\n{user}")).await;
-    }
-
-    let pool = state.db_manager.pool().clone();
-    if matches!(
-        provider,
-        LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
-    ) {
-        let configured = SettingsRepository::get_custom_openai_config(&pool)
-            .await
-            .map_err(|e| format!("Failed to read OpenAI-compatible config: {e}"))?;
-        let mut config = match configured {
-            Some(config) => config_from_custom_openai(config),
-            None if provider == LLMProvider::OpenAICompatible => {
-                let key = SettingsRepository::get_api_key(&pool, "openai")
-                    .await
-                    .map_err(|e| format!("Failed to read OpenAI API key: {e}"))?
-                    .filter(|key| !key.trim().is_empty())
-                    .ok_or(
-                        "OpenAI-compatible chat requires an OpenAI API key or configured endpoint",
-                    )?;
-                config_from_openai_api_key(Some(key), model_name.to_string())
-            }
-            None => return Err("No OpenAI-compatible configuration found".into()),
-        };
-        config.model = model_name.to_string();
-        return OpenAICompatibleProcessingProvider::new(config)?
-            .send_text_prompt(system, user)
-            .await;
-    }
-    let mut api_key = String::new();
-    let mut ollama_endpoint: Option<String> = None;
-    let mut custom_openai_endpoint: Option<String> = None;
-    let mut allow_unencrypted = false;
-
-    match provider {
-        LLMProvider::Ollama | LLMProvider::BuiltInAI => {}
-        LLMProvider::OpenClaw => {
-            let cfg = crate::openclaw::load_config(app)
-                .map_err(|e| format!("Failed to load OpenClaw config: {e}"))?;
-            if !cfg.enabled || cfg.bearer_token.trim().is_empty() {
-                return Err("OpenClaw handoff is disabled or missing a bearer token.".to_string());
-            }
-            allow_unencrypted = cfg.allow_unencrypted;
-            custom_openai_endpoint = Some(cfg.model_endpoint);
-            api_key = cfg.bearer_token;
-        }
-        _ => {
-            api_key = SettingsRepository::get_api_key(&pool, model)
-                .await
-                .map_err(|e| format!("Failed to read API key: {e}"))?
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| format!("API key not found for {model}"))?;
-        }
-    }
-
-    if provider == LLMProvider::Ollama {
-        ollama_endpoint = SettingsRepository::get_model_config(&pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|c| c.ollama_endpoint);
-    }
-
-    let app_data_dir = app.path().app_data_dir().ok();
-    let client = reqwest::Client::new();
-    generate_summary(
-        &client,
-        &provider,
+    generate_configured_text_cancellable(
+        app,
+        state,
+        model,
         model_name,
-        &api_key,
         system,
         user,
-        ollama_endpoint.as_deref(),
-        custom_openai_endpoint.as_deref(),
-        allow_unencrypted,
-        None,
-        None,
-        None,
-        app_data_dir.as_ref(),
-        None,
+        &CancellationToken::new(),
     )
     .await
+    .map(|reply| reply.text)
 }
-
+pub(crate) async fn generate_configured_text_cancellable<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &tauri::State<'_, crate::state::AppState>,
+    model: &str,
+    model_name: &str,
+    system: &str,
+    user: &str,
+    token: &CancellationToken,
+) -> Result<ConfiguredTextReply, String> {
+    let started = tokio::time::Instant::now();
+    if token.is_cancelled() {
+        return Err("Answer cancelled before configuration".into());
+    }
+    let provider = LLMProvider::from_str(model)?;
+    let environment = TextEnvironment::from_app(app, &provider)?;
+    let resolved = resolve_configured_text(
+        state.db_manager.pool(),
+        environment,
+        model,
+        model_name,
+        started,
+        token,
+    )
+    .await?;
+    dispatch_resolved_text(resolved, system.into(), user.into(), token).await
+}
 #[cfg(test)]
 mod response_tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn config_pool(endpoint: &str) -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let config = super::super::CustomOpenAIConfig {
+            destination_problem: None,
+            allow_unencrypted: false,
+            endpoint: endpoint.into(),
+            api_key: None,
+            model: "saved-model".into(),
+            timeout_seconds: Some(1),
+            organization: Some("public-organization".into()),
+            project: Some("public-project".into()),
+            max_tokens: Some(512),
+            context_window: Some(8192),
+            temperature: None,
+            top_p: None,
+        };
+        crate::database::repositories::setting::SettingsRepository::save_custom_openai_config(
+            &pool, &config,
+        )
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn read_test_request(socket: &mut tokio::net::TcpStream) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut data = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                data.extend_from_slice(&chunk[..count]);
+                assert!(data.len() < 16384);
+                let request = String::from_utf8_lossy(&data);
+                if let Some(end) = request.find("\r\n\r\n") {
+                    let length = request[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|n| n.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= end + 4 + length {
+                        return request.to_string();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_compatible_dispatch_uses_normalized_frozen_settings() {
+        for (input, actual) in [("  public-model  ", "public-model"), ("   ", "gpt-4o-mini")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+            let pool = config_pool(&endpoint).await;
+            let dir = tempfile::tempdir().unwrap();
+            let resolved = resolve_configured_text(
+                &pool,
+                TextEnvironment::local(dir.path().into()),
+                "api-key",
+                input,
+                tokio::time::Instant::now(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolved.model, actual);
+            assert_eq!(resolved.budget.context_tokens, 8192);
+            sqlx::query(
+                "UPDATE settings SET customOpenAIConfig=NULL,model='changed-after-resolution'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let request = read_test_request(&mut socket).await;
+                let body = r#"{"choices":[{"message":{"content":"Public completed answer."},"finish_reason":"stop"}]}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                request
+            });
+            let response = dispatch_resolved_text(
+                resolved,
+                "Public system".into(),
+                "Public question".into(),
+                &CancellationToken::new(),
+            )
+            .await;
+            let request = tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+            let response = response.unwrap();
+            assert_eq!(response.provider, "openai-compatible");
+            assert_eq!(response.model, actual);
+            assert_eq!(response.text, "Public completed answer.");
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("openai-organization: public-organization"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("openai-project: public-project"));
+            let body: serde_json::Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["model"], actual);
+            assert!(body.get("response_format").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_deadline_covers_success_error_trickles_and_retry_backoff() {
+        for status in [200, 400, 503] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let pool = config_pool(&format!("http://{}/v1", listener.local_addr().unwrap())).await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut resolved = resolve_configured_text(
+                &pool,
+                TextEnvironment::local(dir.path().into()),
+                "custom-openai",
+                "public-model",
+                tokio::time::Instant::now(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let (sent, headers) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let _ = read_test_request(&mut socket).await;
+                let response = if status == 503 {
+                    "HTTP/1.1 503 Busy\r\nContent-Length: 2\r\nRetry-After: 60\r\n\r\n{}"
+                        .to_string()
+                } else {
+                    format!("HTTP/1.1 {status} Test\r\nContent-Length: 100000\r\n\r\n{{")
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = sent.send(());
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    if socket.write_all(b" ").await.is_err() {
+                        break;
+                    }
+                }
+            });
+            resolved.deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                dispatch_resolved_text(
+                    resolved,
+                    "Public system".into(),
+                    "Public question".into(),
+                    &CancellationToken::new(),
+                ),
+            )
+            .await;
+            let reached = tokio::time::timeout(Duration::from_secs(1), headers).await;
+            server.abort();
+            let _ = server.await;
+            assert!(reached.is_ok(), "Provider must reach response handling");
+            assert!(result.unwrap().unwrap_err().contains("deadline"));
+        }
+    }
+
+    struct LifetimeFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for LifetimeFlag {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_answer_precancel_never_dispatches() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = dispatched.clone();
+        let result = supervise(
+            &token,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(20),
+            move |_| async move {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!dispatched.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn saved_answer_deadline_retains_owner_past_cleanup_allowance() {
+        let owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let observed = owner.clone();
+        let release = CancellationToken::new();
+        let child_release = release.clone();
+        let result = supervise(
+            &CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_millis(20),
+            Duration::from_millis(20),
+            move |token| async move {
+                let _owner = LifetimeFlag(observed);
+                token.cancelled().await;
+                child_release.cancelled().await;
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().contains("cleanup"));
+        assert!(
+            owner.load(std::sync::atomic::Ordering::SeqCst),
+            "Timeout must not release native ownership"
+        );
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while owner.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_saved_answer_waiter_signals_owned_cleanup() {
+        let entered = CancellationToken::new();
+        let started = entered.clone();
+        let cleaned = CancellationToken::new();
+        let finished = cleaned.clone();
+        let task = tokio::spawn(async move {
+            supervise(
+                &CancellationToken::new(),
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                Duration::from_millis(20),
+                move |token| async move {
+                    started.cancel();
+                    token.cancelled().await;
+                    finished.cancel();
+                    Ok(())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.cancelled())
+            .await
+            .expect("The supervised operation must start before its caller can be dropped");
+        task.abort();
+        tokio::time::timeout(Duration::from_secs(1), cleaned.cancelled())
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn incomplete_outputs_are_never_reported_as_complete() {

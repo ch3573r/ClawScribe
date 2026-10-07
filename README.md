@@ -102,6 +102,25 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 
 ## Meeting Notes And Exports
 
+The meeting-memory preview in this source branch adds **Meetings → Meeting
+memory**: select saved meetings explicitly, or choose all saved meetings, then
+search transcript passages and ask cited questions. Project Any/All/Untagged
+filters and inclusive dates constrain that same selection. Keyword retrieval
+works without downloading a model; optional local semantic retrieval uses the
+embedding model under **Settings → Meeting memory**. Results show the mode
+actually used, and answers show the configured and executed summary provider.
+Open citations to inspect evidence, reveal its current transcript position, or
+play saved audio at a verified recording offset. Historical, changed, missing,
+and invalid sources remain explicitly identified and cannot navigate as current
+evidence. Existing meeting chat is preserved and defaults to this meeting only.
+Expanding to other meetings uses a separate saved library conversation; switching
+back restores the meeting's history.
+Document attachments and live assistance are planned separately and have no
+controls in this preview. Installed offline, provider-failure, focus, citation,
+and playback acceptance remains pending; see the
+[local library guide](docs/local-library.md#meeting-memory) and
+[preview acceptance policy](docs/windows-release.md#required-real-device-acceptance).
+
 - **Local Word export:** save a summary, full transcript, or both as `.docx`,
   including tables, with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
   sign-in or Word installed.
@@ -178,6 +197,9 @@ and recordings. Restore adds missing meetings and skips existing IDs. Backups
 continue when recording folders are missing and report affected meetings,
 excluded recovery files, and unavailable audio. Archives exclude credentials and
 models and are not encrypted.
+Saved knowledge conversations and their original citation labels are included.
+Restored references remain historical until a new question establishes fresh
+evidence; interrupted answers are never resubmitted automatically.
 
 Meeting deletion can also remove its recording folder, including audio,
 transcript copies, metadata, recovery originals, and generated documents. The

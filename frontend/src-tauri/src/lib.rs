@@ -49,6 +49,7 @@ pub mod diagnostics;
 pub mod exports;
 mod external_url;
 pub mod groq;
+pub mod knowledge;
 pub mod library;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
@@ -569,6 +570,7 @@ pub fn run() {
         .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
         .manage(summary::edit_exit::SummaryEditsState::default())
+        .manage(knowledge::KnowledgeState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
@@ -960,6 +962,21 @@ pub fn run() {
             database::commands::check_default_legacy_database,
             database::commands::check_homebrew_database,
             database::commands::import_and_initialize_database,
+            knowledge::indexer::knowledge_search,
+            knowledge::commands::knowledge_ask,
+            knowledge::commands::knowledge_cancel_request,
+            knowledge::commands::knowledge_history,
+            knowledge::commands::knowledge_resolve_evidence,
+            knowledge::commands::knowledge_create_library_conversation,
+            knowledge::commands::knowledge_list_library_conversations,
+            knowledge::commands::knowledge_clear_history,
+            knowledge::indexer::knowledge_index_status,
+            knowledge::indexer::knowledge_reindex,
+            knowledge::indexer::knowledge_cancel_index,
+            knowledge::indexer::knowledge_model_enable,
+            knowledge::indexer::knowledge_model_status,
+            knowledge::indexer::knowledge_model_download,
+            knowledge::indexer::knowledge_model_cancel_download,
             database::commands::initialize_fresh_database,
             // Database and Models path commands
             database::commands::get_database_directory,

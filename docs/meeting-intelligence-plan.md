@@ -8,6 +8,14 @@
 **Goal:** Add semantic meeting search, reference-document context, and manual
 live assistance without compromising recording or local data control.
 
+**Delivery split:** The first preview delivers meeting memory only (Phase 1,
+Tasks 1–4). Reference documents and live assistance remain the follow-up plan
+(Tasks 5–8); their controls are not exposed in this preview. Automated frontend
+and canonical-navigation checks remain mandatory. Installed offline,
+provider-failure, focus, citation-click and playback acceptance is explicitly
+pending until an isolated native desktop test is available, following the
+pending-real-device policy in [Windows releases](windows-release.md).
+
 **Architecture:** One Rust knowledge subsystem owns source revisions, local
 embeddings, hybrid retrieval, evidence, and request identities. It uses the
 existing SQLite database, Tauri commands/events, model downloads, and summary
@@ -24,7 +32,7 @@ document parsers only through the compatibility tasks below.
 - Windows is the supported release target. Keep the Tauri application runtime.
 - Recording remains the highest-priority workload; inference runs on blocking workers.
 - Local embeddings are opt-in; cloud embeddings are outside the initial scope.
-- Chunk size is at most 320 model tokens; overlap is 48 tokens; query limit is 1,024 UTF-8 bytes.
+- Semantic chunk bodies are at most 320 model tokens with 48-token overlap; keyword-only windows are at most 2,048 UTF-8 bytes with at most 128-byte overlap. Query limit is 1,024 UTF-8 bytes.
 - Retrieval uses 64 candidates per channel, reciprocal rank fusion constant 60, and at most 12 passages.
 - One embedding input at a time, at most two inference threads, a 32-entry coalesced notification queue, and 60-second idle unload.
 - Reference limits: 25 MiB input, 2 MiB extracted text, 500 PDF pages, 10-second extraction, 512 MiB child memory, 32 MiB DOCX decompression, and 5 MiB per XML entry.
@@ -97,13 +105,13 @@ job/native permits for embeddings and releases the native permit only inside
 the completed blocking call. Extend recording preemption to cancel indexing
 before trying to claim its job; preserve local-summary preemption behavior.
 
-- [ ] Add tests `rejects_bad_dimensions_and_nonfinite_vectors`, `query_and_passage_prefixes`, `cancel_retains_native_permit`, and `recording_preempts_indexing`. Assert 384 finite normalized values, the correct prefix, and no overlap between native calls.
-- [ ] Run `cargo test -p clawscribe --lib knowledge::`; the new behavior tests must fail before implementation.
-- [ ] Implement CPU inference, masked mean pooling, normalization, two-thread configuration, one-input batches, idle unload, and the bounded/coalesced scheduler.
-- [ ] Pin the candidate model revision from the design, required files and actual SHA-256 values. Reuse `model_download.rs`; add a Rust tokenizer dependency with an exact tested version and compatible license/MSRV. Preserve the existing ORT version.
-- [ ] On the designated runner, compare embeddings with independently generated model-card reference outputs. Measure warm single-input completion, model memory, and start-recording preemption. Require a native input/preemption bound of two seconds and incremental worker memory no greater than 1 GiB.
-- [ ] If the baseline misses these bounds, stop Phase 1 implementation and revise the model artifact/scheduling design with measured results. Do not silently select an unsupported quantized export.
-- [ ] Run targeted tests, `cargo fmt --all -- --check`, `cargo check -p clawscribe --features windows-gpu`, and the safety scan; commit `feat: add local knowledge embedding runtime`.
+- [x] Add tests `rejects_bad_dimensions_and_nonfinite_vectors`, `query_and_passage_prefixes`, `cancel_retains_native_permit`, and `recording_preempts_indexing`. Assert 384 finite normalized values, the correct prefix, and no overlap between native calls.
+- [x] Run `cargo test -p clawscribe --lib knowledge::`; the new behavior tests must fail before implementation.
+- [x] Implement CPU inference, masked mean pooling, normalization, two-thread configuration, one-input batches, idle unload, and the bounded/coalesced scheduler. Validate disabled graph optimization/prepacking on the unchanged float32 artifact before accepting the revised loading policy.
+- [x] Pin the candidate model revision from the design, required files and actual SHA-256 values. Reuse `model_download.rs`; add a Rust tokenizer dependency with an exact tested version and compatible license/MSRV. Preserve the existing ORT version.
+- [x] On the designated runner, compare embeddings with independently generated model-card reference outputs. Measure warm single-input completion, model memory, and start-recording preemption. Require a native input/preemption bound of two seconds and incremental worker memory no greater than 1 GiB.
+- [x] If the baseline misses these bounds, stop Phase 1 implementation and revise the model artifact/scheduling design with measured results. Do not silently select an unsupported quantized export.
+- [x] Run targeted tests, `cargo fmt --all -- --check`, `cargo check -p clawscribe --features windows-gpu`, and the safety scan; commit `feat: add local knowledge embedding runtime`.
 
 ### Task 2 Source generations, chunking, and hybrid search
 
@@ -123,7 +131,7 @@ enum KnowledgeScope {
     Live { session_id: String },
 }
 struct MeetingFilter {
-    meeting_ids: Vec<String>, tags: Vec<String>,
+    all_meetings: bool, meeting_ids: Vec<String>, tags: Vec<String>,
     tag_mode: TagMatch, untagged: bool,
     from: Option<String>, to: Option<String>,
 }
@@ -147,17 +155,26 @@ async fn retrieve(pool: &SqlitePool, runtime: &KnowledgeState,
 `SearchResponse` contains passages, actual retrieval mode, and index status.
 Each passage contains `EvidenceRef`, display metadata, text, and rank;
 define `EvidenceRef` in this task so Task 3 can implement its resolver.
+Each speaker/title/date display string is limited to 1,024 UTF-8 bytes on a
+character boundary, with `metadata_truncated: bool` marking any incomplete
+display metadata. Hash full canonical metadata without truncation. Task 3
+must label incomplete metadata in prompts and avoid treating clipped names or
+dates as complete facts; Task 4 must show the indication in source previews.
 Keep scope checks in the backend and use
 the existing tag semantics. Live is rejected until Task 7 supplies its source.
 
-- [ ] Write clean/upgrade database tests and retrieval tests: `edited_source_cannot_publish_old_generation`, `delete_cascades_index`, `restore_requeues_index`, `tag_scope_applies_before_ranking`, `hybrid_preserves_identifier_hits`, `unicode_chunk_spans_roundtrip`, and `model_space_change_requires_reindex`.
-- [ ] Pin assertions: 320-token maximum, 48-token overlap, vector pages of at most 512 rows, 64 candidates per channel, and at most 12 final passages. Verify sources outside the selected meetings/tags never appear.
-- [ ] Run the new tests and confirm the absent behavior fails.
-- [ ] Add the source/chunk/vector/job tables and FTS5 table. Test FTS5 availability in the supported bundled SQLite runtime. Add transcript mutation triggers and source deletion cascades in the new migration.
-- [ ] Implement streaming chunk construction with transcript IDs/byte spans, durable coalesced jobs, three-attempt retry limit, and conditional generation publication. Restarted jobs remain recoverable.
-- [ ] Implement quoted/sanitized lexical queries and normalized cosine search with a bounded heap; combine ranks using constant 60. Return keyword-only status when semantic work cannot run.
-- [ ] Register `knowledge_search`, `knowledge_index_status`, `knowledge_reindex`, `knowledge_cancel_index`, and model enable/download/status commands. Commands never accept a client-provided SQL filter or embedding-space identity.
-- [ ] Run targeted tests and the 10,000-passage/30-question English-German acceptance corpus on the designated runner: at least 27 expected top-five hits and warm p95 no greater than two seconds. Commit after Rust checks and the safety scan: `feat: add hybrid meeting retrieval`.
+- [x] Write clean/upgrade database tests and retrieval tests: `edited_source_cannot_publish_old_generation`, `delete_cascades_index`, `restore_requeues_index`, `tag_scope_applies_before_ranking`, `hybrid_preserves_identifier_hits`, `unicode_chunk_spans_roundtrip`, and `model_space_change_requires_reindex`.
+- [x] Pin assertions: 320-token maximum, 48-token overlap, vector pages of at most 512 rows, 64 candidates per channel, and at most 12 final passages. Verify sources outside the selected meetings/tags never appear.
+- [x] Keep tokenizer-free lexical windows separate from model chunks: 2,048-byte maximum, at most 128-byte overlap, exact canonical UTF-8 spans. Never estimate model-token counts or require a tokenizer download for keyword readiness. Fuse only actual matching evidence identities, preserve identifier hits, and resolve citations without a foreign key to derived chunks.
+- [x] Run the new tests and confirm the absent behavior fails.
+- [x] Add the source/chunk/vector/job tables and FTS5 table. Test FTS5 availability in the supported bundled SQLite runtime. Add transcript mutation triggers and source deletion cascades in the new migration.
+- [x] Implement streaming chunk construction with transcript IDs/byte spans, durable coalesced jobs, three-attempt retry limit, and conditional generation publication. Restarted jobs remain recoverable.
+- [x] Implement quoted/sanitized lexical queries and normalized cosine search with a bounded heap; combine ranks using constant 60. Return keyword-only status when semantic work cannot run.
+- [x] Index current speaker labels in a separate lexical field while preserving body-only semantic embeddings. Test Unicode label edits, old-name invalidation, and real canonical evidence for speaker-only hits.
+- [x] When multiple currently indexed sources are eligible, select at most three semantic candidates per source within the global 64 budget; a sole source keeps all 64. Keep lexical identifiers, distinct dates/spans, and RRF 60 unchanged. Test single-source budgets and multi-source starvation without merging or deleting stored evidence.
+- [x] Register `knowledge_search`, `knowledge_index_status`, `knowledge_reindex`, `knowledge_cancel_index`, and model enable/download/status commands. Commands never accept a client-provided SQL filter or embedding-space identity.
+- [x] Require explicit `all_meetings` for unconstrained library scope; freeze allowed meeting IDs for an answer and recheck metadata/tag membership before dispatch and persistence. Start exactly one worker for the current pool across normal and first-run database initialization.
+- [x] Run targeted tests and the 10,000-passage/30-question English-German acceptance corpus on the designated runner: at least 27 expected top-five hits and warm p95 no greater than two seconds. Commit after Rust checks and the safety scan: `feat: add hybrid meeting retrieval`.
 
 ### Task 3 Evidence, answer requests, and conversation persistence
 
@@ -185,15 +202,26 @@ frontend boundary. Resolve configured provider/model server-side at request
 start; do not accept credentials from these commands. Live owners remain
 in-memory when enabled in Task 7.
 
-- [ ] Write tests `duplicate_request_returns_same_reply`, `unknown_tag_has_no_link`, `changed_passage_resolves_stale`, `deleted_source_aborts_queued_dispatch`, `deleted_source_discards_completed_answer`, `cancelled_request_cannot_commit`, `prompt_injection_stays_inside_evidence`, and `changed_decision_retains_dates_and_both_sources`.
-- [ ] Assert one assistant message per owner/request, zero navigable links for invented tags, no provider dispatch after detected source deletion, and an insufficient-evidence answer for unsupported questions. Run tests and observe failure before implementation.
-- [ ] Implement backend-owned `[K1]` maps and fingerprint resolution. Preserve saved summary-source links. Recheck source revisions immediately before dispatch and transactionally before persisting a reply; redact invalidated dependent conversation turns on source deletion.
-- [ ] Add request/message tables with a unique owner/request identity and normalized evidence associations. Existing `ai_chat_messages` remain readable; merge legacy history for a meeting deterministically while writing new knowledge turns only once.
-- [ ] Add `generate_configured_text_cancellable` beside the current helper with the existing app/state/provider/model/system/user inputs plus `&CancellationToken`, returning `Result<ConfiguredTextReply, String>`. Keep the existing helper as a compatibility wrapper returning only text. Report the actual resolved provider/model and propagate cancellation/deadlines through every existing provider, including bundled Codex, without creating a second credential path.
-- [ ] Build bounded prompts using `summary/context_budget.rs`, meeting titles/dates, distinct transcript/document sections, and only selected evidence. A latest-decision question must retain conflicting dated evidence and qualify incomplete retrieval. Persist user turns before generation; failed requests keep a retryable status and their request identity.
-- [ ] Extend version-1 backup optional tables for authoritative knowledge conversations and exclude derived indexes; restore requeues sources. Add round-trip tests with pre-feature archives.
-- [ ] On the designated runner, review the design's 12-case synthetic answer set with the configured provider/model: supported facts, absent evidence, changed decisions, project collisions, and short German responses. Require correct source navigation and no unsupported claims; record sanitized outcome metadata only.
-- [ ] Run relevant `knowledge::`, summary-provider cancellation/reconciliation tests, Rust checks, and the safety scan; commit `feat: add cited knowledge conversations`.
+Use one absolute saved-answer budget across setup, queueing, retries, and reads:
+HTTP 300 seconds or compatible configuration; Codex configured duration/default
+600 seconds with its existing 30-second minimum; Built-in AI 900 seconds. Cleanup
+has a separate overall five-second allowance. Surface cleanup failures and retain
+native/process ownership until actual exit/reaping or explicit quarantine; an
+expired deadline must not release active inference admission. Test with injected
+short durations. Task 7 retains its separate 30-second live deadline.
+
+- [x] Write tests `duplicate_request_returns_same_reply`, `unknown_tag_has_no_link`, `changed_passage_resolves_stale`, `deleted_source_aborts_queued_dispatch`, `deleted_source_discards_completed_answer`, `cancelled_request_cannot_commit`, `prompt_injection_stays_inside_evidence`, and `changed_decision_retains_dates_and_both_sources`.
+- [x] Assert one assistant message per owner/request, zero navigable links for invented tags, no provider dispatch after detected source deletion, and an insufficient-evidence answer for unsupported questions. Run tests and observe failure before implementation.
+- [x] Implement backend-owned `[K1]` maps and fingerprint resolution. Preserve saved summary-source links. Recheck source revisions immediately before dispatch and transactionally before persisting a reply; redact invalidated dependent conversation turns on source deletion.
+- [x] Add request/message tables with a unique owner/request identity and normalized evidence associations. Existing `ai_chat_messages` remain readable; merge legacy history for a meeting deterministically while writing new knowledge turns only once.
+- [x] Add durable library owner rows, globally unique request UUIDs, immutable input fingerprints, and create/list/clear lifecycle commands. Clear cancels pending work and removes legacy/new history together. Normalize dependencies inherited from any history sent to the provider; source deletion redacts dependent turns before association cascades.
+- [x] Constrain inherited prompt history to the current frozen scope as well as its evidence dependencies. Omit out-of-scope or unverifiable prior turns after a project/date/document selection changes; add a filter-change regression while preserving readable saved history.
+- [x] Add `generate_configured_text_cancellable` beside the current helper with the existing app/state/provider/model/system/user inputs plus `&CancellationToken`, returning `Result<ConfiguredTextReply, String>`. Keep the existing helper as a compatibility wrapper returning only text. Report the actual resolved provider/model and propagate cancellation/deadlines through every existing provider, including bundled Codex, without creating a second credential path.
+- [x] Build bounded prompts using `summary/context_budget.rs`, meeting titles/dates, distinct transcript/document sections, and only selected evidence. A latest-decision question must retain conflicting dated evidence and qualify incomplete retrieval. Persist user turns before generation; failed requests keep a retryable status and their request identity.
+- [x] Extend version-1 backup optional tables for authoritative knowledge conversations and exclude derived indexes; restore requeues sources. Add round-trip tests with pre-feature archives.
+- [x] Import owner/request/message/evidence tables in dependency order using table-specific validation instead of the existing generic `meeting_id` assumption. Test library-only histories, mixed restored/skipped sources, thread-ID collisions, interrupted requests, and stale canonical references without restored chunk rows.
+- [x] On the designated runner, review the design's 12-case synthetic answer set with the configured provider/model: supported facts, absent evidence, changed decisions, project collisions, and short German responses. Require correct source navigation and no unsupported claims; record sanitized outcome metadata only.
+- [x] Run relevant `knowledge::`, summary-provider cancellation/reconciliation tests, Rust checks, and the safety scan; commit `feat: add cited knowledge conversations`.
 
 ### Task 4 Archive search and scope UI
 
@@ -208,13 +236,14 @@ invoke wrapper. `useKnowledgeSearch` owns request sequence, loading state,
 actual retrieval mode, and scope; components render that state. Expose index
 progress, Pause/Retry/Rebuild, and model download in Settings.
 
-- [ ] Add helper tests `old_query_cannot_replace_new_results`, `meeting_navigation_discards_late_reply`, `scope_and_project_filter_stay_synchronized`, and `repeated_submit_reuses_request_id`. Assert only the newest response is visible and a single request is sent while pending.
-- [ ] Run `pnpm run test` from `frontend` and confirm the new assertions fail before implementation.
-- [ ] Add Keyword/Semantic search modes, selected-meeting/project scope, ranked passages, and an Ask about these meetings action. Keep keyword mode usable before model download.
-- [ ] Add citation previews with transcript reveal/playback navigation and stale/missing-source messages. Preserve existing meeting history and default scope. Show the configured answer provider and the actual retrieval mode.
-- [ ] Implement cancellation, empty/error states, accessible focus/keyboard behavior, dark/light/accent styling, and narrow-layout behavior using existing shared components.
-- [ ] Run `pnpm run typecheck`, `pnpm run test`, and `pnpm run build`; complete installed-app offline retrieval and provider-failure smoke on the designated runner. Update `README.md`, `docs/architecture.md`, and `docs/local-library.md` to describe only delivered behavior.
-- [ ] Run the safety scan and commit `feat: add meeting knowledge interface`.
+- [x] Add helper tests `old_query_cannot_replace_new_results`, `meeting_navigation_discards_late_reply`, `scope_and_project_filter_stay_synchronized`, and `repeated_submit_reuses_request_id`. Assert only the newest response is visible and a single request is sent while pending.
+- [x] Run `pnpm run test` from `frontend` and confirm the new assertions fail before implementation.
+- [x] Add Keyword/Semantic search modes, selected-meeting/project scope, ranked passages, and an Ask about these meetings action. Keep keyword mode usable before model download.
+- [x] Add citation previews with transcript reveal/playback navigation and stale/missing-source messages. Preserve existing meeting history and default scope. Show the configured answer provider and the actual retrieval mode.
+- [x] Implement cancellation, empty/error states, accessible focus/keyboard behavior, dark/light/accent styling, and narrow-layout behavior using existing shared components.
+- [x] Run `pnpm run typecheck`, `pnpm run test`, and `pnpm run build` on the designated runner. Update `README.md`, `docs/architecture.md`, and `docs/local-library.md` to describe only delivered behavior.
+- [ ] Complete installed-app offline retrieval, provider-failure recovery, citation navigation/playback, focus, and actual theme/narrow-layout smoke on the designated runner. These checks remain pending for the explicitly labeled preview; automated checks do not establish installed acceptance.
+- [x] Run the safety scan and commit `feat: add meeting knowledge interface`.
 
 **Phase 1 gate:** Search and cited library questions work independently of
 documents/live assistance. Pass fresh/upgrade database, mutation, deletion,

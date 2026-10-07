@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
 
@@ -40,6 +40,9 @@ pub struct SidecarManager {
 
     /// Shutdown flag
     should_shutdown: Arc<AtomicBool>,
+
+    /// A resource whose cleanup has not actually completed cannot be reused.
+    quarantined: Arc<AtomicBool>,
 
     /// Active request count (for graceful shutdown)
     active_request_count: Arc<AtomicUsize>,
@@ -153,6 +156,7 @@ impl SidecarManager {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
+            quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
             current_model_path: Arc::new(RwLock::new(None)),
@@ -220,6 +224,7 @@ impl SidecarManager {
         command.arg("-n").arg("10").arg(&self.helper_binary_path);
 
         command
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // Log stderr to main process
@@ -233,6 +238,8 @@ impl SidecarManager {
             command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
 
+        // Retain the manager slot before spawning; no await may lose a new child.
+        let mut child_lock = self.child_process.lock().await;
         let mut child = command.spawn().with_context(|| {
             format!(
                 "Failed to spawn llama-helper at {:?}",
@@ -250,10 +257,8 @@ impl SidecarManager {
             .ok_or_else(|| anyhow!("Failed to get stdout"))?;
 
         // Store handles
-        {
-            let mut child_lock = self.child_process.lock().await;
-            *child_lock = Some(child);
-        }
+        *child_lock = Some(child);
+        drop(child_lock);
 
         {
             let mut stdin_lock = self.stdin_writer.lock().await;
@@ -297,6 +302,11 @@ impl SidecarManager {
         model: Option<PathBuf>,
         token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<String> {
+        if self.quarantined.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "Local summary helper is quarantined until cleanup completes"
+            ));
+        }
         let _guard = RequestGuard::new(self.active_request_count.clone());
         let fallback_token = tokio_util::sync::CancellationToken::new();
         let token = token.unwrap_or(&fallback_token);
@@ -306,6 +316,11 @@ impl SidecarManager {
             _ = token.cancelled() => return Err(anyhow!("Generation cancelled while queued")),
             lock = self.request_lock.lock() => lock,
         };
+        if self.quarantined.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "Local summary helper is quarantined until cleanup completes"
+            ));
+        }
         let result = tokio::select! {
             biased;
             _ = token.cancelled() => None,
@@ -316,7 +331,11 @@ impl SidecarManager {
             } => Some(result),
         };
         match result {
-            Some(result) => result,
+            Some(Ok(result)) => Ok(result),
+            Some(Err(error)) => {
+                self.shutdown().await?;
+                Err(error)
+            }
             None => {
                 // Keep the exchange guard until the cancelled worker has stopped.
                 self.shutdown().await?;
@@ -369,17 +388,25 @@ impl SidecarManager {
             .as_mut()
             .ok_or_else(|| anyhow!("Sidecar not running"))?;
 
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
+        const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+        let mut line = Vec::new();
+        (&mut *reader)
+            .take((MAX_RESPONSE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
             .await
             .context("Failed to read response from stdout")?;
+        if line.len() > MAX_RESPONSE_BYTES {
+            return Err(anyhow!("Local helper response exceeds its protocol limit"));
+        }
 
         if line.is_empty() {
             return Err(anyhow!("Sidecar closed stdout (process may have crashed)"));
         }
 
-        Ok(line.trim().to_string())
+        Ok(String::from_utf8(line)
+            .map_err(|_| anyhow!("Local helper response is not UTF-8"))?
+            .trim()
+            .to_string())
     }
 
     /// Send ping to keep sidecar alive
@@ -467,69 +494,31 @@ impl SidecarManager {
 
     /// Force shutdown the sidecar
     pub async fn shutdown(&self) -> Result<()> {
-        // Set shutdown flag
         self.should_shutdown.store(true, Ordering::SeqCst);
-
-        // Send shutdown command
-        if self.is_healthy() {
-            let request = serde_json::json!({"type": "shutdown"}).to_string();
-            let _timeout = Duration::from_secs(5);
-
-            // Try to send shutdown command, but ignore errors
-            // We don't use send_request to avoid incrementing counter
-            let _ = async {
-                let mut stdin_lock = self.stdin_writer.lock().await;
-                if let Some(stdin) = stdin_lock.as_mut() {
-                    stdin.write_all(request.as_bytes()).await?;
-                    stdin.write_all(b"\n").await?;
-                    stdin.flush().await?;
-                }
-                Ok::<(), anyhow::Error>(())
-            }
-            .await;
-        }
-
-        // Kill process if still running
+        self.quarantined.store(true, Ordering::SeqCst);
+        self.is_healthy.store(false, Ordering::SeqCst);
+        // Do not write a polite message into a potentially full stdin pipe.
+        // Keep the child in its manager slot across every await. If startup's
+        // waiter is cancelled, the next cleanup owner still has the actual child.
         {
             let mut child_lock = self.child_process.lock().await;
-            if let Some(mut child) = child_lock.take() {
-                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                    Ok(Ok(status)) => {
-                        log::info!("Sidecar exited with status: {}", status);
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("Failed to wait for sidecar: {}", e);
-                    }
-                    Err(_) => {
-                        log::warn!("Sidecar didn't exit gracefully, killing");
-                        let _ = child.kill().await;
+            if let Some(child) = child_lock.as_mut() {
+                loop {
+                    let _ = child.start_kill();
+                    match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+                        Ok(Ok(_)) => break,
+                        _ => tokio::time::sleep(Duration::from_millis(50)).await,
                     }
                 }
             }
+            *child_lock = None;
         }
-
-        // Clear handles
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            *stdin_lock = None;
-        }
-
-        {
-            let mut stdout_lock = self.stdout_reader.lock().await;
-            *stdout_lock = None;
-        }
-
-        {
-            let mut current_model = self.current_model_path.write().await;
-            *current_model = None;
-        }
-
-        self.is_healthy.store(false, Ordering::SeqCst);
-
-        log::info!("Sidecar shutdown complete");
+        *self.stdin_writer.lock().await = None;
+        *self.stdout_reader.lock().await = None;
+        *self.current_model_path.write().await = None;
+        self.quarantined.store(false, Ordering::SeqCst);
         Ok(())
     }
-
     /// Check if sidecar is healthy
     pub fn is_healthy(&self) -> bool {
         self.is_healthy.load(Ordering::SeqCst)
@@ -557,6 +546,7 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
+            quarantined: self.quarantined.clone(),
             active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
@@ -606,6 +596,7 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
+            quarantined: self.quarantined.clone(),
             active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
@@ -705,6 +696,7 @@ mod protocol_tests {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(true)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
+            quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path: PathBuf::new(),
             current_model_path: Arc::new(RwLock::new(None)),
@@ -788,6 +780,128 @@ Start-Sleep -Milliseconds 700
         assert!(error.to_string().contains("cancelled"));
         assert!(!manager.is_healthy());
         assert!(manager.request_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancellation_reaps_a_helper_that_does_not_read_stdin() {
+        let (manager, _stderr) = fake_sidecar("Start-Sleep -Seconds 60").await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let running = manager.clone();
+        let running_token = token.clone();
+        let task = tokio::spawn(async move {
+            running
+                .send_request_cancellable(
+                    "x".repeat(2 * 1024 * 1024),
+                    Duration::from_secs(60),
+                    None,
+                    Some(&running_token),
+                )
+                .await
+        });
+        // A full pipe makes the generation write pending, independently of inference.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(manager.request_lock.try_lock().is_err());
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("Cancellation cleanup must not perform an unbounded polite stdin write")
+            .unwrap();
+        assert!(result.is_err());
+        assert!(
+            manager.child_process.lock().await.is_none(),
+            "Only an actually reaped child may release the exchange"
+        );
+        assert_eq!(manager.active_request_count.load(Ordering::SeqCst), 0);
+        assert!(manager.request_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cleanup_quarantine_retains_exchange_and_job_admission_until_actual_reap() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (manager, _stderr) =
+            fake_sidecar("[Console]::In.ReadLine() | Out-Null; Start-Sleep -Seconds 60").await;
+        // Simulate an unavailable reap path while retaining the real child handle.
+        let child_guard = manager.child_process.lock().await;
+        let running = manager.clone();
+        let (completed, done) = tokio::sync::oneshot::channel();
+        let result = crate::summary::llm_client::supervise(
+            &tokio_util::sync::CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(25),
+            move |token| async move {
+                let _job = crate::audio::inference::claim_job()?;
+                let result = running
+                    .send_request_cancellable(
+                        "{}".into(),
+                        Duration::from_secs(60),
+                        None,
+                        Some(&token),
+                    )
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = completed.send(());
+                result
+            },
+        )
+        .await;
+        let retained = manager.quarantined.load(Ordering::SeqCst)
+            && manager.request_lock.try_lock().is_err()
+            && crate::audio::inference::claim_job().is_err();
+        let rejected = manager
+            .send_request("{}".into(), Duration::from_millis(10))
+            .await
+            .unwrap_err()
+            .to_string();
+        drop(child_guard);
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.active_request_count.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().contains("quarantined"));
+        assert!(
+            retained,
+            "Cleanup timeout must retain child/exchange/JOBS ownership"
+        );
+        assert!(rejected.contains("quarantined"));
+        assert!(manager.child_process.lock().await.is_none());
+        assert!(!manager.quarantined.load(Ordering::SeqCst));
+        let _next_job = crate::audio::inference::claim_job().unwrap();
+        let (replacement,_)=fake_sidecar("[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine('{\"type\":\"response\",\"text\":\"Next answer\",\"error\":null}')").await;
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            replacement.send_request("{}".into(), Duration::from_secs(2)),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), replacement.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.unwrap().unwrap().contains("Next answer"));
+    }
+
+    #[tokio::test]
+    async fn helper_response_retention_is_bounded_before_json_parsing() {
+        let (manager,_)=fake_sidecar("[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine(('x' * 2097152)); Start-Sleep -Seconds 60").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            manager.send_request("{}".into(), Duration::from_secs(3)),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), manager.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.unwrap().is_err(),
+            "Oversized protocol line must fail without retaining unbounded text"
+        );
     }
 
     #[tokio::test]

@@ -442,3 +442,318 @@ attached bookmarks are retained, and cleanup skips active recordings.
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not
 recommend retranscribing unavailable audio. Older archives default this flag to false.
+
+## Local Knowledge Embedding Foundation
+
+The optional knowledge state is disabled on startup and does not load/download
+models implicitly. Its CPU ONNX candidate and SHA-256 manifest live under
+`knowledge/`; explicit downloads use the existing resumable transfer registry.
+The embedding-space identity includes the model revision, both artifact hashes,
+tokenizer version, prefixes, pooling version, and CPU loading policy. The revised
+candidate disables graph optimizations and weight prepacking while keeping the
+exact float32 artifact. It constructs the session before the tokenizer to avoid
+overlapping retained tokenizer allocations with transient model loading. ORT
+defines prepacking control as `session.disable_prepacking=1` in its
+[session configuration reference](https://github.com/microsoft/onnxruntime/blob/v1.22.0/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h).
+The model-space identity distinguishes this loading policy from the earlier
+optimized candidate. Inference handles one input
+at a time with two intra-op threads and sequential graph execution. Inputs are
+bounded to 1,024 UTF-8 bytes for questions and 512 model tokens including
+prefix/special tokens for both queries and passages; oversized inputs fail
+rather than truncate. The indexing layer separately limits chunk bodies to
+320 tokenizer tokens with 48 body tokens of overlap.
+
+Knowledge calls own the shared job and native permits until the blocking call
+returns. Foreground recording/import claims cancel knowledge first and prevent
+new knowledge claims while waiting up to two seconds; local-summary preemption
+retains its existing behavior. Index notifications coalesce by source revision
+in a 32-entry queue; a full queue reports busy so persistent indexing can retry.
+The resident model unloads after 60 seconds idle. Provider/inference errors
+carry categories only, without source text or raw native responses.
+
+The manual knowledge input of the summary regression workflow runs on the
+configured trusted runner, using an exact reviewed commit. Ordinary regression
+runs never download embedding models. Its acceptance option independently
+computes PyTorch/model-card reference vectors from pinned artifacts, then tests
+ONNX parity, peak incremental process memory and cold/warm recording preemption.
+Synthetic fixtures and reference scripts are public; models, reference vectors,
+Python environments, and benchmark output stay on the runner. The acceptance
+gate must pass on the designated runner before dependent indexing work proceeds.
+This foundation does not expose semantic search to users.
+
+The tokenizer is pinned to Apache-2.0 `tokenizers = 0.21.4` with default/network
+features disabled and the Rust regex implementation selected. ORT stays at the
+existing locked `2.0.0-rc.10`. Dependency validation uses the supported stable
+runner toolchain: the repository's declared Rust 1.77 floor is already older
+than ORT's Rust 1.81 and existing `time`/`serde_with` Rust 1.88 requirements.
+This change does not claim compatibility with Rust 1.77.
+
+### Canonical knowledge indexing and retrieval
+
+The knowledge backend uses an additive SQLite migration to seed a stable source
+for every saved meeting, including empty meetings. Canonical transcript changes
+advance the source revision, immediately invalidate semantic publication and
+coalesce one durable job. Speaker, timing, row identity/order and moves between
+meetings participate in invalidation. SQLite FTS5 projects only the changed row
+inside the existing transaction; model tokenization and inference run in the
+background. FTS deletion is explicit because virtual tables do not inherit
+ordinary foreign-key cascades.
+The FTS physical row ID matches the canonical SQLite transcript row ID, so
+per-row updates and deletions use point lookups rather than scanning the full
+FTS table. Evidence identities continue to use canonical transcript IDs and
+spans, independently of that physical projection.
+
+FTS indexes current speaker labels in their own column. Speaker-only hits return
+real transcript spans with visible speaker metadata; semantic bodies remain
+canonical transcript text. Speaker renames invalidate both lexical and semantic
+generations. The source schema reserves document kind and nullable meeting
+ownership for later migrations, while the current worker accepts meeting sources
+only and all document inputs remain rejected.
+
+One worker starts after the installed database pool is available, across normal,
+fresh and legacy-import initialization. It polls durable jobs even if a bounded
+notification was dropped. Publication and cleanup compare both source revision
+and indexing generation under a write transaction. Reindexing the same revision
+therefore supersedes older work. Recording contention, disabled indexing,
+cancellation and superseded jobs do not consume the three real-failure attempts.
+The worker borrows the existing scheduler tokenizer inside bounded calls; it
+does not retain a second tokenizer or a handle across recording backoff.
+
+Keyword evidence uses exact canonical UTF-8 windows of at most 2,048 bytes with
+at most 128 bytes of overlap. Semantic bodies use at most 320 model tokens and
+48-token overlap, with prefixes/special tokens separately checked against 512.
+Evidence identities hash source/revision, canonical row/span and a fingerprint
+including current speaker and time metadata. They do not depend on derived
+cache rows. Titles and meeting dates are joined from current metadata.
+FTS selection carries the original source, revision and generation into
+materialization; a moved or replaced row is rejected as superseded. Canonical
+row pages contain IDs only. Bodies and complete speaker/timing metadata use
+16 KiB incremental SQLite reads, with hashing and keyword matching on one
+bounded blocking reader. Each reader owns its connection, read transaction,
+locked handle and BLOBs until completion or acknowledged cancellation, and
+releases them before model inference or writes. Connection acquisition, identity
+lookup and locked-handle setup check cancellation/foreground priority at
+five-millisecond intervals while pending. Shared inference admission is acquired
+only for synchronous native work after setup, and is released before transaction
+completion awaits. Setup cancellation follows SQLx ownership/rollback; an active
+BLOB still closes in its owning blocking worker. Active background reads register
+their cancellation token with foreground priority under the same lock as job
+admission. The worker-owned guard retains that marker until the shared job permit
+is released, even if the async waiter is aborted. Recording's existing bounded
+preemption wait therefore recognizes active readers as well as embeddings;
+another user recording still receives an immediate busy response. Recording prevents background
+reads and preempts them between windows; keyword reads remain available.
+
+The reusable canonical reader is `knowledge::store`: carry a `SelectedRow`
+(source, owner, revision and generation) from scoped selection, then use
+`locate` for a keyword span or `materialize` for a known canonical span. Each
+call rechecks that identity within its own read transaction; callers must
+still recheck their frozen scope before persisting an answer. Background
+indexing uses `row_ids_page` (32 IDs) and `body_window` (16,384 bytes).
+No caller receives a database handle or retains one across provider work.
+
+A keyword scan retains one 16,384-byte UTF-8 input, a folded-string capacity
+of at most 49,152 bytes and an offset-map capacity of at most 49,152 pairs
+(786,432 bytes on the supported 64-bit runtime), independently of row length.
+Its 4,096-byte scan overlap covers the bounded query across read boundaries.
+Hashing retains one 16,384-byte metadata input plus the passage; JSON escaping
+streams directly into SHA-256. Display strings add at most 3,072 bytes per
+passage. Indexing can temporarily retain both a passage and its inference
+input copy (at most 32,768 bytes combined); tokenizer/model allocations are
+separate existing runtime costs. These bounds cover canonical content and
+metadata buffers, not SQLite's cache, canonical IDs, frozen scope lists or
+the already bounded candidate/vector collections.
+
+The native boundary uses the existing resolved SQLx 0.8.6 and libsqlite3-sys
+0.30.1, now pinned exactly as required by
+[SQLx's locked-handle API](https://docs.rs/sqlx/0.8.6/sqlx/sqlite/struct.LockedSqliteHandle.html#method.as_raw_handle).
+[SQLite incremental BLOB reads](https://www.sqlite.org/c3ref/blob_open.html)
+also support TEXT values and avoid whole-value copies from SQL substring/cast
+expressions. BLOB handles close before their SQLx guards and transactions.
+No SQLite or model runtime version changes accompany this dependency edge.
+
+Display speaker, title and date strings are each capped at 1,024 UTF-8 bytes,
+with `metadata_truncated` explicitly marking incomplete previews. Complete
+canonical metadata is streamed into the existing evidence fingerprint format;
+internal ordering and scope checks use authoritative values. Answer prompts
+must label incomplete metadata rather than infer facts from clipped labels.
+
+Library scope requires selected meeting IDs, project/date/untagged constraints,
+or explicit `all_meetings`. Unicode-lowercase tag equality and Any/All/Untagged
+semantics match the library. Scope resolves before ranking and can be frozen and
+rechecked on a caller-owned SQLite transaction. A frozen scope never acquires
+new meetings. Live and document inputs remain rejected at this phase.
+
+`knowledge_search` accepts a scope, query, document IDs and `keyword`/`hybrid`
+mode. It returns actual mode, index status and canonical passages. Questions are
+limited to 1,024 UTF-8 bytes. Quoted lexical queries and a local cosine scan each
+retain at most 64 candidates; vector pages hold at most 512 rows and scoring
+runs on blocking workers. RRF uses constant 60 and returns at most 12 passages.
+When multiple current indexed sources are eligible, the semantic heap keeps
+at most three candidates per source. A sole eligible source retains all 64
+slots. This limits single-source crowding without merging or deleting stored
+passages; lexical selection retains its full budget. Actual hybrid mode requires
+current vectors inside the selected scope.
+Lexical rank transfers to a published semantic chunk only when that chunk
+covers the complete match. Containment deduplication stays within one source
+revision and preserves distinct dated meetings. Missing models or recording
+contention return keyword results with a visible fallback reason.
+The saved semantic opt-in is distinct from runtime readiness: an enabled
+preference with missing model files reports `model_unavailable`, not `disabled`.
+
+The command surface also includes `knowledge_index_status`, `knowledge_reindex`,
+`knowledge_cancel_index`, `knowledge_model_enable`, `knowledge_model_status`,
+`knowledge_model_download` and `knowledge_model_cancel_download`. Semantic
+enablement is an explicit persisted preference, initially off; a missing model
+never triggers an automatic download. These backend commands precede the
+meeting-intelligence UI and do not change the existing archive search UI.
+
+The guarded manual workflow has a separate retrieval-acceptance switch. It runs
+production indexing and end-to-end searches over 10,000 distinct synthetic
+passages and 30 fixed English/German queries, including nonlexical paraphrases,
+cross-language questions, identifiers and project/date conflicts. It reports
+bulk insertion/coalescing, indexing time, process-memory growth, top-five recall
+and warm p95. Models and measurements remain local to the designated runner.
+
+### Saved conversations and canonical citations
+
+`knowledge_ask` accepts a globally unique request UUID, a durable meeting or
+library owner, and the same explicit scope used by search. The backend resolves
+the configured provider/model, freezes the selected meeting IDs, and saves one
+user turn before generation. A completed retry with identical inputs returns
+the same assistant message; reusing an identity with different inputs fails.
+Cancelled or invalidated requests cannot accept late output. Startup marks
+interrupted requests without automatically resubmitting them.
+
+Prompts contain bounded JSON sections for the question, eligible prior turns,
+and transcript evidence. Document and live inputs remain rejected. Small
+selections can use complete canonical rows to retain short replies and dated
+contradictions: at most eight meetings, fewer than 32 rows per meeting, 64 rows
+overall, and 2,048 bytes per complete row. Larger selections retain bounded
+search results. Context limits can still omit whole rows; answers must qualify
+incomplete evidence. Source text and metadata are untrusted data. Clipped
+metadata is explicitly marked incomplete.
+
+Each request owns its ordered `[K1]` evidence map. Generated answers are asked to
+use independent tags, such as `[K1][K3]`. The backend also recognizes comma
+groups (`[K3, K1]`) and ascending inclusive ranges (`[K1-K4]`), with optional
+whitespace around tokens. Each ordinal must have one to three digits, no
+leading zero, and an entry in that request's map. Groups are bounded to 64
+entries and 1,024 bytes. Mixed comma/range syntax, nested brackets, malformed
+groups and groups with any unknown ordinal are rejected as a whole. Unknown
+tags never become links. The answer text and original map order are preserved;
+renderers must use this grammar and the backend's `cited_tags` allowlist, then
+resolve each link before navigation.
+
+Short replies may carry explicit preceding-question context. Before dispatch,
+the backend verifies both complete canonical rows are already selected, share
+the frozen meeting and source revision, and are immediate neighbors in canonical
+`timestamp,id` order. The predecessor must end in `?`; the nonempty reply must
+be at most 64 UTF-8 bytes and must not itself end in `?`. Partial, stale,
+unselected and nonadjacent rows cannot establish the relation. This is positional
+context, not a new factual decision or additional retrieved evidence.
+
+The optional `EvidenceDisplay.preceding_question_tag` persists that one
+request-local ordinal with the original evidence snapshot. `cited_tags` and raw
+answer content remain exactly the literal model citations and text. The reply's
+`context_links` separately exposes `{kind: "preceding_question", cited_tag,
+context_tag}` for a cited reply. Render the additional link visibly as preceding
+question context and resolve its original map entry, alongside literal links;
+do not imply that the model emitted it. Old history defaults to no context
+relation. Read/restore reject invalid bounds, self-links, chains, cross-source
+or revision relations and invalid spans. Restored context remains historical
+and cannot promote a stale reference to current navigation.
+
+`knowledge_resolve_evidence` reads the current bounded canonical passage
+and checks source revision, content/metadata fingerprint, transcript ID, exact
+UTF-8 span and audio offset. Only a current result supplies a navigation target.
+The additive `navigation` field supplies `meeting_id`, `transcript_id`, the
+current `transcript_index`, and nullable recording-relative `start_seconds`.
+The position lookup uses the paginator's `audio_start_time,id` ordering and
+rechecks source revision/generation in the scalar query. Stale/missing/invalid
+results have no navigation target. The UI never derives a page from rank,
+timestamp, historical IDs, or UTF-8 byte offsets.
+
+The meeting-memory frontend has one native wrapper (`knowledgeService`) and
+one generation owner per search/conversation surface (`useKnowledgeSearch`).
+Meeting-only chat uses its meeting owner. Expanded chat explicitly creates or
+selects a durable library owner; toggling back restores the meeting history and
+retains the selected library owner for the next expansion. Owner changes invalidate
+pending work before late results can enter the new view. All-meetings mode clears
+the frontend ID restriction while retaining project/date/untagged filters and the
+UI's saved selection. The backend still intersects explicit ID restrictions.
+Synchronous pending guards retain a UUID through answer and durable-history
+reconciliation. Scope, owner, query cancellation, and unmount invalidate awaited
+search, ask, history, clear, resolver, route, reveal and player stages. The
+meeting route receives a bounded ephemeral token with no transcript content or
+file paths in its URL, then re-resolves before using the existing paginated
+reveal/player callbacks. Group menus preserve the raw displayed citation group
+and every original ordinal. Literal links require the backend allowlist;
+separately labeled context links validate both map entries and resolve both
+canonical references independently. Native installed clicks remain a manual
+acceptance gate.
+Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
+date and speaker labels describe the original answer snapshot. Editing a title
+or meeting date advances the source revision, invalidates pending answers and
+requeues semantic indexing; keyword retrieval remains available during rebuild.
+
+Prior turns enter a new prompt only when their frozen scope is contained in the
+current selection and every source dependency is current. Historical tags are
+neutralized so they cannot refer to the new request's map. Normalized dependency
+rows cover inherited context as well as newly selected evidence. Source checks
+run immediately before dispatch, during generation, and within the final write
+transaction. Deleting a source redacts dependent turns before removing its
+associations. Clearing a meeting removes legacy and new history together and
+signals its pending requests to stop.
+
+Configured text generation uses one absolute deadline across setup, queueing,
+retries and reads: HTTP 300 seconds or the compatible endpoint's configured
+duration, bundled Codex's configured duration with its 30-second minimum, and
+Built-in AI 900 seconds. The existing text helper delegates to the cancellable
+path. Reply metadata names the backend-normalized dispatched provider and model;
+it does not claim to observe a gateway's internal model routing.
+
+A bounded supervisor retains each operation when its caller disappears. Stop
+signals cancellation without requiring the UI to await cleanup. Cleanup has a
+separate five-second reporting allowance; expiry reports quarantine and does
+not release a live child's exchange or inference admission. The local helper
+rejects reuse while quarantined. Codex cleanup owns only that request's child
+and bounded readers. Ownership ends after actual reap; runtime pins, executable
+discovery and credential/profile boundaries remain unchanged.
+
+Version 1 portable archives include authoritative owner, request, message,
+evidence and dependency rows in dependency order. They omit semantic caches.
+Restored citations preserve their canonical identities but are explicitly
+historical, even if newly created source revision counters match their old
+values. Readable restored history is excluded from future prompts until fresh
+evidence is established. Source counters are never rewritten to make a
+historical reference appear current.
+
+These native conversation commands precede the meeting-intelligence UI. The
+guarded answer-acceptance workflow uses a fixed invented corpus, an isolated
+validation profile and the catalog-pinned Built-in AI model. Its bounded public
+synthetic step summary contains actual first-attempt answers and prompt/evidence
+records for factual review. Ordinary diagnostics contain outcome metadata only;
+model binaries and generated evaluation files are not uploaded or committed.
+
+The manual synthetic answer review job has narrowly scoped Check Run write
+permission. It publishes bounded batches of the invented fixture, exact prompts,
+actual responses and canonical resolutions for independent factual review, and
+keeps the same report in its step summary. Ordinary validation jobs remain
+read-only. Reports are neutral until factual review; they are never diagnostic
+logs, repository files, Actions artifacts or cache entries.
+
+Completed identical requests validate the saved immutable inputs and return their
+original answer before resolving current provider settings or credentials.
+Cancellation signals the active operation immediately, before database access.
+Terminal status persistence shares the existing overall cleanup allowance; if
+storage remains busy, the caller receives a cleanup error and the bounded
+request registry retains ownership until that write finishes. Caller drop uses
+the same retained cancellation ownership.
+
+Answer instructions distinguish an established action from an unassigned owner
+or missing deadline, require original and replacement source citations when
+comparing dated changes, and pair short answers with their question anchors.
+A later incomplete reopening cannot establish suspension or a replacement
+outcome. Actual-provider factual review remains separate from structural
+citation and persistence checks.

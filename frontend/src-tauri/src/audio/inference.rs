@@ -14,6 +14,14 @@ static JOBS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
 #[cfg(test)]
 pub(crate) static GLOBAL_JOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(test)]
+pub(crate) static NATIVE_TEARDOWN_TEST_PAUSE: std::sync::Mutex<
+    Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+
 pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     let permit = JOBS.clone().try_acquire_owned().map_err(|_| {
         if super::diarization::active_speaker_diarization_command().is_some() {
@@ -31,6 +39,23 @@ pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
 pub(crate) async fn claim_job_preempting_local_summary(
     reason: &'static str,
 ) -> Result<OwnedSemaphorePermit, String> {
+    // Block new indexing claims before cancelling the current input. Native FFI
+    // retains both permits until it actually completes.
+    let priority = crate::knowledge::scheduler::ForegroundPriority::enter();
+    if priority.preempted {
+        if let Ok(permit) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(permit) = claim_job() {
+                    break permit;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        {
+            return Ok(permit);
+        }
+    }
     let original = match claim_job() {
         Ok(permit) => return Ok(permit),
         Err(error) => error,
@@ -59,6 +84,14 @@ impl Drop for CancelOnDrop {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NativeRunFailure {
+    #[error("Speech engine is still busy with a previous native call")]
+    Busy,
+    #[error("Native speech engine task failed")]
+    WorkerFailed,
+}
+
 pub(crate) async fn run<T: Send + 'static>(
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
 ) -> Result<T> {
@@ -69,26 +102,47 @@ pub(crate) async fn run_cancellable<T: Send + 'static>(
     cancelled: Arc<AtomicBool>,
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    run_cancellable_with_guard(cancelled, (), work).await
+}
+
+/// The completion guard outlives the native permit, including cancellation and
+/// unwinding. Indexing uses it to keep foreground preemption visible until all
+/// of its resources are available again.
+pub(crate) async fn run_cancellable_with_guard<T: Send + 'static>(
+    cancelled: Arc<AtomicBool>,
+    completion: impl Send + 'static,
+    work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let permit = NATIVE
         .clone()
         .try_acquire_owned()
-        .map_err(|_| anyhow!("Speech engine is still busy with a previous native call"))?;
+        .map_err(|_| NativeRunFailure::Busy)?;
     let mut cancel_on_drop = CancelOnDrop(Some(cancelled.clone()));
     let result = tokio::task::spawn_blocking(move || {
+        // Locals drop in reverse order: release NATIVE before completion.
+        let _completion = completion;
         let _permit = permit;
         if cancelled.load(Ordering::Acquire) {
             return Err(anyhow!("Transcription cancelled"));
         }
         let result = work(cancelled.clone())?;
+        #[cfg(test)]
+        {
+            let pause = NATIVE_TEARDOWN_TEST_PAUSE.lock().unwrap().take();
+            if let Some((started, release)) = pause {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+        }
         if cancelled.load(Ordering::Acquire) {
             return Err(anyhow!("Transcription cancelled"));
         }
         Ok(result)
     })
-    .await
-    .map_err(|_| anyhow!("Native speech engine task failed"))?;
+    .await;
+    // A completed worker failure is not cancellation of the async waiter.
     cancel_on_drop.0 = None;
-    result
+    result.map_err(|_| NativeRunFailure::WorkerFailed)?
 }
 
 #[cfg(test)]

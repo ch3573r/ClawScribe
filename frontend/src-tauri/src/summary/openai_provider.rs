@@ -452,6 +452,31 @@ impl OpenAICompatibleProcessingProvider {
         self.send_chat(system, user, None, None).await
     }
 
+    pub(crate) fn text_settings(&self) -> (&str, u64, usize, Option<u32>) {
+        (
+            &self.config.model,
+            self.config.timeout_seconds,
+            self.config.context_window,
+            self.config.max_tokens,
+        )
+    }
+
+    pub(crate) async fn send_text_prompt_cancellable(
+        &self,
+        system: &str,
+        user: &str,
+        token: &CancellationToken,
+    ) -> Result<String, String> {
+        if token.is_cancelled() {
+            return Err("Answer cancelled".into());
+        }
+        let result = self.send_chat(system, user, None, Some(token)).await;
+        if token.is_cancelled() {
+            return Err("Answer cancelled".into());
+        }
+        result
+    }
+
     async fn build_request(
         &self,
         body: &ChatCompletionRequest,

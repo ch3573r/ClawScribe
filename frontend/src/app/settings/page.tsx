@@ -21,6 +21,7 @@ import { TranscriptSettings } from "@/components/TranscriptSettings";
 import { RecordingSettings } from "@/components/RecordingSettings";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { SummaryModelSettings } from "@/components/SummaryModelSettings";
+import { KnowledgeSettings } from "@/components/KnowledgeSettings";
 import { SummaryTemplateSettings } from "@/components/SummaryTemplateSettings";
 import { BetaSettings } from "@/components/BetaSettings";
 import { IntegrationsSettings, DiagnosticsSettings } from "@/components/IntegrationsSettings";
@@ -53,6 +54,7 @@ const GROUPS: { label: string; items: SectionItem[] }[] = [
     items: [
       { value: "transcription", label: "Transcription", icon: AudioLines, desc: "Speech-to-text engine and model." },
       { value: "summary", label: "Summary", icon: Sparkles, desc: "AI summary provider and model." },
+      { value: "memory", label: "Meeting memory", icon: Sparkles, desc: "Local search model and index progress." },
     ],
   },
   {
@@ -135,6 +137,8 @@ export default function SettingsPage() {
         );
       case "summary":
         return <div className="space-y-6"><SummaryModelSettings /><SummaryTemplateSettings /></div>;
+      case "memory":
+        return <KnowledgeSettings />;
       case "integrations":
         return <IntegrationsSettings />;
       case "diagnostics":

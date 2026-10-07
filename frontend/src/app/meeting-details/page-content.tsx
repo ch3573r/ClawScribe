@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingChat } from '@/components/MeetingDetails/MeetingChat';
+import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
 import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 
@@ -25,6 +26,7 @@ import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 
 export default function PageContent({
   meeting,
+  evidenceToken,
   summaryData,
   shouldAutoGenerate = false,
   onAutoGenerateComplete,
@@ -43,6 +45,7 @@ export default function PageContent({
   onLoadMore,
 }: {
   meeting: any;
+  evidenceToken?: string | null;
   summaryData: Summary | null;
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
@@ -94,10 +97,27 @@ export default function PageContent({
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
+  const evidenceFocusRequest = useRef(0);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
   const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
+  const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
+    if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
+    await onRevealTranscript(id, index);
+    if (!current()) return;
+    setFocusedSource({ id, request: ++evidenceFocusRequest.current });
+    document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+  }, [onRevealTranscript]);
+  const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
+    if (!current()) return;
+    if (!isAudioReady) throw new Error('Saved audio is missing or not ready. The transcript can still be reviewed.');
+    await audioPlayer.seek(seconds);
+    if (!current()) return;
+    const played = await audioPlayer.play();
+    if (!current()) return;
+    if (played === false) throw new Error('Saved audio could not play. Retry playback or review the transcript.');
+  }, [isAudioReady, audioPlayer.seek, audioPlayer.play]);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -276,6 +296,7 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex h-full flex-col bg-background"
     >
+      <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           segments={timelineSegments ?? []}

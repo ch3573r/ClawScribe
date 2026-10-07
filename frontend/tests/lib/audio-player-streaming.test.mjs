@@ -50,3 +50,21 @@ test('playback streams the resolved file, seeks and releases old media on naviga
     assert.equal(elements[1].src, undefined);
   } finally { globalThis.window = previousWindow; }
 });
+
+test('citation playback can distinguish native media rejection from successful playback', async () => {
+  const previousWindow = globalThis.window;
+  class Audio {
+    addEventListener() {} removeEventListener() {} load() {} pause() {} removeAttribute() {}
+    play() { return Promise.reject(new Error('Synthetic playback failure')); }
+  }
+  globalThis.window = { Audio };
+  const hooks = createHookHarness();
+  try {
+    const { useAudioPlayer } = loadTsModule('src/hooks/useAudioPlayer.ts', { react: hooks.react, '@tauri-apps/api/core': { convertFileSrc: path => `asset:${path}` } });
+    const render = () => hooks.render(() => useAudioPlayer('public-fixture/audio.wav'));
+    render();
+    assert.equal(await render().play(), false, 'failed playback must not complete a citation navigation as successful');
+    assert.equal(render().error, 'Failed to play audio');
+    hooks.unmount();
+  } finally { globalThis.window = previousWindow; }
+});

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as TokioCommand};
 use tokio::time::{sleep, timeout};
 
@@ -48,6 +48,132 @@ pub enum CodexHomeMode {
 #[cfg(test)]
 mod app_server_tests {
     use super::*;
+
+    fn saved_text_session(temp: &tempfile::TempDir, scenario: &str) -> AppServerSession {
+        let script = temp.path().join("saved-text-server.cjs");
+        fs::write(&script,r#"
+const fs=require('fs'),readline=require('readline');
+const scenario=process.argv[2];
+const send=m=>process.stdout.write(JSON.stringify(m)+'\n');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const m=JSON.parse(line);
+ if(m.method===scenario) {fs.writeFileSync('ready','ready');return;}
+ if(m.method==='initialize') send({id:m.id,result:{}});
+ if(m.method==='account/read') send({id:m.id,result:{account:{type:'apiKey'}}});
+ if(m.method==='config/read') send({id:m.id,result:{config:{}}});
+ if(m.method==='thread/start') send({id:m.id,result:{thread:{id:'public-thread'}}});
+ if(m.method==='turn/start') {
+   send({id:m.id,result:{text:'One completed answer.'}});
+   if(scenario==='trickle') {fs.writeFileSync('ready','ready');setInterval(()=>send({method:'item/agentMessage/delta',params:{itemId:'one',delta:'x'}}),5);return;}
+   send({method:'turn/completed',params:{turn:{status:scenario}}});
+ }
+});
+"#).unwrap();
+        let provider = CodexAppServerProvider::new(
+            CodexProviderConfig {
+                codex_home_path: Some(
+                    temp.path()
+                        .join("isolated-profile")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            script.clone(),
+        )
+        .unwrap();
+        let name = if cfg!(windows) { "node.exe" } else { "node" };
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .expect("Node is required for protocol tests");
+        let mut command = TokioCommand::new(node);
+        command.arg(script).arg(scenario);
+        AppServerSession::spawn_command(&provider, command, Some(temp.path())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn saved_text_rejects_non_completed_terminal_status_and_reaps_its_child() {
+        for status in ["completed", "failed", "interrupted", ""] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut session = saved_text_session(&temp, status);
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                session.complete_text(
+                    "test-model",
+                    "Public test prompt",
+                    &tokio_util::sync::CancellationToken::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.is_ok(), status == "completed");
+            assert!(session.child.try_wait().unwrap().is_some());
+            assert!(session.stderr_task.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_text_cancellation_and_caller_drop_reap_only_the_owned_exchange() {
+        for scenario in ["initialize", "account/read", "turn/start", "trickle"] {
+            for drop_caller in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut session = saved_text_session(&temp, scenario);
+                let independent_temp = tempfile::tempdir().unwrap();
+                let mut independent = saved_text_session(&independent_temp, "initialize");
+                let token = tokio_util::sync::CancellationToken::new();
+                let task_token = token.clone();
+                let (reaped, done) = tokio::sync::oneshot::channel();
+                let waiter = tokio::spawn(async move {
+                    crate::summary::llm_client::supervise(
+                        &task_token,
+                        tokio::time::Instant::now() + Duration::from_secs(10),
+                        Duration::from_secs(5),
+                        move |token| async move {
+                            let result = session
+                                .complete_text("test-model", "Public test prompt", &token)
+                                .await;
+                            let _ = reaped.send(
+                                session.child.try_wait().unwrap().is_some()
+                                    && session.stderr_task.is_none(),
+                            );
+                            result
+                        },
+                    )
+                    .await
+                });
+                let ready = tokio::time::timeout(Duration::from_secs(5), async {
+                    while !temp.path().join("ready").exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                if drop_caller {
+                    waiter.abort();
+                } else {
+                    token.cancel();
+                }
+                let cleaned = tokio::time::timeout(Duration::from_secs(6), done).await;
+                let caller = tokio::time::timeout(Duration::from_secs(6), waiter).await;
+                let independent_running = independent.child.try_wait().unwrap().is_none();
+                tokio::time::timeout(Duration::from_secs(5), independent.cleanup())
+                    .await
+                    .unwrap();
+                assert!(ready.is_ok(), "Fake provider must reach the selected wait");
+                assert!(
+                    cleaned.unwrap().unwrap(),
+                    "Owned child and reader must finish after cancellation/drop"
+                );
+                assert!(
+                    independent_running,
+                    "Cancellation must not terminate another exchange"
+                );
+                if !drop_caller {
+                    assert!(caller.unwrap().unwrap().is_err());
+                }
+            }
+        }
+    }
 
     #[test]
     fn reauth_message_explains_legacy_file_migration_only_when_present() {
@@ -1485,10 +1611,38 @@ impl CodexAppServerProvider {
     /// model output (no meeting contract). Used for Planner title/notes polish so
     /// Codex has the same AI-polish path as the other providers.
     pub async fn run_text_prompt(&self, prompt: &str) -> Result<String, String> {
-        validate_codex_runtime_file(&self.app_server_binary)?;
-        let mut session = AppServerSession::start(self).await?;
-        session.require_authenticated().await?;
-        session.process_raw_prompt(&self.config.model, prompt).await
+        let provider = self.clone();
+        let prompt = prompt.to_owned();
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.config.timeout_seconds.max(30));
+        super::llm_client::supervise(
+            &tokio_util::sync::CancellationToken::new(),
+            deadline,
+            Duration::from_secs(5),
+            move |token| async move { provider.run_text_prompt_cancellable(&prompt, &token).await },
+        )
+        .await
+    }
+
+    /// The configured-text supervisor retains this future through cleanup.
+    pub(crate) async fn run_text_prompt_cancellable(
+        &self,
+        prompt: &str,
+        token: &tokio_util::sync::CancellationToken,
+    ) -> Result<String, String> {
+        if token.is_cancelled() {
+            return Err("Codex answer cancelled".into());
+        }
+        let binary = self.app_server_binary.clone();
+        let verification =
+            tokio::task::spawn_blocking(move || validate_codex_runtime_file(&binary));
+        tokio::select! {biased;_=token.cancelled()=>return Err("Codex answer cancelled".into()),result=verification=>result.map_err(|_|"Bundled Codex validation failed")??};
+        let mut command = TokioCommand::new(&self.app_server_binary);
+        command.arg("app-server");
+        let mut session = AppServerSession::spawn_command(self, command, None)?;
+        session
+            .complete_text(&self.config.model, prompt, token)
+            .await
     }
 }
 
@@ -2197,7 +2351,7 @@ fn decline_server_request(message: &Value) -> Option<Value> {
 struct AppServerSession {
     child: Child,
     stdin: ChildStdin,
-    lines: Lines<BufReader<ChildStdout>>,
+    lines: BufReader<ChildStdout>,
     stderr_task: Option<tokio::task::JoinHandle<String>>,
     next_id: u64,
     timeout: Duration,
@@ -2205,9 +2359,34 @@ struct AppServerSession {
     cwd: PathBuf,
     _scratch: Option<tempfile::TempDir>,
     codex_home: Option<PathBuf>,
+    require_completed_status: bool,
+    received_bytes: usize,
 }
 
 impl AppServerSession {
+    /// Retained by the configured supervisor even when its caller disappears.
+    async fn complete_text(
+        &mut self,
+        model: &str,
+        prompt: &str,
+        token: &tokio_util::sync::CancellationToken,
+    ) -> Result<String, String> {
+        self.require_completed_status = true;
+        let result = tokio::select! {
+            biased;
+            _=token.cancelled()=>Err("Codex answer cancelled".into()),
+            result=async {
+                self.initialize().await?;
+                self.require_authenticated().await?;
+                self.process_raw_prompt(model,prompt).await
+            }=>result,
+        };
+        self.cleanup().await;
+        if token.is_cancelled() {
+            return Err("Codex answer cancelled".into());
+        }
+        result
+    }
     async fn start(provider: &CodexAppServerProvider) -> Result<Self, String> {
         Self::start_in(provider, None).await
     }
@@ -2223,6 +2402,19 @@ impl AppServerSession {
 
     async fn start_command(
         provider: &CodexAppServerProvider,
+        command: TokioCommand,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
+        let mut session = Self::spawn_command(provider, command, cwd)?;
+        if let Err(error) = session.initialize().await {
+            session.cleanup().await;
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    fn spawn_command(
+        provider: &CodexAppServerProvider,
         mut command: TokioCommand,
         cwd: Option<&Path>,
     ) -> Result<Self, String> {
@@ -2235,6 +2427,7 @@ impl AppServerSession {
             .unwrap_or_else(|| scratch.as_ref().unwrap().path())
             .to_path_buf();
         command
+            .kill_on_drop(true)
             .current_dir(&cwd)
             .env_clear()
             .stdin(Stdio::piped())
@@ -2262,14 +2455,21 @@ impl AppServerSession {
         let stderr_task = stderr.map(|mut stderr| {
             tokio::spawn(async move {
                 let mut buf = Vec::new();
-                let _ = stderr.read_to_end(&mut buf).await;
+                let mut window = [0u8; 4096];
+                while let Ok(count) = stderr.read(&mut window).await {
+                    if count == 0 {
+                        break;
+                    }
+                    let retained = count.min(4096usize.saturating_sub(buf.len()));
+                    buf.extend_from_slice(&window[..retained]);
+                }
                 truncate_for_log(&String::from_utf8_lossy(&buf))
             })
         });
-        let mut session = Self {
+        let session = Self {
             child,
             stdin,
-            lines: BufReader::new(stdout).lines(),
+            lines: BufReader::new(stdout),
             stderr_task,
             next_id: 1,
             timeout: Duration::from_secs(provider.config.timeout_seconds.max(30)),
@@ -2277,9 +2477,26 @@ impl AppServerSession {
             cwd,
             _scratch: scratch,
             codex_home: provider.codex_home.clone(),
+            require_completed_status: false,
+            received_bytes: 0,
         };
-        session.initialize().await?;
         Ok(session)
+    }
+
+    async fn cleanup(&mut self) {
+        // The outer supervisor reports a five-second cleanup overrun while this
+        // session keeps its exclusive child ownership and continues reaping.
+        loop {
+            let _ = self.child.start_kill();
+            match tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await {
+                Ok(Ok(_)) => break,
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        if let Some(reader) = self.stderr_task.take() {
+            reader.abort();
+            let _ = reader.await;
+        }
     }
 
     async fn initialize(&mut self) -> Result<(), String> {
@@ -2487,6 +2704,16 @@ impl AppServerSession {
                     output.collect_completed_item(params);
                 }
                 if method == "turn/completed" {
+                    if self.require_completed_status {
+                        let status = params
+                            .get("turn")
+                            .and_then(|turn| turn.get("status"))
+                            .or_else(|| params.get("status"))
+                            .and_then(Value::as_str);
+                        if status != Some("completed") {
+                            return Err("Codex turn did not complete successfully".into());
+                        }
+                    }
                     if let Some(output) = output.finish(params) {
                         return Ok(strip_json_fence(&output));
                     }
@@ -2560,12 +2787,22 @@ impl AppServerSession {
 
     async fn read_message(&mut self) -> Result<Value, String> {
         loop {
-            let line = timeout(self.timeout, self.lines.next_line())
+            let mut line = Vec::new();
+            let mut bounded = (&mut self.lines).take(1024 * 1024 + 1);
+            let count = timeout(self.timeout, bounded.read_until(b'\n', &mut line))
                 .await
                 .map_err(|_| "Timed out waiting for Codex app-server response")?
-                .map_err(|_| "Failed to read Codex app-server response")?
-                .ok_or("Codex app-server exited before completing the request")?;
-            let message: Value = serde_json::from_str(&line)
+                .map_err(|_| "Failed to read Codex app-server response")?;
+            if count == 0 {
+                return Err("Codex app-server exited before completing the request".into());
+            }
+            self.received_bytes = self.received_bytes.saturating_add(count);
+            if count > 1024 * 1024
+                || (self.require_completed_status && self.received_bytes > 8 * 1024 * 1024)
+            {
+                return Err("Codex response exceeds the saved-answer limit".into());
+            }
+            let message: Value = serde_json::from_slice(&line)
                 .map_err(|_| "Invalid Codex app-server JSONL response")?;
             if let Some(reply) = decline_server_request(&message) {
                 self.send(&reply).await?;

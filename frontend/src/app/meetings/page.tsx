@@ -15,6 +15,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { LibraryBackup } from "@/components/LibraryBackup";
+import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
 import { matchesProjectFilter, type ProjectFilter } from "@/lib/library";
 import {
   DropdownMenu,
@@ -66,9 +67,6 @@ export default function MeetingsPage() {
   const {
     meetings,
     setCurrentMeeting,
-    searchTranscripts,
-    searchResults,
-    isSearching,
     refetchMeetings,
     projectTags,
     projectTagsError,
@@ -110,16 +108,13 @@ export default function MeetingsPage() {
     );
   }, [normalizedQuery, sortedMeetings]);
 
-  const filteredSearchResults = searchResults.filter(result => matchesProjectFilter(result.id, projectFilter, projectTags));
-  const hasTranscriptMatches = normalizedQuery.length > 0 && filteredSearchResults.length > 0;
   const visibleMeetings = normalizedQuery ? titleMatches : sortedMeetings;
 
   const handleQueryChange = useCallback(
     (value: string) => {
       setQuery(value);
-      void searchTranscripts(value);
     },
-    [searchTranscripts],
+    [],
   );
 
   const handleRefresh = useCallback(async () => {
@@ -139,21 +134,7 @@ export default function MeetingsPage() {
     [router, setCurrentMeeting],
   );
 
-  const titleFor = useCallback(
-    (id: string, fallback: string) =>
-      meetings.find((meeting) => meeting.id === id)?.title || fallback,
-    [meetings],
-  );
-
-  const dateFor = useCallback(
-    (id: string) =>
-      formatMeetingDate(meetings.find((meeting) => meeting.id === id)?.created_at),
-    [meetings],
-  );
-
-  const shownCount = hasTranscriptMatches
-    ? filteredSearchResults.length
-    : visibleMeetings.length;
+  const shownCount = visibleMeetings.length;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto bg-background text-foreground">
@@ -185,7 +166,7 @@ export default function MeetingsPage() {
             <InputGroup className="rounded-md border-border bg-background text-foreground shadow-none">
               <InputGroupInput
                 id="meetings-search"
-                placeholder="Search meetings and transcripts..."
+                placeholder="Filter meeting titles..."
                 value={query}
                 onChange={(event) => handleQueryChange(event.target.value)}
                 className="placeholder:text-muted-foreground"
@@ -263,22 +244,18 @@ export default function MeetingsPage() {
               <span>{meetings.length} total</span>
               <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
               <span>{shownCount} shown</span>
-              {isSearching && (
-                <>
-                  <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
-                  <span className="text-primary">Searching...</span>
-                </>
-              )}
             </div>
           </div>
         </section>
+
+        <KnowledgeArchive meetings={sortedMeetings} projectFilter={projectFilter} />
 
         <div className="grid min-h-0 gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <section className="min-w-0 rounded-lg border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between gap-4 border-b border-border px-6 py-5">
               <div>
                 <h2 className="text-lg font-semibold text-foreground">
-                  {hasTranscriptMatches ? "Transcript Matches" : "Saved Meetings"}
+                  Saved Meetings
                 </h2>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {normalizedQuery
@@ -289,50 +266,7 @@ export default function MeetingsPage() {
               <NotebookPen className="h-5 w-5 text-primary" />
             </div>
 
-            {hasTranscriptMatches ? (
-              <div className="divide-y divide-border">
-                {filteredSearchResults.map((result, index) => {
-                  const title = titleFor(result.id, result.title);
-                  return (
-                    <button
-                      key={`${result.id}-${index}`}
-                      onClick={() => openMeeting(result.id, title)}
-                      className="group grid w-full gap-4 px-6 py-5 text-left transition hover:bg-muted lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"
-                    >
-                      <div className="flex min-w-0 gap-3">
-                        <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-primary">
-                          <FileText className="h-4 w-4" />
-                        </span>
-                        <div className="min-w-0">
-                          <h3 className="truncate text-sm font-semibold text-foreground">
-                            {title}
-                          </h3>
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                            <span>Transcript match</span>
-                            <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
-                            <CalendarDays className="h-3.5 w-3.5" />
-                            <span>{dateFor(result.id)}</span>
-                            {result.timestamp ? (
-                              <>
-                                <span className="h-1 w-1 rounded-full bg-muted-foreground/40" />
-                                <span>{result.timestamp}</span>
-                              </>
-                            ) : null}
-                          </div>
-                          <p className="mt-3 line-clamp-2 text-sm leading-6 text-muted-foreground">
-                            {result.matchContext}
-                          </p>
-                        </div>
-                      </div>
-                      <span className="inline-flex items-center gap-2 text-sm font-medium text-primary lg:justify-self-end">
-                        Open details
-                        <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : visibleMeetings.length > 0 ? (
+            {visibleMeetings.length > 0 ? (
               <div className="divide-y divide-border">
                 {visibleMeetings.map((meeting) => (
                   <button
@@ -393,12 +327,6 @@ export default function MeetingsPage() {
                   <span className="text-muted-foreground">Current results</span>
                   <span className="font-semibold text-foreground">
                     {shownCount}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between py-3">
-                  <span className="text-muted-foreground">Transcript hits</span>
-                  <span className="font-semibold text-foreground">
-                    {normalizedQuery ? filteredSearchResults.length : 0}
                   </span>
                 </div>
               </div>
