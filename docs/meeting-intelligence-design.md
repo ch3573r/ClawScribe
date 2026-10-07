@@ -181,7 +181,11 @@ Every retrieved passage carries a backend-owned reference:
 `locator` identifies saved transcript IDs and recording-relative time,
 document page/paragraph, or live session ID and segment sequence. The model
 receives short tags such as `[K1]`. Resolve tags only through the supplied
-evidence map; unknown tags cannot become navigation links. Citations open a
+evidence map; unknown tags cannot become navigation links. Saved-answer parsing
+also accepts comma groups and bounded ascending ranges, with all-or-nothing
+validation against that request's map. The exact grammar and limits are in
+`architecture.md`; the citation renderer must match it and use backend
+`cited_tags` rather than inferring extra links. Citations open a
 transcript passage/playback or an extracted-document preview. Document
 evidence must remain distinguishable from what someone said in a meeting.
 

@@ -95,23 +95,58 @@ pub fn tagged_references(content: &str, map: &[Passage]) -> Vec<(usize, Evidence
 
 pub fn tag_numbers(content: &str, count: usize) -> Vec<usize> {
     let mut tags = std::collections::BTreeSet::new();
-    for part in content.split("[K").skip(1) {
-        let Some(end) = part.find(']') else { continue };
-        let digits = &part[..end];
+    let mut remaining = content;
+    while let Some(start) = remaining.find('[') {
+        remaining = &remaining[start + 1..];
+        let Some(end) = remaining.find(']') else {
+            break;
+        };
+        if let Some(group) = citation_group(&remaining[..end], count) {
+            tags.extend(group);
+        }
+        remaining = &remaining[end + 1..];
+    }
+    tags.into_iter().collect()
+}
+
+/// A complete bracket group is accepted or rejected together. Never salvage an
+/// inner tag from malformed/nested syntax, or expand an unknown range endpoint.
+fn citation_group(body: &str, count: usize) -> Option<Vec<usize>> {
+    const MAX_GROUP_TAGS: usize = 64;
+    if body.len() > 1024 {
+        return None;
+    }
+    let number = |item: &str| {
+        let digits = item.trim().strip_prefix('K')?;
         if digits.is_empty()
             || digits.len() > 3
             || digits.starts_with('0')
             || !digits.bytes().all(|b| b.is_ascii_digit())
         {
-            continue;
+            return None;
         }
-        if let Ok(tag) = digits.parse::<usize>() {
-            if tag > 0 && tag <= count {
-                tags.insert(tag);
+        let tag = digits.parse::<usize>().ok()?;
+        (tag <= count).then_some(tag)
+    };
+    if body.contains(',') {
+        let mut group = Vec::new();
+        for item in body.split(',') {
+            if group.len() == MAX_GROUP_TAGS {
+                return None;
             }
+            group.push(number(item)?);
         }
+        Some(group)
+    } else if let Some((first, last)) = body.split_once('-') {
+        let first = number(first)?;
+        let last = number(last)?;
+        if last < first || last - first >= MAX_GROUP_TAGS {
+            return None;
+        }
+        Some((first..=last).collect())
+    } else {
+        Some(vec![number(body)?])
     }
-    tags.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -158,6 +193,9 @@ mod tests {
             );
         }
         assert!(tag_numbers("[K1, K2]", 1).is_empty());
+        assert!(tag_numbers("[K1-K65]", 999).is_empty());
+        assert!(tag_numbers(&format!("[{}]", vec!["K1"; 65].join(",")), 1).is_empty());
+        assert_eq!(tag_numbers("[K1-K64]", 64), (1..=64).collect::<Vec<_>>());
         assert_eq!(tag_numbers("Unknown [K999]. Known [K1].", 1), vec![1]);
     }
 

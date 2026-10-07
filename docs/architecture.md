@@ -629,8 +629,18 @@ search results. Context limits can still omit whole rows; answers must qualify
 incomplete evidence. Source text and metadata are untrusted data. Clipped
 metadata is explicitly marked incomplete.
 
-Each request owns its ordered `[K1]` evidence map. Unknown tags never become
-links. `knowledge_resolve_evidence` reads the current bounded canonical passage
+Each request owns its ordered `[K1]` evidence map. Generated answers are asked to
+use independent tags, such as `[K1][K3]`. The backend also recognizes comma
+groups (`[K3, K1]`) and ascending inclusive ranges (`[K1-K4]`), with optional
+whitespace around tokens. Each ordinal must have one to three digits, no
+leading zero, and an entry in that request's map. Groups are bounded to 64
+entries and 1,024 bytes. Mixed comma/range syntax, nested brackets, malformed
+groups and groups with any unknown ordinal are rejected as a whole. Unknown
+tags never become links. The answer text and original map order are preserved;
+renderers must use this grammar and the backend's `cited_tags` allowlist, then
+resolve each link before navigation.
+
+`knowledge_resolve_evidence` reads the current bounded canonical passage
 and checks source revision, content/metadata fingerprint, transcript ID, exact
 UTF-8 span and audio offset. Only a current result supplies a navigation target.
 Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
