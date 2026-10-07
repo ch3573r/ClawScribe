@@ -44,6 +44,7 @@ function component(file, name, props, invoke) {
       }),
     },
     "@/components/ui/button": { Button: "button" },
+    "@/components/ui/popover": { Popover: "popover", PopoverTrigger: "trigger", PopoverContent: "content" },
     "@/components/ui/dialog": {
       Dialog: "dialog",
       DialogContent: "content",
