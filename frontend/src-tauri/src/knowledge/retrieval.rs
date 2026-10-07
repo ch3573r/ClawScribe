@@ -552,6 +552,88 @@ pub async fn retrieve(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn renamed_unicode_speaker_search_returns_current_canonical_evidence() {
+        let pool = fixture().await;
+        add_text(
+            &pool,
+            "speaker-row",
+            "one",
+            "Ja. Die Lieferung kommt am Freitag.",
+        )
+        .await;
+        sqlx::query("UPDATE transcripts SET speaker='Özlem' WHERE id='speaker-row'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let hits = search_channels(&pool, &scope, "özlem", None).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "speaker-only matches must retain canonical row evidence"
+        );
+        assert_eq!(hits[0].speaker.as_deref(), Some("Özlem"));
+        assert_eq!(hits[0].text, "Ja. Die Lieferung kommt am Freitag.");
+        let old = hits[0].evidence.clone();
+        sqlx::query("UPDATE transcripts SET speaker='İpek' WHERE id='speaker-row'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(search_channels(&pool, &scope, "özlem", None)
+            .await
+            .unwrap()
+            .is_empty());
+        let hits = search_channels(&pool, &scope, "İpek", None).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].speaker.as_deref(), Some("İpek"));
+        assert!(hits[0].text.len() <= 2048);
+        assert_ne!(hits[0].evidence.fingerprint, old.fingerprint);
+        assert!(hits[0].evidence.source_revision > old.source_revision);
+    }
+    #[tokio::test]
+    async fn date_scope_rejects_partial_invalid_timestamp_and_reversed_bounds() {
+        let pool = fixture().await;
+        for (from, to) in [
+            (Some("2026-09"), None),
+            (Some("2026-02-30"), None),
+            (None, Some("2026-13-01")),
+            (Some("2026-09-01T12:00:00Z"), None),
+            (Some("2026-10-01"), Some("2026-09-01")),
+            (Some("2026-9-01"), None),
+        ] {
+            let scope = KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    all_meetings: true,
+                    from: from.map(str::to_owned),
+                    to: to.map(str::to_owned),
+                    ..Default::default()
+                },
+            };
+            assert!(matches!(
+                freeze_scope(&pool, &scope).await,
+                Err(KnowledgeError::InvalidInput)
+            ));
+        }
+        let scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                from: Some("2026-09-01".into()),
+                to: Some("2026-09-01".into()),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+            vec!["two"]
+        );
+    }
+    #[tokio::test]
     async fn vector_scan_reaches_last_page_with_bounded_candidates_and_results() {
         let pool = fixture().await;
         for n in 0..600 {

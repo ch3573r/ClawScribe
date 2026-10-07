@@ -222,6 +222,82 @@ pub async fn status(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn deletion_removes_populated_vectors_with_both_repository_and_fk_order() {
+        for transcripts_first in [false, true] {
+            let pool = database().await;
+            meeting(&pool, "one").await;
+            transcript(&pool).await;
+            let job = next_job(&pool).await.unwrap().unwrap();
+            let row = rows_page(&pool, &job, None).await.unwrap().remove(0);
+            let span = TextSpan {
+                transcript_id: row.id.clone(),
+                start_byte: 0,
+                end_byte: row.transcript.len(),
+            };
+            stage(&pool, &job, &row, &span, 0, &vec![1.; 384], "test-space")
+                .await
+                .unwrap();
+            assert_eq!(
+                count(&pool, "SELECT COUNT(*) FROM knowledge_vectors").await,
+                1
+            );
+            assert_eq!(count(&pool, "SELECT COUNT(*) FROM knowledge_fts").await, 1);
+            if transcripts_first {
+                sqlx::query("DELETE FROM transcripts WHERE meeting_id='one'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("DELETE FROM meetings WHERE id='one'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            for table in [
+                "knowledge_sources",
+                "knowledge_chunks",
+                "knowledge_vectors",
+                "knowledge_index_jobs",
+                "knowledge_fts",
+            ] {
+                assert_eq!(
+                    count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await,
+                    0,
+                    "orphan in {table}"
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn enabled_without_model_is_distinct_from_disabled() {
+        let pool = database().await;
+        let disabled = status(&pool, false, "test-space").await.unwrap();
+        assert!(!disabled.semantic_enabled);
+        assert_eq!(disabled.reason.as_deref(), Some("disabled"));
+        sqlx::query("UPDATE knowledge_settings SET enabled=1 WHERE singleton=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let missing = status(&pool, false, "test-space").await.unwrap();
+        assert!(
+            missing.semantic_enabled,
+            "saved opt-in must be visible without a ready runtime"
+        );
+        assert_eq!(missing.reason.as_deref(), Some("model_unavailable"));
+    }
+    #[tokio::test]
+    async fn reserved_document_source_does_not_enter_meeting_worker() {
+        let pool = database().await;
+        let insert=sqlx::query("INSERT INTO knowledge_sources(id,kind,meeting_id) VALUES('document:reserved','document',NULL)").execute(&pool).await;
+        assert!(insert.is_ok(),"source ownership must support future document migration without rebuilding evidence foreign keys");
+        sqlx::query(
+            "INSERT INTO knowledge_index_jobs(source_id,revision) VALUES('document:reserved',1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(next_job(&pool).await.unwrap().is_none());
+    }
+    #[tokio::test]
     async fn model_space_change_requires_reindex_and_supersedes_same_revision_worker() {
         let pool = database().await;
         meeting(&pool, "one").await;
