@@ -442,3 +442,41 @@ attached bookmarks are retained, and cleanup skips active recordings.
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not
 recommend retranscribing unavailable audio. Older archives default this flag to false.
+
+## Local Knowledge Embedding Foundation
+
+The optional knowledge state is disabled on startup and does not load/download
+models implicitly. Its CPU ONNX candidate and SHA-256 manifest live under
+`knowledge/`; explicit downloads use the existing resumable transfer registry.
+The embedding-space identity includes the model revision, both artifact hashes,
+tokenizer version, prefixes, and pooling version. Inference handles one input
+at a time with two intra-op threads and sequential graph execution. Inputs are
+bounded to 1,024 UTF-8 bytes for questions and 512 model tokens including
+prefix/special tokens for both queries and passages; oversized inputs fail
+rather than truncate. The indexing layer separately limits chunk bodies to
+320 tokenizer tokens with 48 body tokens of overlap.
+
+Knowledge calls own the shared job and native permits until the blocking call
+returns. Foreground recording/import claims cancel knowledge first and prevent
+new knowledge claims while waiting up to two seconds; local-summary preemption
+retains its existing behavior. Index notifications coalesce by source revision
+in a 32-entry queue; a full queue reports busy so persistent indexing can retry.
+The resident model unloads after 60 seconds idle. Provider/inference errors
+carry categories only, without source text or raw native responses.
+
+The manual knowledge input of the summary regression workflow runs on the
+configured trusted runner, using an exact reviewed commit. Ordinary regression
+runs never download embedding models. Its acceptance option independently
+computes PyTorch/model-card reference vectors from pinned artifacts, then tests
+ONNX parity, peak incremental process memory and cold/warm recording preemption.
+Synthetic fixtures and reference scripts are public; models, reference vectors,
+Python environments, and benchmark output stay on the runner. This foundation
+does not establish that the candidate has passed the acceptance gate or expose
+semantic search to users.
+
+The tokenizer is pinned to Apache-2.0 `tokenizers = 0.21.4` with default/network
+features disabled and the Rust regex implementation selected. ORT stays at the
+existing locked `2.0.0-rc.10`. Dependency validation uses the supported stable
+runner toolchain: the repository's declared Rust 1.77 floor is already older
+than ORT's Rust 1.81 and existing `time`/`serde_with` Rust 1.88 requirements.
+This change does not claim compatibility with Rust 1.77.

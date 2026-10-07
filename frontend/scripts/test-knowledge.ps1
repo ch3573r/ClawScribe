@@ -6,15 +6,15 @@ if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
     $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER) { throw 'Designated build runner required.' }
 . (Join-Path $PSScriptRoot 'configure-windows-portability.ps1')
 $env:LIBCLANG_PATH = Join-Path $env:ProgramFiles 'LLVM/bin'
-if (-not $env:VULKAN_SDK) {
-    $sdk = Get-ChildItem 'C:/VulkanSDK' -Directory | Where-Object Name -eq '1.4.309.0' | Select-Object -First 1
-    if ($sdk) { $env:VULKAN_SDK = $sdk.FullName }
-}
+$pinnedSdk = 'C:/VulkanSDK/1.4.309.0'
+if (Test-Path -LiteralPath $pinnedSdk) { $env:VULKAN_SDK = $pinnedSdk }
+else { throw 'The repository-pinned Vulkan SDK 1.4.309.0 is required.' }
 ./frontend/scripts/ensure-windows-vulkan-runtime.ps1
 node scripts/verify-public-repo-safety.mjs
 cargo fmt --all -- --check
-cargo check -p clawscribe --locked --features windows-gpu
 ./frontend/scripts/stage-sherpa-runtime.ps1 -TauriRoot frontend/src-tauri -Runtime directml
+rustc --version
+cargo check -p clawscribe --locked --features windows-gpu
 $runtime = (Resolve-Path 'frontend/src-tauri/binaries/sherpa-onnx').Path
 $env:PATH = "$runtime;$env:PATH"
 $build = & cargo test -p clawscribe --lib --release --locked --features windows-gpu --no-run --message-format=json-render-diagnostics

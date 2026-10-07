@@ -118,10 +118,9 @@ impl OnnxEmbedding {
             .tokenizer
             .encode(prefixed_input(text, purpose)?, true)
             .map_err(|_| KnowledgeError::InvalidInput)?;
-        let limit = match purpose {
-            EmbeddingPurpose::Query => 512,
-            EmbeddingPurpose::Passage => 320,
-        };
+        // Chunking owns the separate 320 body-token budget. Prefix/special
+        // tokens count against the model input limit, for both purposes.
+        let limit = 512;
         if encoded.is_empty() || encoded.len() > limit {
             return Err(KnowledgeError::InvalidInput);
         }
@@ -325,7 +324,7 @@ mod acceptance {
                 let (input, purpose) = if n % 2 == 0 {
                     ("a ".repeat(508), EmbeddingPurpose::Query)
                 } else {
-                    ("garden ".repeat(315), EmbeddingPurpose::Passage)
+                    ("garden ".repeat(320), EmbeddingPurpose::Passage)
                 };
                 let encoded = runtime.encode(&input, purpose)?;
                 assert!(encoded.len() >= 315, "exercise near-boundary native input");

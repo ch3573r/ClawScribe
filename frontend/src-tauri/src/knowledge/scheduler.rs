@@ -141,7 +141,7 @@ impl NotificationQueue {
     }
 }
 struct Worker {
-    model: Option<OnnxEmbedding>,
+    model: Option<Box<dyn EmbeddingBackend>>,
     last_used: Instant,
 }
 pub struct Scheduler {
@@ -250,7 +250,17 @@ impl Scheduler {
                     .unwrap()
                     .clone()
                     .ok_or(KnowledgeError::ModelUnavailable)?;
-                worker.model = Some(OnnxEmbedding::load(&verified)?);
+                worker.model = Some(Box::new(OnnxEmbedding::load(&verified)?));
+                if scheduler
+                    .cancellation
+                    .active
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|token| token.load(Ordering::Acquire))
+                {
+                    return Err(KnowledgeError::Cancelled);
+                }
             }
             let result = worker.model.as_mut().unwrap().embed(&text, purpose);
             worker.last_used = Instant::now();
@@ -263,6 +273,36 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_unload_releases_model_only_after_sixty_seconds() {
+        struct DropProbe(Arc<AtomicBool>);
+        impl EmbeddingBackend for DropProbe {
+            fn space(&self) -> super::super::types::EmbeddingSpace {
+                super::super::model::PINS.space()
+            }
+            fn embed(&mut self, _: &str, _: EmbeddingPurpose) -> Result<Vec<f32>, KnowledgeError> {
+                unreachable!()
+            }
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let scheduler = Scheduler::new(Arc::new(CancellationRegistry::default()));
+        scheduler.enabled.store(true, Ordering::Release);
+        let dropped = Arc::new(AtomicBool::new(false));
+        {
+            let mut worker = scheduler.worker.lock().unwrap();
+            worker.model = Some(Box::new(DropProbe(dropped.clone())));
+            worker.last_used = Instant::now() - Duration::from_secs(59);
+        }
+        assert!(scheduler.unload_idle() <= Duration::from_secs(1));
+        assert!(!dropped.load(Ordering::Acquire));
+        scheduler.worker.lock().unwrap().last_used = Instant::now() - Duration::from_secs(61);
+        scheduler.unload_idle();
+        assert!(dropped.load(Ordering::Acquire));
+    }
     #[test]
     fn notifications_coalesce_with_bounded_backpressure() {
         let mut queue = NotificationQueue::default();
