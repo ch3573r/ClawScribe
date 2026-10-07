@@ -37,7 +37,7 @@ if (Test-Path $ffmpeg) { Copy-Item $ffmpeg (Join-Path $testDirectory 'ffmpeg.exe
 if ($MutationAcceptance) {
     & $executables[0] knowledge::store::tests::synthetic_fts_mutation_workload --ignored --exact --test-threads=1 --nocapture
 }
-& $executables[0] knowledge:: --test-threads=1
+& $executables[0] knowledge:: --test-threads=1 --show-output
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }
 if ($RetrievalAcceptance) {

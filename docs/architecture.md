@@ -534,6 +534,26 @@ locked handle and BLOBs until completion or acknowledged cancellation, and
 releases them before model inference or writes. Recording prevents background
 reads and preempts them between windows; keyword reads remain available.
 
+The reusable canonical reader is `knowledge::store`: carry a `SelectedRow`
+(source, owner, revision and generation) from scoped selection, then use
+`locate` for a keyword span or `materialize` for a known canonical span. Each
+call rechecks that identity within its own read transaction; callers must
+still recheck their frozen scope before persisting an answer. Background
+indexing uses `row_ids_page` (32 IDs) and `body_window` (16,384 bytes).
+No caller receives a database handle or retains one across provider work.
+
+A keyword scan retains one 16,384-byte UTF-8 input, a folded-string capacity
+of at most 49,152 bytes and an offset-map capacity of at most 49,152 pairs
+(786,432 bytes on the supported 64-bit runtime), independently of row length.
+Its 4,096-byte scan overlap covers the bounded query across read boundaries.
+Hashing retains one 16,384-byte metadata input plus the passage; JSON escaping
+streams directly into SHA-256. Display strings add at most 3,072 bytes per
+passage. Indexing can temporarily retain both a passage and its inference
+input copy (at most 32,768 bytes combined); tokenizer/model allocations are
+separate existing runtime costs. These bounds cover canonical content and
+metadata buffers, not SQLite's cache, canonical IDs, frozen scope lists or
+the already bounded candidate/vector collections.
+
 The native boundary uses the existing resolved SQLx 0.8.6 and libsqlite3-sys
 0.30.1, now pinned exactly as required by
 [SQLx's locked-handle API](https://docs.rs/sqlx/0.8.6/sqlx/sqlite/struct.LockedSqliteHandle.html#method.as_raw_handle).

@@ -597,9 +597,29 @@ mod tests {
         MAPPING_PEAK.store(0, Ordering::Relaxed);
         let recording = crate::audio::inference::claim_job().unwrap();
         let started = std::time::Instant::now();
-        let hits = search_channels(&pool, &scope, "ATLAS-42", None)
-            .await
-            .unwrap();
+        // This test uses a single async runtime thread. Its heartbeat measures
+        // scheduling responsiveness while the blocking reader scans a late hit.
+        let finished = std::sync::atomic::AtomicBool::new(false);
+        let search = async {
+            let result = search_channels(&pool, &scope, "ATLAS-42", None).await;
+            finished.store(true, Ordering::Release);
+            result
+        };
+        let heartbeat = async {
+            let mut ticks = 0;
+            let mut maximum_gap = std::time::Duration::ZERO;
+            let mut previous = std::time::Instant::now();
+            while !finished.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                let now = std::time::Instant::now();
+                maximum_gap = maximum_gap.max(now.duration_since(previous));
+                previous = now;
+                ticks += 1;
+            }
+            (ticks, maximum_gap.as_micros())
+        };
+        let (hits, (heartbeat_ticks, maximum_gap_us)) = tokio::join!(search, heartbeat);
+        let hits = hits.unwrap();
         let elapsed = started.elapsed().as_millis();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].text.contains("ATLAS-42"));
@@ -612,7 +632,7 @@ mod tests {
         drop(recording);
         let body = store::BODY_PEAK.load(Ordering::Relaxed);
         let mapping = MAPPING_PEAK.load(Ordering::Relaxed);
-        println!("KNOWLEDGE_LARGE_KEYWORD canonical_bytes={} retained_body_bytes={body} mapping_bytes={mapping} elapsed_ms={elapsed} recording_contended=true",text.len());
+        println!("KNOWLEDGE_LARGE_KEYWORD canonical_bytes={} retained_body_bytes={body} mapping_bytes={mapping} elapsed_ms={elapsed} heartbeat_ticks={heartbeat_ticks} maximum_heartbeat_gap_us={maximum_gap_us} recording_contended=true",text.len());
         assert!(
             body <= 16384,
             "canonical body loading must be byte bounded, got {body}"
@@ -669,8 +689,10 @@ mod tests {
             "clipped display fields must be explicitly marked"
         );
         assert!(hits[0].speaker.as_ref().unwrap().len() <= 1024 && hits[0].title.len() <= 1024);
+        let metadata = store::METADATA_PEAK.load(std::sync::atomic::Ordering::Relaxed);
+        println!("KNOWLEDGE_LARGE_METADATA speaker_bytes={} timing_bytes={} retained_read_bytes={metadata} displayed_speaker_bytes={} displayed_title_bytes={} fingerprint_matches_complete=true", speaker.len(), timing.len(), hits[0].speaker.as_ref().unwrap().len(), hits[0].title.len());
         assert!(
-            store::METADATA_PEAK.load(std::sync::atomic::Ordering::Relaxed) <= 16384,
+            metadata <= 16384,
             "canonical metadata hashing must stream bounded buffers"
         );
     }
