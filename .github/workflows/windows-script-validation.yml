@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '24.21.0'
       - name: Parse native test and packaging scripts
         shell: pwsh
         run: |
