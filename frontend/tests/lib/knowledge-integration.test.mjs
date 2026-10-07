@@ -274,13 +274,13 @@ test("status polling clears a recovered read error without clearing a failed act
   try {
     app.render();
     await flush();
-    assert.match(text(app.render()), /Retry to reconnect/);
+    assert.match(text(app.render()), /Could not read meeting memory status/);
     // Invoke the scheduled poll itself; manual Refresh previously hid the bug.
     // The same refresh closure is captured by the component's interval.
     failRead = false;
     await new Promise((resolve) => setTimeout(resolve, 2600));
-    assert.doesNotMatch(text(app.render()), /Retry to reconnect/);
-    app.button("Download embedding model").props.onClick();
+    assert.doesNotMatch(text(app.render()), /Could not read meeting memory status/);
+    app.button("Download search model").props.onClick();
     await flush();
     assert.match(text(app.render()), /Download failed/);
     await new Promise((resolve) => setTimeout(resolve, 2600));
