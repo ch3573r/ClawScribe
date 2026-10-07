@@ -87,6 +87,9 @@ Retrieval rules:
   its spans cover the complete match; otherwise keep the lexical evidence.
 - Index current corrected transcript text and speaker labels. Generated
   summaries and assistant messages are not primary evidence.
+- Speaker labels have their own lexical index field. Keep semantic embeddings
+  limited to canonical transcript bodies; return speaker-name matches with
+  actual row spans and current speaker metadata, including after label edits.
 - Apply meeting, date, and project-tag scope in the backend before ranking.
   Document context is limited to explicitly selected attachments in that scope.
 - A library request selects meeting IDs or project/date/untagged constraints,
@@ -95,6 +98,14 @@ Retrieval rules:
 - Retrieve up to 64 candidates from each of lexical and semantic search, merge
   with reciprocal rank fusion using constant 60, and return at most 12 passages.
   Vector scans read at most 512 rows per page and retain only the best candidates.
+- When at least two currently indexed saved sources are eligible in the frozen
+  scope, retain at most three semantic candidates per source within the overall
+  64-candidate budget. A sole eligible source retains the full budget. This
+  prevents repetitive passages from one large source from crowding out other
+  meetings. Lexical candidates keep their existing budget and exact identifiers.
+  This is candidate selection, not deduplication: preserve every stored passage
+  and its distinct source, date, span, and fingerprint. A question needing more
+  semantic passages from one source can select that source alone.
 - Questions retain the existing 1,024 UTF-8-byte limit. Evidence uses the
   selected provider's context budget; never silently exceed it.
 - Missing models, recording contention, or indexing failures produce a visible
