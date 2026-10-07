@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 export const trustedPullRequestCondition = "${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.pull_request.author_association)) }}";
+const manualAnswerQaCondition = "${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && inputs['answer-acceptance'] }}";
 const localRunner = '[self-hosted, Windows, X64, clawscribe]';
 
 // Workflows use block-style job declarations. Reject unknown runner syntax and
@@ -65,7 +66,7 @@ export function workflowPolicyErrors(name, source) {
       if (pullRequests) errors.push(`${label}: pull requests must use a guarded local job`);
       continue;
     }
-    if (pullRequests && /^    if:[ \t]*(.*)$/m.exec(job.source)?.[1].trim() !== trustedPullRequestCondition) {
+    if (pullRequests && ![trustedPullRequestCondition, manualAnswerQaCondition].includes(/^    if:[ \t]*(.*)$/m.exec(job.source)?.[1].trim())) {
       errors.push(`${label}: exclude forks and untrusted authors before scheduling a pull-request job`);
     }
     const checkout = job.source.indexOf('uses: actions/checkout@');

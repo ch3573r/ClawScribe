@@ -676,3 +676,10 @@ validation profile and the catalog-pinned Built-in AI model. Its bounded public
 synthetic step summary contains actual first-attempt answers and prompt/evidence
 records for factual review. Ordinary diagnostics contain outcome metadata only;
 model binaries and generated evaluation files are not uploaded or committed.
+
+The manual synthetic answer review job has narrowly scoped Check Run write
+permission. It publishes bounded batches of the invented fixture, exact prompts,
+actual responses and canonical resolutions for independent factual review, and
+keeps the same report in its step summary. Ordinary validation jobs remain
+read-only. Reports are neutral until factual review; they are never diagnostic
+logs, repository files, Actions artifacts or cache entries.
