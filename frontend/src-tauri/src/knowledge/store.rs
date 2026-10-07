@@ -52,6 +52,14 @@ async fn observe_pending<F: std::future::Future>(future: F) -> F::Output {
     })
     .await
 }
+#[cfg(test)]
+static ACTIVE_READ_PAUSE: std::sync::Mutex<
+    Option<(
+        bool,
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
 struct CancelRead(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelRead {
     fn drop(&mut self) {
@@ -199,6 +207,21 @@ impl<'a> TextBlob<'a> {
         align_start: bool,
         context: &ReadContext,
     ) -> Result<(usize, String), KnowledgeError> {
+        #[cfg(test)]
+        if context.background {
+            let pause = {
+                let mut slot = ACTIVE_READ_PAUSE.lock().unwrap();
+                if slot.as_ref().is_some_and(|(body, _, _)| *body == self.body) {
+                    slot.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, entered, release)) = pause {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+        }
         context.check()?;
         if start > self.len || max > READ_BYTES {
             return Err(KnowledgeError::InvalidInput);
@@ -866,6 +889,122 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn active_reader_yields_to_recording(materialized: bool, abort_waiter: bool) {
+        use crate::audio::inference;
+        use std::time::{Duration, Instant};
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        transcript(&pool).await;
+        let selected = SelectedRow::for_job(&next_job(&pool).await.unwrap().unwrap(), "row".into());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        // Body-window pauses at its body BLOB; materialization pauses at an
+        // actual metadata BLOB after reading the selected text.
+        *ACTIVE_READ_PAUSE.lock().unwrap() = Some((!materialized, entered_tx, release_rx));
+        let reader = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                if materialized {
+                    materialize(
+                        &pool,
+                        &selected,
+                        TextSpan {
+                            transcript_id: "row".into(),
+                            start_byte: 0,
+                            end_byte: 1,
+                        },
+                        true,
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    body_window(&pool, &selected, 0).await.map(|_| ())
+                }
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if abort_waiter {
+            reader.abort();
+        }
+        let admission_held = inference::claim_job().is_err();
+        let lease_held = pool.try_acquire().is_none();
+        let read_slot_held = READERS.clone().try_acquire_owned().is_err();
+        let started = Instant::now();
+        let foreground = tokio::spawn(inference::claim_job_preempting_local_summary("recording"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let returned_before_release = foreground.is_finished();
+        // Always unblock native ownership before assertions, including RED.
+        release_tx.send(()).unwrap();
+        let outcome = reader.await;
+        let foreground = tokio::time::timeout(Duration::from_secs(2), foreground)
+            .await
+            .unwrap()
+            .unwrap();
+        let elapsed = started.elapsed();
+        let admitted = foreground.is_ok();
+        if admitted {
+            assert!(
+                inference::claim_job().is_err(),
+                "recording exclusively owns admission"
+            );
+        }
+        drop(foreground);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            drop(READERS.clone().acquire_owned().await.unwrap());
+            pool.close().await;
+        })
+        .await
+        .unwrap();
+        println!("KNOWLEDGE_ACTIVE_READ materialized={materialized} abort_waiter={abort_waiter} admission_held={admission_held} lease_held={lease_held} read_slot_held={read_slot_held} returned_before_release={returned_before_release} admitted={admitted} elapsed_ms={}", elapsed.as_millis());
+        assert!(admission_held && lease_held && read_slot_held);
+        assert!(
+            !returned_before_release,
+            "recording must wait for the active canonical reader"
+        );
+        assert!(
+            admitted,
+            "recording must acquire admission after bounded reader release"
+        );
+        assert!(elapsed < Duration::from_secs(2));
+        if abort_waiter {
+            assert!(outcome.unwrap_err().is_cancelled());
+        } else {
+            assert!(matches!(outcome.unwrap(), Err(KnowledgeError::Cancelled)));
+        }
+        assert!(inference::claim_job().is_ok());
+    }
+    #[tokio::test]
+    async fn recording_waits_for_active_body_read() {
+        active_reader_yields_to_recording(false, false).await;
+    }
+    #[tokio::test]
+    async fn recording_waits_for_active_metadata_materialization() {
+        active_reader_yields_to_recording(true, false).await;
+    }
+    #[tokio::test]
+    async fn recording_waits_for_aborted_body_reader_worker() {
+        active_reader_yields_to_recording(false, true).await;
+    }
+    #[tokio::test]
+    async fn recording_waits_for_aborted_materialization_worker() {
+        active_reader_yields_to_recording(true, true).await;
+    }
+    #[tokio::test]
+    async fn recording_does_not_wait_for_another_user_job() {
+        use crate::audio::inference;
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _recording = inference::claim_job().unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            inference::claim_job_preempting_local_summary("recording"),
+        )
+        .await;
+        assert!(result.unwrap().is_err());
+    }
     async fn pending_setup_releases_before_connection_return(materialized: bool, preempt: bool) {
         use std::{
             sync::atomic::Ordering,

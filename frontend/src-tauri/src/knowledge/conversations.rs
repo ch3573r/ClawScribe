@@ -586,6 +586,31 @@ pub async fn eligible_history(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn meeting_and_library_request_boundaries_remain_separate() {
+        let mut input = request(ConversationOwner::Meeting("fixture".into()));
+        assert!(
+            validate_request(&input).is_err(),
+            "meeting owner cannot use library scope"
+        );
+        input.search.scope = KnowledgeScope::Meeting {
+            meeting_id: "fixture".into(),
+        };
+        assert!(validate_request(&input).is_ok());
+        input.owner = ConversationOwner::Library("library".into());
+        assert!(
+            validate_request(&input).is_err(),
+            "library owner cannot use meeting scope"
+        );
+        input.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                all_meetings: true,
+                ..Default::default()
+            },
+        };
+        assert!(validate_request(&input).is_ok());
+    }
+
     use sqlx::SqlitePool;
 
     async fn database() -> SqlitePool {

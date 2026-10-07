@@ -27,3 +27,12 @@ test('question context rejects invalid map metadata and remains separate from li
   for (const patch of [{context_tag:3},{context_tag:2},{cited_tag:1}]) assert.equal(contextLinks({...reply,context_links:[{...reply.context_links[0],...patch}]}).length,0);
   assert.equal(contextLinks({...reply,evidence_metadata:[{preceding_question_tag:2},{preceding_question_tag:1}]}).length,0);
 });
+
+test('all-meetings clears only selected IDs while date/project constraints and the saved selection survive', () => {
+  const { libraryScope } = helpers();
+  const selected = ['a'];
+  const project = { tags: [], mode: 'any', untagged: true };
+  const all = libraryScope(selected, true, project, '2026-10-01', '2026-10-07');
+  assert.deepEqual(JSON.parse(JSON.stringify(all.filter)), { all_meetings: true, meeting_ids: [], tags: [], tag_mode: 'any', untagged: true, from: '2026-10-01', to: '2026-10-07' });
+  assert.deepEqual([...libraryScope(selected, false, project).filter.meeting_ids], ['a']);
+});
