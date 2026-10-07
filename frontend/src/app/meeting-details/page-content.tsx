@@ -97,6 +97,7 @@ export default function PageContent({
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
+  const evidenceFocusRequest = useRef(0);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
@@ -105,7 +106,7 @@ export default function PageContent({
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);
     if (!current()) return;
-    setFocusedSource({ id, request: Date.now() });
+    setFocusedSource({ id, request: ++evidenceFocusRequest.current });
     document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
   }, [onRevealTranscript]);
   const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
@@ -113,8 +114,9 @@ export default function PageContent({
     if (!isAudioReady) throw new Error('Saved audio is missing or not ready. The transcript can still be reviewed.');
     await audioPlayer.seek(seconds);
     if (!current()) return;
-    await audioPlayer.play();
+    const played = await audioPlayer.play();
     if (!current()) return;
+    if (played === false) throw new Error('Saved audio could not play. Retry playback or review the transcript.');
   }, [isAudioReady, audioPlayer.seek, audioPlayer.play]);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup

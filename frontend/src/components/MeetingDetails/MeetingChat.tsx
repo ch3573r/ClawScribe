@@ -36,6 +36,6 @@ export function MeetingChat({meetingId,provider,model}:{meetingId:string;provide
         <KnowledgeChat state={state} mode={mode} provider={provider} model={model} title="Ask this meeting"/>
       </DialogContent>
     </Dialog>
-    <EvidencePreview state={state}/>
+    <EvidencePreview state={state} onNavigate={()=>{setOpen(false);state.cancel();}}/>
   </>;
 }

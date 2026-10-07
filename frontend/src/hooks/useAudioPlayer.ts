@@ -49,12 +49,14 @@ export const useAudioPlayer = (audioPath: string | null) => {
 
   const play = useCallback(async () => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio) return false;
     try {
       await audio.play();
       if (audioRef.current === audio) setError(null);
+      return audioRef.current === audio;
     } catch {
       if (audioRef.current === audio) setError('Failed to play audio');
+      return false;
     }
   }, []);
 

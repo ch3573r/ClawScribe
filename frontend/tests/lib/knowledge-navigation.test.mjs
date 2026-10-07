@@ -6,9 +6,9 @@ const reference={locator:{kind:'transcript',meeting_id:'target'}};
 const resolved={status:'current',navigation:{meeting_id:'target',transcript_id:'far-row',transcript_index:205,start_seconds:14},passage:{}};
 function navigation(){const m=loadTsModule('src/lib/knowledge-navigation.ts');assert.equal(typeof m.navigateEvidence,'function','canonical reveal/playback adapter must exist');return m.navigateEvidence;}
 test('far-page navigation uses resolver index and checks identity after reveal before playback',async()=>{
-  const navigate=navigation();const reveal=deferred();let current=true;const calls=[];
-  const work=navigate(reference,true,{current:()=>current,resolve:async()=>resolved,reveal:async(id,index)=>{calls.push([id,index]);await reveal.promise;},play:async()=>calls.push('play')});
-  await Promise.resolve();await Promise.resolve();current=false;reveal.resolve();await work;
+  const navigate=navigation();const reveal=deferred();const entered=deferred();let current=true;const calls=[];
+  const work=navigate(reference,true,{current:()=>current,resolve:async()=>resolved,reveal:async(id,index)=>{calls.push([id,index]);entered.resolve();await reveal.promise;},play:async()=>calls.push('play')});
+  await entered.promise;current=false;reveal.resolve();await work;
   assert.deepEqual(calls,[['far-row',205]]);
 });
 test('missing stale invalid evidence and unknown offsets never play',async()=>{
