@@ -7,7 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { citationParts, contextLinks, scopeReady } from "@/lib/knowledge-state";
+import { citationParts, contextLinks, scopeReady, MAX_EVIDENCE_ENTRIES } from "@/lib/knowledge-state";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
 import type { AssistantReply, SearchMode } from "@/types/knowledge";
 function CitedAnswer({
@@ -19,7 +19,7 @@ function CitedAnswer({
 }) {
   const count =
     reply.evidence.length === reply.evidence_metadata.length &&
-    reply.evidence.length <= 64
+    reply.evidence.length <= MAX_EVIDENCE_ENTRIES
       ? reply.evidence.length
       : 0;
   return (

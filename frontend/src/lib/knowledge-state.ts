@@ -5,6 +5,9 @@ import type {
 } from "@/types/knowledge";
 import type { ProjectFilter } from "@/lib/library";
 
+/** Must match knowledge::evidence::MAX_EVIDENCE_ENTRIES in the native core. */
+export const MAX_EVIDENCE_ENTRIES = 1024;
+
 /** A single generation owns all awaited work for one search/conversation surface. */
 export function createKnowledgeController(
   onCancel?: (id: string, current: () => boolean) => void,
@@ -136,11 +139,11 @@ export function citationParts(
   let start = 0;
   let cursor = 0;
   const number = (token: string) => {
-    const match = /^K([1-9]\d{0,2})$/.exec(
+    const match = /^K([1-9]\d*)$/.exec(
       token.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, ""),
     );
     const n = match ? Number(match[1]) : 0;
-    return n <= count && n > 0 ? n : null;
+    return Number.isSafeInteger(n) && n <= Math.min(count, MAX_EVIDENCE_ENTRIES) && n > 0 ? n : null;
   };
   while (cursor < content.length) {
     const open = content.indexOf("[", cursor);
@@ -174,7 +177,7 @@ export function citationParts(
     if (!nested && bytes <= 1024) {
       if (body.includes(",") && !body.includes("-")) {
         const items = body.split(",").map(number);
-        if (items.length <= 64 && items.every((n) => n !== null))
+        if (items.length <= MAX_EVIDENCE_ENTRIES && items.every((n) => n !== null))
           tags = items as number[];
       } else if (body.includes("-") && !body.includes(",")) {
         const items = body.split("-").map(number);
@@ -183,7 +186,7 @@ export function citationParts(
           items[0] !== null &&
           items[1] !== null &&
           items[1] >= items[0] &&
-          items[1] - items[0] < 64
+          items[1] - items[0] < MAX_EVIDENCE_ENTRIES
         )
           tags = Array.from(
             { length: items[1] - items[0] + 1 },
@@ -209,7 +212,7 @@ export function citationParts(
 export function contextLinks(reply: AssistantReply): CitationContextLink[] {
   const evidence = reply.evidence;
   const metadata = reply.evidence_metadata;
-  if (evidence.length !== metadata.length || evidence.length > 64) return [];
+  if (evidence.length !== metadata.length || evidence.length > MAX_EVIDENCE_ENTRIES) return [];
   return (reply.context_links ?? []).filter((link) => {
     const a = link.cited_tag - 1,
       b = link.context_tag - 1;
