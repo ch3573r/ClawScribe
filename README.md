@@ -7,9 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.49**. This Windows GPU preview adds memory across saved
-meetings, filtered keyword/semantic search, and cited conversations. See the
-[0.5.49 preview notes](docs/releases/0.5.49.md) and the
+Source version: **0.5.50**. This Windows GPU preview simplifies meeting selection,
+fixes chat with indexed meetings, shows model-download progress, and restores
+Meetings scrolling. It includes local keyword/semantic search and cited
+conversations across saved meetings. See the
+[0.5.50 preview notes](docs/releases/0.5.50.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
 previews; drafts are excluded from updates. Installed acceptance remains
@@ -225,7 +227,9 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.49 Preview
+## What Changed In 0.5.50 Preview
+
+- Fix the Meetings page growing beyond the window and clipping saved meetings. Its content now scrolls within the available application height.
 
 - Search saved meetings by keyword, or enable optional local multilingual E5
   semantic retrieval. Filter by selected meetings, project tags and dates.
@@ -234,7 +238,7 @@ retain Tauri signature verification and remain subject to Windows security polic
 - Give recording priority over background indexing and active transcript reads.
   Document attachments and live assistance remain the follow-up plan.
 
-See the [preview notes](docs/releases/0.5.49.md), the
+See the [preview notes](docs/releases/0.5.50.md), the
 [implementation plan](docs/meeting-intelligence-plan.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status

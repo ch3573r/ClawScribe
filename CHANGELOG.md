@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.50
+
+- Fix Meetings scrolling after the meeting-memory controls extended the page beyond the window. Constrain the page to the content area's height so saved meetings and expanded content remain reachable.
+- Open Meetings on the archive, with a separate Meeting memory tab, searchable source picker and selected chips. Start a saved conversation automatically on the first question.
+- Fix “Knowledge source changed” when asking about ready meetings whose indexing jobs had already completed. Preserve source revision, generation and deletion checks.
+- Show model download bytes, file and integrity stage independently of index progress. Offer healthy-file verification, persistent cancellation and retry feedback, and explain the pinned local E5 ONNX model.
+- Retain meeting-memory search, optional local semantic retrieval, saved library chat, and cited transcript/audio navigation from 0.5.49. Knowledge settings and expanded chat inside individual meetings are also included; document attachments and live assistance remain planned.
+- Advance the installer/runtime/updater version to 0.5.50 for a Windows GPU preview. Stable remains 0.5.48; enable **Include prereleases** after publication or install manually. Existing 0.5.49 assets remain unchanged. Published NSIS and MSI installers must include Tauri updater signatures; Windows publisher signing is separate.
+- Exact-build installed tabs/scrolling, model progress, chat, offline/provider/citation/playback, recording/upgrade/update discovery and endurance acceptance remain pending. Frontend/native checks, installer preflight, independent review and artifact integrity are separate publication gates. See `docs/releases/0.5.50.md`.
+
 ## 0.5.49
 
 - Add memory across saved meetings: keyword search without a model download, optional local multilingual E5 semantic retrieval, and explicit selected-meeting/project/date scopes. Local embeddings run on CPU; recording takes priority over background indexing and active transcript reads.
