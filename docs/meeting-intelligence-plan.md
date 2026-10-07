@@ -194,6 +194,14 @@ frontend boundary. Resolve configured provider/model server-side at request
 start; do not accept credentials from these commands. Live owners remain
 in-memory when enabled in Task 7.
 
+Use one absolute saved-answer budget across setup, queueing, retries, and reads:
+HTTP 300 seconds or compatible configuration; Codex configured duration/default
+600 seconds with its existing 30-second minimum; Built-in AI 900 seconds. Cleanup
+has a separate overall five-second allowance. Surface cleanup failures and retain
+native/process ownership until actual exit/reaping or explicit quarantine; an
+expired deadline must not release active inference admission. Test with injected
+short durations. Task 7 retains its separate 30-second live deadline.
+
 - [ ] Write tests `duplicate_request_returns_same_reply`, `unknown_tag_has_no_link`, `changed_passage_resolves_stale`, `deleted_source_aborts_queued_dispatch`, `deleted_source_discards_completed_answer`, `cancelled_request_cannot_commit`, `prompt_injection_stays_inside_evidence`, and `changed_decision_retains_dates_and_both_sources`.
 - [ ] Assert one assistant message per owner/request, zero navigable links for invented tags, no provider dispatch after detected source deletion, and an insufficient-evidence answer for unsupported questions. Run tests and observe failure before implementation.
 - [ ] Implement backend-owned `[K1]` maps and fingerprint resolution. Preserve saved summary-source links. Recheck source revisions immediately before dispatch and transactionally before persisting a reply; redact invalidated dependent conversation turns on source deletion.

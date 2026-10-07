@@ -217,6 +217,17 @@ returns the existing result; it does not generate another assistant message.
 The first implementation returns a completed reply using the existing provider
 path. Cancellation and timeout are required; streaming is a later improvement.
 
+Saved answers use one absolute request deadline across configuration, startup,
+queueing, writes, retries, and reads. Preserve the existing provider budgets:
+HTTP 300 seconds or the compatible provider's configured timeout; Codex's
+configured duration, default 600 seconds and existing 30-second minimum; and
+Built-in AI 900 seconds. Allow at most five additional seconds for cleanup
+before surfacing a cleanup error. Cancellation never proves a child exited:
+retain resource ownership until actual termination and reaping, or quarantine
+the resource explicitly. Keep native admission and shared helper locks owned
+through cleanup. Live assistance uses its separate 30-second deadline; stopping
+a recording never awaits assistance cleanup.
+
 Scope is visible beside the input: This meeting, Selected meetings, or Current
 recording, plus selected reference documents. A saved meeting remains the
 default. A library-wide scope requires a deliberate selection. Project filters
