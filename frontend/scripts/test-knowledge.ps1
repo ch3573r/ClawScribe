@@ -1,4 +1,4 @@
-param([switch]$Acceptance)
+param([switch]$Acceptance, [bool]$FullSuite = $true)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
@@ -36,7 +36,7 @@ $ffmpeg = 'frontend/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe'
 if (Test-Path $ffmpeg) { Copy-Item $ffmpeg (Join-Path $testDirectory 'ffmpeg.exe') -Force }
 & $executables[0] knowledge:: --test-threads=1
 
-& $executables[0] --test-threads=1
+if ($FullSuite) { & $executables[0] --test-threads=1 }
 if ($Acceptance) {
     $cache = Join-Path $env:RUNNER_TEMP 'clawscribe-knowledge-acceptance'
     New-Item -ItemType Directory -Force $cache | Out-Null

@@ -313,16 +313,41 @@ mod acceptance {
                 max_error = max_error.max((a - b).abs());
             }
         }
+        println!("KNOWLEDGE_PARITY fixtures=6 max_error={max_error:.8} min_cosine={min_cosine:.8} warm_max_ms={} cold_preemption_ms={} cold_acquired={cold_acquired}", max_warm.as_millis(), cold_preemption.as_millis());
+        // Count with the pinned tokenizer: the prefix need not be two tokens.
+        // This constructs a worst-size valid query rather than assuming a
+        // vocabulary-dependent word/token ratio.
+        let longest_query = {
+            let slot = model.lock().unwrap();
+            let runtime = slot.as_ref().unwrap();
+            (1..=508)
+                .rev()
+                .find_map(|count| {
+                    let text = "a ".repeat(count);
+                    runtime
+                        .encode(&text, EmbeddingPurpose::Query)
+                        .ok()
+                        .filter(|encoded| encoded.len() >= 500)
+                        .map(|encoded| (text, encoded.len()))
+                })
+                .expect("near-512-token query within 1024 UTF-8 bytes")
+        };
+        println!(
+            "KNOWLEDGE_INPUT query_tokens={} query_bytes={}",
+            longest_query.1,
+            longest_query.0.len()
+        );
         let mut max_preemption = Duration::ZERO;
         let mut all_acquired = true;
         for n in 0..10 {
             let loaded = model.clone();
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let query = longest_query.0.clone();
             let task = tokio::spawn(run_indexing(registry.clone(), move || {
                 let mut slot = loaded.lock().unwrap();
                 let runtime = slot.as_mut().unwrap();
                 let (input, purpose) = if n % 2 == 0 {
-                    ("a ".repeat(508), EmbeddingPurpose::Query)
+                    (query, EmbeddingPurpose::Query)
                 } else {
                     ("garden ".repeat(320), EmbeddingPurpose::Passage)
                 };
