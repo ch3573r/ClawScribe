@@ -160,7 +160,7 @@ mod tests {
             resolve(&pool, &passage.evidence).await.unwrap().status,
             EvidenceStatus::Current
         );
-        store::requeue(&pool, &[passage.evidence.source_id.clone()])
+        store::requeue(&pool, &[passage.meeting_id.clone()])
             .await
             .unwrap();
         assert_eq!(
