@@ -72,3 +72,10 @@ test('failed first answer retains the new durable conversation and actionable er
   assert.equal(app.render().owner.id,'saved-failure');assert.match(app.render().error,/Provider unavailable/);assert.equal(app.render().messages[0].status,'failed');
   await app.render().ask('Decision?','keyword');assert.equal(creates,1);assert.equal(requests.length,2);assert.equal(requests[1].owner.id,'saved-failure');app.unmount();
 });
+test('first answer history failure retries the original request after owner adoption without duplicating its saved answer',async()=>{
+  const requests=[];const saved=new Map();let historyReads=0;
+  const app=view({createConversation:async()=>({kind:'library',id:'saved-retry'}),ask:async request=>{requests.push(request);saved.set(request.request_id,{id:request.request_id,role:'assistant',content:'Canonical answer',status:'completed'});},history:async()=>{if(++historyReads===1)throw new Error('History temporarily unavailable');return [...saved.values()];}},{scope:libraryScope,owner:null});
+  app.render();await flush();await app.render().ask('Decision?','keyword');app.render();await flush();
+  assert.equal(app.render().owner.id,'saved-retry');assert.match(app.render().error,/History temporarily unavailable/);
+  await app.render().ask('Decision?','keyword');assert.equal(requests.length,2);assert.equal(requests[1].request_id,requests[0].request_id);assert.equal(saved.size,1);assert.equal(app.render().messages.length,1);app.unmount();
+});
