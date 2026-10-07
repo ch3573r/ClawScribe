@@ -14,6 +14,9 @@ test('exact grouped and ranged citation grammar never salvages malformed tags', 
   const {citationParts} = helpers(); const linked = s => citationParts(s,4,[1,2,3,4]).flatMap(p=>p.tags ?? []);
   assert.deepEqual([...linked('[K3, K1] [ K2 - K4 ]')],[3,1,2,3,4]);
   for (const text of ['[K01]','[K1,K9]','[K1-K2,K3]','[K2-K1]','[[K1][K2]]','[K1 [K2]]','[K1000]']) assert.equal(linked(text).length,0,text);
+  assert.equal(linked(`[${'\u3000'.repeat(350)}K1]`).length,0,'1024-byte group bound uses UTF-8 bytes');
+  assert.equal(linked('[\ufeffK1]').length,0,'Rust whitespace grammar does not include BOM');
+  assert.deepEqual([...linked('[\u0085K1\u0085]')],[1],'Rust whitespace grammar includes next-line');
   assert.equal(citationParts('[K1]',4,[2]).flatMap(p=>p.tags??[]).length,0,'backend literal allowlist is required');
 });
 test('question context rejects invalid map metadata and remains separate from literal tags', () => {

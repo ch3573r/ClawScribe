@@ -4,7 +4,7 @@ import {loadTsModule} from './load-ts-module.mjs';
 import {createHookHarness,deferred,flush} from './hook-harness.mjs';
 const meeting=id=>({kind:'meeting',meeting_id:id});
 function view(service,{scope=meeting('one'),owner={kind:'meeting',id:'one'}}={}) {
-  const hooks=createHookHarness();const {useKnowledgeSearch}=loadTsModule('src/hooks/useKnowledgeSearch.ts',{react:hooks.react,'@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],cancel:async()=>{},history:async()=>[],...service}}});
+  const hooks=createHookHarness();const {useKnowledgeSearch}=loadTsModule('src/hooks/useKnowledgeSearch.ts',{react:hooks.react,'@tauri-apps/api/event':{listen:async()=>()=>{}},'@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],cancel:async()=>{},history:async()=>[],...service}}});
   return {...hooks,render:()=>hooks.render(()=>useKnowledgeSearch(scope,owner)),navigate(id){scope=meeting(id);owner={kind:'meeting',id};}};
 }
 test('hook discards older searches and carries actual selected scope and retrieval mode',async()=>{

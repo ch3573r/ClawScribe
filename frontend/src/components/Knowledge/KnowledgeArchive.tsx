@@ -13,7 +13,7 @@ export function KnowledgeArchive({meetings,projectFilter}:{meetings:{id:string;t
   const {modelConfig}=useConfig();const [query,setQuery]=useState('');const [mode,setMode]=useState<SearchMode>('keyword');
   const [all,setAll]=useState(false);const [selected,setSelected]=useState<string[]>([]);const [from,setFrom]=useState('');const [to,setTo]=useState('');
   const scope=useMemo(()=>libraryScope(selected,all,projectFilter,from,to),[selected,all,projectFilter,from,to]);
-  const state=useKnowledgeSearch(scope);const selectedCount=selected.length;
+  const state=useKnowledgeSearch(scope,null,{provider:modelConfig?.provider,model:modelConfig?.model});const selectedCount=selected.length;
   return <section className="space-y-4" aria-label="Meeting memory">
     <div className="space-y-4 rounded-lg border border-border bg-card p-5 shadow-sm"><div><h2 className="text-lg font-semibold">Meeting memory</h2><p className="mt-1 text-sm text-muted-foreground">Search transcript passages and ask cited questions across a deliberate selection of saved meetings.</p></div>
       <fieldset className="space-y-3"><legend className="mb-2 text-sm font-medium">Source selection</legend>

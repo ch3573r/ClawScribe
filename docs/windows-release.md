@@ -365,6 +365,16 @@ version, audio devices, and result without publishing private meeting content.
 4. Run a sustained Teams/Webex session on the target notebook with its normal
    workload. Observe RAM, transcription backlog, CPU contention, and stop time;
    include device changes, sleep/wake, and failure recovery in acceptance testing.
+5. For the meeting-memory preview, use an isolated profile with invented English
+   and German meetings. Check keyword retrieval offline before any model
+   download, semantic fallback and downloaded-model retrieval, and visible
+   provider-failure/retry behavior. Verify explicit scope and legacy history,
+   grouped/range and preceding-question citations, a source beyond the first
+   transcript page, same-meeting repeat navigation, missing/stale/historical
+   sources, keyboard focus, dark/light/accent and narrow layouts, and saved-audio
+   playback at the verified offset. These installed checks remain pending when
+   only helper and native resolver evidence is available; they do not block a
+   clearly labeled preview under the policy above or establish stable readiness.
 
 Optional hosted-provider verification is documented in
 [hosted-transcription-smoke.md](hosted-transcription-smoke.md). OpenClaw handoff

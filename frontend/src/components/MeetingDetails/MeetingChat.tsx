@@ -18,9 +18,9 @@ export function MeetingChat({meetingId,provider,model}:{meetingId:string;provide
   const {meetings,projectTags,projectTagsError,projectTagsLoading}=useSidebar();
   const tags=[...new Set(projectTags.map(row=>row.tag))];
   const scope=useMemo<KnowledgeScope>(()=>expanded?libraryScope(selected,all,project):{kind:'meeting',meeting_id:meetingId},[expanded,selected,all,project,meetingId]);
-  const state=useKnowledgeSearch(scope,{kind:'meeting',id:meetingId});
+  const state=useKnowledgeSearch(scope,{kind:'meeting',id:meetingId},{provider,model});
   return <>
-    <Dialog open={open} onOpenChange={value=>{setOpen(value);if(!value)state.cancel();}}>
+    <Dialog open={open} onOpenChange={value=>{setOpen(value);if(!value)state.cancel();else void state.reloadHistory();}}>
       <DialogTrigger asChild><button aria-label="Chat with this meeting" className="fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><MessageSquare className="h-5 w-5"/></button></DialogTrigger>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Chat with this meeting</DialogTitle><DialogDescription>Ask cited questions using your configured summary provider.</DialogDescription></DialogHeader>
         <fieldset className="space-y-3 rounded-lg border border-border p-3"><legend className="px-1 text-sm font-medium">Question scope</legend>

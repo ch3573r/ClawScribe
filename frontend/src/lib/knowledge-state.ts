@@ -2,11 +2,11 @@ import type { AssistantReply, CitationContextLink, KnowledgeScope } from '@/type
 import type { ProjectFilter } from '@/lib/library';
 
 /** A single generation owns all awaited work for one search/conversation surface. */
-export function createKnowledgeController(onCancel?: (id:string) => void) {
+export function createKnowledgeController(onCancel?: (id:string,current:()=>boolean) => void) {
   let generation = 0; let configuration = ''; const lanes = new Map<string,number>();
   let pending: {id:string;promise:Promise<unknown>} | null = null;
   let retry: {question:string;id:string} | null = null;
-  const invalidate = () => { generation++; lanes.clear(); if (pending) onCancel?.(pending.id); pending = null; retry = null; };
+  const invalidate = () => { generation++; lanes.clear(); const current=generation;if (pending) onCancel?.(pending.id,()=>generation===current); pending = null; retry = null; };
   const ticket = (lane:string) => {
     const current = generation; const sequence = (lanes.get(lane) ?? 0) + 1; lanes.set(lane,sequence);
     return () => generation === current && lanes.get(lane) === sequence;
