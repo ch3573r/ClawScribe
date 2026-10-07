@@ -576,6 +576,86 @@ pub async fn retrieve(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn multiple_sources_balance_semantic_candidates_without_losing_identifier_hits() {
+        let pool = fixture().await;
+        for n in 0..70 {
+            add_text(
+                &pool,
+                &format!("noise-{n}"),
+                "one",
+                &format!("Distinct inventory identifier ITEM-{n}"),
+            )
+            .await;
+        }
+        add_text(&pool, "identifier", "one", "ATLAS-42 exact identifier").await;
+        add_text(&pool, "target", "two", "A separate relevant decision").await;
+        while let Some(job) = store::next_job(&pool).await.unwrap() {
+            let rows: Vec<CanonicalRow> =
+                sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id=? ORDER BY id")
+                    .bind(&job.meeting_id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            for (n, row) in rows.iter().enumerate() {
+                let mut vector = vec![0.; 384];
+                vector[usize::from(!row.id.starts_with("noise-"))] = 1.;
+                let span = TextSpan {
+                    transcript_id: row.id.clone(),
+                    start_byte: 0,
+                    end_byte: row.transcript.len(),
+                };
+                store::stage(&pool, &job, row, &span, n as i64, &vector, "test-space")
+                    .await
+                    .unwrap();
+            }
+            store::publish(&pool, &job, "test-space").await.unwrap();
+        }
+        let mut query = vec![0.; 384];
+        query[0] = 1.;
+        let both = semantic_candidates(&pool, "[\"one\",\"two\"]", "test-space", &query)
+            .await
+            .unwrap();
+        assert_eq!(both.iter().filter(|hit| hit.meeting_id == "one").count(), 3);
+        assert!(
+            both.iter().any(|hit| hit.meeting_id == "two"),
+            "one source cannot starve another indexed source"
+        );
+        let sole = semantic_candidates(&pool, "[\"one\"]", "test-space", &query)
+            .await
+            .unwrap();
+        assert_eq!(
+            sole.len(),
+            64,
+            "a sole eligible source retains the full candidate budget"
+        );
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    all_meetings: true,
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let hits = search_channels(&pool, &scope, "ATLAS-42", Some(("test-space", &query)))
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("ATLAS-42")),
+            "semantic source balancing cannot remove lexical identifiers"
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_vectors")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored, 72,
+            "source balancing never merges or deletes distinct evidence"
+        );
+    }
+    #[tokio::test]
     async fn hybrid_mode_requires_a_ready_generation_inside_selected_scope() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = fixture().await;
