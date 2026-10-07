@@ -1,4 +1,4 @@
-param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$RetrievalAcceptance)
+param([switch]$Acceptance, [bool]$FullSuite = $true, [switch]$RetrievalAcceptance, [switch]$MutationAcceptance)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
@@ -34,6 +34,9 @@ Get-ChildItem -LiteralPath $runtime -Filter '*.dll' -File | ForEach-Object {
 }
 $ffmpeg = 'frontend/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe'
 if (Test-Path $ffmpeg) { Copy-Item $ffmpeg (Join-Path $testDirectory 'ffmpeg.exe') -Force }
+if ($MutationAcceptance) {
+    & $executables[0] knowledge::store::tests::synthetic_fts_mutation_workload --ignored --exact --test-threads=1 --nocapture
+}
 & $executables[0] knowledge:: --test-threads=1
 
 if ($FullSuite) { & $executables[0] --test-threads=1 }

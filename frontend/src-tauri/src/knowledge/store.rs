@@ -229,6 +229,78 @@ pub async fn status(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn fts_row_identity_survives_gaps_moves_and_recreated_rows() {
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        meeting(&pool, "two").await;
+        sqlx::query("INSERT INTO transcripts(rowid,id,meeting_id,transcript,timestamp) VALUES(101,'gap','one','ATLAS-42','00:01'),(900,'keep','one','BOREAL-731','00:02')").execute(&pool).await.unwrap();
+        assert_eq!(count(&pool,"SELECT COUNT(*) FROM knowledge_fts f JOIN transcripts t ON t.rowid=f.rowid AND t.id=f.transcript_id").await,2,"FTS must use canonical row identity for bounded point mutations");
+        sqlx::query("UPDATE transcripts SET meeting_id='two',transcript='Moved FALKE-908',speaker='Änne' WHERE id='gap'").execute(&pool).await.unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH '\"ATLAS-42\"'"
+            )
+            .await,
+            0
+        );
+        let moved:(i64,String,String)=sqlx::query_as("SELECT rowid,transcript_id,source_id FROM knowledge_fts WHERE knowledge_fts MATCH '\"FALKE-908\"'").fetch_one(&pool).await.unwrap();
+        assert_eq!(moved, (101, "gap".into(), "meeting:two".into()));
+        sqlx::query("DELETE FROM transcripts WHERE id='gap'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO transcripts(rowid,id,meeting_id,transcript,timestamp) VALUES(1500,'gap','one','Recreated XR-6619','00:03')").execute(&pool).await.unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH '\"FALKE-908\"'"
+            )
+            .await,
+            0
+        );
+        let recreated:(i64,String,String)=sqlx::query_as("SELECT rowid,transcript_id,source_id FROM knowledge_fts WHERE knowledge_fts MATCH '\"XR-6619\"'").fetch_one(&pool).await.unwrap();
+        assert_eq!(recreated, (1500, "gap".into(), "meeting:one".into()));
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH '\"BOREAL-731\"'"
+            )
+            .await,
+            1
+        );
+        sqlx::query("DELETE FROM meetings WHERE id='one'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM knowledge_fts").await, 0);
+    }
+    #[tokio::test]
+    #[ignore = "manual trusted-runner 10000-row FTS mutation measurement"]
+    async fn synthetic_fts_mutation_workload() {
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let pool=database().await;
+            meeting(&pool,"one").await;
+            let mut tx=pool.begin().await.unwrap();
+            for n in 0..10000 {
+                sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES(?,'one',?,'00:01')").bind(format!("row-{n}")).bind(format!("Synthetic identifier ITEM-{n}")).execute(&mut *tx).await.unwrap();
+            }
+            tx.commit().await.unwrap();
+            let started=std::time::Instant::now();
+            sqlx::query("UPDATE transcripts SET transcript=transcript || ' corrected',speaker='Änne'").execute(&pool).await.unwrap();
+            let update_ms=started.elapsed().as_millis();
+            assert_eq!(count(&pool,"SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'corrected AND speaker:Änne'").await,10000);
+            let started=std::time::Instant::now();
+            sqlx::query("DELETE FROM transcripts").execute(&pool).await.unwrap();
+            let delete_ms=started.elapsed().as_millis();
+            assert_eq!(count(&pool,"SELECT COUNT(*) FROM knowledge_fts").await,0);
+            assert_eq!(count(&pool,"SELECT COUNT(*) FROM knowledge_sources").await,1);
+            let jobs=count(&pool,"SELECT COUNT(*) FROM knowledge_index_jobs").await;
+            assert_eq!(jobs,1);
+            println!("KNOWLEDGE_FTS_MUTATIONS rows=10000 update_ms={update_ms} delete_ms={delete_ms} jobs={jobs} database=in_memory");
+        }).await.expect("bounded mutation workload deadline");
+    }
+    #[tokio::test]
     async fn deletion_removes_populated_vectors_with_both_repository_and_fk_order() {
         for transcripts_first in [false, true] {
             let pool = database().await;
@@ -637,11 +709,24 @@ mod tests {
         meeting(&pool, "one").await;
         meeting(&pool, "empty").await;
         transcript(&pool).await;
+        sqlx::query("UPDATE transcripts SET rowid=99 WHERE id='row'")
+            .execute(&pool)
+            .await
+            .unwrap();
         let migration = migrations
             .iter()
             .find(|m| m.version == 20261007000000)
             .unwrap();
         sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT rowid FROM knowledge_fts WHERE transcript_id='row'"
+            )
+            .await,
+            99,
+            "upgrade backfill preserves canonical row identity"
+        );
         assert_eq!(
             count(&pool, "SELECT COUNT(*) FROM knowledge_sources").await,
             2

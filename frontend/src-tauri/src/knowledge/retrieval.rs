@@ -14,6 +14,17 @@ pub struct FrozenScope {
     pub scope: KnowledgeScope,
     pub meeting_ids: Vec<String>,
 }
+fn valid_scope_date(value: &str) -> bool {
+    value.len() == 10
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if index == 4 || index == 7 {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+        && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
+}
 pub async fn freeze_scope(
     pool: &SqlitePool,
     scope: &KnowledgeScope,
@@ -43,12 +54,8 @@ pub async fn freeze_scope_in_connection(
     }
     if filter.meeting_ids.iter().any(|id| id.trim().is_empty())
         || filter.tags.iter().any(|tag| tag.trim().is_empty())
-        || filter.from.as_ref().is_some_and(|v| {
-            v.len() != 10 || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_err()
-        })
-        || filter.to.as_ref().is_some_and(|v| {
-            v.len() != 10 || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_err()
-        })
+        || filter.from.as_ref().is_some_and(|v| !valid_scope_date(v))
+        || filter.to.as_ref().is_some_and(|v| !valid_scope_date(v))
         || matches!((&filter.from,&filter.to),(Some(from),Some(to)) if from>to)
     {
         return Err(KnowledgeError::InvalidInput);
