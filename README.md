@@ -104,12 +104,17 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 ## Meeting Notes And Exports
 
 The meeting-memory preview in this source branch adds **Meetings → Meeting
-memory**: select saved meetings explicitly, or choose all saved meetings, then
+memory** in a separate tab: use the searchable picker to select saved meetings
+explicitly, or choose all saved meetings, then
 search transcript passages and ask cited questions. Project Any/All/Untagged
 filters and inclusive dates constrain that same selection. Keyword retrieval
 works without downloading a model; optional local semantic retrieval uses the
 embedding model under **Settings → Meeting memory**. Results show the mode
 actually used, and answers show the configured and executed summary provider.
+The first question starts a saved conversation automatically. Model settings
+show download bytes and integrity verification separately from indexing. The
+pinned multilingual E5 model and tokenizer use ONNX Runtime locally on CPU;
+healthy files can be verified without downloading them again.
 Open citations to inspect evidence, reveal its current transcript position, or
 play saved audio at a verified recording offset. Historical, changed, missing,
 and invalid sources remain explicitly identified and cannot navigate as current

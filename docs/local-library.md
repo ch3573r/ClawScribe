@@ -2,8 +2,9 @@
 
 ## Meeting memory
 
-On **Meetings**, ordinary title filtering remains separate from **Meeting
-memory** transcript retrieval. Select meetings explicitly, or check **Search
+The **Meetings** tab opens the saved archive. Switch to **Meeting memory** for
+transcript search and cited questions. Its searchable picker lets you select
+meetings and remove selected chips, or check **Search
 all saved meetings**. The shared Project filter applies Any/All/Untagged
 semantics to title browsing and retrieval; **From** and **To** dates are
 inclusive. All-meetings mode searches every meeting eligible under those filters;
@@ -12,7 +13,8 @@ search. Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
 
-Create or choose a saved library conversation under **Ask about these meetings**.
+The first question creates a saved library conversation automatically. You can
+also create a new conversation or choose an existing one.
 Questions use the summary provider configured in Settings. That provider may
 be local or cloud; retrieval and embedding inference remain local. Answers
 show the executed provider/model and retrieval mode. Cancel and scope changes
@@ -43,10 +45,19 @@ Citation handoffs are ephemeral: after an application restart, reopen the
 source reference instead of reusing a previous navigation URL.
 
 Under **Settings → Meeting memory**, enable the optional local embedding model,
-download or repair it, inspect ready/pending/failed index counts, Pause,
+download it, inspect ready/pending/failed index counts, Pause,
 Retry/resume, or Rebuild. Foreground recording and inference take priority.
 Index rebuilds do not renumber saved citations. Downloads never start
-automatically from a search. Document and live-assistance controls are outside
+automatically from a search. The download contains the pinned E5 ONNX model
+and tokenizer, about 465 MiB combined. Transfer progress shows bytes and the
+current file; integrity verification is a separate stage from semantic indexing.
+**Verify installed files** checks existing files and downloads only missing or
+invalid ones. It does not repair meeting data. The multilingual model supports
+English and German retrieval; its fixed tokenizer, pooling and 384-dimensional
+vectors must stay compatible with the saved index. ONNX Runtime runs this model
+locally on CPU. The configured summary provider answers questions using the
+retrieved passages; the embedding model itself does not write answers.
+Document and live-assistance controls are outside
 this preview.
 
 Automated helper and native resolver checks cover request ownership and
