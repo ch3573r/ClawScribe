@@ -49,6 +49,132 @@ pub enum CodexHomeMode {
 mod app_server_tests {
     use super::*;
 
+    fn saved_text_session(temp: &tempfile::TempDir, scenario: &str) -> AppServerSession {
+        let script = temp.path().join("saved-text-server.cjs");
+        fs::write(&script,r#"
+const fs=require('fs'),readline=require('readline');
+const scenario=process.argv[2];
+const send=m=>process.stdout.write(JSON.stringify(m)+'\n');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const m=JSON.parse(line);
+ if(m.method===scenario) {fs.writeFileSync('ready','ready');return;}
+ if(m.method==='initialize') send({id:m.id,result:{}});
+ if(m.method==='account/read') send({id:m.id,result:{account:{type:'apiKey'}}});
+ if(m.method==='config/read') send({id:m.id,result:{config:{}}});
+ if(m.method==='thread/start') send({id:m.id,result:{thread:{id:'public-thread'}}});
+ if(m.method==='turn/start') {
+   send({id:m.id,result:{text:'One completed answer.'}});
+   if(scenario==='trickle') {fs.writeFileSync('ready','ready');setInterval(()=>send({method:'item/agentMessage/delta',params:{itemId:'one',delta:'x'}}),5);return;}
+   send({method:'turn/completed',params:{turn:{status:scenario}}});
+ }
+});
+"#).unwrap();
+        let provider = CodexAppServerProvider::new(
+            CodexProviderConfig {
+                codex_home_path: Some(
+                    temp.path()
+                        .join("isolated-profile")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            script.clone(),
+        )
+        .unwrap();
+        let name = if cfg!(windows) { "node.exe" } else { "node" };
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .expect("Node is required for protocol tests");
+        let mut command = TokioCommand::new(node);
+        command.arg(script).arg(scenario);
+        AppServerSession::spawn_command(&provider, command, Some(temp.path())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn saved_text_rejects_non_completed_terminal_status_and_reaps_its_child() {
+        for status in ["completed", "failed", "interrupted", ""] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut session = saved_text_session(&temp, status);
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                session.complete_text(
+                    "test-model",
+                    "Public test prompt",
+                    &tokio_util::sync::CancellationToken::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.is_ok(), status == "completed");
+            assert!(session.child.try_wait().unwrap().is_some());
+            assert!(session.stderr_task.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_text_cancellation_and_caller_drop_reap_only_the_owned_exchange() {
+        for scenario in ["initialize", "account/read", "turn/start", "trickle"] {
+            for drop_caller in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut session = saved_text_session(&temp, scenario);
+                let independent_temp = tempfile::tempdir().unwrap();
+                let mut independent = saved_text_session(&independent_temp, "initialize");
+                let token = tokio_util::sync::CancellationToken::new();
+                let task_token = token.clone();
+                let (reaped, done) = tokio::sync::oneshot::channel();
+                let waiter = tokio::spawn(async move {
+                    crate::summary::llm_client::supervise(
+                        &task_token,
+                        tokio::time::Instant::now() + Duration::from_secs(10),
+                        Duration::from_secs(5),
+                        move |token| async move {
+                            let result = session
+                                .complete_text("test-model", "Public test prompt", &token)
+                                .await;
+                            let _ = reaped.send(
+                                session.child.try_wait().unwrap().is_some()
+                                    && session.stderr_task.is_none(),
+                            );
+                            result
+                        },
+                    )
+                    .await
+                });
+                let ready = tokio::time::timeout(Duration::from_secs(5), async {
+                    while !temp.path().join("ready").exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                if drop_caller {
+                    waiter.abort();
+                } else {
+                    token.cancel();
+                }
+                let cleaned = tokio::time::timeout(Duration::from_secs(6), done).await;
+                let caller = tokio::time::timeout(Duration::from_secs(6), waiter).await;
+                let independent_running = independent.child.try_wait().unwrap().is_none();
+                tokio::time::timeout(Duration::from_secs(5), independent.cleanup())
+                    .await
+                    .unwrap();
+                assert!(ready.is_ok(), "Fake provider must reach the selected wait");
+                assert!(
+                    cleaned.unwrap().unwrap(),
+                    "Owned child and reader must finish after cancellation/drop"
+                );
+                assert!(
+                    independent_running,
+                    "Cancellation must not terminate another exchange"
+                );
+                if !drop_caller {
+                    assert!(caller.unwrap().unwrap().is_err());
+                }
+            }
+        }
+    }
+
     #[test]
     fn reauth_message_explains_legacy_file_migration_only_when_present() {
         let temp = tempfile::tempdir().unwrap();
@@ -1514,21 +1640,9 @@ impl CodexAppServerProvider {
         let mut command = TokioCommand::new(&self.app_server_binary);
         command.arg("app-server");
         let mut session = AppServerSession::spawn_command(self, command, None)?;
-        session.require_completed_status = true;
-        let result = tokio::select! {
-            biased;
-            _=token.cancelled()=>Err("Codex answer cancelled".into()),
-            result=async {
-                session.initialize().await?;
-                session.require_authenticated().await?;
-                session.process_raw_prompt(&self.config.model,prompt).await
-            }=>result,
-        };
-        session.cleanup().await;
-        if token.is_cancelled() {
-            return Err("Codex answer cancelled".into());
-        }
-        result
+        session
+            .complete_text(&self.config.model, prompt, token)
+            .await
     }
 }
 
@@ -2250,6 +2364,29 @@ struct AppServerSession {
 }
 
 impl AppServerSession {
+    /// Retained by the configured supervisor even when its caller disappears.
+    async fn complete_text(
+        &mut self,
+        model: &str,
+        prompt: &str,
+        token: &tokio_util::sync::CancellationToken,
+    ) -> Result<String, String> {
+        self.require_completed_status = true;
+        let result = tokio::select! {
+            biased;
+            _=token.cancelled()=>Err("Codex answer cancelled".into()),
+            result=async {
+                self.initialize().await?;
+                self.require_authenticated().await?;
+                self.process_raw_prompt(model,prompt).await
+            }=>result,
+        };
+        self.cleanup().await;
+        if token.is_cancelled() {
+            return Err("Codex answer cancelled".into());
+        }
+        result
+    }
     async fn start(provider: &CodexAppServerProvider) -> Result<Self, String> {
         Self::start_in(provider, None).await
     }

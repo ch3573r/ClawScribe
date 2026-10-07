@@ -804,6 +804,95 @@ Start-Sleep -Milliseconds 700
     }
 
     #[tokio::test]
+    async fn cleanup_quarantine_retains_exchange_and_job_admission_until_actual_reap() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (manager, _stderr) =
+            fake_sidecar("[Console]::In.ReadLine() | Out-Null; Start-Sleep -Seconds 60").await;
+        // Simulate an unavailable reap path while retaining the real child handle.
+        let child_guard = manager.child_process.lock().await;
+        let running = manager.clone();
+        let (completed, done) = tokio::sync::oneshot::channel();
+        let result = crate::summary::llm_client::supervise(
+            &tokio_util::sync::CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(25),
+            move |token| async move {
+                let _job = crate::audio::inference::claim_job()?;
+                let result = running
+                    .send_request_cancellable(
+                        "{}".into(),
+                        Duration::from_secs(60),
+                        None,
+                        Some(&token),
+                    )
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = completed.send(());
+                result
+            },
+        )
+        .await;
+        let retained = manager.quarantined.load(Ordering::SeqCst)
+            && manager.request_lock.try_lock().is_err()
+            && crate::audio::inference::claim_job().is_err();
+        let rejected = manager
+            .send_request("{}".into(), Duration::from_millis(10))
+            .await
+            .unwrap_err()
+            .to_string();
+        drop(child_guard);
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.active_request_count.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().contains("quarantined"));
+        assert!(
+            retained,
+            "Cleanup timeout must retain child/exchange/JOBS ownership"
+        );
+        assert!(rejected.contains("quarantined"));
+        assert!(manager.child_process.lock().await.is_none());
+        assert!(!manager.quarantined.load(Ordering::SeqCst));
+        let _next_job = crate::audio::inference::claim_job().unwrap();
+        let (replacement,_)=fake_sidecar("[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine('{\"type\":\"response\",\"text\":\"Next answer\",\"error\":null}')").await;
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            replacement.send_request("{}".into(), Duration::from_secs(2)),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), replacement.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.unwrap().unwrap().contains("Next answer"));
+    }
+
+    #[tokio::test]
+    async fn helper_response_retention_is_bounded_before_json_parsing() {
+        let (manager,_)=fake_sidecar("[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine(('x' * 2097152)); Start-Sleep -Seconds 60").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            manager.send_request("{}".into(), Duration::from_secs(3)),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), manager.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.unwrap().is_err(),
+            "Oversized protocol line must fail without retaining unbounded text"
+        );
+    }
+
+    #[tokio::test]
     async fn health_check_and_generation_cannot_overlap_jsonl_exchanges() {
         let script = r#"
 $reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput())

@@ -480,6 +480,22 @@ pub async fn retrieve(
         return Err(KnowledgeError::InvalidInput);
     }
     let scope = freeze_scope(pool, &request.scope).await?;
+    retrieve_frozen(pool, runtime, request, &scope).await
+}
+
+/// Reuse the request's durable selection; a queued answer must never broaden it.
+pub async fn retrieve_frozen(
+    pool: &SqlitePool,
+    runtime: &super::KnowledgeState,
+    request: &SearchRequest,
+    scope: &FrozenScope,
+) -> Result<SearchResponse, KnowledgeError> {
+    if request.query.trim().is_empty()
+        || request.query.len() > 1024
+        || !request.document_ids.is_empty()
+    {
+        return Err(KnowledgeError::InvalidInput);
+    }
     let space = super::model::PINS.space();
     let mut status = super::store::status(pool, runtime.scheduler.is_enabled(), &space.id).await?;
     let allowed =
@@ -513,12 +529,12 @@ pub async fn retrieve(
     };
     let passages = search_channels(
         pool,
-        &scope,
+        scope,
         &request.query,
         vector.as_ref().map(|v| (space.id.as_str(), v.as_slice())),
     )
     .await?;
-    recheck_scope(pool, &scope).await?;
+    recheck_scope(pool, scope).await?;
     Ok(SearchResponse {
         passages,
         mode: if vector.is_some() {

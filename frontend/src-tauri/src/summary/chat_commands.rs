@@ -53,12 +53,13 @@ pub async fn api_chat_history(
 #[tauri::command]
 pub async fn api_chat_clear(
     state: tauri::State<'_, AppState>,
+    runtime: tauri::State<'_, crate::knowledge::KnowledgeState>,
     meeting_id: String,
 ) -> Result<u64, String> {
     let pool = state.db_manager.pool().clone();
-    AiChatRepository::clear(&pool, &meeting_id)
-        .await
-        .map_err(|e| format!("Failed to clear chat history: {e}"))
+    let owner = crate::knowledge::types::ConversationOwner::Meeting(meeting_id);
+    runtime.answers.cancel_owner(&owner)?;
+    crate::knowledge::conversations::clear(&pool, &owner).await
 }
 
 /// Send a question about a meeting and get the assistant's reply, grounded in

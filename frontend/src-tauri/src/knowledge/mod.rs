@@ -1,6 +1,7 @@
 //! Opt-in local knowledge resources; meeting persistence remains in AppState.
 pub mod answers;
 pub mod chunking;
+pub mod commands;
 pub mod conversations;
 pub mod embedding;
 pub mod evidence;
@@ -12,6 +13,7 @@ pub mod store;
 pub mod types;
 use std::sync::Arc;
 pub struct KnowledgeState {
+    pub answers: Arc<answers::AnswerRegistry>,
     pub index_worker: indexer::IndexWorker,
     pub configuration: Arc<tokio::sync::Mutex<()>>,
     pub cancellation: Arc<scheduler::CancellationRegistry>,
@@ -22,6 +24,7 @@ impl Default for KnowledgeState {
     fn default() -> Self {
         let cancellation = Arc::new(scheduler::CancellationRegistry::default());
         Self {
+            answers: Arc::new(answers::AnswerRegistry::default()),
             index_worker: indexer::IndexWorker::default(),
             configuration: Arc::new(tokio::sync::Mutex::new(())),
             scheduler: scheduler::Scheduler::new(cancellation.clone()),

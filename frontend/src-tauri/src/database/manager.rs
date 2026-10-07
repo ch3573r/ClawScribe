@@ -50,6 +50,8 @@ impl DatabaseManager {
         }
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
+        sqlx::query("UPDATE knowledge_requests SET status='interrupted',failure='application_interrupted' WHERE status IN ('preparing','running')")
+            .execute(&pool).await?;
         if prune_expired_snapshots(Path::new(tauri_db_path)).is_err() {
             log::warn!("Could not remove expired pre-migration database backups");
         }
