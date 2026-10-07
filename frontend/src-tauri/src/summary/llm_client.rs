@@ -487,7 +487,232 @@ fn provider_name(provider: &LLMProvider) -> &str {
     }
 }
 
-/// Shared provider resolution for meeting chat and reviewed task polishing.
+/// Public metadata identifies the backend-normalized dispatched configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfiguredTextReply {
+    pub text: String,
+    pub provider: String,
+    pub model: String,
+}
+
+pub(crate) struct TextEnvironment {
+    pub app_data_dir: PathBuf,
+    pub codex: Option<super::codex_provider::CodexAppServerProvider>,
+    pub openclaw: Option<crate::openclaw::OpenClawConfig>,
+}
+impl TextEnvironment {
+    pub fn local(app_data_dir: PathBuf) -> Self {
+        Self {
+            app_data_dir,
+            codex: None,
+            openclaw: None,
+        }
+    }
+    pub fn from_app<R: tauri::Runtime>(
+        app: &tauri::AppHandle<R>,
+        provider: &LLMProvider,
+    ) -> Result<Self, String> {
+        use tauri::Manager;
+        let mut environment = Self::local(
+            app.path()
+                .app_data_dir()
+                .map_err(|_| "App data directory unavailable")?,
+        );
+        if *provider == LLMProvider::Codex {
+            environment.codex = Some(super::codex_provider::provider_from_app(app)?);
+        }
+        if *provider == LLMProvider::OpenClaw {
+            environment.openclaw = Some(crate::openclaw::load_config(app)?);
+        }
+        Ok(environment)
+    }
+}
+// Never serialize or Debug this credential-bearing execution snapshot.
+pub(crate) struct ResolvedText {
+    pub provider: LLMProvider,
+    pub model: String,
+    pub deadline: tokio::time::Instant,
+    pub budget: super::context_budget::ModelBudget,
+    execution: TextExecution,
+}
+enum TextExecution {
+    Compatible(super::openai_provider::OpenAICompatibleProcessingProvider),
+    Codex(super::codex_provider::CodexAppServerProvider),
+    Generic {
+        api_key: String,
+        ollama_endpoint: Option<String>,
+        endpoint: Option<String>,
+        allow_unencrypted: bool,
+        app_data_dir: PathBuf,
+    },
+}
+pub(crate) fn canonical_provider(provider: &LLMProvider) -> &'static str {
+    match provider {
+        LLMProvider::OpenAI => "openai",
+        LLMProvider::Claude => "claude",
+        LLMProvider::Groq => "groq",
+        LLMProvider::Ollama => "ollama",
+        LLMProvider::OpenRouter => "openrouter",
+        LLMProvider::BuiltInAI => "builtin-ai",
+        LLMProvider::OpenAICompatible => "openai-compatible",
+        LLMProvider::CustomOpenAI => "custom-openai",
+        LLMProvider::OpenClaw => "openclaw",
+        LLMProvider::Codex => "codex",
+    }
+}
+pub(crate) async fn resolve_configured_text(
+    pool: &sqlx::SqlitePool,
+    environment: TextEnvironment,
+    provider_name: &str,
+    model_name: &str,
+    started: tokio::time::Instant,
+    token: &CancellationToken,
+) -> Result<ResolvedText, String> {
+    use super::openai_provider::{
+        config_from_custom_openai, config_from_openai_api_key, OpenAICompatibleProcessingProvider,
+    };
+    use crate::database::repositories::setting::SettingsRepository;
+    if token.is_cancelled() {
+        return Err("Answer cancelled before configuration".into());
+    }
+    let provider = LLMProvider::from_str(provider_name)?;
+    // Configuration lookup has a short independent failure bound. Elapsed setup
+    // remains charged to the original absolute request deadline below.
+    let resolution = async {
+        let mut provider = provider;
+        let mut model = model_name.to_string();
+        let mut duration = REQUEST_TIMEOUT_DURATION;
+        let mut context = None;
+        let mut output = None;
+        let execution = if provider == LLMProvider::Codex {
+            let codex = environment
+                .codex
+                .ok_or("Bundled Codex configuration unavailable")?;
+            model = codex.config.model.clone();
+            duration = Duration::from_secs(codex.config.timeout_seconds.max(30));
+            TextExecution::Codex(codex)
+        } else if matches!(
+            provider,
+            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
+        ) {
+            let configured = SettingsRepository::get_custom_openai_config(pool)
+                .await
+                .map_err(|_| "Failed to read compatible provider configuration")?;
+            let mut config = match configured {
+                Some(config) => config_from_custom_openai(config),
+                None if provider == LLMProvider::OpenAICompatible => {
+                    let key = SettingsRepository::get_api_key(pool, "openai")
+                        .await
+                        .map_err(|_| "Failed to read OpenAI credential")?
+                        .filter(|key| !key.trim().is_empty())
+                        .ok_or("OpenAI API key or compatible endpoint is required")?;
+                    provider = LLMProvider::OpenAI;
+                    config_from_openai_api_key(Some(key), model.clone())
+                }
+                None => return Err("No OpenAI-compatible configuration found".into()),
+            };
+            config.model = model;
+            let compatible = OpenAICompatibleProcessingProvider::new(config)?;
+            let (actual, seconds, window, tokens) = compatible.text_settings();
+            model = actual.to_string();
+            duration = Duration::from_secs(seconds);
+            context = Some(window);
+            output = tokens.map(|value| value as usize);
+            TextExecution::Compatible(compatible)
+        } else {
+            let mut api_key = String::new();
+            let mut endpoint = None;
+            let mut allow_unencrypted = false;
+            let mut ollama_endpoint = None;
+            match provider {
+                LLMProvider::BuiltInAI => {
+                    model = super::summary_engine::models::get_model_by_name(&model)
+                        .ok_or("Unknown Built-in AI model")?
+                        .name;
+                    duration = Duration::from_secs(900);
+                }
+                LLMProvider::Ollama => {
+                    ollama_endpoint = SettingsRepository::get_model_config(pool)
+                        .await
+                        .map_err(|_| "Failed to read local provider settings")?
+                        .and_then(|setting| setting.ollama_endpoint);
+                }
+                LLMProvider::OpenClaw => {
+                    let config = environment
+                        .openclaw
+                        .ok_or("OpenClaw configuration unavailable")?;
+                    if !config.enabled || config.bearer_token.trim().is_empty() {
+                        return Err("OpenClaw is disabled or missing its credential".into());
+                    }
+                    endpoint = Some(config.model_endpoint);
+                    api_key = config.bearer_token;
+                    allow_unencrypted = config.allow_unencrypted;
+                }
+                _ => {
+                    api_key = SettingsRepository::get_api_key(pool, canonical_provider(&provider))
+                        .await
+                        .map_err(|_| "Failed to read provider credential")?
+                        .filter(|key| !key.is_empty())
+                        .ok_or("Provider credential is unavailable")?;
+                }
+            }
+            TextExecution::Generic {
+                api_key,
+                ollama_endpoint,
+                endpoint,
+                allow_unencrypted,
+                app_data_dir: environment.app_data_dir,
+            }
+        };
+        let deadline = started
+            .checked_add(duration)
+            .ok_or("Invalid provider timeout")?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Answer deadline expired during configuration".into());
+        }
+        let budget = super::context_budget::resolve(&provider, &model, context, output);
+        Ok(ResolvedText {
+            provider,
+            model,
+            deadline,
+            budget,
+            execution,
+        })
+    };
+    tokio::select! {
+        biased;
+        _=token.cancelled()=>Err("Answer cancelled during configuration".into()),
+        result=tokio::time::timeout(Duration::from_secs(1),resolution)=>result.map_err(|_|"Provider configuration lookup timed out")?,
+    }
+}
+
+pub(crate) async fn dispatch_resolved_text(
+    resolved: ResolvedText,
+    system: String,
+    user: String,
+    token: &CancellationToken,
+) -> Result<ConfiguredTextReply, String> {
+    let deadline = resolved.deadline;
+    supervise(token,deadline,Duration::from_secs(5),move |token|async move {
+        let text=match resolved.execution {
+            TextExecution::Compatible(provider)=>{
+                tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=provider.send_text_prompt_cancellable(&system,&user,&token)=>result?}
+            },
+            TextExecution::Codex(provider)=>provider.run_text_prompt_cancellable(&format!("{system}\n\n{user}"),&token).await?,
+            TextExecution::Generic{api_key,ollama_endpoint,endpoint,allow_unencrypted,app_data_dir}=>{
+                let client=Client::new();
+                let operation=generate_summary(&client,&resolved.provider,&resolved.model,&api_key,&system,&user,ollama_endpoint.as_deref(),endpoint.as_deref(),allow_unencrypted,None,None,None,Some(&app_data_dir),Some(&token));
+                if resolved.provider==LLMProvider::BuiltInAI {operation.await?} else {
+                    tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=operation=>result?}
+                }
+            },
+        };
+        if token.is_cancelled() {return Err("Answer cancelled".into());}
+        Ok(ConfiguredTextReply{text,provider:canonical_provider(&resolved.provider).into(),model:resolved.model})
+    }).await
+}
+
+/// Compatibility entry point for existing meeting chat and reviewed task polish.
 pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &tauri::State<'_, crate::state::AppState>,
@@ -496,102 +721,44 @@ pub(crate) async fn generate_configured_text<R: tauri::Runtime>(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    use super::openai_provider::{
-        config_from_custom_openai, config_from_openai_api_key, OpenAICompatibleProcessingProvider,
-    };
-    use crate::database::repositories::setting::SettingsRepository;
-    use tauri::Manager;
-
-    let provider = LLMProvider::from_str(model)?;
-
-    if matches!(provider, LLMProvider::Codex) {
-        let codex = crate::summary::codex_provider::provider_from_app(app)
-            .map_err(|e| format!("Codex app-server unavailable: {e}"))?;
-        return codex.run_text_prompt(&format!("{system}\n\n{user}")).await;
-    }
-
-    let pool = state.db_manager.pool().clone();
-    if matches!(
-        provider,
-        LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
-    ) {
-        let configured = SettingsRepository::get_custom_openai_config(&pool)
-            .await
-            .map_err(|e| format!("Failed to read OpenAI-compatible config: {e}"))?;
-        let mut config = match configured {
-            Some(config) => config_from_custom_openai(config),
-            None if provider == LLMProvider::OpenAICompatible => {
-                let key = SettingsRepository::get_api_key(&pool, "openai")
-                    .await
-                    .map_err(|e| format!("Failed to read OpenAI API key: {e}"))?
-                    .filter(|key| !key.trim().is_empty())
-                    .ok_or(
-                        "OpenAI-compatible chat requires an OpenAI API key or configured endpoint",
-                    )?;
-                config_from_openai_api_key(Some(key), model_name.to_string())
-            }
-            None => return Err("No OpenAI-compatible configuration found".into()),
-        };
-        config.model = model_name.to_string();
-        return OpenAICompatibleProcessingProvider::new(config)?
-            .send_text_prompt(system, user)
-            .await;
-    }
-    let mut api_key = String::new();
-    let mut ollama_endpoint: Option<String> = None;
-    let mut custom_openai_endpoint: Option<String> = None;
-    let mut allow_unencrypted = false;
-
-    match provider {
-        LLMProvider::Ollama | LLMProvider::BuiltInAI => {}
-        LLMProvider::OpenClaw => {
-            let cfg = crate::openclaw::load_config(app)
-                .map_err(|e| format!("Failed to load OpenClaw config: {e}"))?;
-            if !cfg.enabled || cfg.bearer_token.trim().is_empty() {
-                return Err("OpenClaw handoff is disabled or missing a bearer token.".to_string());
-            }
-            allow_unencrypted = cfg.allow_unencrypted;
-            custom_openai_endpoint = Some(cfg.model_endpoint);
-            api_key = cfg.bearer_token;
-        }
-        _ => {
-            api_key = SettingsRepository::get_api_key(&pool, model)
-                .await
-                .map_err(|e| format!("Failed to read API key: {e}"))?
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| format!("API key not found for {model}"))?;
-        }
-    }
-
-    if provider == LLMProvider::Ollama {
-        ollama_endpoint = SettingsRepository::get_model_config(&pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|c| c.ollama_endpoint);
-    }
-
-    let app_data_dir = app.path().app_data_dir().ok();
-    let client = reqwest::Client::new();
-    generate_summary(
-        &client,
-        &provider,
+    generate_configured_text_cancellable(
+        app,
+        state,
+        model,
         model_name,
-        &api_key,
         system,
         user,
-        ollama_endpoint.as_deref(),
-        custom_openai_endpoint.as_deref(),
-        allow_unencrypted,
-        None,
-        None,
-        None,
-        app_data_dir.as_ref(),
-        None,
+        &CancellationToken::new(),
     )
     .await
+    .map(|reply| reply.text)
 }
-
+pub(crate) async fn generate_configured_text_cancellable<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &tauri::State<'_, crate::state::AppState>,
+    model: &str,
+    model_name: &str,
+    system: &str,
+    user: &str,
+    token: &CancellationToken,
+) -> Result<ConfiguredTextReply, String> {
+    let started = tokio::time::Instant::now();
+    if token.is_cancelled() {
+        return Err("Answer cancelled before configuration".into());
+    }
+    let provider = LLMProvider::from_str(model)?;
+    let environment = TextEnvironment::from_app(app, &provider)?;
+    let resolved = resolve_configured_text(
+        state.db_manager.pool(),
+        environment,
+        model,
+        model_name,
+        started,
+        token,
+    )
+    .await?;
+    dispatch_resolved_text(resolved, system.into(), user.into(), token).await
+}
 #[cfg(test)]
 mod response_tests {
     use super::*;

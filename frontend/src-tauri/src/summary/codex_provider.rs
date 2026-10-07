@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as TokioCommand};
 use tokio::time::{sleep, timeout};
 
@@ -1485,10 +1485,50 @@ impl CodexAppServerProvider {
     /// model output (no meeting contract). Used for Planner title/notes polish so
     /// Codex has the same AI-polish path as the other providers.
     pub async fn run_text_prompt(&self, prompt: &str) -> Result<String, String> {
-        validate_codex_runtime_file(&self.app_server_binary)?;
-        let mut session = AppServerSession::start(self).await?;
-        session.require_authenticated().await?;
-        session.process_raw_prompt(&self.config.model, prompt).await
+        let provider = self.clone();
+        let prompt = prompt.to_owned();
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.config.timeout_seconds.max(30));
+        super::llm_client::supervise(
+            &tokio_util::sync::CancellationToken::new(),
+            deadline,
+            Duration::from_secs(5),
+            move |token| async move { provider.run_text_prompt_cancellable(&prompt, &token).await },
+        )
+        .await
+    }
+
+    /// The configured-text supervisor retains this future through cleanup.
+    pub(crate) async fn run_text_prompt_cancellable(
+        &self,
+        prompt: &str,
+        token: &tokio_util::sync::CancellationToken,
+    ) -> Result<String, String> {
+        if token.is_cancelled() {
+            return Err("Codex answer cancelled".into());
+        }
+        let binary = self.app_server_binary.clone();
+        let verification =
+            tokio::task::spawn_blocking(move || validate_codex_runtime_file(&binary));
+        tokio::select! {biased;_=token.cancelled()=>return Err("Codex answer cancelled".into()),result=verification=>result.map_err(|_|"Bundled Codex validation failed")??};
+        let mut command = TokioCommand::new(&self.app_server_binary);
+        command.arg("app-server");
+        let mut session = AppServerSession::spawn_command(self, command, None)?;
+        session.require_completed_status = true;
+        let result = tokio::select! {
+            biased;
+            _=token.cancelled()=>Err("Codex answer cancelled".into()),
+            result=async {
+                session.initialize().await?;
+                session.require_authenticated().await?;
+                session.process_raw_prompt(&self.config.model,prompt).await
+            }=>result,
+        };
+        session.cleanup().await;
+        if token.is_cancelled() {
+            return Err("Codex answer cancelled".into());
+        }
+        result
     }
 }
 
@@ -2197,7 +2237,7 @@ fn decline_server_request(message: &Value) -> Option<Value> {
 struct AppServerSession {
     child: Child,
     stdin: ChildStdin,
-    lines: Lines<BufReader<ChildStdout>>,
+    lines: BufReader<ChildStdout>,
     stderr_task: Option<tokio::task::JoinHandle<String>>,
     next_id: u64,
     timeout: Duration,
@@ -2205,6 +2245,8 @@ struct AppServerSession {
     cwd: PathBuf,
     _scratch: Option<tempfile::TempDir>,
     codex_home: Option<PathBuf>,
+    require_completed_status: bool,
+    received_bytes: usize,
 }
 
 impl AppServerSession {
@@ -2223,6 +2265,19 @@ impl AppServerSession {
 
     async fn start_command(
         provider: &CodexAppServerProvider,
+        command: TokioCommand,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
+        let mut session = Self::spawn_command(provider, command, cwd)?;
+        if let Err(error) = session.initialize().await {
+            session.cleanup().await;
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    fn spawn_command(
+        provider: &CodexAppServerProvider,
         mut command: TokioCommand,
         cwd: Option<&Path>,
     ) -> Result<Self, String> {
@@ -2235,6 +2290,7 @@ impl AppServerSession {
             .unwrap_or_else(|| scratch.as_ref().unwrap().path())
             .to_path_buf();
         command
+            .kill_on_drop(true)
             .current_dir(&cwd)
             .env_clear()
             .stdin(Stdio::piped())
@@ -2262,14 +2318,21 @@ impl AppServerSession {
         let stderr_task = stderr.map(|mut stderr| {
             tokio::spawn(async move {
                 let mut buf = Vec::new();
-                let _ = stderr.read_to_end(&mut buf).await;
+                let mut window = [0u8; 4096];
+                while let Ok(count) = stderr.read(&mut window).await {
+                    if count == 0 {
+                        break;
+                    }
+                    let retained = count.min(4096usize.saturating_sub(buf.len()));
+                    buf.extend_from_slice(&window[..retained]);
+                }
                 truncate_for_log(&String::from_utf8_lossy(&buf))
             })
         });
-        let mut session = Self {
+        let session = Self {
             child,
             stdin,
-            lines: BufReader::new(stdout).lines(),
+            lines: BufReader::new(stdout),
             stderr_task,
             next_id: 1,
             timeout: Duration::from_secs(provider.config.timeout_seconds.max(30)),
@@ -2277,9 +2340,26 @@ impl AppServerSession {
             cwd,
             _scratch: scratch,
             codex_home: provider.codex_home.clone(),
+            require_completed_status: false,
+            received_bytes: 0,
         };
-        session.initialize().await?;
         Ok(session)
+    }
+
+    async fn cleanup(&mut self) {
+        // The outer supervisor reports a five-second cleanup overrun while this
+        // session keeps its exclusive child ownership and continues reaping.
+        loop {
+            let _ = self.child.start_kill();
+            match tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await {
+                Ok(Ok(_)) => break,
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        if let Some(reader) = self.stderr_task.take() {
+            reader.abort();
+            let _ = reader.await;
+        }
     }
 
     async fn initialize(&mut self) -> Result<(), String> {
@@ -2487,6 +2567,16 @@ impl AppServerSession {
                     output.collect_completed_item(params);
                 }
                 if method == "turn/completed" {
+                    if self.require_completed_status {
+                        let status = params
+                            .get("turn")
+                            .and_then(|turn| turn.get("status"))
+                            .or_else(|| params.get("status"))
+                            .and_then(Value::as_str);
+                        if status != Some("completed") {
+                            return Err("Codex turn did not complete successfully".into());
+                        }
+                    }
                     if let Some(output) = output.finish(params) {
                         return Ok(strip_json_fence(&output));
                     }
@@ -2560,12 +2650,22 @@ impl AppServerSession {
 
     async fn read_message(&mut self) -> Result<Value, String> {
         loop {
-            let line = timeout(self.timeout, self.lines.next_line())
+            let mut line = Vec::new();
+            let mut bounded = (&mut self.lines).take(1024 * 1024 + 1);
+            let count = timeout(self.timeout, bounded.read_until(b'\n', &mut line))
                 .await
                 .map_err(|_| "Timed out waiting for Codex app-server response")?
-                .map_err(|_| "Failed to read Codex app-server response")?
-                .ok_or("Codex app-server exited before completing the request")?;
-            let message: Value = serde_json::from_str(&line)
+                .map_err(|_| "Failed to read Codex app-server response")?;
+            if count == 0 {
+                return Err("Codex app-server exited before completing the request".into());
+            }
+            self.received_bytes = self.received_bytes.saturating_add(count);
+            if count > 1024 * 1024
+                || (self.require_completed_status && self.received_bytes > 8 * 1024 * 1024)
+            {
+                return Err("Codex response exceeds the saved-answer limit".into());
+            }
+            let message: Value = serde_json::from_slice(&line)
                 .map_err(|_| "Invalid Codex app-server JSONL response")?;
             if let Some(reply) = decline_server_request(&message) {
                 self.send(&reply).await?;
