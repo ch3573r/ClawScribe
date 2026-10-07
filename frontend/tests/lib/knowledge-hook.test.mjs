@@ -4,8 +4,9 @@ import {loadTsModule} from './load-ts-module.mjs';
 import {createHookHarness,deferred,flush} from './hook-harness.mjs';
 const meeting=id=>({kind:'meeting',meeting_id:id});
 function view(service,{scope=meeting('one'),owner={kind:'meeting',id:'one'}}={}) {
+  let configuration;
   const hooks=createHookHarness();const {useKnowledgeSearch}=loadTsModule('src/hooks/useKnowledgeSearch.ts',{react:hooks.react,'@tauri-apps/api/event':{listen:async()=>()=>{}},'@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],cancel:async()=>{},history:async()=>[],...service}}});
-  return {...hooks,render:()=>hooks.render(()=>useKnowledgeSearch(scope,owner)),navigate(id){scope=meeting(id);owner={kind:'meeting',id};}};
+  return {...hooks,render:()=>hooks.render(()=>useKnowledgeSearch(scope,owner,configuration)),navigate(id){scope=meeting(id);owner={kind:'meeting',id};},configureScope(next){scope=next;},configureAnswer(next){configuration=next;}};
 }
 test('hook discards older searches and carries actual selected scope and retrieval mode',async()=>{
   const reads=[];const app=view({search:request=>{const read=deferred();reads.push({request,...read});return read.promise;}});
@@ -79,3 +80,16 @@ test('first answer history failure retries the original request after owner adop
   assert.equal(app.render().owner.id,'saved-retry');assert.match(app.render().error,/History temporarily unavailable/);
   await app.render().ask('Decision?','keyword');assert.equal(requests.length,2);assert.equal(requests[1].request_id,requests[0].request_id);assert.equal(saved.size,1);assert.equal(app.render().messages.length,1);app.unmount();
 });
+for(const invalidation of ['cancel','scope','provider','thread','question']) {
+  test(`automatic owner adoption never restores a retry UUID after ${invalidation} changes`,async()=>{
+    const requests=[];let reads=0;
+    const app=view({createConversation:async()=>({kind:'library',id:'original-thread'}),ask:async request=>{requests.push(request);},history:async()=>{if(++reads===1)throw 'History unavailable';return [];}},{scope:libraryScope,owner:null});
+    app.render();await flush();await app.render().ask('Decision?','keyword');app.render();await flush();
+    if(invalidation==='cancel')app.render().cancel();
+    if(invalidation==='scope')app.configureScope({...libraryScope,filter:{...libraryScope.filter,meeting_ids:['two']}});
+    if(invalidation==='provider')app.configureAnswer({provider:'other',model:'other-model'});
+    if(invalidation==='thread')app.render().selectConversation({kind:'library',id:'other-thread'});
+    app.render();await flush();await app.render().ask(invalidation==='question'?'Another question?':'Decision?','keyword');
+    assert.equal(requests.length,2);assert.notEqual(requests[1].request_id,requests[0].request_id);app.unmount();
+  });
+}

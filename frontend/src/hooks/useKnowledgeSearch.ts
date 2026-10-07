@@ -52,6 +52,7 @@ export function useKnowledgeSearch(
   const [creating, setCreating] = useState(false);
   const createPending = useRef(false);
   const adoptionError = useRef<{ ownerId: string; error: string } | null>(null);
+  const adoptedRetry = useRef<{ identity: string; question: string; id: string } | null>(null);
   const [preview, setPreview] = useState<{
     reference: EvidenceRef;
     metadata: EvidenceDisplay;
@@ -65,10 +66,14 @@ export function useKnowledgeSearch(
     libraryRevision,
     answerConfiguration,
   });
+  // Only automatic owner adoption may carry a failed first turn across identities.
+  // Scope, provider, library revision, and ordinary thread changes discard it.
+  if (adoptedRetry.current && adoptedRetry.current.identity !== identity) adoptedRetry.current = null;
   controller.configure({ scope, owner, libraryRevision, answerConfiguration });
   const [visibleFor, setVisibleFor] = useState(identity);
   const reset = () => {
     controller.invalidate();
+    adoptedRetry.current = null;
     setResponse(null);
     setLoading(false);
     setSending(false);
@@ -204,15 +209,18 @@ export function useKnowledgeSearch(
       );
       return;
     }
+    if (adoptedRetry.current?.question !== question.trim()) adoptedRetry.current = null;
     setSending(true);
     setError("");
     const current = controller.ticket("ask-operation");
     let createdOwner: ConversationOwner | null = null;
     let submissionError = "";
+    let submittedId = "";
     try {
       await controller.submit(
         question.trim(),
         async (request_id) => {
+          submittedId = request_id;
           let requestOwner = owner;
           if (!requestOwner && scope.kind === "library") {
             createPending.current = true;
@@ -240,7 +248,9 @@ export function useKnowledgeSearch(
         (history) => {
           // Hold the synchronous pending guard through durable history reconciliation.
           if (history) setMessages(history);
+          adoptedRetry.current = null;
         },
+        () => adoptedRetry.current?.id ?? globalThis.crypto.randomUUID(),
       );
     } catch (e) {
       if (current()) {
@@ -254,7 +264,14 @@ export function useKnowledgeSearch(
         // Failed answers retain the durable owner and error for a retry in this thread.
         if (createdOwner) {
           const value: ConversationOwner = createdOwner;
-          if (submissionError) adoptionError.current = { ownerId: value.id, error: submissionError };
+          if (submissionError) {
+            adoptionError.current = { ownerId: value.id, error: submissionError };
+            adoptedRetry.current = {
+              identity: JSON.stringify({ scope, owner: value, libraryRevision, answerConfiguration }),
+              question: question.trim(),
+              id: submittedId,
+            };
+          }
           setThreads((rows) => [value, ...rows.filter((row) => row.id !== value.id)]);
           setOwner(value);
         }
