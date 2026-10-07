@@ -311,6 +311,61 @@ pub async fn knowledge_model_cancel_download(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn large_unicode_indexing_is_complete_bounded_and_defers_reads_during_capture() {
+        use super::*;
+        use std::sync::atomic::Ordering;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES('large','Synthetic','2026-10-07','2026-10-07')").execute(&pool).await.unwrap();
+        let text = "Äpfel🙂 e\u{301} canonical word ".repeat(12000);
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES('large-row','large',?,'00:01')").bind(&text).execute(&pool).await.unwrap();
+        let job = store::next_job(&pool).await.unwrap().unwrap();
+        let runtime = super::super::scheduler::synthetic_query_scheduler();
+        store::BODY_PEAK.store(0, Ordering::Relaxed);
+        let recording = crate::audio::inference::claim_job().unwrap();
+        assert!(matches!(
+            index_source(&pool, &runtime, &job).await,
+            Err(KnowledgeError::Busy)
+        ));
+        let capture_reads = store::BODY_PEAK.load(Ordering::Relaxed);
+        drop(recording);
+        assert_eq!(
+            capture_reads, 0,
+            "capture contention must be checked before canonical body loading"
+        );
+        store::BODY_PEAK.store(0, Ordering::Relaxed);
+        index_source(&pool, &runtime, &job).await.unwrap();
+        let spans: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT start_byte,end_byte FROM knowledge_chunks ORDER BY ordinal")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(spans.len() > 10);
+        assert_eq!(spans[0].0, 0);
+        assert_eq!(spans.last().unwrap().1 as usize, text.len());
+        for span in &spans {
+            assert!(text.get(span.0 as usize..span.1 as usize).is_some());
+        }
+        for pair in spans.windows(2) {
+            assert!(
+                pair[1].0 > pair[0].0 && pair[1].0 < pair[0].1,
+                "semantic overlap must cover every byte across read windows"
+            );
+        }
+        let peak = store::BODY_PEAK.load(Ordering::Relaxed);
+        println!(
+            "KNOWLEDGE_LARGE_INDEX canonical_bytes={} chunks={} retained_body_bytes={peak}",
+            text.len(),
+            spans.len()
+        );
+        assert!(peak <= 16384, "index input must remain bounded");
+    }
     use super::*;
     #[tokio::test]
     async fn installed_pool_has_one_worker_and_disabled_jobs_remain_durable() {

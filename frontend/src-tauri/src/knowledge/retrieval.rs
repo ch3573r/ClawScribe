@@ -8,6 +8,10 @@ pub const CANDIDATES: usize = 64;
 pub const VECTOR_PAGE: usize = 512;
 pub const RESULT_LIMIT: usize = 12;
 pub const RRF_CONSTANT: f64 = 60.;
+#[cfg(test)]
+tokio::task_local! { static MOVE_AFTER_FTS: std::cell::RefCell<Option<(String,String)>>; }
+#[cfg(test)]
+static MAPPING_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 pub struct FrozenScope {
@@ -243,6 +247,14 @@ pub async fn search_channels(
             .join(" OR ");
         let expression = format!("text: ({body_expression}) OR speaker: ({speaker_expression})");
         let ids:Vec<String>=sqlx::query_scalar("SELECT f.transcript_id FROM knowledge_fts f JOIN transcripts t ON t.id=f.transcript_id JOIN json_each(?) allowed ON allowed.value=t.meeting_id WHERE knowledge_fts MATCH ? ORDER BY bm25(knowledge_fts),f.transcript_id LIMIT 64").bind(&allowed).bind(expression).fetch_all(pool).await?;
+        #[cfg(test)]
+        if let Ok(Some((id, owner))) = MOVE_AFTER_FTS.try_with(|slot| slot.borrow_mut().take()) {
+            sqlx::query("UPDATE transcripts SET meeting_id=? WHERE id=?")
+                .bind(owner)
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
         for id in ids {
             let Some(data) = canonical(pool, &id).await? else {
                 continue;
@@ -387,6 +399,11 @@ fn folded_match(text: &str, needle: &str) -> Option<(usize, usize)> {
         }
     }
     let needle = needle.to_lowercase();
+    #[cfg(test)]
+    MAPPING_PEAK.fetch_max(
+        map.len() * std::mem::size_of::<(usize, usize)>(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let start = folded.find(&needle)?;
     Some((map[start].0, map[start + needle.len() - 1].1))
 }
@@ -404,6 +421,8 @@ async fn canonical(
 ) -> Result<Option<(CanonicalRow, SourceJob, String, String)>, KnowledgeError> {
     let row=sqlx::query("SELECT t.*,s.id AS source_id,s.revision,s.generation,m.title,m.created_at AS date FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=?").bind(id).fetch_optional(pool).await?;
     row.map(|row| {
+        #[cfg(test)]
+        store::track_row(&CanonicalRow::from_row(&row)?);
         Ok((
             CanonicalRow::from_row(&row)?,
             SourceJob {
@@ -430,6 +449,7 @@ fn passage(
         title,
         date,
         speaker: row.speaker,
+        metadata_truncated: false,
         text: row.transcript[span.start_byte..span.end_byte].into(),
         rank: 0.,
     })
@@ -607,6 +627,147 @@ pub async fn retrieve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn moving_a_selected_fts_row_cannot_escape_search_or_public_retrieval_scope() {
+        let pool = fixture().await;
+        add_text(&pool, "moving", "one", "ATLAS-42 scoped evidence").await;
+        let request = SearchRequest {
+            scope: KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+            query: "ATLAS-42".into(),
+            document_ids: Vec::new(),
+            mode: SearchMode::Keyword,
+        };
+        for public in [false, true] {
+            sqlx::query("UPDATE transcripts SET meeting_id='one' WHERE id='moving'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let frozen = freeze_scope(&pool, &request.scope).await.unwrap();
+            let result = MOVE_AFTER_FTS
+                .scope(
+                    std::cell::RefCell::new(Some(("moving".into(), "two".into()))),
+                    async {
+                        if public {
+                            retrieve(&pool, &super::super::KnowledgeState::default(), &request)
+                                .await
+                                .map(|response| response.passages)
+                        } else {
+                            search_channels(&pool, &frozen, &request.query, None).await
+                        }
+                    },
+                )
+                .await;
+            match result {
+                Ok(hits) => assert!(
+                    hits.iter().all(|hit| hit.meeting_id == "one"),
+                    "a post-selection move cannot disclose unselected evidence; public={public}"
+                ),
+                Err(KnowledgeError::Superseded) => {}
+                Err(error) => panic!("unexpected scoped race error: {error}"),
+            }
+        }
+    }
+    #[tokio::test]
+    async fn late_unicode_identifier_uses_bounded_inputs_and_maps_during_recording() {
+        use std::sync::atomic::Ordering;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = fixture().await;
+        let text = format!(
+            "{} ATLAS-42 Überprüfung",
+            "Ä e\u{301} 🙂 ordinary material. ".repeat(40000)
+        );
+        add_text(&pool, "large", "one", &text).await;
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        store::BODY_PEAK.store(0, Ordering::Relaxed);
+        MAPPING_PEAK.store(0, Ordering::Relaxed);
+        let recording = crate::audio::inference::claim_job().unwrap();
+        let started = std::time::Instant::now();
+        let hits = search_channels(&pool, &scope, "ATLAS-42", None)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed().as_millis();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("ATLAS-42"));
+        if let EvidenceLocator::Transcript { spans, .. } = &hits[0].evidence.locator {
+            assert!(spans[0].start_byte > 16384);
+            assert_eq!(&text[spans[0].start_byte..spans[0].end_byte], hits[0].text);
+        } else {
+            panic!("canonical transcript locator required");
+        }
+        drop(recording);
+        let body = store::BODY_PEAK.load(Ordering::Relaxed);
+        let mapping = MAPPING_PEAK.load(Ordering::Relaxed);
+        println!("KNOWLEDGE_LARGE_KEYWORD canonical_bytes={} retained_body_bytes={body} mapping_bytes={mapping} elapsed_ms={elapsed} recording_contended=true",text.len());
+        assert!(
+            body <= 16384,
+            "canonical body loading must be byte bounded, got {body}"
+        );
+        assert!(
+            mapping <= 16384 * 3 * std::mem::size_of::<(usize, usize)>(),
+            "case-fold mapping must be bounded, got {mapping}"
+        );
+    }
+    #[tokio::test]
+    async fn oversized_metadata_is_explicitly_clipped_but_fingerprint_remains_complete() {
+        let pool = fixture().await;
+        add_text(&pool, "metadata", "one", "ATLAS-42 body").await;
+        let speaker = "Änne🙂".repeat(10000);
+        let timing = format!("{{\"synthetic\":\"{}\"}}", "x".repeat(256 * 1024));
+        sqlx::query("UPDATE transcripts SET speaker=?,word_timestamps_json=? WHERE id='metadata'")
+            .bind(&speaker)
+            .bind(&timing)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE meetings SET title=? WHERE id='one'")
+            .bind("Ü".repeat(2000))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row: CanonicalRow = sqlx::query_as("SELECT * FROM transcripts WHERE id='metadata'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let scope = freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        store::METADATA_PEAK.store(0, std::sync::atomic::Ordering::Relaxed);
+        let hits = search_channels(&pool, &scope, "ATLAS-42", None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        let EvidenceLocator::Transcript { spans, .. } = &hits[0].evidence.locator else {
+            panic!("transcript locator")
+        };
+        assert_eq!(
+            hits[0].evidence.fingerprint,
+            store::fingerprint(&row, &spans[0]).unwrap(),
+            "complete canonical-v1 fingerprint must remain stable"
+        );
+        assert!(
+            hits[0].metadata_truncated,
+            "clipped display fields must be explicitly marked"
+        );
+        assert!(hits[0].speaker.as_ref().unwrap().len() <= 1024 && hits[0].title.len() <= 1024);
+        assert!(
+            store::METADATA_PEAK.load(std::sync::atomic::Ordering::Relaxed) <= 16384,
+            "canonical metadata hashing must stream bounded buffers"
+        );
+    }
     #[tokio::test]
     async fn multiple_sources_balance_semantic_candidates_without_losing_identifier_hits() {
         let pool = fixture().await;

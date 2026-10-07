@@ -2,6 +2,22 @@
 use super::types::*;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
+#[cfg(test)]
+pub(crate) static BODY_PEAK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static METADATA_PEAK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) fn track_row(row: &CanonicalRow) {
+    use std::sync::atomic::Ordering;
+    BODY_PEAK.fetch_max(row.transcript.len(), Ordering::Relaxed);
+    METADATA_PEAK.fetch_max(
+        row.speaker.as_ref().map_or(0, String::len)
+            + row.word_timestamps_json.as_ref().map_or(0, String::len),
+        Ordering::Relaxed,
+    );
+}
 
 #[derive(Debug, Clone, FromRow)]
 pub struct SourceJob {
@@ -91,7 +107,12 @@ pub async fn rows_page(
         return Err(KnowledgeError::Superseded);
     }
     let (timestamp, id) = after.unwrap_or(("", ""));
-    Ok(sqlx::query_as("SELECT id,meeting_id,transcript,speaker,timestamp,audio_start_time,audio_end_time,duration,word_timestamps_json FROM transcripts WHERE meeting_id=? AND (timestamp>? OR (timestamp=? AND id>?)) ORDER BY timestamp,id LIMIT 32").bind(&job.meeting_id).bind(timestamp).bind(timestamp).bind(id).fetch_all(pool).await?)
+    let rows=sqlx::query_as("SELECT id,meeting_id,transcript,speaker,timestamp,audio_start_time,audio_end_time,duration,word_timestamps_json FROM transcripts WHERE meeting_id=? AND (timestamp>? OR (timestamp=? AND id>?)) ORDER BY timestamp,id LIMIT 32").bind(&job.meeting_id).bind(timestamp).bind(timestamp).bind(id).fetch_all(pool).await?;
+    #[cfg(test)]
+    for row in &rows {
+        track_row(row);
+    }
+    Ok(rows)
 }
 pub async fn stage(
     pool: &SqlitePool,

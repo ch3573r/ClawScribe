@@ -107,6 +107,8 @@ pub struct Passage {
     pub title: String,
     pub date: String,
     pub speaker: Option<String>,
+    #[serde(default)]
+    pub metadata_truncated: bool,
     pub text: String,
     pub rank: f64,
 }

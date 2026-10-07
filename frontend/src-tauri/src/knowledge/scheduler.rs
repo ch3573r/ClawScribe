@@ -302,7 +302,9 @@ impl Scheduler {
 #[cfg(test)]
 pub(crate) fn synthetic_query_scheduler() -> Arc<Scheduler> {
     // Test utility for retrieval control flow, never used by model acceptance.
-    struct UnitVector;
+    struct UnitVector {
+        tokenizer: tokenizers::Tokenizer,
+    }
     impl EmbeddingBackend for UnitVector {
         fn space(&self) -> super::types::EmbeddingSpace {
             super::model::PINS.space()
@@ -312,10 +314,27 @@ pub(crate) fn synthetic_query_scheduler() -> Arc<Scheduler> {
             vector[0] = 1.;
             Ok(vector)
         }
+        fn spans(
+            &self,
+            id: &str,
+            text: &str,
+        ) -> Result<Vec<super::types::TextSpan>, KnowledgeError> {
+            super::chunking::semantic_spans(&self.tokenizer, id, text)
+        }
     }
     let scheduler = Scheduler::new(Arc::new(CancellationRegistry::default()));
     scheduler.enabled.store(true, Ordering::Release);
-    scheduler.worker.lock().unwrap().model = Some(Box::new(UnitVector));
+    let mut tokenizer = tokenizers::Tokenizer::new(
+        tokenizers::models::wordlevel::WordLevel::builder()
+            .vocab([("[UNK]".into(), 0)].into_iter().collect())
+            .unk_token("[UNK]".into())
+            .build()
+            .unwrap(),
+    );
+    tokenizer.with_pre_tokenizer(Some(
+        tokenizers::pre_tokenizers::whitespace::WhitespaceSplit,
+    ));
+    scheduler.worker.lock().unwrap().model = Some(Box::new(UnitVector { tokenizer }));
     scheduler
 }
 
