@@ -54,7 +54,17 @@ if ($FullSuite) { & $executables[0] --test-threads=1 }
 if ($AnswerAcceptance) {
     if ([string]::IsNullOrWhiteSpace($env:CLAWSCRIBE_VALIDATION_ROOT)) { throw 'An explicit isolated validation root is required.' }
     $validationRoot = [System.IO.Path]::GetFullPath($env:CLAWSCRIBE_VALIDATION_ROOT)
-    if (-not (Test-Path -LiteralPath $validationRoot -PathType Container)) { throw 'The isolated validation root must be provisioned first.' }
+    $rootVolume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($validationRoot))
+    if (-not $rootVolume.IsReady -or $rootVolume.DriveType -ne [IO.DriveType]::Fixed -or $rootVolume.AvailableFreeSpace -lt 4GB) { throw 'Isolated validation requires a fixed local volume with at least 4 GiB free.' }
+    if (-not (Test-Path -LiteralPath $validationRoot)) {
+        $rootParent = [IO.Directory]::GetParent($validationRoot)
+        if ($null -eq $rootParent -or -not (Test-Path -LiteralPath $rootParent.FullName -PathType Container)) { throw 'The explicitly configured validation root requires an existing local parent.' }
+        for ($ancestor = Get-Item -LiteralPath $rootParent.FullName; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+            if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root parent cannot traverse a reparse point.' }
+        }
+        New-Item -ItemType Directory -Path $validationRoot | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $validationRoot -PathType Container)) { throw 'Invalid isolated validation root.' }
     $validationItem = Get-Item -LiteralPath $validationRoot
     for ($ancestor = $validationItem; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
         if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Validation root cannot traverse a reparse point.' }
