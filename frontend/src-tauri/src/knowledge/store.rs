@@ -287,7 +287,19 @@ pub async fn row_ids_page(
     job: &SourceJob,
     after: Option<&str>,
 ) -> Result<Vec<String>, KnowledgeError> {
-    if !current(pool, job).await? {
+    // Canonical readers also serve answers after publication (which removes
+    // the index job), or while indexing is paused/failed. Worker admission
+    // remains guarded separately by current, stage_evidence and publish.
+    let source_current: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND meeting_id=? AND kind='meeting' AND revision=? AND generation=?)",
+    )
+    .bind(&job.source_id)
+    .bind(&job.meeting_id)
+    .bind(job.revision)
+    .bind(job.generation)
+    .fetch_one(pool)
+    .await?;
+    if !source_current {
         return Err(KnowledgeError::Superseded);
     }
     Ok(sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id=? AND (? IS NULL OR (timestamp,id)>(SELECT timestamp,id FROM transcripts WHERE id=?)) ORDER BY timestamp,id LIMIT 32").bind(&job.meeting_id).bind(after).bind(after).fetch_all(pool).await?)
