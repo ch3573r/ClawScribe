@@ -450,9 +450,10 @@ models implicitly. Its CPU ONNX candidate and SHA-256 manifest live under
 `knowledge/`; explicit downloads use the existing resumable transfer registry.
 The embedding-space identity includes the model revision, both artifact hashes,
 tokenizer version, prefixes, pooling version, and CPU loading policy. The revised
-candidate disables graph optimizations and weight prepacking to reduce peak
-loading memory while keeping the exact float32 artifact. ORT defines the latter
-as `session.disable_prepacking=1` in its
+candidate disables graph optimizations and weight prepacking while keeping the
+exact float32 artifact. It constructs the session before the tokenizer to avoid
+overlapping retained tokenizer allocations with transient model loading. ORT
+defines prepacking control as `session.disable_prepacking=1` in its
 [session configuration reference](https://github.com/microsoft/onnxruntime/blob/v1.22.0/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h).
 The model-space identity distinguishes this loading policy from the earlier
 optimized candidate. Inference handles one input
@@ -476,9 +477,9 @@ runs never download embedding models. Its acceptance option independently
 computes PyTorch/model-card reference vectors from pinned artifacts, then tests
 ONNX parity, peak incremental process memory and cold/warm recording preemption.
 Synthetic fixtures and reference scripts are public; models, reference vectors,
-Python environments, and benchmark output stay on the runner. This foundation
-does not establish that the candidate has passed the acceptance gate or expose
-semantic search to users.
+Python environments, and benchmark output stay on the runner. The acceptance
+gate must pass on the designated runner before dependent indexing work proceeds.
+This foundation does not expose semantic search to users.
 
 The tokenizer is pinned to Apache-2.0 `tokenizers = 0.21.4` with default/network
 features disabled and the Rust regex implementation selected. ORT stays at the
