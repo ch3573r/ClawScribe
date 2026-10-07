@@ -2,6 +2,7 @@
 pub mod embedding;
 pub mod model;
 pub mod scheduler;
+pub mod store;
 pub mod types;
 use std::sync::Arc;
 pub struct KnowledgeState {
