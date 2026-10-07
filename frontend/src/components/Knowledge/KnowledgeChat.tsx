@@ -7,7 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { citationParts, contextLinks } from "@/lib/knowledge-state";
+import { citationParts, contextLinks, scopeReady } from "@/lib/knowledge-state";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
 import type { AssistantReply, SearchMode } from "@/types/knowledge";
 function CitedAnswer({
@@ -112,7 +112,7 @@ export function KnowledgeChat({
   title?: string;
 }) {
   const [question, setQuestion] = useState("");
-  const ready = !!provider && !!model && !!state.owner && !state.historyLoading;
+  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating;
   const submit = () => {
     if (question.trim() && ready && !state.sending)
       void state.ask(question, mode);
@@ -165,15 +165,12 @@ export function KnowledgeChat({
                 ))}
               </select>
             </label>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => void state.reloadThreads()}
-            >
-              Reload conversations
-            </Button>
           </div>
         )}
+        {(!!state.owner || state.scope.kind === "library") && <details>
+          <summary className="w-fit cursor-pointer rounded text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Conversation actions</summary>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {state.scope.kind === "library" && state.owner?.kind !== "meeting" && <Button size="sm" variant="ghost" onClick={() => void state.reloadThreads()}>Reload conversations</Button>}
         {!!state.messages.length && (
           <Button
             variant="ghost"
@@ -194,6 +191,8 @@ export function KnowledgeChat({
             Reload history
           </Button>
         )}
+          </div>
+        </details>}
       </header>
       <div
         className="max-h-[30rem] flex-1 space-y-4 overflow-y-auto p-4"
@@ -208,7 +207,7 @@ export function KnowledgeChat({
           <p className="text-sm text-muted-foreground">
             Ask about decisions, action items, or what was said.{" "}
             {state.scope.kind === "library" && !state.owner
-              ? "Create or choose a conversation to begin."
+              ? "Your conversation is saved when you ask the first question."
               : ""}
           </p>
         )}

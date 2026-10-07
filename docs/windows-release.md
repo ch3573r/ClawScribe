@@ -29,9 +29,11 @@ dual-source recording smoke.
 ### Toolchain
 
 Use Windows with Visual Studio Build Tools 2022 (Desktop development with C++),
-a Windows SDK, WebView2, Rust stable/MSVC, Node.js 24, pnpm 10, PowerShell 7, and
+a Windows SDK, WebView2, Rust stable/MSVC, Node.js 24.21.0, pnpm 10, PowerShell 7, and
 CMake. The workflow pins LLVM 20.1.8 for bindgen compatibility and Vulkan SDK
-1.4.309.0 for the `windows-gpu` and `vulkan` paths. Set `LIBCLANG_PATH` to the
+1.4.309.0 for the `windows-gpu` and `vulkan` paths. Node is pinned to include the
+isolated test-runner transport fix; keep process isolation and assertions enabled.
+Set `LIBCLANG_PATH` to the
 LLVM `bin` directory when needed. Use the versions declared by the checked-out
 workflow rather than silently changing the native toolchain during a release.
 
@@ -122,7 +124,8 @@ without relying on PATH or downloading an encoder at test time.
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
 DLLs, zero matched tests, and failing test results. Required suites cover summary
-providers and sidecar exchanges, audio cancellation and model switching,
+providers and sidecar exchanges, meeting memory and source invalidation,
+audio cancellation and model switching,
 transcript preservation and paging, credentials, Microsoft export persistence,
 and updater selection. It also runs the local summary helper protocol, sampling,
 and stop-sequence tests. Recording suites cover partial audio finalization,

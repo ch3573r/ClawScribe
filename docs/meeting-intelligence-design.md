@@ -50,6 +50,11 @@ vector extension until the acceptance corpus demonstrates that it is needed.
 Database access stays in SQLx; model inference and scoring run on blocking
 workers with bounded inputs.
 
+Canonical transcript reads for answers check the source identity, revision and
+generation independently of indexing jobs. A completed or paused indexing job
+does not invalidate a saved transcript; actual edits or deletion still reject
+stale evidence. Worker admission and publication retain their separate job checks.
+
 ## Local model and retrieval
 
 Use `intfloat/multilingual-e5-small` as the first model candidate. Its

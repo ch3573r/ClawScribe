@@ -13,7 +13,11 @@ export interface EvidenceRef { historical?: boolean; source_id:string;source_rev
 export interface EvidenceDisplay {title:string;date:string;speaker:string|null;metadata_truncated:boolean;preceding_question_tag?:number|null}
 export interface Passage extends Omit<EvidenceDisplay,'preceding_question_tag'> {evidence:EvidenceRef;meeting_id:string;text:string;rank:number}
 export interface IndexStatus {keyword_ready:boolean;semantic_enabled:boolean;semantic_ready:number;pending:number;failed:number;reason:string|null}
-export interface ModelStatus {enabled:boolean;ready:boolean;model:string}
+export interface ModelDownloadStatus {
+  stage:'idle'|'checking'|'downloading'|'verifying'|'cancelling'|'ready'|'cancelled'|'error';
+  downloaded_bytes:number;total_bytes:number;current_file:string|null;error:string|null;
+}
+export interface ModelStatus {enabled:boolean;ready:boolean;installed:boolean;model:string;download:ModelDownloadStatus}
 export interface SearchRequest {scope:KnowledgeScope;query:string;document_ids:string[];mode:SearchMode}
 export interface SearchResponse {passages:Passage[];mode:SearchMode;index_status:IndexStatus}
 export interface AskRequest {request_id:string;owner:ConversationOwner;search:SearchRequest}
