@@ -80,6 +80,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           KNOWLEDGE: ${{ inputs.knowledge }}
           BUILD_REF: ${{ inputs['build-ref'] }}
+          ANSWER_ACCEPTANCE: ${{ inputs['answer-acceptance'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
@@ -88,6 +89,7 @@ jobs:
               $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
             throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
           }
+          if ($env:ANSWER_ACCEPTANCE -eq 'true') { throw 'Use the manual Knowledge answer synthetic review workflow for bounded factual review reporting.' }
           if ($env:KNOWLEDGE -eq 'true' -and $env:BUILD_REF -notmatch '^[0-9a-f]{40}$') {
             throw 'An immutable reviewed commit SHA is required.'
           }
