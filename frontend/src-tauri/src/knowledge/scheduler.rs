@@ -396,7 +396,7 @@ mod tests {
             panic!("synthetic indexing panic");
         })
         .await;
-        assert_eq!(result, Err(KnowledgeError::Busy));
+        assert_eq!(result, Err(KnowledgeError::ProviderFailure));
         assert!(registry.active.lock().unwrap().is_none());
         let priority = ForegroundPriority::enter();
         assert!(!priority.preempted);
