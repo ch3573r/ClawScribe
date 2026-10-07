@@ -155,18 +155,18 @@ dates as complete facts; Task 4 must show the indication in source previews.
 Keep scope checks in the backend and use
 the existing tag semantics. Live is rejected until Task 7 supplies its source.
 
-- [ ] Write clean/upgrade database tests and retrieval tests: `edited_source_cannot_publish_old_generation`, `delete_cascades_index`, `restore_requeues_index`, `tag_scope_applies_before_ranking`, `hybrid_preserves_identifier_hits`, `unicode_chunk_spans_roundtrip`, and `model_space_change_requires_reindex`.
-- [ ] Pin assertions: 320-token maximum, 48-token overlap, vector pages of at most 512 rows, 64 candidates per channel, and at most 12 final passages. Verify sources outside the selected meetings/tags never appear.
-- [ ] Keep tokenizer-free lexical windows separate from model chunks: 2,048-byte maximum, at most 128-byte overlap, exact canonical UTF-8 spans. Never estimate model-token counts or require a tokenizer download for keyword readiness. Fuse only actual matching evidence identities, preserve identifier hits, and resolve citations without a foreign key to derived chunks.
-- [ ] Run the new tests and confirm the absent behavior fails.
-- [ ] Add the source/chunk/vector/job tables and FTS5 table. Test FTS5 availability in the supported bundled SQLite runtime. Add transcript mutation triggers and source deletion cascades in the new migration.
-- [ ] Implement streaming chunk construction with transcript IDs/byte spans, durable coalesced jobs, three-attempt retry limit, and conditional generation publication. Restarted jobs remain recoverable.
-- [ ] Implement quoted/sanitized lexical queries and normalized cosine search with a bounded heap; combine ranks using constant 60. Return keyword-only status when semantic work cannot run.
-- [ ] Index current speaker labels in a separate lexical field while preserving body-only semantic embeddings. Test Unicode label edits, old-name invalidation, and real canonical evidence for speaker-only hits.
-- [ ] When multiple currently indexed sources are eligible, select at most three semantic candidates per source within the global 64 budget; a sole source keeps all 64. Keep lexical identifiers, distinct dates/spans, and RRF 60 unchanged. Test single-source budgets and multi-source starvation without merging or deleting stored evidence.
-- [ ] Register `knowledge_search`, `knowledge_index_status`, `knowledge_reindex`, `knowledge_cancel_index`, and model enable/download/status commands. Commands never accept a client-provided SQL filter or embedding-space identity.
-- [ ] Require explicit `all_meetings` for unconstrained library scope; freeze allowed meeting IDs for an answer and recheck metadata/tag membership before dispatch and persistence. Start exactly one worker for the current pool across normal and first-run database initialization.
-- [ ] Run targeted tests and the 10,000-passage/30-question English-German acceptance corpus on the designated runner: at least 27 expected top-five hits and warm p95 no greater than two seconds. Commit after Rust checks and the safety scan: `feat: add hybrid meeting retrieval`.
+- [x] Write clean/upgrade database tests and retrieval tests: `edited_source_cannot_publish_old_generation`, `delete_cascades_index`, `restore_requeues_index`, `tag_scope_applies_before_ranking`, `hybrid_preserves_identifier_hits`, `unicode_chunk_spans_roundtrip`, and `model_space_change_requires_reindex`.
+- [x] Pin assertions: 320-token maximum, 48-token overlap, vector pages of at most 512 rows, 64 candidates per channel, and at most 12 final passages. Verify sources outside the selected meetings/tags never appear.
+- [x] Keep tokenizer-free lexical windows separate from model chunks: 2,048-byte maximum, at most 128-byte overlap, exact canonical UTF-8 spans. Never estimate model-token counts or require a tokenizer download for keyword readiness. Fuse only actual matching evidence identities, preserve identifier hits, and resolve citations without a foreign key to derived chunks.
+- [x] Run the new tests and confirm the absent behavior fails.
+- [x] Add the source/chunk/vector/job tables and FTS5 table. Test FTS5 availability in the supported bundled SQLite runtime. Add transcript mutation triggers and source deletion cascades in the new migration.
+- [x] Implement streaming chunk construction with transcript IDs/byte spans, durable coalesced jobs, three-attempt retry limit, and conditional generation publication. Restarted jobs remain recoverable.
+- [x] Implement quoted/sanitized lexical queries and normalized cosine search with a bounded heap; combine ranks using constant 60. Return keyword-only status when semantic work cannot run.
+- [x] Index current speaker labels in a separate lexical field while preserving body-only semantic embeddings. Test Unicode label edits, old-name invalidation, and real canonical evidence for speaker-only hits.
+- [x] When multiple currently indexed sources are eligible, select at most three semantic candidates per source within the global 64 budget; a sole source keeps all 64. Keep lexical identifiers, distinct dates/spans, and RRF 60 unchanged. Test single-source budgets and multi-source starvation without merging or deleting stored evidence.
+- [x] Register `knowledge_search`, `knowledge_index_status`, `knowledge_reindex`, `knowledge_cancel_index`, and model enable/download/status commands. Commands never accept a client-provided SQL filter or embedding-space identity.
+- [x] Require explicit `all_meetings` for unconstrained library scope; freeze allowed meeting IDs for an answer and recheck metadata/tag membership before dispatch and persistence. Start exactly one worker for the current pool across normal and first-run database initialization.
+- [x] Run targeted tests and the 10,000-passage/30-question English-German acceptance corpus on the designated runner: at least 27 expected top-five hits and warm p95 no greater than two seconds. Commit after Rust checks and the safety scan: `feat: add hybrid meeting retrieval`.
 
 ### Task 3 Evidence, answer requests, and conversation persistence
 
