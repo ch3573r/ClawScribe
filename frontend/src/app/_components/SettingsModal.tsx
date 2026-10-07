@@ -1,5 +1,6 @@
 import { ModelConfig } from "@/components/ModelSettingsModal";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
+import { KnowledgeSettings } from "@/components/KnowledgeSettings";
 import { DeviceSelection } from "@/components/DeviceSelection";
 import { LanguageSelection } from "@/components/LanguageSelection";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
@@ -81,6 +82,7 @@ export function SettingsModals({
           <div className="flex-1 overflow-y-auto p-6 space-y-8">
             {/* General Preferences Section */}
             <PreferenceSettings />
+            <KnowledgeSettings />
 
             {/* Divider */}
             <div className="border-t pt-8">

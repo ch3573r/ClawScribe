@@ -17,6 +17,17 @@ pub struct ResolvedEvidence {
     pub status: EvidenceStatus,
     /// Available only for a verified current canonical passage.
     pub passage: Option<Passage>,
+    /// Current pagination position, never a saved rank or historical row index.
+    #[serde(default)]
+    pub navigation: Option<EvidenceNavigation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceNavigation {
+    pub meeting_id: String,
+    pub transcript_id: String,
+    pub transcript_index: i64,
+    pub start_seconds: Option<f64>,
 }
 
 pub async fn resolve(
@@ -27,6 +38,7 @@ pub async fn resolve(
         Ok(ResolvedEvidence {
             status,
             passage: None,
+            navigation: None,
         })
     };
     if reference.historical {
@@ -79,9 +91,32 @@ pub async fn resolve(
     if &passage.evidence != reference {
         return outcome(EvidenceStatus::Invalid);
     }
+    // The scalar lookup uses the transcript paginator's exact order. Its source
+    // revision/generation predicate closes edits between materialization and
+    // position lookup without reading transcript bodies or scanning in the UI.
+    let position: Option<i64> = sqlx::query_scalar(
+        "SELECT position FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY audio_start_time,id)-1 AS position FROM transcripts WHERE meeting_id=?) WHERE id=? AND EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND meeting_id=? AND revision=? AND generation=?)",
+    )
+    .bind(meeting_id)
+    .bind(&selected.transcript_id)
+    .bind(&selected.source_id)
+    .bind(meeting_id)
+    .bind(selected.revision)
+    .bind(selected.generation)
+    .fetch_optional(pool)
+    .await?;
+    let Some(transcript_index) = position else {
+        return outcome(EvidenceStatus::Stale);
+    };
     Ok(ResolvedEvidence {
         status: EvidenceStatus::Current,
         passage: Some(passage),
+        navigation: Some(EvidenceNavigation {
+            meeting_id: meeting_id.clone(),
+            transcript_id: selected.transcript_id,
+            transcript_index,
+            start_seconds: *start_seconds,
+        }),
     })
 }
 
