@@ -44,6 +44,7 @@ function component(file, name, props, invoke) {
       }),
     },
     "@/components/ui/button": { Button: "button" },
+    "@/components/ui/popover": { Popover: "popover", PopoverTrigger: "trigger", PopoverContent: "content" },
     "@/components/ui/dialog": {
       Dialog: "dialog",
       DialogContent: "content",
@@ -256,7 +257,8 @@ test("status polling clears a recovered read error without clearing a failed act
         };
       }
       if (command === "knowledge_model_status")
-        return { model: "fixture", enabled: false, ready: false };
+        return { model: "fixture", enabled: false, ready: false, installed: false,
+          download: {stage: "idle", downloaded_bytes: 0, total_bytes: 487351240, current_file: null, error: null} };
       if (command === "knowledge_model_download") throw "Download failed";
       throw new Error(`Unexpected command ${command}`);
     },
@@ -270,7 +272,7 @@ test("status polling clears a recovered read error without clearing a failed act
     failRead = false;
     await new Promise((resolve) => setTimeout(resolve, 2600));
     assert.doesNotMatch(text(app.render()), /Retry to reconnect/);
-    app.button("Download / repair model").props.onClick();
+    app.button("Download embedding model").props.onClick();
     await flush();
     assert.match(text(app.render()), /Download failed/);
     await new Promise((resolve) => setTimeout(resolve, 2600));

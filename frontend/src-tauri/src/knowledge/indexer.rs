@@ -266,10 +266,14 @@ pub async fn knowledge_model_enable(
 pub struct ModelStatus {
     pub enabled: bool,
     pub ready: bool,
+    /// Files exist with pinned sizes; this is not an integrity or inference guarantee.
+    pub installed: bool,
     pub model: String,
+    pub download: model::DownloadStatus,
 }
 #[tauri::command]
 pub async fn knowledge_model_status(
+    app: tauri::AppHandle,
     state: State<'_, crate::state::AppState>,
     runtime: State<'_, KnowledgeState>,
 ) -> Result<ModelStatus, String> {
@@ -282,7 +286,9 @@ pub async fn knowledge_model_status(
     Ok(ModelStatus {
         enabled,
         ready: runtime.scheduler.is_enabled(),
+        installed: model::files_present(&model_root(&app)?).await,
         model: model::PINS.model.clone(),
+        download: runtime.downloads.snapshot(),
     })
 }
 #[tauri::command]

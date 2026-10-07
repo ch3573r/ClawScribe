@@ -73,7 +73,7 @@ if ($MutationAcceptance) {
 }
 $focusedFailures = 0
 $PSNativeCommandUseErrorActionPreference = $false
-$focusedFilters = @('knowledge::', 'library::backup::tests::conversation_')
+$focusedFilters = @('knowledge::', 'model_download::tests::', 'library::backup::tests::conversation_')
 if (-not $AnswerAcceptance -and -not $ConversationOnly) { $focusedFilters += @('summary::llm_client::response_tests::',
     'summary::openai_provider::tests::', 'summary::codex_provider::app_server_tests::',
     'summary::summary_engine::sidecar::protocol_tests::',

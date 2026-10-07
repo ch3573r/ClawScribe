@@ -23,6 +23,7 @@ struct Registry {
     generation: u64,
 }
 struct Transfer {
+    generation: u64,
     token: CancellationToken,
     done: watch::Sender<bool>,
 }
@@ -42,12 +43,13 @@ impl Downloads {
                 "A model operation is already in progress; wait for it to finish before retrying"
             );
         }
+        active.generation = active.generation.wrapping_add(1);
         let transfer = Arc::new(Transfer {
+            generation: active.generation,
             token: CancellationToken::new(),
             done: watch::channel(false).0,
         });
         active.active.insert(name.into(), transfer.clone());
-        active.generation = active.generation.wrapping_add(1);
         Ok(Reservation {
             registry: self.0.clone(),
             name: name.into(),
@@ -58,11 +60,23 @@ impl Downloads {
         self.0.lock().unwrap().active.contains_key(name)
     }
     pub async fn cancel(&self, name: &str) -> Result<()> {
+        self.cancel_matching_generation(name, None).await
+    }
+    /// Match the reservation identity rather than the registry change counter:
+    /// unrelated model operations must not invalidate cancellation ownership.
+    pub async fn cancel_generation(&self, name: &str, generation: u64) -> Result<()> {
+        self.cancel_matching_generation(name, Some(generation))
+            .await
+    }
+    async fn cancel_matching_generation(&self, name: &str, generation: Option<u64>) -> Result<()> {
         let mut done = {
             let active = self.0.lock().unwrap();
             let Some(transfer) = active.active.get(name) else {
                 return Ok(());
             };
+            if generation.is_some_and(|expected| transfer.generation != expected) {
+                return Ok(());
+            }
             transfer.token.cancel();
             transfer.done.subscribe()
         };
@@ -79,6 +93,9 @@ impl Downloads {
     }
 }
 impl Reservation {
+    pub fn generation(&self) -> u64 {
+        self.transfer.generation
+    }
     pub fn token(&self) -> &CancellationToken {
         &self.transfer.token
     }
@@ -269,19 +286,21 @@ pub(crate) async fn verify_file(path: &Path, size: u64, hash: &str) -> Result<()
     .await?
 }
 
-pub(crate) async fn download_file_checked(
+pub(crate) async fn download_file_checked_with_verification(
     client: &Client,
     url: &str,
     path: &Path,
     token: &CancellationToken,
     integrity: Option<(u64, &str)>,
     mut progress: impl FnMut(u64, u64),
+    mut verifying: impl FnMut(),
 ) -> Result<u64> {
     let operation = async {
         let partial = partial_path(path);
         let final_size = fs::metadata(path).await.ok().map(|m| m.len());
         if let Some((size, hash)) = integrity {
             if final_size == Some(size) {
+                verifying();
                 if verify_file(path, size, hash).await.is_ok() {
                     progress(size, size);
                     return Ok(size);
@@ -395,6 +414,7 @@ pub(crate) async fn download_file_checked(
             return Err(Cancelled.into());
         }
         if let Some((size, hash)) = integrity {
+            verifying();
             if let Err(error) = verify_file(&partial, size, hash).await {
                 fs::remove_file(&partial).await?;
                 return Err(error);
@@ -413,6 +433,19 @@ pub(crate) async fn download_file_checked(
         Ok(total)
     };
     operation.await
+}
+
+/// Ordinary transfer callbacks keep their existing contract.
+pub(crate) async fn download_file_checked(
+    client: &Client,
+    url: &str,
+    path: &Path,
+    token: &CancellationToken,
+    integrity: Option<(u64, &str)>,
+    progress: impl FnMut(u64, u64),
+) -> Result<u64> {
+    download_file_checked_with_verification(client, url, path, token, integrity, progress, || {})
+        .await
 }
 
 #[cfg(test)]
@@ -491,6 +524,67 @@ mod tests {
         (url, task)
     }
     const HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n";
+
+    #[tokio::test]
+    async fn checked_transfer_reports_integrity_stage_before_promoting_downloaded_file() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model");
+        let hash = format!("{:x}", Sha256::digest(b"abcdef"));
+        let (url, task) = server(vec![
+            HEAD,
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabcdef",
+        ])
+        .await;
+        let mut stages = Vec::new();
+        download_file_checked_with_verification(
+            &client().unwrap(),
+            &url,
+            &path,
+            &CancellationToken::new(),
+            Some((6, &hash)),
+            |_, _| {},
+            || stages.push((path.exists(), partial_path(&path).exists())),
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+        assert_eq!(
+            stages,
+            vec![(false, true)],
+            "integrity checking must be visible before final-file promotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_checked_transfer_reports_verification_without_network_or_rewriting() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model");
+        fs::write(&path, b"abcdef").await.unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"abcdef"));
+        let mut stages = 0;
+        download_file_checked_with_verification(
+            &client().unwrap(),
+            "http://127.0.0.1:1/model",
+            &path,
+            &CancellationToken::new(),
+            Some((6, &hash)),
+            |_, _| {},
+            || stages += 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stages, 1,
+            "healthy-file integrity checking must be visible too"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+    }
 
     #[tokio::test]
     async fn verified_complete_file_needs_no_network_and_bad_hash_is_removed() {
@@ -664,6 +758,26 @@ mod tests {
         drop(reservation);
         cancelling.await.unwrap().unwrap();
         assert!(downloads.start("first").is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cancellation_preserves_a_new_transfer() {
+        let downloads = Downloads::default();
+        let old = downloads.start("model").unwrap();
+        let old_generation = downloads.generation();
+        drop(old);
+        let current = downloads.start("model").unwrap();
+        let cancelling = downloads.cancel_generation("model", old_generation);
+        tokio::pin!(cancelling);
+        tokio::select! {
+            biased;
+            result = &mut cancelling => result.unwrap(),
+            _ = tokio::task::yield_now() => {},
+        }
+        assert!(
+            !current.token().is_cancelled(),
+            "late cancellation must not target a newer reservation"
+        );
     }
 
     #[tokio::test]

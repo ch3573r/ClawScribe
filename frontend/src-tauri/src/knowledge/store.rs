@@ -287,7 +287,19 @@ pub async fn row_ids_page(
     job: &SourceJob,
     after: Option<&str>,
 ) -> Result<Vec<String>, KnowledgeError> {
-    if !current(pool, job).await? {
+    // Canonical readers also serve answers after publication (which removes
+    // the index job), or while indexing is paused/failed. Worker admission
+    // remains guarded separately by current, stage_evidence and publish.
+    let source_current: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND meeting_id=? AND kind='meeting' AND revision=? AND generation=?)",
+    )
+    .bind(&job.source_id)
+    .bind(&job.meeting_id)
+    .bind(job.revision)
+    .bind(job.generation)
+    .fetch_one(pool)
+    .await?;
+    if !source_current {
         return Err(KnowledgeError::Superseded);
     }
     Ok(sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id=? AND (? IS NULL OR (timestamp,id)>(SELECT timestamp,id FROM transcripts WHERE id=?)) ORDER BY timestamp,id LIMIT 32").bind(&job.meeting_id).bind(after).bind(after).fetch_all(pool).await?)
@@ -889,6 +901,75 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn canonical_row_pagination_does_not_require_an_active_index_job() {
+        for state in ["ready", "paused", "failed"] {
+            let pool = database().await;
+            meeting(&pool, "one").await;
+            transcript(&pool).await;
+            let job = next_job(&pool).await.unwrap().unwrap();
+            match state {
+                "ready" => publish(&pool, &job, "test-space").await.unwrap(),
+                "paused" => {
+                    sqlx::query("UPDATE knowledge_index_jobs SET paused=1")
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    sqlx::query("UPDATE knowledge_index_jobs SET attempts=3")
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                }
+            }
+            assert_eq!(row_ids_page(&pool, &job, None).await.unwrap(), vec!["row"]);
+            assert!(row_ids_page(&pool, &job, Some("row"))
+                .await
+                .unwrap()
+                .is_empty());
+            let selected = SelectedRow::for_job(&job, "row".into());
+            let (text, total) = body_window(&pool, &selected, 0).await.unwrap();
+            let passage = materialize(
+                &pool,
+                &selected,
+                TextSpan {
+                    transcript_id: "row".into(),
+                    start_byte: 0,
+                    end_byte: total,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(passage.text, text);
+            sqlx::query("UPDATE transcripts SET speaker='Changed speaker' WHERE id='row'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                row_ids_page(&pool, &job, None).await,
+                Err(KnowledgeError::Superseded)
+            );
+            assert_eq!(
+                super::super::evidence::resolve(&pool, &passage.evidence)
+                    .await
+                    .unwrap()
+                    .status,
+                super::super::evidence::EvidenceStatus::Stale
+            );
+            let current: SourceJob = sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id='one'")
+                .fetch_one(&pool).await.unwrap();
+            sqlx::query("DELETE FROM meetings WHERE id='one'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                row_ids_page(&pool, &current, None).await,
+                Err(KnowledgeError::Superseded)
+            );
+        }
+    }
     async fn active_reader_yields_to_recording(materialized: bool, abort_waiter: bool) {
         use crate::audio::inference;
         use std::time::{Duration, Instant};

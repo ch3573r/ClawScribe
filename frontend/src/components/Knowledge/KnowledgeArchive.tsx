@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { libraryScope } from "@/lib/knowledge-state";
 import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
 import { SearchResults } from "./SearchResults";
@@ -21,6 +22,7 @@ export function KnowledgeArchive({
   const [mode, setMode] = useState<SearchMode>("keyword");
   const [all, setAll] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
+  const [meetingQuery, setMeetingQuery] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const scope = useMemo(
@@ -32,18 +34,18 @@ export function KnowledgeArchive({
     model: modelConfig?.model,
   });
   const selectedCount = selected.length;
+  const matchingMeetings = meetings.filter((meeting) => meeting.title.toLocaleLowerCase().includes(meetingQuery.trim().toLocaleLowerCase()));
   return (
     <section className="space-y-4" aria-label="Meeting memory">
-      <div className="space-y-4 rounded-lg border border-border bg-card p-5 shadow-sm">
+      <div className="space-y-4">
         <div>
-          <h2 className="text-lg font-semibold">Meeting memory</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Search transcript passages and ask cited questions across a
-            deliberate selection of saved meetings.
+          <p className="text-sm text-muted-foreground">
+            Choose meetings, then search transcripts or ask a question with cited sources.
           </p>
         </div>
         <fieldset className="space-y-3">
-          <legend className="mb-2 text-sm font-medium">Source selection</legend>
+          <legend className="mb-2 text-sm font-medium">Sources</legend>
+          <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -54,12 +56,15 @@ export function KnowledgeArchive({
             Search all saved meetings
           </label>
           {!all && (
-            <details className="rounded-md border border-border p-3">
-              <summary className="cursor-pointer text-sm focus-visible:ring-2 focus-visible:ring-ring">
-                {selectedCount} meetings selected
-              </summary>
-              <div className="mt-3 max-h-48 space-y-2 overflow-y-auto">
-                {meetings.map((meeting) => (
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm">Choose meetings{selectedCount ? ` (${selectedCount})` : ""}</Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-80 max-w-[calc(100vw-3rem)] space-y-3">
+                <input aria-label="Find meetings" value={meetingQuery} onChange={(event) => setMeetingQuery(event.target.value)}
+                  placeholder="Find a meeting…" className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+              <div className="max-h-56 space-y-2 overflow-y-auto">
+                {matchingMeetings.map((meeting) => (
                   <label
                     key={meeting.id}
                     className="flex items-start gap-2 text-sm"
@@ -79,14 +84,30 @@ export function KnowledgeArchive({
                     <span className="break-words">{meeting.title}</span>
                   </label>
                 ))}
-                {!meetings.length && (
+                {!matchingMeetings.length && (
                   <p className="text-xs text-muted-foreground">
-                    No meetings match the project filter.
+                    No meetings match this search and project filter.
                   </p>
                 )}
               </div>
-            </details>
+              </PopoverContent>
+            </Popover>
           )}
+          <details>
+            <summary className="cursor-pointer rounded text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Date range{from || to ? " · active" : ""}</summary>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <label className="text-xs">From (inclusive)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1 block rounded border border-input bg-background p-2 text-sm" /></label>
+              <label className="text-xs">To (inclusive)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1 block rounded border border-input bg-background p-2 text-sm" /></label>
+            </div>
+          </details>
+          </div>
+          {!all && selectedCount > 0 && <div className="flex flex-wrap gap-2" aria-label="Selected meetings">
+            {selected.map((id) => {
+              const title = meetings.find((meeting) => meeting.id === id)?.title ?? "Selected meeting outside project filter";
+              return <button key={id} type="button" aria-label={`Remove ${title}`} onClick={() => setSelected((ids) => ids.filter((value) => value !== id))}
+                className="max-w-full rounded-md border border-primary/25 bg-primary/10 px-2 py-1 text-xs text-foreground hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><span className="block truncate">{title} · Remove</span></button>;
+            })}
+          </div>}
           <p className="text-xs text-muted-foreground">
             {projectFilter.untagged
               ? "Untagged meetings"
@@ -95,28 +116,8 @@ export function KnowledgeArchive({
                 : "All projects"}{" "}
             ·{" "}
             {all ? "All saved meetings" : `${selectedCount} selected meetings`}.
-            An empty selection searches no meetings.
+            {!all && !selectedCount ? "Choose at least one meeting to begin." : ""}
           </p>
-          <div className="flex flex-wrap gap-3">
-            <label className="text-xs">
-              From (inclusive)
-              <input
-                type="date"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                className="mt-1 block rounded border border-input bg-background p-2 text-sm"
-              />
-            </label>
-            <label className="text-xs">
-              To (inclusive)
-              <input
-                type="date"
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                className="mt-1 block rounded border border-input bg-background p-2 text-sm"
-              />
-            </label>
-          </div>
         </fieldset>
         <form
           onSubmit={(e) => {

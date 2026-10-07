@@ -45,7 +45,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '24.21.0'
       - run: node scripts/verify-public-repo-safety.mjs
       - name: Install frontend dependencies and clear stale route types
         working-directory: frontend
