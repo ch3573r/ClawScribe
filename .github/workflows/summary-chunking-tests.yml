@@ -11,6 +11,11 @@ on:
       - 'frontend/src-tauri/src/summary/**'
       - '.github/workflows/summary-chunking-tests.yml'
   workflow_dispatch:
+    inputs:
+      inspect-runner-storage:
+        description: 'Inspect local generated build storage without running tests'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,10 +50,30 @@ jobs:
         with:
           clean: false
           persist-credentials: false
+      - name: Inspect generated build storage
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs['inspect-runner-storage'] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          $drive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot($workspace).Substring(0, 1))
+          Write-Host "Workspace volume: free=$($drive.Free) used=$($drive.Used) bytes"
+          foreach ($relative in @('target/debug', 'target/release', 'frontend/src-tauri/target/debug', 'frontend/src-tauri/target/release', 'frontend/node_modules', 'frontend/.next')) {
+            $directory = Join-Path $workspace $relative
+            if (Test-Path -LiteralPath $directory -PathType Container) {
+              foreach ($entry in Get-ChildItem -LiteralPath $directory -Directory) {
+                $bytes = (Get-ChildItem -LiteralPath $entry.FullName -File -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                Write-Host "$relative/$($entry.Name): $bytes bytes"
+              }
+              $bytes = (Get-ChildItem -LiteralPath $directory -File | Measure-Object Length -Sum).Sum
+              Write-Host "$relative root files: $bytes bytes"
+            }
+          }
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !inputs['inspect-runner-storage'] }}
         with:
           targets: x86_64-pc-windows-msvc
       - name: Compile production chunker and its unit tests without desktop dependencies
+        if: ${{ !inputs['inspect-runner-storage'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -56,6 +81,7 @@ jobs:
           rustc --version
           rustc --edition=2021 --test frontend/src-tauri/src/summary/chunking.rs -o $testExe
       - name: Verify source coverage, Unicode, overlap, and token budgets
+        if: ${{ !inputs['inspect-runner-storage'] }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
