@@ -247,7 +247,7 @@ where
             conversations::eligible_history(pool, &request.owner, &frozen, (budget / 4).min(8192))
                 .await?;
         let (prompt, selected) = build_prompt(&request.search.query, &passages, &history, budget)?;
-        conversations::prepare(
+        let contexts = conversations::prepare(
             pool,
             &request.request_id,
             &frozen,
@@ -256,6 +256,16 @@ where
             response.mode,
         )
         .await?;
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&prompt).map_err(|_| "Invalid evidence prompt")?;
+        for (index, context) in contexts.iter().enumerate() {
+            envelope["transcript_evidence"][index]["preceding_question_tag"] =
+                serde_json::json!(context);
+        }
+        let prompt = envelope.to_string();
+        if prompt.len() > budget {
+            return Err("Evidence context exceeds the model budget".into());
+        }
         conversations::check_ready(pool, &request.request_id, &frozen).await?;
         Ok::<_, String>((prompt, selected))
     };
@@ -385,7 +395,9 @@ CITATIONS: Attach exact independent backend tags such as [K1][K2] to every factu
 
 PARTIAL FACTS: Answer each requested field independently. Explicitly needed work is an action even when no owner or deadline was assigned. Report the supported action and label missing owner/deadline as unassigned or not established; do not deny the action because those other fields are missing. If evidence does not establish an answer, say so within the selected scope and do not guess.
 
-DECISION HISTORY: Distinguish the latest explicit recorded decision from later reopening, proposals, questions, or incomplete fragments. A reopening does not by itself prove suspension, revocation, replacement or a final outcome. If the later record ends before the decision, report the earlier explicit decision and the later uncertainty with their citations; do not assert the old decision still stands or has been superseded without explicit evidence.
+DECISION HISTORY: Distinguish the latest explicit recorded decision from later reopening, proposals, questions, or incomplete fragments. A reopening does not by itself prove suspension, revocation, replacement or a final outcome. If the user asks whether something is still confirmed/current and a later record reopens it without a complete outcome, lead with the inability to confirm its current status. Then describe the last explicit approval as historical. Absence of a recorded replacement does not confirm that the earlier decision remains current. Do not assert either continued confirmation or supersession without explicit evidence.
+
+QUESTION CONTEXT: A preceding_question_tag identifies the already-selected immediate source question needed to interpret a short reply. It is positional context, not an additional decision. Read both rows together; preserve the reply's negation and any later limits.
 
 FINAL CHECK: For every reported agreement or refusal based on a short reply, verify that BOTH the source question tag and the reply tag are attached to that claim. Verify every calendar date against the cited text or complete meeting-date metadata; copy the supported date, never derive one from tag numbers, IDs or recording offsets. Omit a date that is not established. Give the answer once, without an extra recap that can introduce unsupported details.
 
@@ -414,7 +426,7 @@ pub fn build_prompt(
     }
     for passage in passages {
         rows.push(serde_json::json!({"tag":format!("[K{}]",selected.len()+1),"title":passage.title,
-            "date":passage.date,"speaker":passage.speaker,"metadata_incomplete":passage.metadata_truncated,"text":passage.text}));
+            "date":passage.date,"speaker":passage.speaker,"metadata_incomplete":passage.metadata_truncated,"text":passage.text,"preceding_question_tag":null}));
         if envelope(&rows, true).len() > budget {
             rows.pop();
             continue;
@@ -651,8 +663,45 @@ mod tests {
                         .iter()
                         .all(|row| rows.iter().any(|id| row == id));
                     let assistants:i64=sqlx::query_scalar("SELECT count(*) FROM knowledge_messages WHERE request_id=? AND role='assistant'").bind(&request.request_id).fetch_one(&pool).await.unwrap();
+                    let context_links_valid = super::super::evidence::validate_context_metadata(
+                        &reply.evidence,
+                        &reply.evidence_metadata,
+                    )
+                    .is_ok()
+                        && reply.context_links.len() <= reply.cited_tags.len()
+                        && reply.context_links.iter().all(|link| {
+                            reply.cited_tags.contains(&link.cited_tag)
+                                && link
+                                    .cited_tag
+                                    .checked_sub(1)
+                                    .and_then(|index| reply.evidence_metadata.get(index))
+                                    .is_some_and(|display| {
+                                        display.preceding_question_tag == Some(link.context_tag)
+                                    })
+                        })
+                        && reply.cited_tags.iter().all(|tag| {
+                            reply.evidence_metadata[*tag - 1]
+                                .preceding_question_tag
+                                .is_none_or(|context| {
+                                    reply
+                                        .context_links
+                                        .iter()
+                                        .filter(|link| {
+                                            link.cited_tag == *tag && link.context_tag == context
+                                        })
+                                        .count()
+                                        == 1
+                                })
+                        });
+                    let effective_navigation_tags = reply
+                        .cited_tags
+                        .iter()
+                        .copied()
+                        .chain(reply.context_links.iter().map(|link| link.context_tag))
+                        .collect::<std::collections::BTreeSet<_>>();
                     let gates = valid
                         && context
+                        && context_links_valid
                         && history_omitted
                         && assistants == 1
                         && reply.provider == "builtin-ai"
@@ -661,7 +710,7 @@ mod tests {
                         failed += 1;
                     }
                     write_record(
-                        serde_json::json!({"case":id,"request":request,"frozen":frozen.meeting_ids,"actual_reply":reply,"dispatched_prompt":envelope,"canonical_resolutions":resolutions,"elapsed_ms":elapsed,"required_context_present":context,"history_isolated":history_omitted,"assistant_count":assistants,"automated_gate":gates,"factual_review":"pending"}),
+                        serde_json::json!({"case":id,"request":request,"frozen":frozen.meeting_ids,"actual_reply":reply,"dispatched_prompt":envelope,"canonical_resolutions":resolutions,"elapsed_ms":elapsed,"required_context_present":context,"history_isolated":history_omitted,"assistant_count":assistants,"context_links_valid":context_links_valid,"effective_navigation_tags":effective_navigation_tags,"automated_gate":gates,"factual_review":"pending"}),
                     );
                     println!("answer_qa case={id} runtime=completed automated_gate={gates}");
                 }
@@ -719,6 +768,37 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+    #[tokio::test]
+    async fn public_saved_ask_exposes_verified_question_context_before_dispatch() {
+        let (pool, request, dir) = answer_fixture().await;
+        let reply = ask_resolved(
+            &pool,
+            &super::super::KnowledgeState::default(),
+            &request,
+            resolved(&pool, dir.path()).await,
+            &CancellationToken::new(),
+            |resolved, _, prompt, _| async move {
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                assert_eq!(
+                    envelope["transcript_evidence"][1]["preceding_question_tag"],
+                    1
+                );
+                Ok(ConfiguredTextReply {
+                    text: "Nein [K2].".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.content, "Nein [K2].");
+        assert_eq!(reply.cited_tags, vec![2]);
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap()["context_links"],
+            serde_json::json!([{"kind":"preceding_question","cited_tag":2,"context_tag":1}])
+        );
     }
     #[tokio::test]
     async fn saved_ask_terminal_status_wait_respects_overall_cleanup_deadline() {

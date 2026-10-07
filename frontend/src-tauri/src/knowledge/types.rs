@@ -156,6 +156,9 @@ pub struct AssistantReply {
     /// Original bounded labels, in the same request-local order as evidence.
     pub evidence_metadata: Vec<EvidenceDisplay>,
     pub cited_tags: Vec<usize>,
+    /// Backend-verified positional context, not tags emitted by the model.
+    #[serde(default)]
+    pub context_links: Vec<CitationContextLink>,
     pub retrieval_mode: SearchMode,
     pub provider: String,
     pub model: String,
@@ -167,6 +170,21 @@ pub struct EvidenceDisplay {
     pub date: String,
     pub speaker: Option<String>,
     pub metadata_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preceding_question_tag: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CitationContextKind {
+    PrecedingQuestion,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CitationContextLink {
+    pub kind: CitationContextKind,
+    pub cited_tag: usize,
+    pub context_tag: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

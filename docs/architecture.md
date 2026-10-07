@@ -640,6 +640,25 @@ tags never become links. The answer text and original map order are preserved;
 renderers must use this grammar and the backend's `cited_tags` allowlist, then
 resolve each link before navigation.
 
+Short replies may carry explicit preceding-question context. Before dispatch,
+the backend verifies both complete canonical rows are already selected, share
+the frozen meeting and source revision, and are immediate neighbors in canonical
+`timestamp,id` order. The predecessor must end in `?`; the nonempty reply must
+be at most 64 UTF-8 bytes and must not itself end in `?`. Partial, stale,
+unselected and nonadjacent rows cannot establish the relation. This is positional
+context, not a new factual decision or additional retrieved evidence.
+
+The optional `EvidenceDisplay.preceding_question_tag` persists that one
+request-local ordinal with the original evidence snapshot. `cited_tags` and raw
+answer content remain exactly the literal model citations and text. The reply's
+`context_links` separately exposes `{kind: "preceding_question", cited_tag,
+context_tag}` for a cited reply. Render the additional link visibly as preceding
+question context and resolve its original map entry, alongside literal links;
+do not imply that the model emitted it. Old history defaults to no context
+relation. Read/restore reject invalid bounds, self-links, chains, cross-source
+or revision relations and invalid spans. Restored context remains historical
+and cannot promote a stale reference to current navigation.
+
 `knowledge_resolve_evidence` reads the current bounded canonical passage
 and checks source revision, content/metadata fingerprint, transcript ID, exact
 UTF-8 span and audio offset. Only a current result supplies a navigation target.

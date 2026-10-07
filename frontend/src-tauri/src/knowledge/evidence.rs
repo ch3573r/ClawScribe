@@ -98,15 +98,183 @@ pub fn tag_numbers(content: &str, count: usize) -> Vec<usize> {
     let mut remaining = content;
     while let Some(start) = remaining.find('[') {
         remaining = &remaining[start + 1..];
-        let Some(end) = remaining.find(']') else {
+        let mut depth = 1usize;
+        let mut nested = false;
+        let end = remaining.bytes().position(|byte| {
+            if byte == b'[' {
+                depth += 1;
+                nested = true;
+            }
+            if byte == b']' {
+                depth -= 1;
+            }
+            depth == 0
+        });
+        let Some(end) = end else {
             break;
         };
-        if let Some(group) = citation_group(&remaining[..end], count) {
-            tags.extend(group);
+        if !nested {
+            if let Some(group) = citation_group(&remaining[..end], count) {
+                tags.extend(group);
+            }
         }
         remaining = &remaining[end + 1..];
     }
     tags.into_iter().collect()
+}
+
+/// Establish positional context only from complete, already-selected canonical
+/// rows. No text, row, or scope is added to the request by this relation.
+pub async fn preceding_questions(
+    pool: &SqlitePool,
+    frozen: &super::retrieval::FrozenScope,
+    passages: &[Passage],
+) -> Result<Vec<Option<usize>>, String> {
+    if passages.len() > 64 {
+        return Err("Too many evidence rows".into());
+    }
+    let mut complete = vec![false; passages.len()];
+    let mut ids = vec![None; passages.len()];
+    for (index, passage) in passages.iter().enumerate() {
+        if !frozen.meeting_ids.contains(&passage.meeting_id) || passage.evidence.historical {
+            continue;
+        }
+        let EvidenceLocator::Transcript {
+            transcript_ids,
+            spans,
+            ..
+        } = &passage.evidence.locator
+        else {
+            continue;
+        };
+        if transcript_ids.len() != 1 || spans.len() != 1 || spans[0].start_byte != 0 {
+            continue;
+        }
+        let canonical = resolve(pool, &passage.evidence)
+            .await
+            .map_err(|e| e.to_string())?;
+        if canonical.status != EvidenceStatus::Current
+            || canonical
+                .passage
+                .as_ref()
+                .is_none_or(|p| p.text != passage.text)
+        {
+            continue;
+        }
+        let job:Option<super::store::SourceJob>=sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE id=? AND meeting_id=?")
+            .bind(&passage.evidence.source_id).bind(&passage.meeting_id).fetch_optional(pool).await.map_err(|_|"Evidence storage unavailable")?;
+        let Some(job) = job else { continue };
+        if job.revision != passage.evidence.source_revision {
+            continue;
+        }
+        let (_, total) = super::store::body_window(
+            pool,
+            &super::store::SelectedRow::for_job(&job, transcript_ids[0].clone()),
+            0,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        complete[index] = spans[0].end_byte == total && passage.text.len() == total;
+        ids[index] = Some(transcript_ids[0].clone());
+    }
+    let mut contexts = vec![None; passages.len()];
+    for (index, reply) in passages.iter().enumerate() {
+        if !complete[index]
+            || reply.text.trim().is_empty()
+            || reply.text.len() > 64
+            || reply.text.trim_end().ends_with('?')
+        {
+            continue;
+        }
+        let predecessor:Option<String>=sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id=? AND (timestamp,id)<(SELECT timestamp,id FROM transcripts WHERE id=? AND meeting_id=?) ORDER BY timestamp DESC,id DESC LIMIT 1")
+            .bind(&reply.meeting_id).bind(ids[index].as_deref()).bind(&reply.meeting_id).fetch_optional(pool).await.map_err(|_|"Evidence storage unavailable")?;
+        let Some(predecessor) = predecessor else {
+            continue;
+        };
+        let question = passages.iter().enumerate().find(|(other, p)| {
+            complete[*other]
+                && ids[*other].as_deref() == Some(predecessor.as_str())
+                && p.meeting_id == reply.meeting_id
+                && p.evidence.source_id == reply.evidence.source_id
+                && p.evidence.source_revision == reply.evidence.source_revision
+                && p.text.trim_end().ends_with('?')
+        });
+        if let Some((other, _)) = question {
+            contexts[index] = Some(other + 1);
+        }
+    }
+    Ok(contexts)
+}
+
+/// Historical snapshots remain readable without consulting mutated source text,
+/// but their serialized relation must still fit the immutable canonical map.
+pub fn validate_context_metadata(
+    evidence: &[EvidenceRef],
+    metadata: &[EvidenceDisplay],
+) -> Result<(), String> {
+    if evidence.len() != metadata.len() || evidence.len() > 64 {
+        return Err("Invalid evidence map".into());
+    }
+    for (index, display) in metadata.iter().enumerate() {
+        if display.title.len() > 1024
+            || display.date.len() > 1024
+            || display.speaker.as_ref().is_some_and(|s| s.len() > 1024)
+        {
+            return Err("Invalid evidence labels".into());
+        }
+        let Some(tag) = display.preceding_question_tag else {
+            continue;
+        };
+        let question = tag
+            .checked_sub(1)
+            .filter(|n| *n < evidence.len() && *n != index)
+            .ok_or("Invalid preceding-question tag")?;
+        let reply = &evidence[index];
+        let anchor = &evidence[question];
+        if metadata[question].preceding_question_tag.is_some()
+            || reply.source_id != anchor.source_id
+            || reply.source_revision != anchor.source_revision
+            || reply.historical != anchor.historical
+        {
+            return Err("Invalid preceding-question relation".into());
+        }
+        let (
+            EvidenceLocator::Transcript {
+                meeting_id: a,
+                transcript_ids: ai,
+                spans: aspan,
+                ..
+            },
+            EvidenceLocator::Transcript {
+                meeting_id: b,
+                transcript_ids: bi,
+                spans: bspan,
+                ..
+            },
+        ) = (&reply.locator, &anchor.locator)
+        else {
+            return Err("Invalid context locator".into());
+        };
+        if a != b
+            || reply.source_id != format!("meeting:{a}")
+            || ai.len() != 1
+            || bi.len() != 1
+            || ai == bi
+            || aspan.len() != 1
+            || bspan.len() != 1
+            || aspan[0].transcript_id != ai[0]
+            || bspan[0].transcript_id != bi[0]
+            || aspan[0].start_byte != 0
+            || bspan[0].start_byte != 0
+            || aspan[0].end_byte == 0
+            || aspan[0].end_byte > 64
+            || bspan[0].end_byte == 0
+            || bspan[0].end_byte > super::store::READ_BYTES
+        {
+            return Err("Invalid context span".into());
+        }
+    }
+    Ok(())
 }
 
 /// A complete bracket group is accepted or rejected together. Never salvage an
@@ -153,6 +321,125 @@ fn citation_group(body: &str, count: usize) -> Option<Vec<usize>> {
 mod tests {
     use super::*;
     use crate::knowledge::{retrieval, store};
+
+    #[tokio::test]
+    async fn question_context_rejects_partial_nonadjacent_changed_and_unselected_rows() {
+        use crate::knowledge::conversations::tests::question_pair_fixture;
+        for scenario in [
+            "partial_question",
+            "partial_reply",
+            "not_question",
+            "intervening",
+            "changed_revision",
+            "outside_scope",
+            "different_meeting",
+        ] {
+            let (pool, _, mut frozen, mut passages) = question_pair_fixture("Ja.").await;
+            if scenario == "not_question" {
+                sqlx::query(
+                    "UPDATE transcripts SET transcript='A statement.' WHERE id='context-question'",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                passages[0].text = "A statement.".into();
+            }
+            if scenario == "intervening" {
+                sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES ('between','fixture','Pause.','00:01:30')").execute(&pool).await.unwrap();
+            }
+            if scenario == "changed_revision" {
+                sqlx::query("UPDATE meetings SET title='Changed' WHERE id='fixture'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                let job:store::SourceJob=sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id='fixture'").fetch_one(&pool).await.unwrap();
+                for (index, passage) in passages.iter_mut().enumerate() {
+                    let id = if index == 0 {
+                        "context-question"
+                    } else {
+                        "context-reply"
+                    };
+                    let partial = (scenario == "partial_question" && index == 0)
+                        || (scenario == "partial_reply" && index == 1);
+                    *passage = store::materialize(
+                        &pool,
+                        &store::SelectedRow::for_job(&job, id.into()),
+                        TextSpan {
+                            transcript_id: id.into(),
+                            start_byte: usize::from(partial),
+                            end_byte: passage.text.len(),
+                        },
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            if scenario == "outside_scope" {
+                frozen.meeting_ids.clear();
+            }
+            if scenario == "different_meeting" {
+                passages[0].meeting_id = "other-meeting".into();
+            }
+            assert_eq!(
+                preceding_questions(&pool, &frozen, &passages)
+                    .await
+                    .unwrap(),
+                vec![None, None],
+                "{scenario}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn context_metadata_rejects_cross_source_revision_chains_and_partial_spans() {
+        let (_, _, _, passages) =
+            crate::knowledge::conversations::tests::question_pair_fixture("Ja.").await;
+        let refs = passages
+            .iter()
+            .map(|p| p.evidence.clone())
+            .collect::<Vec<_>>();
+        let metadata = passages
+            .iter()
+            .enumerate()
+            .map(|(index, p)| EvidenceDisplay {
+                title: p.title.clone(),
+                date: p.date.clone(),
+                speaker: p.speaker.clone(),
+                metadata_truncated: false,
+                preceding_question_tag: (index == 1).then_some(1),
+            })
+            .collect::<Vec<_>>();
+        assert!(validate_context_metadata(&refs, &metadata).is_ok());
+        for scenario in [
+            "source",
+            "revision",
+            "chain",
+            "partial",
+            "same_row",
+            "historical",
+        ] {
+            let mut refs = refs.clone();
+            let mut metadata = metadata.clone();
+            match scenario {
+                "source" => refs[0].source_id = "meeting:other".into(),
+                "revision" => refs[0].source_revision += 1,
+                "chain" => metadata[0].preceding_question_tag = Some(2),
+                "same_row" => refs[0] = refs[1].clone(),
+                "historical" => refs[0].historical = true,
+                _ => {
+                    if let EvidenceLocator::Transcript { spans, .. } = &mut refs[1].locator {
+                        spans[0].start_byte = 1;
+                    }
+                }
+            }
+            assert!(
+                validate_context_metadata(&refs, &metadata).is_err(),
+                "{scenario}"
+            );
+        }
+    }
 
     #[test]
     fn grouped_citations_retain_every_explicit_original_ordinal() {

@@ -189,6 +189,12 @@ validation against that request's map. The exact grammar and limits are in
 transcript passage/playback or an extracted-document preview. Document
 evidence must remain distinguishable from what someone said in a meeting.
 
+For bounded short replies, the backend can separately expose verified
+preceding-question `context_links` between already-selected complete canonical
+rows. These labeled context links preserve independent evidence identities and
+raw model text; they are not additional model-emitted citations. Render and
+resolve them alongside literal citations using the contract in `architecture.md`.
+
 Use the existing summary source UI behavior as a reference, but introduce an
 evidence resolver that handles more than one meeting and documents. Do not
 reinterpret existing saved summary links or change their identifiers.

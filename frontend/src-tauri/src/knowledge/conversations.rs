@@ -245,7 +245,7 @@ pub async fn prepare(
     passages: &[Passage],
     inherited: &BTreeMap<String, i64>,
     mode: SearchMode,
-) -> Result<(), String> {
+) -> Result<Vec<Option<usize>>, String> {
     let mut dependencies = inherited.clone();
     for passage in passages {
         if !frozen.meeting_ids.contains(&passage.meeting_id) || passage.evidence.historical {
@@ -261,6 +261,7 @@ pub async fn prepare(
             return Err("Evidence changed while preparing the answer".into());
         }
     }
+    let contexts = super::evidence::preceding_questions(pool, frozen, passages).await?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let changed=sqlx::query("UPDATE knowledge_requests SET status='running',retrieval_mode=? WHERE id=? AND status='preparing'")
         .bind(if mode==SearchMode::Hybrid {"hybrid"}else{"keyword"}).bind(id).execute(&mut *tx).await.map_err(failure)?;
@@ -306,11 +307,12 @@ pub async fn prepare(
         .map_err(failure)?;
     }
     for (index, passage) in passages.iter().enumerate() {
-        let display = serde_json::json!({"title":passage.title,"date":passage.date,"speaker":passage.speaker,"metadata_truncated":passage.metadata_truncated});
+        let display = serde_json::json!({"title":passage.title,"date":passage.date,"speaker":passage.speaker,"metadata_truncated":passage.metadata_truncated,"preceding_question_tag":contexts[index]});
         sqlx::query("INSERT INTO knowledge_request_evidence(request_id,ordinal,reference_json,display_json) VALUES (?,?,?,?)")
             .bind(id).bind((index+1) as i64).bind(json(&passage.evidence)?).bind(json(&display)?).execute(&mut *tx).await.map_err(failure)?;
     }
-    tx.commit().await.map_err(failure)
+    tx.commit().await.map_err(failure)?;
+    Ok(contexts)
 }
 
 async fn check_in(
@@ -398,7 +400,20 @@ async fn reply_in(connection: &mut SqliteConnection, id: &str) -> Result<Assista
         evidence.push(value);
     }
     let content: String = row.get("content");
+    super::evidence::validate_context_metadata(&evidence, &evidence_metadata)?;
     let cited_tags = super::evidence::tag_numbers(&content, evidence.len());
+    let context_links = cited_tags
+        .iter()
+        .filter_map(|tag| {
+            evidence_metadata[*tag - 1]
+                .preceding_question_tag
+                .map(|context_tag| CitationContextLink {
+                    kind: CitationContextKind::PrecedingQuestion,
+                    cited_tag: *tag,
+                    context_tag,
+                })
+        })
+        .collect();
     Ok(AssistantReply {
         request_id: id.into(),
         message_id: row.get("id"),
@@ -406,6 +421,7 @@ async fn reply_in(connection: &mut SqliteConnection, id: &str) -> Result<Assista
         evidence,
         evidence_metadata,
         cited_tags,
+        context_links,
         retrieval_mode: if row.get::<String, _>("retrieval_mode") == "hybrid" {
             SearchMode::Hybrid
         } else {
@@ -543,6 +559,13 @@ pub async fn eligible_history(
         }
         let bytes:i64=sqlx::query_scalar("SELECT coalesce(sum(length(CAST(content AS BLOB))),0) FROM knowledge_messages WHERE request_id=?").bind(&id).fetch_one(pool).await.map_err(failure)?;
         if bytes < 0 || bytes as usize > budget.saturating_sub(used) {
+            continue;
+        }
+        let valid_snapshot = {
+            let mut connection = pool.acquire().await.map_err(failure)?;
+            reply_in(&mut connection, &id).await.is_ok()
+        };
+        if !valid_snapshot {
             continue;
         }
         let messages=sqlx::query("SELECT role,content FROM knowledge_messages WHERE request_id=? ORDER BY CASE role WHEN 'user' THEN 0 ELSE 1 END").bind(&id).fetch_all(pool).await.map_err(failure)?;
@@ -719,6 +742,11 @@ pub(crate) mod tests {
                 history(&pool, &request.owner).await.is_err(),
                 "Forged context tag {tag}"
             );
+            assert!(eligible_history(&pool, &request.owner, &frozen, 8192)
+                .await
+                .unwrap()
+                .0
+                .is_empty());
         }
     }
 

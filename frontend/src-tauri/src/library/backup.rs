@@ -798,6 +798,7 @@ async fn import_conversations(
         }
     }
     let mut ordinals = BTreeMap::<String, Vec<i64>>::new();
+    let mut context_maps = BTreeMap::<String, BTreeMap<i64, (EvidenceRef, EvidenceDisplay)>>::new();
     for row in rows("knowledge_request_evidence") {
         let id = text_field(row, "request_id")?;
         requests.get(id).ok_or("Unknown evidence request")?;
@@ -821,6 +822,10 @@ async fn import_conversations(
         {
             return Err("Invalid saved evidence snapshot.".into());
         }
+        context_maps
+            .entry(id.into())
+            .or_default()
+            .insert(ordinal, (reference.clone(), display));
         let EvidenceLocator::Transcript {
             meeting_id,
             transcript_ids,
@@ -850,6 +855,17 @@ async fn import_conversations(
         {
             return Err("Non-contiguous citation map.".into());
         }
+    }
+    for map in context_maps.values() {
+        let references = map
+            .values()
+            .map(|(reference, _)| reference.clone())
+            .collect::<Vec<_>>();
+        let metadata = map
+            .values()
+            .map(|(_, display)| display.clone())
+            .collect::<Vec<_>>();
+        crate::knowledge::evidence::validate_context_metadata(&references, &metadata)?;
     }
     let mut roles = BTreeMap::<String, HashSet<String>>::new();
     let mut message_ids = HashSet::new();
@@ -1320,6 +1336,29 @@ mod tests {
         );
         assert_eq!(reply.content, "Abgelehnt [K2].");
         assert!(reply.evidence.iter().all(|r| r.historical));
+        let (mut older, _) = snapshot(&source).await.unwrap();
+        for row in older.tables.get_mut("knowledge_request_evidence").unwrap() {
+            let mut display: Value =
+                serde_json::from_str(row["display_json"].as_str().unwrap()).unwrap();
+            display
+                .as_object_mut()
+                .unwrap()
+                .remove("preceding_question_tag");
+            row.insert("display_json".into(), Value::String(display.to_string()));
+        }
+        let old_destination = empty_conversation_destination().await;
+        import_manifest(&old_destination, older, tempfile::tempdir().unwrap())
+            .await
+            .unwrap();
+        let old_history = conversations::history(&old_destination, &request.owner)
+            .await
+            .unwrap();
+        assert!(old_history[1]
+            .reply
+            .as_ref()
+            .unwrap()
+            .context_links
+            .is_empty());
         for tag in [0, 2, 999] {
             let (mut malformed, _) = snapshot(&source).await.unwrap();
             for row in malformed
