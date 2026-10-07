@@ -982,6 +982,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_ask_reads_ready_legacy_and_imported_sources_without_index_jobs() {
+        let (pool, mut request, dir) = answer_fixture().await;
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('imported-fixture','Public imported fixture','2026-09-02T10:15:00Z','2026-09-02T10:15:00Z'),('excluded-fixture','Excluded fixture','2026-09-03','2026-09-03')")
+            .execute(&pool).await.unwrap();
+        // The legacy rows retain NULL timing/speaker/word metadata. Imported
+        // rows use recording offsets, empty speakers and serialized word data.
+        let imported = "Pilot ATLAS-42: Änderung bestätigt.\n\"Ja\", aber erst nach Prüfung.\\";
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,speaker,audio_start_time,audio_end_time,duration,word_timestamps_json) VALUES ('imported-row','imported-fixture',?,'00:01:05.125','',65.125,68.75,3.625,?),('empty-row','imported-fixture','','',NULL,NULL,NULL,NULL,NULL),('excluded-row','excluded-fixture','Pilot outside selected scope','00:00',NULL,0,1,1,NULL)")
+            .bind(imported).bind(r#"[{"word":"Pilot","start":65.125,"end":65.5}]"#)
+            .execute(&pool).await.unwrap();
+        request.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                meeting_ids: vec!["answer-fixture".into(), "imported-fixture".into()],
+                ..Default::default()
+            },
+        };
+        while let Some(job) = store::next_job(&pool).await.unwrap() {
+            let rows = store::rows_page(&pool, &job, None).await.unwrap();
+            for (ordinal, row) in rows
+                .iter()
+                .filter(|row| !row.transcript.is_empty())
+                .enumerate()
+            {
+                store::stage(
+                    &pool,
+                    &job,
+                    row,
+                    &TextSpan {
+                        transcript_id: row.id.clone(),
+                        start_byte: 0,
+                        end_byte: row.transcript.len(),
+                    },
+                    ordinal as i64,
+                    &vec![1.; 384],
+                    &super::super::model::PINS.space().id,
+                )
+                .await
+                .unwrap();
+            }
+            store::publish(&pool, &job, &super::super::model::PINS.space().id)
+                .await
+                .unwrap();
+        }
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_index_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 0, "fixture must reproduce completed indexing");
+        let runtime = super::super::KnowledgeState::default();
+        let response = retrieval::retrieve(&pool, &runtime, &request.search)
+            .await
+            .unwrap();
+        assert_eq!(response.mode, SearchMode::Keyword);
+        assert_eq!(response.index_status.semantic_ready, 3);
+        assert_eq!(response.passages.len(), 2);
+        assert!(response
+            .passages
+            .iter()
+            .all(|p| p.meeting_id != "excluded-fixture"));
+        for passage in &response.passages {
+            assert_eq!(
+                super::super::evidence::resolve(&pool, &passage.evidence)
+                    .await
+                    .unwrap()
+                    .status,
+                super::super::evidence::EvidenceStatus::Current
+            );
+        }
+        let reply = ask_resolved(
+            &pool,
+            &runtime,
+            &request,
+            resolved(&pool, dir.path()).await,
+            &CancellationToken::new(),
+            |resolved, _, prompt, _| async move {
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                assert_eq!(envelope["transcript_evidence"].as_array().unwrap().len(), 3);
+                assert!(prompt.contains("Nein."));
+                assert!(prompt.contains("ATLAS-42"));
+                assert!(!prompt.contains("outside selected scope"));
+                Ok(ConfiguredTextReply {
+                    text: "Pilot status [K1][K2][K3].".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.evidence.len(), 3);
+        assert_eq!(
+            conversations::history(&pool, &request.owner)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        for reference in &reply.evidence {
+            assert_eq!(
+                super::super::evidence::resolve(&pool, reference)
+                    .await
+                    .unwrap()
+                    .status,
+                super::super::evidence::EvidenceStatus::Current
+            );
+        }
+    }
+    #[tokio::test]
     async fn saved_ask_uses_canonical_small_context_and_returns_one_durable_reply() {
         let (pool, request, dir) = answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
