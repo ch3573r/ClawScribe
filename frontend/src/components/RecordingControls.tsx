@@ -16,6 +16,7 @@ import {
 import Analytics from '@/lib/analytics';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
+import { Button } from '@/components/ui/button';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -142,7 +143,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         errorMsg.includes('input')
       ) {
         setDeviceError({
-          title: 'Microphone Not Available',
+          title: 'Microphone not available',
           message:
             'Unable to access your microphone. Please check that:\n• Your microphone is connected\n• The app has microphone permissions\n• No other app is using the microphone'
         });
@@ -152,19 +153,19 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         errorMsg.includes('output')
       ) {
         setDeviceError({
-          title: 'System Audio Not Available',
+          title: 'System audio not available',
           message:
             'Unable to capture system audio. Please check that:\n• A virtual audio device (like BlackHole) is installed\n• The app has screen recording permissions (macOS)\n• System audio is properly configured'
         });
       } else if (errorMsg.includes('permission')) {
         setDeviceError({
-          title: 'Permission Required',
+          title: 'Permission required',
           message:
             'Recording permissions are required. Please:\n• Grant microphone access in System Settings\n• Grant screen recording access for system audio (macOS)\n• Restart the app after granting permissions'
         });
       } else {
         setDeviceError({
-          title: 'Recording Failed',
+          title: 'Recording failed',
           message:
             'Unable to start recording. Please check your audio device settings and try again.'
         });
@@ -383,14 +384,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     ? 'flex items-center gap-3 bg-transparent p-0 shadow-none'
     : 'flex items-center space-x-2 bg-card rounded-full shadow-sm px-4 py-2';
   const startButtonClassName = isDashboard
-    ? `h-16 w-16 flex items-center justify-center rounded-full text-primary-foreground shadow-[0_0_34px_hsl(var(--primary)/0.42)] transition-all relative ${isStartPending || isProcessing || isRecordingDisabled ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-primary to-primary/70 hover:scale-105 hover:shadow-[0_0_44px_hsl(var(--primary)/0.6)]'}`
-    : `w-12 h-12 flex items-center justify-center ${isStartPending || isProcessing ? 'bg-muted' : 'bg-red-500 hover:bg-red-600'} rounded-full text-foreground transition-colors relative`;
+    ? `h-16 w-16 p-0 [&_svg]:!size-[26px] flex items-center justify-center rounded-full text-primary-foreground shadow-[0_0_34px_hsl(var(--primary)/0.42)] transition-all relative ${isStartPending || isProcessing || isRecordingDisabled ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-primary to-primary/70 hover:scale-105 hover:shadow-[0_0_44px_hsl(var(--primary)/0.6)]'}`
+    : `w-12 h-12 p-0 [&_svg]:!size-5 flex items-center justify-center ${isStartPending || isProcessing ? 'bg-muted text-foreground' : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'} rounded-full transition-colors relative`;
   const secondaryButtonClassName = isDashboard
-    ? `h-12 w-12 flex items-center justify-center rounded-full border border-border text-foreground transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-muted text-muted-foreground' : 'bg-muted hover:bg-accent'}`
-    : `w-10 h-10 flex items-center justify-center ${isPausing || isResuming || isStopping ? 'bg-muted border-2 border-border text-muted-foreground' : 'bg-card border-2 border-border text-muted-foreground hover:border-ring hover:bg-muted'} rounded-full transition-colors relative`;
+    ? `h-12 w-12 p-0 flex items-center justify-center rounded-full border border-border text-foreground transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-muted text-muted-foreground' : 'bg-muted hover:bg-accent'}`
+    : `w-10 h-10 p-0 flex items-center justify-center ${isPausing || isResuming || isStopping ? 'bg-muted border-2 border-border text-muted-foreground' : 'bg-card border-2 border-border text-muted-foreground hover:border-ring hover:bg-muted'} rounded-full transition-colors relative`;
   const stopButtonClassName = isDashboard
-    ? `h-12 w-12 flex items-center justify-center rounded-full text-foreground transition-colors relative ${isStopping || isPausing || isResuming ? 'bg-muted cursor-not-allowed' : 'bg-red-500 hover:bg-red-400'}`
-    : `w-10 h-10 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-muted' : 'bg-red-500 hover:bg-red-600'} rounded-full text-foreground transition-colors relative`;
+    ? `h-12 w-12 p-0 flex items-center justify-center rounded-full transition-colors relative ${isStopping || isPausing || isResuming ? 'bg-muted cursor-not-allowed text-foreground' : 'bg-destructive hover:bg-destructive/80 text-destructive-foreground'}`
+    : `w-10 h-10 p-0 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-muted text-foreground' : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'} rounded-full transition-colors relative`;
   const waveformClassName = isDashboard
     ? 'flex items-center justify-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-4 py-3'
     : 'flex items-center space-x-1 mx-4';
@@ -428,12 +429,12 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             <>
               {showPlayback ? (
                 <>
-                  <button
+                  <Button variant="ghost" size="icon"
                     onClick={handleStartRecording}
-                    className="w-10 h-10 flex items-center justify-center bg-red-500 rounded-full text-foreground hover:bg-red-600 transition-colors"
+                    className="w-10 h-10 p-0 flex items-center justify-center bg-destructive rounded-full text-destructive-foreground hover:bg-destructive/90 transition-colors"
                   >
                     <Mic size={16} />
-                  </button>
+                  </Button>
 
                   <div className="w-px h-6 bg-border mx-1" />
 
@@ -452,12 +453,12 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     </div>
                   </div>
 
-                  <button
-                    className="w-10 h-10 flex items-center justify-center bg-secondary rounded-full text-foreground cursor-not-allowed"
+                  <Button variant="ghost" size="icon"
+                    className="w-10 h-10 p-0 flex items-center justify-center bg-secondary rounded-full text-foreground cursor-not-allowed"
                     disabled
                   >
                     <Play size={16} />
-                  </button>
+                  </Button>
                 </>
               ) : (
                 <>
@@ -465,7 +466,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     // Start recording button
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <button
+                        <Button variant="ghost" size="icon"
                           onClick={() => {
                             Analytics.trackButtonClick(
                               'start_recording',
@@ -482,11 +483,11 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                           className={startButtonClassName}
                         >
                           {isStartPending ? (
-                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-foreground"></div>
                           ) : (
                             <Mic size={isDashboard ? 26 : 20} />
                           )}
-                        </button>
+                        </Button>
                       </TooltipTrigger>
                       <TooltipContent>
                         <p>{isStartPending ? 'Starting recording...' : 'Start recording'}</p>
@@ -507,7 +508,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <button
+                          <Button variant="ghost" size="icon"
                             onClick={() => {
                               if (isPaused) {
                                 Analytics.trackButtonClick(
@@ -536,7 +537,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                                 {isPausing ? 'Pausing...' : 'Resuming...'}
                               </div>
                             )}
-                          </button>
+                          </Button>
                         </TooltipTrigger>
                         <TooltipContent>
                           <p>
@@ -547,7 +548,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <button
+                          <Button variant="ghost" size="icon"
                             onClick={() => {
                               Analytics.trackButtonClick(
                                 'stop_recording',
@@ -564,7 +565,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                                 Stopping...
                               </div>
                             )}
-                          </button>
+                          </Button>
                         </TooltipTrigger>
                         <TooltipContent>
                           <p>Stop recording</p>
@@ -584,7 +585,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       <div
                         key={index}
                         className={`${isDashboard ? 'w-1.5' : 'w-1'} rounded-full transition-all duration-200 ${
-                          isPaused ? 'bg-orange-400' : 'bg-brand-gradient-v'
+                          isPaused ? 'bg-[hsl(var(--theme-warning-fg))]' : 'bg-brand-gradient-v'
                         }`}
                         style={{
                           height:
@@ -622,20 +623,20 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         {deviceError && (
           <Alert
             variant="destructive"
-            className="mt-4 border-red-300 bg-red-50"
+            className="mt-4 border-[hsl(var(--theme-error-fg)/0.3)] bg-[hsl(var(--theme-error-bg))]"
           >
-            <AlertCircle className="h-5 w-5 text-red-600" />
-            <button
+            <AlertCircle className="h-5 w-5 text-[hsl(var(--theme-error-fg))]" />
+            <Button variant="ghost" size="icon"
               onClick={() => setDeviceError(null)}
-              className="absolute right-3 top-3 text-red-600 hover:text-red-800 transition-colors"
+              className="absolute right-3 top-3 h-auto w-auto p-0 hover:bg-transparent text-[hsl(var(--theme-error-fg))] hover:text-[hsl(var(--theme-error-fg))] transition-colors"
               aria-label="Close alert"
             >
               <X className="h-4 w-4" />
-            </button>
-            <AlertTitle className="text-red-800 font-semibold mb-2">
+            </Button>
+            <AlertTitle className="text-[hsl(var(--theme-error-fg))] font-semibold mb-2">
               {deviceError.title}
             </AlertTitle>
-            <AlertDescription className="text-red-700">
+            <AlertDescription className="text-[hsl(var(--theme-error-fg))]">
               {deviceError.message.split('\n').map((line, i) => (
                 <div key={i} className={i > 0 ? 'ml-2' : ''}>
                   {line}
