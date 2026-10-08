@@ -70,3 +70,47 @@ pub fn original_path(
     }
     Ok(root.join(name))
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn cancellation_arriving_before_import_registration_is_retained() {
+        let imports = Imports::default();
+        let id = "00000000-0000-4000-8000-000000000001";
+        imports.cancel(id);
+        assert!(matches!(imports.begin(id), Err(DocumentError::Cancelled)));
+    }
+    #[test]
+    fn admission_stays_single_flight_until_lease_release() {
+        let imports = Imports::default();
+        let first = imports
+            .begin("00000000-0000-4000-8000-000000000001")
+            .unwrap();
+        let second = "00000000-0000-4000-8000-000000000002";
+        imports.cancel("00000000-0000-4000-8000-000000000003");
+        assert!(!first.cancel.is_cancelled());
+        assert!(matches!(imports.begin(second), Err(DocumentError::Busy)));
+        imports.cancel("00000000-0000-4000-8000-000000000001");
+        assert!(first.cancel.is_cancelled());
+        assert!(matches!(imports.begin(second), Err(DocumentError::Busy)));
+        drop(first);
+        assert!(imports.begin(second).is_ok());
+    }
+    #[test]
+    fn original_storage_names_are_canonical_and_cannot_escape() {
+        let root = std::path::Path::new("originals");
+        for invalid in [
+            "../reference.pdf",
+            "/reference.pdf",
+            "document.pdf",
+            "00000000-0000-4000-8000-000000000001.exe",
+        ] {
+            assert!(original_path(root, invalid).is_err());
+        }
+        assert_eq!(
+            original_path(root, "00000000-0000-4000-8000-000000000001.pdf").unwrap(),
+            root.join("00000000-0000-4000-8000-000000000001.pdf")
+        );
+    }
+}
