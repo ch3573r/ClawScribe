@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.52
+
+- Apply shared UI controls, semantic theme colors and sentence-case labels across shared components, Settings, Home and recording, Meeting details, Onboarding, and import/backup screens. Preserve application behavior and layout.
+- Add success, warning, error and info color families; replace arbitrary status backgrounds, borders, text and Home status rings. Give Home overlays a named color while preserving their existing opacity.
+- Consolidate Tailwind/PostCSS configuration into TypeScript/MJS, preserving application fonts, sidebar/chart colors, accordion animations and autoprefixer. Align component tooling with the canonical config.
+- Reduce all 68 UI-conventions baseline entries to zero. Keep meeting-memory search, answers and cited conversations from 0.5.51.
+- Advance installer/runtime/updater version to 0.5.52 for a Windows GPU preview. Stage a draft, verify uploaded assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
+- Installed light/dark/accent, focus and narrow-layout review of the changed screens remains pending. Recording, upgrade, retrieval/chat/citation/playback, update discovery and sustained-device acceptance remain pending before stable promotion. See `docs/releases/0.5.52.md`.
+
 ## 0.5.51
 
 - Improve cross-meeting answer coverage: include complete selected transcripts when the configured provider's context budget permits, otherwise reserve up to three available matches per selected meeting before filling by rank. A meeting with no matches receives clearly labeled, non-citable saved-summary overview context.

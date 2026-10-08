@@ -7,11 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.51**. This Windows GPU preview improves answer coverage
-across selected meetings, renders markdown with numbered source chips, and
-simplifies Meeting memory and semantic-search settings. It includes local
-keyword/semantic search and saved cited conversations. See the
-[0.5.51 preview notes](docs/releases/0.5.51.md) and the
+Source version: **0.5.52**. This Windows GPU preview applies shared controls,
+sentence-case labels and semantic theme colors across Settings, Home and
+recording, Meeting details, Onboarding, import and backup screens. Existing
+meeting-memory search and cited conversations remain available. See the
+[0.5.52 preview notes](docs/releases/0.5.52.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
 previews; drafts are excluded from updates. Installed acceptance remains
@@ -227,20 +227,18 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What Changed In 0.5.51 Preview
+## What changed in 0.5.52 preview
 
-- Fit complete selected transcripts within the answer provider's context budget;
-  when retrieval is needed, reserve matches for each selected meeting.
-- Render answer markdown and numbered source chips, keep failed questions for
-  retry, and put conversations in one menu.
-- Keep chat full-width with compact source controls and optional transcript
-  search. Ready semantic indexing defaults to semantic plus keyword search.
-- Clarify local search-model download and index states with shared controls.
-- Preserve existing data and backup citations while raising the evidence limit
-  to 1024. Document attachments and live assistance remain the follow-up plan.
+- Use shared controls and sentence-case labels across the six UI areas.
+- Replace raw status colors, rings and Home overlays with named theme colors.
+- Consolidate Tailwind/PostCSS configuration while preserving application fonts,
+  sidebar colors, animations and CSS prefixing.
+- Reduce all 68 files in the UI conventions baseline to zero recorded violations.
+- Provide a preview for installed light/dark, accent, keyboard and narrow-layout
+  review. Application behavior, provider and recording logic are unchanged.
 
-See the [preview notes](docs/releases/0.5.51.md), the
-[implementation plan](docs/meeting-intelligence-plan.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.52.md), the
+[previous meeting-memory preview](docs/releases/0.5.51.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 
