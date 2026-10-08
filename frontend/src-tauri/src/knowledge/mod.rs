@@ -3,6 +3,7 @@ pub mod answers;
 pub mod chunking;
 pub mod commands;
 pub mod conversations;
+pub mod document_context;
 #[cfg(test)]
 mod document_contract_tests;
 pub mod documents;

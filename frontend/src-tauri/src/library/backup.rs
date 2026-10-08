@@ -44,6 +44,8 @@ struct Manifest {
     // Optional in V1; omissions remain visible when this archive is restored.
     #[serde(default)]
     incomplete_audio: BTreeMap<usize, IncompleteAudio>,
+    #[serde(default)]
+    document_files: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -211,6 +213,7 @@ async fn snapshot(pool: &SqlitePool) -> Result<(Manifest, Vec<Option<PathBuf>>),
             tables,
             files: BTreeMap::new(),
             incomplete_audio: BTreeMap::new(),
+            document_files: BTreeMap::new(),
         },
         folders,
     ))
@@ -1167,6 +1170,36 @@ async fn import_manifest(
     })
 }
 
+// Task 6 API scaffolding. The designated runner must prove the document
+// contract tests fail before these forwarding implementations are replaced.
+async fn snapshot_with_documents(
+    pool: &SqlitePool,
+) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
+    snapshot(pool).await
+}
+
+fn write_archive_with_documents(
+    path: &Path,
+    manifest: Manifest,
+    folders: Vec<Option<PathBuf>>,
+    _reference_root: &Path,
+) -> Result<BackupReport, String> {
+    write_archive(path, manifest, folders)
+}
+
+async fn import_manifest_with_documents(
+    pool: &SqlitePool,
+    manifest: Manifest,
+    stage: tempfile::TempDir,
+    _reference_root: &Path,
+) -> Result<BackupReport, String> {
+    import_manifest(pool, manifest, stage).await
+}
+
+#[cfg(test)]
+#[path = "backup/document_tests.rs"]
+mod document_tests;
+
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
     if !Path::new(&path)
@@ -1216,7 +1249,8 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
 mod tests {
     use super::*;
 
-    async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest) {
+    pub(super) async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest)
+    {
         conversation_fixture_schema(false).await
     }
 
@@ -1307,7 +1341,7 @@ mod tests {
         (pool, request)
     }
 
-    async fn empty_conversation_destination() -> SqlitePool {
+    pub(super) async fn empty_conversation_destination() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
