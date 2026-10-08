@@ -13,6 +13,10 @@ $storeModule = ''
 if (Test-Path -LiteralPath (Join-Path $sourceRoot 'store.rs')) {
     $storeModule = "#[path = `"$sourceRoot/store.rs`"] pub mod store;"
 }
+$importModule = ''
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'import.rs')) {
+    $importModule = "#[path = `"$sourceRoot/import.rs`"] pub mod import;"
+}
 $workerModule = ''
 $workerBinary = ''
 if (Test-Path -LiteralPath (Join-Path $sourceRoot 'worker.rs')) {
@@ -38,6 +42,7 @@ pub mod documents {
     #[path = "$sourceRoot/extract.rs"] pub mod extract;
     $workerModule
     $storeModule
+    $importModule
     #[cfg(test)] #[path = "$sourceRoot/fixtures.rs"] pub mod fixtures;
     #[cfg(test)] #[path = "$sourceRoot/tests.rs"] mod tests;
 }
@@ -63,6 +68,7 @@ tempfile = "3"
 windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 $workerBinary
 "@ | Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Encoding utf8NoBOM
 # Shared production parser/worker modules, without the unrelated desktop/ML link.
