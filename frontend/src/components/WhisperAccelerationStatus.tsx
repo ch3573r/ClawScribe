@@ -47,7 +47,7 @@ export function WhisperAccelerationStatus() {
     <div className="rounded-lg border border-border bg-muted p-3 text-sm">
       <div className="flex items-center gap-2">
         {onGpu ? (
-          <Zap className="h-4 w-4 text-emerald-500" />
+          <Zap className="h-4 w-4 text-[hsl(var(--theme-success-fg))]" />
         ) : (
           <Cpu className="h-4 w-4 text-muted-foreground" />
         )}
@@ -58,7 +58,7 @@ export function WhisperAccelerationStatus() {
       </div>
 
       {status.gpuAvailableButUnused && (
-        <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-300/40 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+        <div className="mt-2 flex items-start gap-2 rounded-md border border-[hsl(var(--theme-warning-fg)/0.4)] bg-[hsl(var(--theme-warning-bg))] p-2 text-xs text-[hsl(var(--theme-warning-fg))]">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
             A {status.runtimeDetectedGpu} GPU was detected, but this is the
