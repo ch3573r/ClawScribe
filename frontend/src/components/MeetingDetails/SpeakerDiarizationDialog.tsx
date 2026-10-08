@@ -98,22 +98,22 @@ export function SpeakerDiarizationDialog({
             {isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                Detecting Speakers...
+                Detecting speakers...
               </>
             ) : error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-destructive" />
-                Speaker Diarization Failed
+                Speaker diarization failed
               </>
             ) : result ? (
               <>
-                <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                Speaker Diarization Complete
+                <CheckCircle2 className="h-5 w-5 text-success-foreground" />
+                Speaker diarization complete
               </>
             ) : (
               <>
                 <Users className="h-5 w-5 text-primary" />
-                Detect Speakers
+                Detect speakers
               </>
             )}
           </DialogTitle>
@@ -129,7 +129,7 @@ export function SpeakerDiarizationDialog({
         </DialogHeader>
 
         <div className="min-w-0 space-y-4 py-4">
-          {result?.file_warning && <p role="alert" className="text-sm text-amber-600 dark:text-amber-400">Speaker labels are saved. The recording-folder copy needs updating; use Retry file update below the transcript.</p>}
+          {result?.file_warning && <p role="alert" className="text-sm text-warning-foreground">Speaker labels are saved. The recording-folder copy needs updating; use Retry file update below the transcript.</p>}
           {isProcessing && (
             <div className="space-y-2">
               <div className="relative">

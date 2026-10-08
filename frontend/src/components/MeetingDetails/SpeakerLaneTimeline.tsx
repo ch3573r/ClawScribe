@@ -1,5 +1,6 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
 import { memo, useMemo } from "react";
 import { Activity, Pause, Play } from "lucide-react";
 import { TranscriptSegmentData } from "@/types";
@@ -31,14 +32,14 @@ interface TimelineLane {
 }
 
 const LANE_COLORS = [
-  "var(--accent)",
-  "#14b8a6",
-  "#f59e0b",
-  "#ef4444",
-  "#8b5cf6",
-  "#22c55e",
-  "#0ea5e9",
-  "#ec4899",
+  "hsl(var(--primary))",
+  "hsl(var(--chart-2))",
+  "hsl(var(--theme-warning-fg))",
+  "hsl(var(--theme-error-fg))",
+  "hsl(var(--chart-4))",
+  "hsl(var(--theme-success-fg))",
+  "hsl(var(--chart-3))",
+  "hsl(var(--chart-5))",
 ];
 
 const MAX_VISIBLE_LANES = 6;
@@ -179,10 +180,10 @@ export function SpeakerLaneTimeline({
         </div>
         <div className="flex shrink-0 items-center gap-3">
           {isAudioReady && onPlayPause && (
-            <button
+            <Button variant="ghost"
               type="button"
               onClick={onPlayPause}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-border bg-background text-foreground hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring"
+              className="gap-0 p-0 whitespace-normal [&_svg]:size-3.5 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-border bg-background text-foreground hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring"
               aria-label={isPlaying ? "Pause recording playback" : "Play recording"}
             >
               {isPlaying ? (
@@ -190,7 +191,7 @@ export function SpeakerLaneTimeline({
               ) : (
                 <Play className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-            </button>
+            </Button>
           )}
           <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
             <span>{formatDuration(timelineDuration)}</span>
@@ -202,13 +203,13 @@ export function SpeakerLaneTimeline({
       <div className="space-y-1.5">
         {visibleLanes.map((lane) => (
           <div key={lane?.speaker ?? 'audio'} className={lane ? 'grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3' : ''}>
-            {lane && <div className="min-w-0 truncate font-mono text-[11px] font-medium uppercase tracking-normal text-muted-foreground">
+            {lane && <div className="min-w-0 truncate font-mono text-[11px] font-medium tracking-normal text-muted-foreground">
               {lane.speaker}
             </div>}
-            <button
+            <Button variant="ghost"
               type="button"
               disabled={!canSeek}
-              className={`relative h-5 w-full overflow-hidden rounded-[3px] bg-muted/45 text-left focus:outline-none focus:ring-2 focus:ring-ring ${canSeek ? "cursor-pointer hover:bg-muted/70" : "cursor-default"}`}
+              className={`gap-0 p-0 whitespace-normal hover:bg-muted/45 disabled:pointer-events-auto disabled:opacity-100 relative h-5 w-full overflow-hidden rounded-[3px] bg-muted/45 text-left focus:outline-none focus:ring-2 focus:ring-ring ${canSeek ? "cursor-pointer hover:bg-muted/70" : "cursor-default"}`}
               onClick={(event) => {
                 if (!onSeek) return;
                 const rect = event.currentTarget.getBoundingClientRect();
@@ -220,12 +221,12 @@ export function SpeakerLaneTimeline({
               {lane && <LaneBars lane={lane} timelineDuration={timelineDuration} />}
               {canSeek && (
                 <span
-                  className="pointer-events-none absolute top-0 h-full w-px bg-foreground/80 shadow-[0_0_0_1px_rgba(255,255,255,0.22)]"
+                  className="pointer-events-none absolute top-0 h-full w-px bg-foreground/80 shadow-[0_0_0_1px_hsl(var(--background)/0.22)]"
                   style={{ left: `${playheadLeft}%` }}
                   aria-hidden="true"
                 />
               )}
-            </button>
+            </Button>
           </div>
         ))}
       </div>
