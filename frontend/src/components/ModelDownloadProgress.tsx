@@ -43,7 +43,7 @@ export function ModelDownloadProgress({ status, modelName, onCancel }: ModelDown
       </div>
       
       {isCompleted && (
-        <div className="mt-2 text-xs text-green-700">
+        <div className="mt-2 text-xs text-[hsl(var(--theme-success-fg))]">
           ✓ Download completed, loading model...
         </div>
       )}
@@ -74,7 +74,7 @@ export function ProgressRing({ progress, size = 40, strokeWidth = 3 }: ProgressR
           cx={size / 2}
           cy={size / 2}
           r={radius}
-          stroke="#e5e7eb"
+          className="stroke-border"
           strokeWidth={strokeWidth}
           fill="transparent"
         />
@@ -82,13 +82,13 @@ export function ProgressRing({ progress, size = 40, strokeWidth = 3 }: ProgressR
           cx={size / 2}
           cy={size / 2}
           r={radius}
-          stroke="#3b82f6"
+          stroke="currentColor"
           strokeWidth={strokeWidth}
           strokeDasharray={strokeDasharray}
           strokeDashoffset={strokeDashoffset}
           strokeLinecap="round"
           fill="transparent"
-          className="transition-all duration-300 ease-in-out"
+          className="stroke-primary transition-all duration-300 ease-in-out"
         />
       </svg>
       <span className="absolute text-xs font-medium text-primary">
@@ -121,7 +121,7 @@ export function DownloadSummary({ totalModels, downloadedModels, totalSizeMb }: 
         </span>
       </div>
       {downloadedModels > 0 && (
-        <div className="mt-1 text-xs text-green-600">
+        <div className="mt-1 text-xs text-[hsl(var(--theme-success-fg))]">
           ✓ Models run locally - no internet required for transcription
         </div>
       )}
