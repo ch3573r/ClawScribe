@@ -255,7 +255,7 @@
     "frontend/src/components/RecordingModeSelect.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/RecordingSettings.tsx": {
       "paletteColors": 2,
