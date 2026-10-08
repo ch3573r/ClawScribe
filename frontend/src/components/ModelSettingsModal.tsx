@@ -1289,12 +1289,12 @@ export function ModelSettingsModal({
   return (
     <div>
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-lg font-semibold">Model Settings</h3>
+        <h3 className="text-lg font-semibold">Model settings</h3>
       </div>
 
       <div className="space-y-4">
         <div>
-          <Label>Summarization Model</Label>
+          <Label>Summarization model</Label>
           <div className="flex space-x-2 mt-1">
             <Select
               value={modelConfig.provider}
@@ -1374,12 +1374,12 @@ export function ModelSettingsModal({
               </SelectTrigger>
               <SelectContent className="max-h-72 overflow-y-auto">
                 <SelectGroup>
-                  <SelectLabel>On your device</SelectLabel>
+                  <SelectLabel className="normal-case">On your device</SelectLabel>
                   <SelectItem value="builtin-ai">Built-in &middot; offline, no key</SelectItem>
                   <SelectItem value="ollama">Ollama &middot; local server</SelectItem>
                 </SelectGroup>
                 <SelectGroup>
-                  <SelectLabel>Cloud APIs</SelectLabel>
+                  <SelectLabel className="normal-case">Cloud APIs</SelectLabel>
                   <SelectItem value="custom-openai">OpenAI or compatible</SelectItem>
                   <SelectItem value="claude">Claude</SelectItem>
                   <SelectItem value="groq">Groq</SelectItem>
@@ -1387,7 +1387,7 @@ export function ModelSettingsModal({
                   <SelectItem value="openclaw">OpenClaw</SelectItem>
                 </SelectGroup>
                 <SelectGroup>
-                  <SelectLabel>Advanced</SelectLabel>
+                  <SelectLabel className="normal-case">Advanced</SelectLabel>
                   <SelectItem value="codex">Codex app-server</SelectItem>
                 </SelectGroup>
               </SelectContent>
@@ -1472,7 +1472,7 @@ export function ModelSettingsModal({
 
             <div>
               <UnencryptedHttpOptIn destinationProblem={customDestinationProblem} urls={[customOpenAIEndpoint]} checked={customAllowUnencrypted} onChange={value => { setCustomAllowUnencrypted(value); setCustomDestinationProblem(null); }} />
-              <Label htmlFor="custom-model">Model Name *</Label>
+              <Label htmlFor="custom-model">Model name *</Label>
               <Input
                 id="custom-model"
                 value={customOpenAIModel}
@@ -1506,7 +1506,7 @@ export function ModelSettingsModal({
                 className="flex items-center justify-between cursor-pointer py-2"
                 onClick={() => setIsCustomOpenAIAdvancedOpen(!isCustomOpenAIAdvancedOpen)}
               >
-                <Label className="cursor-pointer">Advanced Options</Label>
+                <Label className="cursor-pointer">Advanced options</Label>
                 {isCustomOpenAIAdvancedOpen ? (
                   <ChevronUp className="h-4 w-4 text-muted-foreground" />
                 ) : (
@@ -1647,7 +1647,7 @@ export function ModelSettingsModal({
                   <span className="font-medium">Advanced: Codex app-server</span>
                   <span className={cn(
                     'rounded-full px-2 py-0.5 text-xs font-medium',
-                    codexStatus?.found ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                    codexStatus?.found ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
                   )}>
                     {isCodexBusy ? 'Checking' : codexStatus?.found ? 'Bundled runtime found' : 'Missing or damaged'}
                   </span>
@@ -1724,7 +1724,7 @@ export function ModelSettingsModal({
                   <SelectContent>
                     {codexPickerModels.map((model) => (
                       <SelectItem key={model.id} value={model.id}>
-                        {model.displayName} · {model.id}{model.isDefault ? ' · Recommended' : ''}
+                        {model.displayName} · {model.id}{model.isDefault ? ' · recommended' : ''}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1807,7 +1807,7 @@ export function ModelSettingsModal({
               <div className="flex items-start gap-3">
                 <div className={cn(
                   'mt-0.5 rounded-md p-2',
-                  openClawStatus?.ready ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                  openClawStatus?.ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
                 )}>
                   <ServerCog className="h-4 w-4" />
                 </div>
@@ -1816,7 +1816,7 @@ export function ModelSettingsModal({
                     <span className="font-medium">OpenClaw gateway</span>
                     <span className={cn(
                       'rounded-full px-2 py-0.5 text-xs font-medium',
-                      openClawStatus?.ready ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                      openClawStatus?.ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
                     )}>
                       {isLoadingOpenClawStatus
                         ? 'Checking'
@@ -1862,7 +1862,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <Label htmlFor="openclaw-endpoint">Meeting Handoff URL *</Label>
+              <Label htmlFor="openclaw-endpoint">Meeting handoff URL *</Label>
               <Input
                 id="openclaw-endpoint"
                 type="url"
@@ -1874,7 +1874,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <Label htmlFor="openclaw-model-endpoint">Summary Gateway URL *</Label>
+              <Label htmlFor="openclaw-model-endpoint">Summary gateway URL *</Label>
               <Input
                 id="openclaw-model-endpoint"
                 type="url"
@@ -1887,7 +1887,7 @@ export function ModelSettingsModal({
 
             <div>
               <UnencryptedHttpOptIn destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null} urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
-              <Label htmlFor="openclaw-bearer-token">Bearer Token *</Label>
+              <Label htmlFor="openclaw-bearer-token">Bearer token *</Label>
               <Input
                 id="openclaw-bearer-token"
                 type="password"
@@ -1904,7 +1904,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <Label htmlFor="openclaw-source">Source Name *</Label>
+              <Label htmlFor="openclaw-source">Source name *</Label>
               <Input
                 id="openclaw-source"
                 value={openClawSource}
@@ -1932,7 +1932,7 @@ export function ModelSettingsModal({
 
         {requiresApiKey && (
           <div>
-            <Label>API Key</Label>
+            <Label>API key</Label>
             <div className="relative mt-1">
               <Input
                 type={showApiKey ? 'text' : 'password'}
@@ -1955,7 +1955,7 @@ export function ModelSettingsModal({
                     variant="ghost"
                     size="icon"
                     onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                    className={isLockButtonVibrating ? 'animate-vibrate text-red-500' : ''}
+                    className={isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''}
                     title={isApiKeyLocked ? 'Unlock to edit' : 'Lock to prevent editing'}
                   >
                     {isApiKeyLocked ? <Lock /> : <Unlock />}
@@ -2025,7 +2025,7 @@ export function ModelSettingsModal({
               className="flex items-center justify-between cursor-pointer py-2"
               onClick={() => setIsEndpointSectionCollapsed(!isEndpointSectionCollapsed)}
             >
-              <Label className="cursor-pointer">Custom Endpoint (optional)</Label>
+              <Label className="cursor-pointer">Custom endpoint (optional)</Label>
               {isEndpointSectionCollapsed ? (
                 <ChevronDown className="h-4 w-4 text-muted-foreground" />
               ) : (
@@ -2054,14 +2054,14 @@ export function ModelSettingsModal({
                       placeholder="http://localhost:11434"
                       className={cn(
                         "pr-10",
-                        endpointValidationState === 'invalid' && "border-red-500"
+                        endpointValidationState === 'invalid' && "border-destructive"
                       )}
                     />
                     {endpointValidationState === 'valid' && (
-                      <CheckCircle2 className="absolute right-3 top-1/2 -translate-y-1/2 h-5 w-5 text-green-500" />
+                      <CheckCircle2 className="absolute right-3 top-1/2 -translate-y-1/2 h-5 w-5 text-success-foreground" />
                     )}
                     {endpointValidationState === 'invalid' && (
-                      <XCircle className="absolute right-3 top-1/2 -translate-y-1/2 h-5 w-5 text-red-500" />
+                      <XCircle className="absolute right-3 top-1/2 -translate-y-1/2 h-5 w-5 text-destructive" />
                     )}
                   </div>
                   <Button
@@ -2080,15 +2080,15 @@ export function ModelSettingsModal({
                     ) : (
                       <>
                         <RefreshCw className="mr-2 h-4 w-4" />
-                        Fetch Models
+                        Fetch models
                       </>
                     )}
                   </Button>
                 </div>
                 {ollamaEndpointChanged && !error && (
-                  <Alert className="mt-3 border-yellow-500 bg-yellow-50">
-                    <AlertDescription className="text-yellow-800">
-                      Endpoint changed. Please click "Fetch Models" to load models from the new endpoint before saving.
+                  <Alert className="mt-3 border-warning-border bg-warning">
+                    <AlertDescription className="text-warning-foreground">
+                      Endpoint changed. Please click "Fetch models" to load models from the new endpoint before saving.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -2100,7 +2100,7 @@ export function ModelSettingsModal({
         {modelConfig.provider === 'ollama' && (
           <div>
             <div className="flex items-center justify-between mb-4">
-              <h4 className="text-sm font-bold">Available Ollama Models</h4>
+              <h4 className="text-sm font-bold">Available Ollama models</h4>
               {lastFetchedEndpoint && models.length > 0 && (
                 <div className="flex items-center gap-2 text-sm">
                   <span className="text-muted-foreground">Using:</span>
@@ -2130,8 +2130,8 @@ export function ModelSettingsModal({
                 {ollamaNotInstalled ? (
                   /* Show Ollama download link when not installed */
                   <div className="space-y-4">
-                    <Alert className="border-orange-500 bg-orange-50">
-                      <AlertDescription className="text-orange-800">
+                    <Alert className="border-warning-border bg-warning">
+                      <AlertDescription className="text-warning-foreground">
                         Ollama is not installed or not running. Please download and install Ollama to use local models.
                       </AlertDescription>
                     </Alert>
@@ -2145,7 +2145,7 @@ export function ModelSettingsModal({
                       Download Ollama
                     </Button>
                     <div className="text-sm text-muted-foreground text-center">
-                      After installing Ollama, restart this application and click "Fetch Models" to continue.
+                      After installing Ollama, restart this application and click "Fetch models" to continue.
                     </div>
                   </div>
                 ) : (
@@ -2154,8 +2154,8 @@ export function ModelSettingsModal({
                     <Alert className="mb-4">
                       <AlertDescription>
                         {ollamaEndpointChanged
-                          ? 'Endpoint changed. Click "Fetch Models" to load models from the new endpoint.'
-                          : 'No models found. Download a recommended model or click "Fetch Models" to load available Ollama models.'}
+                          ? 'Endpoint changed. Click "Fetch models" to load models from the new endpoint.'
+                          : 'No models found. Download a recommended model or click "Fetch models" to load available Ollama models.'}
                       </AlertDescription>
                     </Alert>
                     {!ollamaEndpointChanged && (
@@ -2175,7 +2175,7 @@ export function ModelSettingsModal({
                           ) : (
                             <>
                               <Download className="mr-2 h-4 w-4" />
-                              Download gemma3:1b (Recommended, ~800MB)
+                              Download gemma3:1b (recommended, ~800MB)
                             </>
                           )}
                         </Button>
@@ -2222,7 +2222,7 @@ export function ModelSettingsModal({
                           className={cn(
                             'bg-card p-2 m-0 rounded-md border transition-colors',
                             modelConfig.model === model.name
-                              ? 'ring-1 ring-ring border-primary background-blue-100'
+                              ? 'ring-1 ring-ring border-primary bg-primary/10'
                               : 'hover:bg-muted/50',
                             !modelIsDownloading && 'cursor-pointer'
                           )}
@@ -2299,7 +2299,7 @@ export function ModelSettingsModal({
       <div className="mt-6 flex justify-end">
         <Button
           className={cn(
-            'px-4 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring',
+            'px-4 text-sm font-medium text-primary-foreground rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring',
             isDoneDisabled ? 'bg-muted cursor-not-allowed' : 'bg-primary hover:bg-primary'
           )}
           onClick={handleSave}

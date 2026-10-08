@@ -43,6 +43,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { VisuallyHidden } from "@/components/ui/visually-hidden";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 
 import Logo from "../Logo";
 import {
@@ -372,9 +375,9 @@ const Sidebar: React.FC = () => {
     ];
     const statusDot = isRecording
       ? isPaused
-        ? "bg-amber-500"
-        : "bg-red-500 animate-pulse"
-      : "bg-emerald-500";
+        ? "bg-warning-foreground"
+        : "bg-error-foreground animate-pulse"
+      : "bg-success-foreground";
     const statusLabel = isRecording
       ? isPaused
         ? "Paused"
@@ -394,17 +397,18 @@ const Sidebar: React.FC = () => {
               return (
                 <Tooltip key={item.label}>
                   <TooltipTrigger asChild>
-                    <button
+                    <Button
+                      variant="ghost"
                       onClick={item.onClick}
-                      className={`flex h-10 w-10 items-center justify-center rounded-md transition ${
+                      className={`whitespace-normal gap-0 p-0 [&_svg]:size-5 flex h-10 w-10 items-center justify-center rounded-md transition ${
                         item.active
-                          ? "bg-primary/10 text-primary ring-1 ring-primary/20"
+                          ? "bg-primary/10 text-primary ring-1 ring-primary/20 hover:bg-primary/10 hover:text-primary"
                           : "text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
                       }`}
                       aria-label={item.label}
                     >
                       <Icon className="h-5 w-5" />
-                    </button>
+                    </Button>
                   </TooltipTrigger>
                   <TooltipContent side="right">
                     <p>{item.label}</p>
@@ -419,11 +423,12 @@ const Sidebar: React.FC = () => {
           <div className="flex flex-col items-center gap-2">
             <Tooltip>
               <TooltipTrigger asChild>
-                <button
+                <Button
+                  variant="ghost"
                   onClick={handleRecordingToggle}
-                  className={`flex h-11 w-11 items-center justify-center rounded-lg transition ${
+                  className={`whitespace-normal gap-0 p-0 hover:bg-transparent hover:text-primary-foreground [&_svg]:size-5 flex h-11 w-11 items-center justify-center rounded-lg transition ${
                     isRecording
-                      ? "bg-red-500 text-white hover:bg-red-600"
+                      ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground"
                       : idleRecordingButtonClass
                   }`}
                   aria-label={isRecording ? "Stop recording" : "Start recording"}
@@ -433,7 +438,7 @@ const Sidebar: React.FC = () => {
                   ) : (
                     <Mic className="h-5 w-5" />
                   )}
-                </button>
+                </Button>
               </TooltipTrigger>
               <TooltipContent side="right">
                 <p>
@@ -441,39 +446,41 @@ const Sidebar: React.FC = () => {
                     ? isPaused
                       ? "Paused — click to stop"
                       : "Recording — click to stop"
-                    : "Start Recording"}
+                    : "Start recording"}
                 </p>
               </TooltipContent>
             </Tooltip>
 
             <Tooltip>
               <TooltipTrigger asChild>
-                <button
+                <Button
+                  variant="ghost"
                   onClick={() => openImportDialog()}
-                  className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                  className="whitespace-normal gap-0 p-0 [&_svg]:size-5 flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
                   aria-label="Import audio"
                 >
                   <Upload className="h-5 w-5" />
-                </button>
+                </Button>
               </TooltipTrigger>
               <TooltipContent side="right">
-                <p>Import Audio</p>
+                <p>Import audio</p>
               </TooltipContent>
             </Tooltip>
 
             <Tooltip>
               <TooltipTrigger asChild>
-                <button
+                <Button
+                  variant="ghost"
                   onClick={() => openSettingsTab("general")}
-                  className={`flex h-10 w-10 items-center justify-center rounded-md transition ${
+                  className={`whitespace-normal gap-0 p-0 [&_svg]:size-5 flex h-10 w-10 items-center justify-center rounded-md transition ${
                     isSettingsPage
-                      ? "bg-primary/10 text-primary ring-1 ring-primary/20"
+                      ? "bg-primary/10 text-primary ring-1 ring-primary/20 hover:bg-primary/10 hover:text-primary"
                       : "text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
                   }`}
                   aria-label="Settings"
                 >
                   <Settings className="h-5 w-5" />
-                </button>
+                </Button>
               </TooltipTrigger>
               <TooltipContent side="right">
                 <p>Settings</p>
@@ -530,7 +537,7 @@ const Sidebar: React.FC = () => {
           isActive
             ? "border-primary/25 bg-primary/10 text-sidebar-foreground shadow-sm"
             : hasTranscriptMatch
-              ? "border-amber-400/30 bg-amber-400/10 text-sidebar-foreground"
+              ? "border-warning-border/30 bg-warning text-sidebar-foreground"
               : "border-transparent text-sidebar-foreground hover:border-sidebar-border hover:bg-sidebar-hover"
         }`}
       >
@@ -552,34 +559,36 @@ const Sidebar: React.FC = () => {
           </div>
           {isMeetingItem && (
             <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-              <button
+              <Button
+                variant="ghost"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleEditStart(item.id, item.title);
                 }}
-                className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                className="whitespace-normal h-auto gap-0 [&_svg]:size-3.5 rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
                 aria-label="Edit meeting title"
               >
                 <Pencil className="h-3.5 w-3.5" />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
                 onClick={(e) => {
                   e.stopPropagation();
                   setDeleteFiles(true);
                   setDeleteModalState({ isOpen: true, itemId: item.id });
                 }}
-                className="rounded-md p-1.5 text-muted-foreground hover:bg-red-500/10 hover:text-red-500"
+                className="whitespace-normal h-auto gap-0 [&_svg]:size-3.5 rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 aria-label="Delete meeting"
               >
                 <Trash2 className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             </div>
           )}
         </div>
 
         {hasTranscriptMatch && (
-          <div className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/10 p-2 text-xs leading-5 text-amber-800 dark:text-amber-100">
-            <span className="font-medium text-amber-800 dark:text-amber-200">Match:</span>{" "}
+          <div className="mt-2 rounded-md border border-warning-border/30 bg-warning p-2 text-xs leading-5 text-warning-foreground">
+            <span className="font-medium text-warning-foreground">Match:</span>{" "}
             {matchingResult.matchContext}
           </div>
         )}
@@ -621,9 +630,10 @@ const Sidebar: React.FC = () => {
   return (
     <div className="fixed left-0 top-[var(--titlebar-height)] z-40 h-[calc(100vh-var(--titlebar-height))]">
       {!onSettings && (
-        <button
+        <Button
+          variant="ghost"
           onClick={toggleCollapse}
-          className="absolute -right-3 top-24 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-sidebar-border bg-sidebar text-muted-foreground shadow-sm transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
+          className="whitespace-normal gap-0 p-0 [&_svg]:size-5 absolute -right-3 top-24 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-sidebar-border bg-sidebar text-muted-foreground shadow-sm transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
           aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           {isCollapsed ? (
@@ -631,7 +641,7 @@ const Sidebar: React.FC = () => {
           ) : (
             <ChevronLeftCircle className="h-5 w-5" />
           )}
-        </button>
+        </Button>
       )}
 
       <aside
@@ -713,12 +723,13 @@ const Sidebar: React.FC = () => {
               {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <button
+                  <Button
+                    variant="ghost"
                     key={item.label}
                     onClick={item.onClick}
-                    className={`relative flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition ${
+                    className={`h-auto justify-start whitespace-normal relative flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition ${
                       item.active
-                        ? "bg-primary/10 text-primary ring-1 ring-primary/15"
+                        ? "bg-primary/10 text-primary ring-1 ring-primary/15 hover:bg-primary/10 hover:text-primary"
                         : "text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
                     }`}
                   >
@@ -727,14 +738,14 @@ const Sidebar: React.FC = () => {
                     )}
                     <Icon className="h-4 w-4 shrink-0" />
                     <span>{item.label}</span>
-                  </button>
+                  </Button>
                 );
               })}
             </nav>
 
             <div className="mt-6 flex min-h-0 flex-1 flex-col px-3">
               <div className="mb-2 flex items-center justify-between px-1">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                <div className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground">
                   {showAllMeetings ? "All meetings" : "Recent meetings"}
                 </div>
                 {isSearching && (
@@ -759,23 +770,25 @@ const Sidebar: React.FC = () => {
               </div>
 
               {!searchQuery && meetings.length > 8 && (
-                <button
+                <Button
+                  variant="ghost"
                   onClick={() => setShowAllMeetings((value) => !value)}
-                  className="mt-3 flex items-center gap-2 px-1 text-sm font-medium text-primary hover:text-primary/80"
+                  className="whitespace-normal h-auto justify-start rounded-none py-0 hover:bg-transparent mt-3 flex items-center gap-2 px-1 text-sm font-medium text-primary hover:text-primary/80"
                 >
                   {showAllMeetings ? "Show recent" : "View all meetings"}
                   <ArrowRight className="h-4 w-4" />
-                </button>
+                </Button>
               )}
             </div>
 
             <div className="flex-shrink-0 space-y-2.5 border-t border-sidebar-border bg-sidebar p-3">
-              <button
+              <Button
+                variant="ghost"
                 onClick={handleRecordingToggle}
                 title={isRecording ? "Click to stop recording" : undefined}
-                className={`flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold transition ${
+                className={`whitespace-normal h-auto hover:bg-transparent hover:text-primary-foreground flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold transition ${
                   isRecording
-                    ? "bg-red-500 text-white hover:bg-red-600"
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground"
                     : idleRecordingButtonClass
                 }`}
               >
@@ -789,47 +802,49 @@ const Sidebar: React.FC = () => {
                     ? isPaused
                       ? "Paused — click to stop"
                       : "Recording — click to stop"
-                    : "Start Recording"}
+                    : "Start recording"}
                 </span>
-              </button>
+              </Button>
 
               <div className="grid grid-cols-2 gap-2">
-                <button
+                <Button
+                  variant="ghost"
                   onClick={() => openImportDialog()}
-                  className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
+                  className="whitespace-normal h-auto hover:text-sidebar-foreground flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
                 >
                   <Upload className="h-4 w-4 shrink-0" />
                   <span className="truncate">Import</span>
-                </button>
+                </Button>
 
-                <button
+                <Button
+                  variant="ghost"
                   onClick={() => openSettingsTab("general")}
-                  className={`flex min-w-0 items-center justify-center gap-2 rounded-lg border px-2.5 py-2.5 text-sm font-medium transition ${
+                  className={`whitespace-normal h-auto flex min-w-0 items-center justify-center gap-2 rounded-lg border px-2.5 py-2.5 text-sm font-medium transition ${
                     onSettings
-                      ? "border-primary/20 bg-primary/10 text-primary"
-                      : "border-sidebar-border bg-transparent text-sidebar-foreground hover:bg-sidebar-hover"
+                      ? "border-primary/20 bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary"
+                      : "border-sidebar-border bg-transparent text-sidebar-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
                   }`}
                 >
                   <Settings className="h-4 w-4 shrink-0" />
                   <span className="truncate">Settings</span>
-                </button>
+                </Button>
               </div>
 
               {isRecording ? (
                 isPaused ? (
-                  <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                    <span className="h-2 w-2 rounded-full bg-amber-500" />
+                  <div className="flex items-center gap-2 rounded-lg border border-warning-border/20 bg-warning px-3 py-2 text-xs text-warning-foreground">
+                    <span className="h-2 w-2 rounded-full bg-warning-foreground" />
                     Paused
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                  <div className="flex items-center gap-2 rounded-lg border border-error-border/20 bg-error px-3 py-2 text-xs text-error-foreground">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-error-foreground" />
                     Recording
                   </div>
                 )
               ) : (
-                <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                <div className="flex items-center gap-2 rounded-lg border border-success-border/20 bg-success px-3 py-2 text-xs text-success-foreground">
+                  <span className="h-2 w-2 rounded-full bg-success-foreground" />
                   Ready for recording
                 </div>
               )}
@@ -849,7 +864,7 @@ const Sidebar: React.FC = () => {
         onConfirm={handleDeleteConfirm}
         onCancel={() => setDeleteModalState({ isOpen: false, itemId: null })}
       >
-        <label className="mb-6 flex items-start gap-2 text-sm"><input type="checkbox" checked={deleteFiles} onChange={event => setDeleteFiles(event.target.checked)} className="mt-1 accent-primary" />Also delete the recording files (audio, transcript copy, metadata, and generated documents).</label>
+        <label className="mb-6 flex items-start gap-2 text-sm"><Checkbox checked={deleteFiles} onCheckedChange={checked => setDeleteFiles(checked === true)} className="mt-1 h-[13px] w-[13px]" />Also delete the recording files (audio, transcript copy, metadata, and generated documents).</label>
       </ConfirmationModal>
 
       {/* Edit Meeting Title Modal */}
@@ -861,19 +876,19 @@ const Sidebar: React.FC = () => {
       >
         <DialogContent className="sm:max-w-[425px]">
           <VisuallyHidden>
-            <DialogTitle>Edit Meeting Title</DialogTitle>
+            <DialogTitle>Edit meeting title</DialogTitle>
           </VisuallyHidden>
           <div className="py-4">
-            <h3 className="text-lg font-semibold mb-4">Edit Meeting Title</h3>
+            <h3 className="text-lg font-semibold mb-4">Edit meeting title</h3>
             <div className="space-y-4">
               <div>
                 <label
                   htmlFor="meeting-title"
                   className="block text-sm font-medium text-foreground mb-2"
                 >
-                  Meeting Title
+                  Meeting title
                 </label>
-                <input
+                <Input
                   id="meeting-title"
                   type="text"
                   value={editingTitle}
@@ -885,7 +900,7 @@ const Sidebar: React.FC = () => {
                       handleEditCancel();
                     }
                   }}
-                  className="w-full px-3 py-2 border border-input bg-background rounded-md focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
+                  className="h-auto w-full px-3 py-2 border border-input bg-background rounded-md text-base md:text-base shadow-none focus:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-ring focus:border-transparent"
                   placeholder="Enter meeting title"
                   autoFocus
                 />
@@ -893,18 +908,20 @@ const Sidebar: React.FC = () => {
             </div>
           </div>
           <DialogFooter>
-            <button
+            <Button
+              variant="ghost"
               onClick={handleEditCancel}
-              className="px-4 py-2 text-sm font-medium text-secondary-foreground bg-secondary hover:bg-muted rounded-md transition-colors"
+              className="whitespace-normal h-auto gap-0 hover:text-secondary-foreground px-4 py-2 text-sm font-medium text-secondary-foreground bg-secondary hover:bg-muted rounded-md transition-colors"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
               onClick={handleEditConfirm}
-              className="px-4 py-2 text-sm font-medium text-primary-foreground bg-primary hover:bg-primary/90 rounded-md transition-colors"
+              className="whitespace-normal h-auto gap-0 hover:text-primary-foreground px-4 py-2 text-sm font-medium text-primary-foreground bg-primary hover:bg-primary/90 rounded-md transition-colors"
             >
               Save
-            </button>
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

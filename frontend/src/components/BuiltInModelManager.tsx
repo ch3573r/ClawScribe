@@ -278,7 +278,7 @@ export function BuiltInModelManager({
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h4 className="text-sm font-bold">Built-in AI Models</h4>
+        <h4 className="text-sm font-bold">Built-in AI models</h4>
       </div>
 
       <div
@@ -322,8 +322,8 @@ export function BuiltInModelManager({
                     <span className="min-w-0 break-words text-base font-bold leading-snug text-foreground">{model.display_name || model.name}</span>
                     {isAvailable && (
                       <>
-                        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-green-600">
-                          <span className="h-2 w-2 rounded-full bg-green-600"></span>
+                        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-success-foreground">
+                          <span className="h-2 w-2 rounded-full bg-success-foreground"></span>
                           Ready
                         </span>
                         {selectedModel === model.name && (
@@ -420,8 +420,8 @@ export function BuiltInModelManager({
                   )}
                   {/* Available - Show small trash icon (only if not currently selected) */}
                   {isAvailable && !modelIsDownloading && selectedModel !== model.name && (
-                    <button
-                      className="p-2 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive"
+                    <Button variant="ghost"
+                      className="p-2 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive h-auto w-auto"
                       onClick={(e) => {
                         e.stopPropagation();
                         deleteModel(model.name);
@@ -429,7 +429,7 @@ export function BuiltInModelManager({
                       title="Delete model"
                     >
                       <Trash2 className="h-4 w-4" />
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>

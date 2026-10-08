@@ -25,7 +25,8 @@ test('Confluence saved status supplies the HTTP checkbox and base URL while offl
     urls: [status.baseUrl], checked: status.allowUnencrypted, onChange() {},
     destinationProblem: status.destinationProblem,
   }));
-  assert.match(html, /type="checkbox"[^>]*checked=""/);
+  assert.match(html, /role="checkbox"/);
+  assert.match(html, /aria-checked="true"/);
   assert.doesNotMatch(html, /Settings need attention/);
 });
 test('HTTP opt-in appears only for private network destinations', () => {
