@@ -8,6 +8,8 @@ import { formatTranscriptDisplayText } from "@/lib/transcriptDisplay";
 import { toast } from "sonner";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -192,10 +194,10 @@ const TranscriptSegment = memo(function TranscriptSegment({
     };
 
     const speakerClass = isMe
-        ? "bg-primary/10 text-primary hover:bg-primary/15"
+        ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
         : currentSpeaker
-            ? "bg-muted text-muted-foreground hover:bg-muted/80"
-            : "border border-dashed border-border bg-transparent text-muted-foreground hover:bg-muted";
+            ? "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-muted-foreground"
+            : "border border-dashed border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-muted-foreground";
 
     return (
         <div
@@ -205,15 +207,16 @@ const TranscriptSegment = memo(function TranscriptSegment({
             <div className="flex items-start gap-3">
                 <Tooltip>
                     <TooltipTrigger asChild>
-                        <button
+                        <Button
+                            variant="ghost"
                             type="button"
                             disabled={!canSeek}
                             onClick={seekToSegment}
                             aria-label={`Play recording from ${formatRecordingTime(timestamp)}`}
-                            className="flex min-h-8 min-w-[3.5rem] flex-shrink-0 items-center rounded font-mono text-[11px] tabular-nums text-muted-foreground enabled:hover:bg-muted enabled:hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default"
+                            className="h-auto justify-start gap-0 p-0 whitespace-normal font-normal hover:bg-transparent hover:text-muted-foreground disabled:pointer-events-auto disabled:opacity-100 flex min-h-8 min-w-[3.5rem] flex-shrink-0 items-center rounded font-mono text-[11px] tabular-nums text-muted-foreground enabled:hover:bg-muted enabled:hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default"
                         >
                             {formatRecordingTime(timestamp)}
-                        </button>
+                        </Button>
                     </TooltipTrigger>
                     <TooltipContent>
                         {showConfidence && (
@@ -225,15 +228,16 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     {showSpeakerLabels && onSpeakerChange ? (
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                                <button
+                                <Button
+                                    variant="ghost"
                                     type="button"
                                     disabled={isSaving}
                                     onClick={(event) => event.stopPropagation()}
                                     onKeyDown={(event) => event.stopPropagation()}
-                                    className={`mb-0.5 inline-flex max-w-[11rem] items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition disabled:opacity-60 ${speakerClass}`}
+                                    className={`h-auto gap-0 whitespace-normal hover:text-current mb-0.5 inline-flex max-w-[11rem] items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide transition disabled:opacity-60 ${speakerClass}`}
                                 >
                                     <span className="truncate">{currentSpeaker ?? "Label"}</span>
-                                </button>
+                                </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="start" className="w-64">
                                 <DropdownMenuLabel className="min-w-0">
@@ -278,7 +282,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                         {canReplaceMatching ? "Custom replacement" : "Custom label"}
                                     </label>
                                     <div className="flex gap-1.5">
-                                        <input
+                                        <Input
                                             id={speakerInputId}
                                             disabled={isSaving}
                                             value={customSpeaker}
@@ -291,16 +295,17 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                             }}
                                             maxLength={64}
                                             placeholder="Speaker name"
-                                            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                                            className="h-auto min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs md:text-xs shadow-none outline-none focus:border-primary"
                                         />
-                                        <button
+                                        <Button
+                                            variant="ghost"
                                             type="button"
                                             onClick={() => void saveCustomSpeaker()}
                                             disabled={isSaving || !customSpeaker.trim()}
-                                            className="rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                                            className="h-auto gap-0 whitespace-normal hover:text-foreground rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
                                         >
                                             {replacementVerb}
-                                        </button>
+                                        </Button>
                                     </div>
                                 </div>
                                 {canReplaceMatching && (
@@ -342,13 +347,13 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         </DropdownMenu>
                     ) : showSpeakerLabels && currentSpeaker && (
                         <span
-                            className={`mb-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${speakerClass}`}
+                            className={`mb-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${speakerClass}`}
                         >
                             {currentSpeaker}
                         </span>
                     )}
                     {onEdit && <div className="mb-1 flex items-center gap-2 text-xs">
-                        <button type="button" onClick={onEdit} className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Correct transcript passage">Edit text</button>
+                        <Button variant="ghost" type="button" onClick={onEdit} className="h-auto gap-0 whitespace-normal text-xs font-normal hover:bg-transparent rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Correct transcript passage">Edit text</Button>
                         {originalText != null && originalText !== text && <span className="text-primary">Edited</span>}
                     </div>}
                     {isStreaming ? (
@@ -534,7 +539,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                     {isRecording ? (
                         <>
                             <div className="flex items-center justify-center mb-3">
-                                <div className={`w-3 h-3 rounded-full ${isPaused ? 'bg-orange-500' : 'bg-primary animate-pulse'}`}></div>
+                                <div className={`w-3 h-3 rounded-full ${isPaused ? 'bg-warning-foreground' : 'bg-primary animate-pulse'}`}></div>
                             </div>
                             <p className="text-sm text-muted-foreground">
                                 {isPaused ? 'Recording paused' : 'Listening for speech...'}
@@ -605,7 +610,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                         <div ref={loadMoreTriggerRef} className="flex justify-center items-center py-4 mt-2">
                             {isLoadingMore ? (
                                 <div className="flex items-center gap-2 text-muted-foreground">
-                                    <div className="w-4 h-4 border-2 border-border border-t-gray-600 rounded-full animate-spin" />
+                                    <div className="w-4 h-4 border-2 border-border border-t-muted-foreground rounded-full animate-spin" />
                                     <span className="text-sm">Loading more...</span>
                                 </div>
                             ) : hasMore && totalCount > 0 ? (
@@ -671,7 +676,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                         <div ref={loadMoreTriggerRef} className="flex justify-center items-center py-4 mt-2">
                             {isLoadingMore ? (
                                 <div className="flex items-center gap-2 text-muted-foreground">
-                                    <div className="w-4 h-4 border-2 border-border border-t-gray-600 rounded-full animate-spin" />
+                                    <div className="w-4 h-4 border-2 border-border border-t-muted-foreground rounded-full animate-spin" />
                                     <span className="text-sm">Loading more...</span>
                                 </div>
                             ) : hasMore && totalCount > 0 ? (
@@ -699,13 +704,14 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             </div>
             {isRecording && !disableAutoScroll && !autoScroll && segments.length > 0 && (
                 <div className="sticky bottom-3 z-20 flex justify-end pt-2 pointer-events-none">
-                    <button
+                    <Button
+                        variant="ghost"
                         type="button"
                         onClick={scrollToBottom}
-                        className="pointer-events-auto min-h-9 rounded-full border border-border bg-card px-4 text-sm font-medium text-foreground shadow-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        className="h-auto gap-0 py-0 whitespace-normal hover:text-foreground pointer-events-auto min-h-9 rounded-full border border-border bg-card px-4 text-sm font-medium text-foreground shadow-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                         Jump to live transcript
-                    </button>
+                    </Button>
                 </div>
             )}
         </div>

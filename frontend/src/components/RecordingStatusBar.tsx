@@ -39,8 +39,8 @@ export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused
       transition={{ duration: 0.2 }}
       className="flex items-center gap-2 px-3 py-2 bg-muted rounded-lg mb-2"
     >
-      <div className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500' : isStarting ? 'bg-primary animate-pulse' : 'bg-red-500 animate-pulse'}`} />
-      <span className={`text-sm ${isPaused ? 'text-orange-700' : 'text-foreground'}`}>
+      <div className={`w-2 h-2 rounded-full ${isPaused ? 'bg-warning-foreground' : isStarting ? 'bg-primary animate-pulse' : 'bg-error-foreground animate-pulse'}`} />
+      <span className={`text-sm ${isPaused ? 'text-warning-foreground' : 'text-foreground'}`}>
         {isPaused ? 'Paused' : isStarting ? 'Starting recording...' : 'Recording'}
         {!isStarting && ` • ${formatDuration(displaySeconds)}`}
       </span>

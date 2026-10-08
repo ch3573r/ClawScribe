@@ -34,6 +34,8 @@ function createView(overrides = {}) {
     'framer-motion': { motion: { div: 'div' }, AnimatePresence: 'Fragment' },
     './ConfidenceIndicator': { ConfidenceIndicator: 'ConfidenceIndicator' },
     './RecordingStatusBar': { RecordingStatusBar: 'RecordingStatusBar' },
+    './ui/button': { Button: 'button' },
+    './ui/input': { Input: 'input' },
     './ui/tooltip': Object.fromEntries(['Tooltip', 'TooltipTrigger', 'TooltipContent'].map(name => [name, name])),
     './ui/dropdown-menu': Object.fromEntries(['DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuLabel', 'DropdownMenuSeparator', 'DropdownMenuSub', 'DropdownMenuSubContent', 'DropdownMenuSubTrigger', 'DropdownMenuTrigger'].map(name => [name, name])),
   };

@@ -15,6 +15,8 @@ function setup(props = {}) {
     'lucide-react': { BookmarkPlus: 'BookmarkPlus' },
     sonner: { toast: { success() {}, error() {} } },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' },
   });
   return { hooks, request, calls, render: () => hooks.render(() => LiveBookmarkButton(props)) };
 }
@@ -23,7 +25,9 @@ test('live bookmark renders an accessible icon with the recording bar class', ()
   const { render, hooks } = setup({ className: 'h-10 w-10 rounded-full' });
   const button = render();
   assert.equal(button.type, 'button');
-  assert.equal(button.props.className, 'h-10 w-10 rounded-full');
+  assert.match(button.props.className, /(?:^| )h-10(?: |$)/);
+  assert.match(button.props.className, /(?:^| )w-10(?: |$)/);
+  assert.match(button.props.className, /(?:^| )rounded-full(?: |$)/);
   assert.equal(button.props['aria-label'], 'Bookmark this moment');
   assert.equal(button.props.children.type, 'BookmarkPlus');
   assert.equal(button.props.children.props.size, 16);
