@@ -189,7 +189,8 @@ fn validate_xml(bytes: &[u8]) -> Result<(), DocumentError> {
                 }
             }
             Event::Text(value) if elements.is_empty() => {
-                if !value.as_ref().iter().all(u8::is_ascii_whitespace) {
+                let bytes: &[u8] = value.as_ref();
+                if !bytes.iter().all(u8::is_ascii_whitespace) {
                     return Err(DocumentError::Malformed);
                 }
             }
