@@ -1,4 +1,5 @@
 import React from 'react';
+import { Button } from '@/components/ui/button';
 
 export interface ChunkStatus {
   chunk_id: number;
@@ -76,11 +77,11 @@ export function ChunkProgressDisplay({
   const getChunkStatusColor = (status: ChunkStatus['status']) => {
     switch (status) {
       case 'completed':
-        return 'text-green-600 bg-green-50 border-green-200';
+        return 'text-[hsl(var(--theme-success-fg))] bg-[hsl(var(--theme-success-bg))] border-[hsl(var(--theme-success-fg)/0.3)]';
       case 'processing':
         return 'text-primary bg-primary/10 border-primary';
       case 'failed':
-        return 'text-red-600 bg-red-50 border-red-200';
+        return 'text-[hsl(var(--theme-error-fg))] bg-[hsl(var(--theme-error-bg))] border-[hsl(var(--theme-error-fg)/0.3)]';
       case 'pending':
       default:
         return 'text-muted-foreground bg-muted border-border';
@@ -93,10 +94,10 @@ export function ChunkProgressDisplay({
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-3">
           <h3 className="text-lg font-semibold text-foreground">
-            Processing Progress
+            Processing progress
           </h3>
           {isPaused && (
-            <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full text-xs font-medium">
+            <span className="bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))] px-2 py-1 rounded-full text-xs font-medium">
               Paused
             </span>
           )}
@@ -104,28 +105,28 @@ export function ChunkProgressDisplay({
 
         <div className="flex items-center space-x-2">
           {!isPaused ? (
-            <button
+            <Button variant="ghost"
               onClick={onPause}
-              className="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm transition-colors"
+              className="bg-[hsl(var(--theme-warning-bg))] hover:bg-[hsl(var(--theme-warning-bg)/0.8)] text-[hsl(var(--theme-warning-fg))] px-3 py-1 rounded text-sm transition-colors h-auto font-normal hover:text-[hsl(var(--theme-warning-fg))]"
               disabled={progress.processing_chunks === 0 && progress.completed_chunks === progress.total_chunks}
             >
               Pause
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button variant="ghost"
               onClick={onResume}
-              className="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm transition-colors"
+              className="bg-[hsl(var(--theme-success-bg))] hover:bg-[hsl(var(--theme-success-bg)/0.8)] text-[hsl(var(--theme-success-fg))] px-3 py-1 rounded text-sm transition-colors h-auto font-normal hover:text-[hsl(var(--theme-success-fg))]"
             >
               Resume
-            </button>
+            </Button>
           )}
 
-          <button
+          <Button variant="ghost"
             onClick={onCancel}
-            className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm transition-colors"
+            className="bg-[hsl(var(--theme-error-bg))] hover:bg-[hsl(var(--theme-error-bg)/0.8)] text-[hsl(var(--theme-error-fg))] px-3 py-1 rounded text-sm transition-colors h-auto font-normal hover:text-[hsl(var(--theme-error-fg))]"
           >
             Cancel
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -151,7 +152,7 @@ export function ChunkProgressDisplay({
       {/* Processing Stats */}
       <div className="grid grid-cols-4 gap-4 mb-4 text-sm">
         <div className="text-center">
-          <div className="text-lg font-semibold text-green-600">
+          <div className="text-lg font-semibold text-[hsl(var(--theme-success-fg))]">
             {progress.completed_chunks}
           </div>
           <div className="text-muted-foreground">Completed</div>
@@ -172,7 +173,7 @@ export function ChunkProgressDisplay({
         </div>
 
         <div className="text-center">
-          <div className="text-lg font-semibold text-red-600">
+          <div className="text-lg font-semibold text-[hsl(var(--theme-error-fg))]">
             {progress.failed_chunks}
           </div>
           <div className="text-muted-foreground">Failed</div>
@@ -194,7 +195,7 @@ export function ChunkProgressDisplay({
       {/* Recent Chunks Grid */}
       <div className="space-y-2">
         <h4 className="text-sm font-medium text-foreground mb-2">
-          Recent Chunks ({Math.min(progress.chunks.length, 10)} of {progress.total_chunks})
+          Recent chunks ({Math.min(progress.chunks.length, 10)} of {progress.total_chunks})
         </h4>
 
         <div className="max-h-48 overflow-y-auto space-y-1">
@@ -233,7 +234,7 @@ export function ChunkProgressDisplay({
                 )}
 
                 {chunk.error_message && (
-                  <div className="mt-1 text-red-700 text-xs">
+                  <div className="mt-1 text-[hsl(var(--theme-error-fg))] text-xs">
                     Error: {chunk.error_message}
                   </div>
                 )}
@@ -244,10 +245,10 @@ export function ChunkProgressDisplay({
 
       {/* Processing Complete */}
       {progress.completed_chunks === progress.total_chunks && progress.total_chunks > 0 && (
-        <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-3">
+        <div className="mt-4 bg-[hsl(var(--theme-success-bg))] border border-[hsl(var(--theme-success-fg)/0.3)] rounded-lg p-3">
           <div className="flex items-center space-x-2">
-            <span className="text-green-600">🎉</span>
-            <span className="text-sm font-medium text-green-800">
+            <span className="text-[hsl(var(--theme-success-fg))]">🎉</span>
+            <span className="text-sm font-medium text-[hsl(var(--theme-success-fg))]">
               Processing completed! All {progress.total_chunks} chunks have been transcribed.
             </span>
           </div>
