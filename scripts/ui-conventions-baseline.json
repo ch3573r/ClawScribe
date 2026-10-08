@@ -43,7 +43,7 @@
       "nativeControls": 1
     },
     "frontend/src/components/BluetoothPlaybackWarning.tsx": {
-      "paletteColors": 10,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
