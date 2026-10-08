@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Button } from '@/components/ui/button';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { Database, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
@@ -97,7 +98,7 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
           <div className="flex items-center gap-2 mb-1">
             <AlertCircle className="h-4 w-4 text-primary" />
             <h3 className="text-sm font-semibold text-primary">
-              Previous Meetily Installation Detected!
+              Previous Meetily installation detected!
             </h3>
           </div>
           <p className="text-sm text-primary mb-2">
@@ -117,10 +118,10 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
           
           {/* Yes/No Buttons */}
           <div className="flex gap-2">
-            <button
+            <Button variant="ghost"
               onClick={handleYes}
               disabled={isImporting}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-muted disabled:cursor-not-allowed transition-colors"
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))] rounded-lg hover:bg-[hsl(var(--theme-success-bg)/0.8)] disabled:bg-muted disabled:cursor-not-allowed transition-colors h-auto text-base font-normal hover:text-[hsl(var(--theme-success-fg))]"
             >
               {isImporting ? (
                 <>
@@ -130,18 +131,18 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
               ) : (
                 <>
                   <CheckCircle2 className="h-4 w-4" />
-                  <span>Yes, Import</span>
+                  <span>Yes, import</span>
                 </>
               )}
-            </button>
+            </Button>
             
-            <button
+            <Button variant="ghost"
               onClick={handleNo}
               disabled={isImporting}
-              className="flex-1 px-4 py-2 border-2 border-primary text-primary rounded-lg hover:bg-primary/15 disabled:bg-muted disabled:cursor-not-allowed transition-colors"
+              className="flex-1 px-4 py-2 border-2 border-primary text-primary rounded-lg hover:bg-primary/15 disabled:bg-muted disabled:cursor-not-allowed transition-colors h-auto text-base font-normal hover:text-primary"
             >
-              No, Browse Manually
-            </button>
+              No, browse manually
+            </Button>
           </div>
         </div>
       </div>

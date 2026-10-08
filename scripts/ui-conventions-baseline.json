@@ -73,12 +73,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/DatabaseImport/HomebrewDatabaseDetector.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/DatabaseImport/LegacyDatabaseImport.tsx": {
-      "paletteColors": 13,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
