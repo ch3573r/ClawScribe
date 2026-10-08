@@ -11,6 +11,8 @@ pub mod retrieval;
 pub mod scheduler;
 pub mod store;
 pub mod types;
+#[cfg(test)]
+mod document_contract_tests;
 use std::sync::Arc;
 pub struct KnowledgeState {
     pub answers: Arc<answers::AnswerRegistry>,
