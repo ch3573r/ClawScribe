@@ -297,27 +297,27 @@ export function ImportAudioDialog({
             {isCancelling ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                Cancelling Import...
+                Cancelling import...
               </>
             ) : isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                Importing Audio...
+                Importing audio...
               </>
             ) : error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-destructive" />
-                Import Failed
+                Import failed
               </>
             ) : status === 'complete' ? (
               <>
-                <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                Import Complete
+                <CheckCircle2 className="h-5 w-5 text-[hsl(var(--theme-success-fg))]" />
+                Import complete
               </>
             ) : (
               <>
                 <Upload className="h-5 w-5 text-primary" />
-                Import Audio File
+                Import audio file
               </>
             )}
           </DialogTitle>
@@ -360,7 +360,7 @@ export function ImportAudioDialog({
 
                   {/* Editable title */}
                   <div className="space-y-1">
-                    <label className="text-sm font-medium text-muted-foreground">Meeting Title</label>
+                    <label className="text-sm font-medium text-muted-foreground">Meeting title</label>
                     <Input
                       value={title}
                       onChange={(e) => {
@@ -372,7 +372,7 @@ export function ImportAudioDialog({
                   </div>
 
                   <Button variant="outline" size="sm" onClick={handleSelectFile} className="w-full">
-                    Choose Different File
+                    Choose different file
                   </Button>
                 </div>
               ) : (
@@ -387,7 +387,7 @@ export function ImportAudioDialog({
                     ) : (
                       <>
                         <Upload className="h-4 w-4 mr-2" />
-                        Select Audio File
+                        Select audio file
                       </>
                     )}
                   </Button>
@@ -398,17 +398,17 @@ export function ImportAudioDialog({
               {/* Advanced options (collapsible) */}
               {fileInfo && (
                 <div className="border rounded-lg">
-                  <button
+                  <Button variant="ghost"
                     onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-muted-foreground hover:bg-muted"
+                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-muted-foreground hover:bg-muted h-auto rounded-none hover:text-muted-foreground"
                   >
-                    <span>Advanced Options</span>
+                    <span>Advanced options</span>
                     {showAdvanced ? (
                       <ChevronUp className="h-4 w-4" />
                     ) : (
                       <ChevronDown className="h-4 w-4" />
                     )}
-                  </button>
+                  </Button>
 
                   {showAdvanced && (
                     <div className="p-3 pt-0 space-y-4 border-t">
@@ -573,10 +573,10 @@ export function ImportAudioDialog({
           {status === 'complete' && (
             <>
               <Button variant="outline" onClick={handleImportAnother}>
-                Import Another
+                Import another
               </Button>
               <Button onClick={handleOpenImportedMeeting} className="bg-primary hover:bg-primary/90">
-                Open Meeting
+                Open meeting
               </Button>
             </>
           )}
@@ -596,7 +596,7 @@ export function ImportAudioDialog({
                 Close
               </Button>
               <Button onClick={reset} variant="outline">
-                Try Again
+                Try again
               </Button>
             </>
           )}
