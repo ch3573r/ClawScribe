@@ -81,7 +81,7 @@ export function SettingsModals({
   return <>
     {/* Legacy Settings Modal */}
     {modals.modelSettings && (
-      <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50 p-4">
+      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50 p-4">
         <div className="bg-card rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
           {/* Header */}
           <div className="flex justify-between items-center p-6 border-b">
@@ -201,7 +201,7 @@ export function SettingsModals({
 
     {/* Device Settings Modal */}
     {modals.deviceSettings && (
-      <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
+      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
         <div className="bg-card rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-lg font-semibold text-foreground">Audio device settings</h3>
@@ -245,7 +245,7 @@ export function SettingsModals({
 
     {/* Language settings Modal */}
     {modals.languageSettings && (
-      <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
+      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
         <div className="bg-card rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-lg font-semibold text-foreground">Language settings</h3>
@@ -283,7 +283,7 @@ export function SettingsModals({
 
     {/* Model Selection Modal */}
     {modals.modelSelector && (
-      <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
+      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
         <div className="bg-card rounded-lg max-w-4xl w-full mx-4 shadow-xl max-h-[90vh] flex flex-col">
           {/* Fixed Header */}
           <div className="flex justify-between items-center p-6 pb-4 border-b border-border">
@@ -343,7 +343,7 @@ export function SettingsModals({
 
     {/* Error Alert Modal */}
     {modals.errorAlert && (
-      <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
+      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
         <Alert className="max-w-md mx-4 border-error-border/30 bg-card shadow-xl">
           <AlertTitle className="text-error-foreground">Recording stopped</AlertTitle>
           <AlertDescription className="text-error-foreground">
@@ -362,7 +362,7 @@ export function SettingsModals({
 
     {/* Chunk Drop Warning Modal */}
     {modals.chunkDropWarning && (
-      <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
+      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
         <Alert className="max-w-lg mx-4 border-warning-border/30 bg-card shadow-xl">
           <AlertTitle className="text-warning-foreground">Transcription performance warning</AlertTitle>
           <AlertDescription className="text-warning-foreground">
