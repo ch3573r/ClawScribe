@@ -401,7 +401,7 @@ export function DownloadProgressStep() {
             {icon}
           </div>
           <div>
-            <h3 className="font-medium text-foreground">{title}</h3>
+            <h3 className="font-medium text-foreground">{title.replace(' Engine', ' engine')}</h3>
             <p className="text-sm text-muted-foreground">{modelSize}</p>
           </div>
         </div>
@@ -413,12 +413,12 @@ export function DownloadProgressStep() {
             <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
           )}
           {state.status === 'completed' && (
-            <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center">
-              <Check className="w-4 h-4 text-green-600" />
+            <div className="w-6 h-6 rounded-full bg-[hsl(var(--theme-success-bg))] flex items-center justify-center">
+              <Check className="w-4 h-4 text-[hsl(var(--theme-success-fg))]" />
             </div>
           )}
           {state.status === 'error' && (
-            <span className="text-sm text-red-500">Failed</span>
+            <span className="text-sm text-[hsl(var(--theme-error-fg))]">Failed</span>
           )}
         </div>
       </div>
@@ -426,7 +426,7 @@ export function DownloadProgressStep() {
       {/* Progress Bar */}
       {(state.status === 'downloading' || state.status === 'completed') && (
         <div className="space-y-2">
-          <div role="progressbar" aria-label={`${title} download`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.progress)} className="w-full h-2 bg-muted rounded-full overflow-hidden">
+          <div role="progressbar" aria-label={`${title.replace(' Engine', ' engine')} download`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.progress)} className="w-full h-2 bg-muted rounded-full overflow-hidden">
             <div
               className="h-full bg-primary rounded-full transition-all duration-300"
               style={{ width: `${state.progress}%` }}
@@ -451,20 +451,20 @@ export function DownloadProgressStep() {
       )}
 
       {state.status === 'error' && state.error && (
-        <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-md">
-          <p className="text-sm text-red-600 font-medium">Download Error</p>
-          <p className="text-xs text-red-500 mt-1">{state.error}</p>
+        <div className="mt-2 p-3 bg-[hsl(var(--theme-error-bg))] border border-[hsl(var(--theme-error-fg)/0.3)] rounded-md">
+          <p className="text-sm text-[hsl(var(--theme-error-fg))] font-medium">Download error</p>
+          <p className="text-xs text-[hsl(var(--theme-error-fg))] mt-1">{state.error}</p>
           {(title === 'Transcription Engine' || title === 'Summary Engine') && (
-            <button
+            <Button variant="ghost"
               onClick={title === 'Transcription Engine' ? handleRetryDownload : handleRetrySummaryDownload}
-              className="mt-3 w-full h-9 px-4 bg-accent-gradient hover:brightness-110 text-primary-foreground text-sm font-medium rounded-md transition-colors flex items-center justify-center gap-2"
+              className="mt-3 w-full h-9 px-4 py-0 bg-accent-gradient hover:brightness-110 text-primary-foreground text-sm font-medium rounded-md transition-colors flex items-center justify-center gap-2 hover:text-primary-foreground"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                       d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              Try Again
-            </button>
+              Try again
+            </Button>
           )}
         </div>
       )}
@@ -474,7 +474,7 @@ export function DownloadProgressStep() {
   return (
     <OnboardingContainer
       title="Getting things ready"
-      description="You can start using ClawScribe after downloading the Transcription Engine."
+      description="You can start using ClawScribe after downloading the transcription engine."
       step={3}
       totalSteps={isMac ? 4 : 3}
     >
