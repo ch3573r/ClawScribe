@@ -114,7 +114,7 @@
     },
     "frontend/src/components/IntegrationIcons.tsx": {
       "paletteColors": 0,
-      "hexColors": 43,
+      "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/IntegrationsSettings.tsx": {
