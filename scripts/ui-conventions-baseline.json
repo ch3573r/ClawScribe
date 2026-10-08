@@ -288,9 +288,9 @@
       "nativeControls": 0
     },
     "frontend/src/components/UnencryptedHttpOptIn.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/VirtualizedTranscriptView.tsx": {
       "paletteColors": 3,
