@@ -113,7 +113,7 @@ export function PermissionsStep() {
 
   return (
     <OnboardingContainer
-      title="Grant Permissions"
+      title="Grant permissions"
       description="ClawScribe needs access to your microphone and system audio to record meetings"
       step={4}
       hideProgress={true}
@@ -136,7 +136,7 @@ export function PermissionsStep() {
           {/* System Audio */}
           <PermissionRow
             icon={<Volume2 className="w-5 h-5" />}
-            title="System Audio"
+            title="System audio"
             description="Click Enable to grant Audio Capture permission"
             status={permissions.systemAudio}
             isPending={isPending}
@@ -147,15 +147,15 @@ export function PermissionsStep() {
         {/* Action Buttons */}
         <div className="flex flex-col gap-3 pt-4">
           <Button onClick={handleFinish} disabled={!allPermissionsGranted} className="w-full h-11">
-            Finish Setup
+            Finish setup
           </Button>
 
-          <button
+          <Button variant="ghost"
             onClick={handleSkip}
-            className="text-sm text-neutral-500 hover:text-neutral-700 transition-colors"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors h-auto p-0 font-normal hover:bg-transparent"
           >
             I'll do this later
-          </button>
+          </Button>
 
           {!allPermissionsGranted && (
             <p className="text-xs text-center text-muted-foreground">
