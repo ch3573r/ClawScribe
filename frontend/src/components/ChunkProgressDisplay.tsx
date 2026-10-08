@@ -107,7 +107,7 @@ export function ChunkProgressDisplay({
           {!isPaused ? (
             <Button variant="ghost"
               onClick={onPause}
-              className="bg-[hsl(var(--theme-warning-bg))] hover:bg-[hsl(var(--theme-warning-bg)/0.8)] text-[hsl(var(--theme-warning-fg))] px-3 py-1 rounded text-sm transition-colors h-auto"
+              className="bg-[hsl(var(--theme-warning-bg))] hover:bg-[hsl(var(--theme-warning-bg)/0.8)] text-[hsl(var(--theme-warning-fg))] px-3 py-1 rounded text-sm transition-colors h-auto font-normal hover:text-[hsl(var(--theme-warning-fg))]"
               disabled={progress.processing_chunks === 0 && progress.completed_chunks === progress.total_chunks}
             >
               Pause
@@ -115,7 +115,7 @@ export function ChunkProgressDisplay({
           ) : (
             <Button variant="ghost"
               onClick={onResume}
-              className="bg-[hsl(var(--theme-success-bg))] hover:bg-[hsl(var(--theme-success-bg)/0.8)] text-[hsl(var(--theme-success-fg))] px-3 py-1 rounded text-sm transition-colors h-auto"
+              className="bg-[hsl(var(--theme-success-bg))] hover:bg-[hsl(var(--theme-success-bg)/0.8)] text-[hsl(var(--theme-success-fg))] px-3 py-1 rounded text-sm transition-colors h-auto font-normal hover:text-[hsl(var(--theme-success-fg))]"
             >
               Resume
             </Button>
@@ -123,7 +123,7 @@ export function ChunkProgressDisplay({
 
           <Button variant="ghost"
             onClick={onCancel}
-            className="bg-[hsl(var(--theme-error-bg))] hover:bg-[hsl(var(--theme-error-bg)/0.8)] text-[hsl(var(--theme-error-fg))] px-3 py-1 rounded text-sm transition-colors h-auto"
+            className="bg-[hsl(var(--theme-error-bg))] hover:bg-[hsl(var(--theme-error-bg)/0.8)] text-[hsl(var(--theme-error-fg))] px-3 py-1 rounded text-sm transition-colors h-auto font-normal hover:text-[hsl(var(--theme-error-fg))]"
           >
             Cancel
           </Button>
