@@ -275,7 +275,7 @@
     "frontend/src/components/SummaryTemplateSettings.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 3
+      "nativeControls": 0
     },
     "frontend/src/components/TranscriptRecovery/TranscriptRecovery.tsx": {
       "paletteColors": 4,
