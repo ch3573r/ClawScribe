@@ -308,7 +308,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/molecules/form-components/form-select-item.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },

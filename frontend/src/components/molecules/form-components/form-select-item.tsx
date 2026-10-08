@@ -66,12 +66,12 @@ export const FormSelectItem = ({
                   </FormControl>
                   <SelectContent>
                     <SelectGroup>
-                      <SelectLabel>{selectLabel}</SelectLabel>
+                      <SelectLabel className="normal-case">{selectLabel}</SelectLabel>
                       {options.map((item, i) => (
                         <SelectItem
                           key={`${item}+${i}`}
                           value={item.value}
-                          className="hover:bg-slate-100 cursor-pointer"
+                          className="hover:bg-muted cursor-pointer"
                         >
                           {item.label}
                         </SelectItem>
