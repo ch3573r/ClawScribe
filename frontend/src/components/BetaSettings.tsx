@@ -81,10 +81,10 @@ export function BetaSettings() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start gap-3 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
-        <AlertCircle className="h-5 w-5 text-yellow-600 flex-shrink-0 mt-0.5" />
-        <div className="text-sm text-yellow-800">
-          <p className="font-medium">Experimental Settings</p>
+      <div className="flex items-start gap-3 p-4 bg-[hsl(var(--theme-warning-bg))] border border-[hsl(var(--theme-warning-fg)/0.3)] rounded-md">
+        <AlertCircle className="h-5 w-5 text-[hsl(var(--theme-warning-fg))] flex-shrink-0 mt-0.5" />
+        <div className="text-sm text-[hsl(var(--theme-warning-fg))]">
+          <p className="font-medium">Experimental settings</p>
           <p className="mt-1">
             These settings are still being tested. You may encounter issues, and
             changes may take effect on the next recording.
@@ -101,8 +101,8 @@ export function BetaSettings() {
               <h3 className="text-lg font-semibold text-foreground">
                 GPU transcription (Parakeet · DirectML)
               </h3>
-              <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
-                BETA
+              <span className="rounded-full bg-[hsl(var(--theme-warning-bg))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--theme-warning-fg))]">
+                Beta
               </span>
             </div>
             <p className="text-sm text-muted-foreground">
@@ -127,8 +127,8 @@ export function BetaSettings() {
               <h3 className="text-lg font-semibold text-foreground">
                 Source attribution (Me / Participants)
               </h3>
-              <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
-                BETA
+              <span className="rounded-full bg-[hsl(var(--theme-warning-bg))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--theme-warning-fg))]">
+                Beta
               </span>
             </div>
             <p className="text-sm text-muted-foreground">
@@ -140,7 +140,7 @@ export function BetaSettings() {
             </p>
             {!audioSavingEnabled && (
               <p className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
-                Enable Recording &gt; Save Audio Recordings first. Source
+                Enable Recording &gt; Save audio recordings first. Source
                 attribution depends on the saved audio workflow and stays off
                 while audio saving is disabled.
               </p>
@@ -165,8 +165,8 @@ export function BetaSettings() {
               <h3 className="text-lg font-semibold text-foreground">
                 Cloud transcription
               </h3>
-              <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
-                BETA
+              <span className="rounded-full bg-[hsl(var(--theme-warning-bg))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--theme-warning-fg))]">
+                Beta
               </span>
             </div>
             <p className="text-sm text-muted-foreground">
