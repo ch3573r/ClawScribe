@@ -340,7 +340,7 @@
     "frontend/src/lib/recordingNotification.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     }
   }
 }

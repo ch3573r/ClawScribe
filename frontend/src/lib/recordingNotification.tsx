@@ -1,3 +1,5 @@
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 
@@ -19,23 +21,23 @@ export async function showRecordingNotification(): Promise<void> {
     if (showNotification) {
       let dontShowAgain = false;
 
-      const toastId = toast.info('🔴 Recording Started', {
+      const toastId = toast.info('🔴 Recording started', {
         description: (
           <div className="space-y-3 min-w-[280px]">
             <p className="text-sm font-medium text-foreground">
               Inform all participants this meeting is being recorded.
             </p>
             <label className="flex items-center gap-2 text-xs cursor-pointer hover:bg-muted p-2 rounded transition-colors">
-              <input
-                type="checkbox"
-                onChange={(e) => {
-                  dontShowAgain = e.target.checked;
+              <Checkbox
+                onCheckedChange={(checked) => {
+                  dontShowAgain = checked === true;
                 }}
                 className="rounded border-input text-primary focus:ring-ring focus:ring-2"
               />
               <span className="select-none text-muted-foreground">Don't show this again</span>
             </label>
-            <button
+            <Button
+              variant="ghost"
               onClick={async () => {
                 if (dontShowAgain) {
                   const { Store } = await import('@tauri-apps/plugin-store');
@@ -46,10 +48,10 @@ export async function showRecordingNotification(): Promise<void> {
                 Analytics.trackButtonClick('recording_notification_acknowledged', 'toast');
                 toast.dismiss(toastId);
               }}
-              className="w-full px-3 py-1.5 bg-primary text-primary-foreground text-xs rounded hover:bg-primary/90 transition-colors font-medium"
+              className="h-auto whitespace-normal w-full px-3 py-1.5 bg-primary text-primary-foreground text-xs rounded hover:bg-primary/90 transition-colors font-medium hover:text-primary-foreground"
             >
-              I've Notified Participants
-            </button>
+              I've notified participants
+            </Button>
           </div>
         ),
         duration: 10000,
