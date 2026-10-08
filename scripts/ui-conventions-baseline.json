@@ -33,7 +33,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/BetaSettings.tsx": {
-      "paletteColors": 10,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -118,12 +118,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/IntegrationsSettings.tsx": {
-      "paletteColors": 71,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 8
+      "nativeControls": 0
     },
     "frontend/src/components/KeyboardShortcutsSettings.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -228,12 +228,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/NemotronModelManager.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ParakeetModelManager.tsx": {
-      "paletteColors": 20,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -258,7 +258,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/RecordingSettings.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -275,7 +275,7 @@
     "frontend/src/components/SummaryTemplateSettings.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 3
+      "nativeControls": 0
     },
     "frontend/src/components/TranscriptRecovery/TranscriptRecovery.tsx": {
       "paletteColors": 4,
@@ -298,12 +298,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/WhisperAccelerationStatus.tsx": {
-      "paletteColors": 7,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/WhisperModelManager.tsx": {
-      "paletteColors": 23,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
