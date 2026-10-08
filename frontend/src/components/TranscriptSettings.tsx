@@ -286,14 +286,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectTrigger>
                                 <SelectContent>
                                     <SelectGroup>
-                                        <SelectLabel>On your device</SelectLabel>
+                                        <SelectLabel className="normal-case">On your device</SelectLabel>
                                         <SelectItem value="parakeet">Parakeet &middot; real-time, recommended</SelectItem>
                                         <SelectItem value="localWhisper">Whisper &middot; highest accuracy</SelectItem>
                                         <SelectItem value="nemotron">Nemotron &middot; streaming, multilingual (beta)</SelectItem>
                                     </SelectGroup>
                                     {(cloudTranscriptionEnabled || isCloudProvider) && (
                                         <SelectGroup>
-                                            <SelectLabel>Cloud APIs</SelectLabel>
+                                            <SelectLabel className="normal-case">Cloud APIs</SelectLabel>
                                             <SelectItem value="cloud-whisper" disabled={!cloudTranscriptionEnabled}>Hosted Whisper &middot; OpenAI-compatible</SelectItem>
                                             <SelectItem value="mai-transcribe" disabled={!cloudTranscriptionEnabled}>MAI-Transcribe &middot; Azure Speech</SelectItem>
                                         </SelectGroup>
@@ -325,11 +325,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
                     {isCloudProvider && <p className="text-sm text-muted-foreground">Used for Import and Enhance (whole-file). Live recordings always transcribe on this device with {liveEngineLabel}.</p>}
                     {isCloudProvider && cloudTranscriptionLoaded && !cloudTranscriptionEnabled && <div role="status" className="space-y-2 rounded-md border p-3 text-sm">
-                        <p>Cloud transcription is turned off in Beta settings, so Import and Enhance use this device&apos;s engine. Your {uiProvider === 'mai-transcribe' ? 'Microsoft AI' : 'Cloud Whisper'} settings are kept.</p>
+                        <p>Cloud transcription is turned off in beta settings, so Import and Enhance use this device&apos;s engine. Your {uiProvider === 'mai-transcribe' ? 'Microsoft AI' : 'Cloud Whisper'} settings are kept.</p>
                         <Button variant="outline" onClick={() => {
                             router.push('/settings?tab=beta');
                             window.dispatchEvent(new CustomEvent('open-settings-tab', { detail: 'beta' }));
-                        }}>Open Beta settings</Button>
+                        }}>Open beta settings</Button>
                     </div>}
 
                     {uiProvider === 'localWhisper' && (
@@ -444,7 +444,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                     {requiresApiKey && (
                         <div>
                             <Label className="block text-sm font-medium text-foreground mb-1">
-                                API Key
+                                API key
                             </Label>
                             <div className="relative mx-1">
                                 <Input
@@ -469,7 +469,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         variant="ghost"
                                         size="icon"
                                         onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-red-500' : ''
+                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''
                                             }`}
                                         title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
                                     >

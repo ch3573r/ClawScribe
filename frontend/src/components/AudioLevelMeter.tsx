@@ -31,9 +31,9 @@ export function AudioLevelMeter({
 
   // Color coding based on level
   const getLevelColor = (level: number) => {
-    if (level < 0.3) return 'bg-green-500';
-    if (level < 0.7) return 'bg-yellow-500';
-    return 'bg-red-500';
+    if (level < 0.3) return 'bg-success-foreground';
+    if (level < 0.7) return 'bg-warning-foreground';
+    return 'bg-error-foreground';
   };
 
   const rmsColor = getLevelColor(logRms);
@@ -64,7 +64,7 @@ export function AudioLevelMeter({
     <div className={`flex items-center space-x-2 ${className}`}>
       {/* Device activity indicator */}
       <div className={`w-2 h-2 rounded-full ${
-        isActive ? 'bg-green-400 animate-pulse' : 'bg-secondary'
+        isActive ? 'bg-success-foreground animate-pulse' : 'bg-secondary'
       }`} title={`${deviceName} - ${isActive ? 'Active' : 'Inactive'}`} />
 
       {/* Level meter container */}
@@ -124,16 +124,16 @@ export function CompactAudioLevelMeter({
   const rmsPercent = Math.round(logRms * 100);
 
   const getLevelColor = (level: number) => {
-    if (level < 0.3) return 'bg-green-400';
-    if (level < 0.7) return 'bg-yellow-400';
-    return 'bg-red-400';
+    if (level < 0.3) return 'bg-success-foreground';
+    if (level < 0.7) return 'bg-warning-foreground';
+    return 'bg-error-foreground';
   };
 
   return (
     <div className={`flex items-center space-x-1 ${className}`}>
       {/* Activity dot */}
       <div className={`w-1.5 h-1.5 rounded-full ${
-        isActive ? 'bg-green-400' : 'bg-secondary'
+        isActive ? 'bg-success-foreground' : 'bg-secondary'
       }`} />
 
       {/* Mini meter */}

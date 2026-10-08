@@ -23,12 +23,12 @@
       "nativeControls": 1
     },
     "frontend/src/components/AudioBackendSelector.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/AudioLevelMeter.tsx": {
-      "paletteColors": 8,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -43,32 +43,32 @@
       "nativeControls": 1
     },
     "frontend/src/components/BluetoothPlaybackWarning.tsx": {
-      "paletteColors": 10,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/BuiltInModelManager.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ChunkProgressDisplay.tsx": {
-      "paletteColors": 24,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ComplianceNotification.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ConfidenceIndicator.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ConfirmationModel/confirmation-modal.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -83,7 +83,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/DeviceSelection.tsx": {
-      "paletteColors": 15,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -114,7 +114,7 @@
     },
     "frontend/src/components/IntegrationIcons.tsx": {
       "paletteColors": 0,
-      "hexColors": 43,
+      "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/IntegrationsSettings.tsx": {
@@ -128,7 +128,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/LanguagePickerPopover.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -150,7 +150,7 @@
     "frontend/src/components/MeetingDetails/MeetingBookmarks.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/MeetingChat.tsx": {
       "paletteColors": 0,
@@ -218,12 +218,12 @@
       "nativeControls": 1
     },
     "frontend/src/components/ModelDownloadProgress.tsx": {
-      "paletteColors": 2,
-      "hexColors": 2,
+      "paletteColors": 0,
+      "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ModelSettingsModal.tsx": {
-      "paletteColors": 23,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -255,7 +255,7 @@
     "frontend/src/components/RecordingModeSelect.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/RecordingSettings.tsx": {
       "paletteColors": 2,
@@ -263,14 +263,14 @@
       "nativeControls": 0
     },
     "frontend/src/components/RecordingStatusBar.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/Sidebar/index.tsx": {
-      "paletteColors": 34,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/SummaryTemplateSettings.tsx": {
       "paletteColors": 0,
@@ -283,17 +283,17 @@
       "nativeControls": 0
     },
     "frontend/src/components/TranscriptSettings.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/UnencryptedHttpOptIn.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/VirtualizedTranscriptView.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -308,7 +308,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/molecules/form-components/form-select-item.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -340,7 +340,7 @@
     "frontend/src/lib/recordingNotification.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     }
   }
 }

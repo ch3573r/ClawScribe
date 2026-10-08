@@ -1,4 +1,5 @@
 import React from 'react';
+import { Button } from '@/components/ui/button';
 
 interface ConfirmationModalProps {
   onConfirm: () => void;
@@ -12,24 +13,24 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
       <div className="bg-card rounded-lg p-6 max-w-md w-full mx-4">
-        <h2 className="text-xl font-semibold mb-4">Confirm Delete</h2>
+        <h2 className="text-xl font-semibold mb-4">Confirm delete</h2>
         <p className="text-muted-foreground mb-6">{text}</p>
         {children}
         <div className="flex justify-end space-x-4">
-          <button
+          <Button variant="ghost"
             onClick={onCancel}
-            className="px-4 py-2 text-muted-foreground hover:bg-muted rounded-md transition-colors"
+            className="px-4 py-2 text-muted-foreground hover:bg-muted rounded-md transition-colors h-auto text-base font-normal hover:text-muted-foreground"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={onConfirm}
-            className="px-4 py-2 bg-red-600 text-white hover:bg-red-700 rounded-md transition-colors"
+            className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md transition-colors h-auto text-base font-normal hover:text-destructive-foreground"
           >
             Delete
-          </button>
+          </Button>
         </div>
       </div>
     </div>

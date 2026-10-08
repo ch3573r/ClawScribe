@@ -16,7 +16,9 @@ test('bookmark changes reload once through the event and preserve the list while
   let registrations = 0;
   const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    '@/components/ui/button': { Button: 'button' }, sonner: { toast: { error() {} } },
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
       if (command === 'list_meeting_bookmarks') { const read = deferred(); reads.push(read); return read.promise; }
       for (const listener of listeners) listener();
@@ -99,7 +101,9 @@ test('bookmarks load, retry, and refresh after writes when event registration fa
   let failSubscription = true;
   const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    '@/components/ui/button': { Button: 'button' }, sonner: { toast: { error() {} } },
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
       if (command === 'list_meeting_bookmarks') {
         reads++;
@@ -136,7 +140,9 @@ test('a subscription failure after navigation does not load the previous meeting
   let reads = 0;
   const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    '@/components/ui/button': { Button: 'button' }, sonner: { toast: { error() {} } },
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async () => { reads++; return []; } },
     '@tauri-apps/api/event': { listen: () => subscription.promise },
   });

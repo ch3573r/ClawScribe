@@ -75,17 +75,18 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
         {/* Header with close button */}
         <div className="flex items-start justify-between mb-2">
           <div className="flex items-center gap-1">
-            <AlertTriangle className="h-3 w-3 text-amber-500 flex-shrink-0" />
+            <AlertTriangle className="h-3 w-3 text-warning-foreground flex-shrink-0" />
             <h3 className="text-xs font-semibold text-foreground">
-              Recording Notice
+              Recording notice
             </h3>
           </div>
-          <button
+          <Button variant="ghost"
             onClick={handleClose}
-            className="text-muted-foreground hover:text-muted-foreground transition-colors p-0.5 rounded hover:bg-muted"
+            className="text-muted-foreground hover:text-muted-foreground transition-colors p-0.5 rounded hover:bg-muted h-auto w-auto [&_svg]:!size-3"
+            aria-label="Close recording notice"
           >
             <X className="h-3 w-3" />
-          </button>
+          </Button>
         </div>
 
         {/* Content */}
@@ -93,8 +94,8 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
           <p className="text-xs text-muted-foreground mb-1">
             Inform participants about recording.
           </p>
-          <div className="rounded border p-1 border-[color:hsl(var(--theme-warning-fg)/0.28)] bg-[hsl(var(--theme-warning-bg))]">
-            <p className="text-xs font-medium text-[hsl(var(--theme-warning-fg))]">
+          <div className="rounded border p-1 border-warning-border/[0.28] bg-warning">
+            <p className="text-xs font-medium text-warning-foreground">
               US compliance required
             </p>
           </div>

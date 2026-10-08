@@ -95,6 +95,8 @@ for (const props of [
 function transcriptView(props = {}) {
   const hooks = createHookHarness();
   const { VirtualizedTranscriptView } = loadTsModule(component('VirtualizedTranscriptView'), {
+    './ui/button': { Button: 'button' },
+    './ui/input': { Input: 'input' },
     react: { ...hooks.react, memo: fn => fn, useReducer: () => [0, () => {}] },
     '@tanstack/react-virtual': { useVirtualizer: () => ({}) },
     '@/hooks/useAutoScroll': { useAutoScroll: () => ({ autoScroll: false, scrollToBottom() {} }) },

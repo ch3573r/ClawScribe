@@ -101,7 +101,7 @@ for (const enabled of [true, false]) {
       assert.equal(nodes(tree).some(node => node.type === 'SelectItem' && node.props.value === 'mai-transcribe'), true);
     }
     if (!enabled) {
-      nodes(render()).find(node => node.type === 'Button' && text(node) === 'Open Beta settings').props.onClick();
+      nodes(render()).find(node => node.type === 'Button' && text(node) === 'Open beta settings').props.onClick();
       assert.deepEqual(routes, ['/settings?tab=beta']);
       assert.equal(events[0].detail, 'beta');
     }
