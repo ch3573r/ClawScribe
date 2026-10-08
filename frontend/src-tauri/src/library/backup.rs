@@ -1522,7 +1522,19 @@ mod tests {
         for owner in &owners {
             histories.push(conversations::history(&source, owner).await.unwrap());
         }
-        sqlx::migrate!("./migrations").run(&source).await.unwrap();
+        // This regression targets the shipped evidence-table rebuild. Later additive
+        // migrations have their own upgrade contracts and may create new tables.
+        let full = sqlx::migrate!("./migrations");
+        let evidence_upgrade = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                full.iter()
+                    .filter(|m| m.version <= 20261008000000)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        evidence_upgrade.run(&source).await.unwrap();
         assert_eq!(
             counts(&source).await,
             before_counts,
