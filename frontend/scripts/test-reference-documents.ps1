@@ -10,24 +10,12 @@ $testRoot = Join-Path $env:RUNNER_TEMP "clawscribe-document-tests-$env:GITHUB_RU
 $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_WORKSPACE '.clawscribe-reference-tests'
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../src-tauri/migrations') -Destination $testRoot -Recurse -Force
-$storeModule = ''
-if (Test-Path -LiteralPath (Join-Path $sourceRoot 'store.rs')) {
-    $storeModule = "#[path = `"$sourceRoot/store.rs`"] pub mod store;"
-}
-$importModule = ''
-if (Test-Path -LiteralPath (Join-Path $sourceRoot 'import.rs')) {
-    $importModule = "#[path = `"$sourceRoot/import.rs`"] pub mod import;"
-}
-$workerModule = ''
-$workerBinary = ''
-if (Test-Path -LiteralPath (Join-Path $sourceRoot 'worker.rs')) {
-    $workerModule = "#[path = `"$sourceRoot/worker.rs`"] pub mod worker;"
-    $workerBinary = @'
+$workerBinary = @'
 [[bin]]
 name = "reference-worker"
 path = "main.rs"
 '@
-    @'
+@'
 fn main() {
     match clawscribe_document_tests::documents::worker::dispatch() {
         Some(code) => std::process::exit(code),
@@ -35,18 +23,9 @@ fn main() {
     }
 }
 '@ | Set-Content -LiteralPath (Join-Path $testRoot 'main.rs') -Encoding utf8NoBOM
-}
 @"
-pub mod documents {
-    #[path = "$sourceRoot/types.rs"] mod types;
-    pub use types::*;
-    #[path = "$sourceRoot/extract.rs"] pub mod extract;
-    $workerModule
-    $storeModule
-    $importModule
-    #[cfg(test)] #[path = "$sourceRoot/fixtures.rs"] pub mod fixtures;
-    #[cfg(test)] #[path = "$sourceRoot/tests.rs"] mod tests;
-}
+#[path = "$sourceRoot/mod.rs"] pub mod documents;
+#[cfg(test)] #[path = "$sourceRoot/../document_contract_tests.rs"] mod document_contract_tests;
 "@ | Set-Content -LiteralPath (Join-Path $testRoot 'lib.rs') -Encoding utf8NoBOM
 @"
 [package]
@@ -74,8 +53,6 @@ $workerBinary
 "@ | Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Encoding utf8NoBOM
 # Shared production parser/worker modules, without the unrelated desktop/ML link.
 rustc --version
-if ($workerBinary) {
-    cargo build --manifest-path (Join-Path $testRoot 'Cargo.toml') --bin reference-worker
-    $env:CLAWSCRIBE_DOCUMENT_TEST_WORKER = Join-Path $env:CARGO_TARGET_DIR 'debug/reference-worker.exe'
-}
+cargo build --manifest-path (Join-Path $testRoot 'Cargo.toml') --bin reference-worker
+$env:CLAWSCRIBE_DOCUMENT_TEST_WORKER = Join-Path $env:CARGO_TARGET_DIR 'debug/reference-worker.exe'
 cargo test --manifest-path (Join-Path $testRoot 'Cargo.toml') --lib -- --include-ignored --test-threads=1

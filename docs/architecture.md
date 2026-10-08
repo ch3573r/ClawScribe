@@ -615,6 +615,42 @@ cross-language questions, identifiers and project/date conflicts. It reports
 bulk insertion/coalescing, indexing time, process-memory growth, top-five recall
 and warm p95. Models and measurements remain local to the designated runner.
 
+### Local reference ingestion
+
+The document commands stage an explicitly selected PDF, DOCX, TXT or Markdown
+file under an app-owned generated ID. Original filesystem paths are neither
+stored in the database nor returned in attachment metadata. Extraction starts
+in an early application child mode, before Tauri plugins or the single-instance
+guard, and requires a parent handshake after Windows Job Object assignment.
+The hidden child has a 512 MiB process-memory limit and a 10-second extraction
+deadline. Cancellation, recording preemption and abandoned callers terminate
+and reap the child before its recording admission lease is released.
+
+Inputs are limited to 25 MiB, extracted UTF-8 text and the IPC envelope to
+2 MiB each, PDFs to 500 actual pages, DOCX decompression to 32 MiB and each XML
+part to 5 MiB. JSON anchor overhead can require splitting a document near the
+text limit. Encrypted PDFs and PDFs without a text layer fail visibly; OCR is
+unavailable. DOCX table paragraphs retain their document-order anchors,
+including the positions of empty paragraphs. XML DTDs are rejected and external
+relationships are never fetched. Extraction uses pinned MIT-licensed
+`lopdf` 0.34.0 and `quick-xml` 0.37.5 with the existing ZIP implementation.
+
+Canonical originals, extracted blocks and meeting attachment relations are
+separate from derived search chunks. Database publication occurs only after
+successful extraction and staging. Failed/cancelled imports remove the
+unpublished copy. Identical content is shared across attachments; detaching one
+meeting preserves the document, while explicit deletion removes its source and
+uses the existing dependent-conversation invalidation triggers. The ingestion
+command queues indexing; document retrieval and UI selection use the same
+canonical source identities.
+
+`frontend/scripts/test-reference-documents.ps1` executes the actual production
+document modules in a small test driver on the designated runner. It builds a
+local child from the same dispatcher, so timeout, cancellation, memory limits,
+real PDF pages, DOCX tables and database upgrades are exercised without linking
+the unrelated desktop/transcription stack for every test iteration. The full
+native checks still compile and test the application integration.
+
 ### Saved conversations and canonical citations
 
 `knowledge_ask` accepts a globally unique request UUID, a durable meeting or

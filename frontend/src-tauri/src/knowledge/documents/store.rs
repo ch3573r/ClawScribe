@@ -280,6 +280,16 @@ mod tests {
         let pool = pool().await;
         let attached = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
         attach(&pool, "birch", "00000000-0000-4000-8000-000000000002").await;
+        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) VALUES ('meeting:aster','meeting','aster')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,question,scope_json,frozen_ids_json,status,provider,model) VALUES ('reference-turn','meeting:aster','synthetic','What is the reference?','{}','[]','completed','synthetic','synthetic')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_messages(id,request_id,role,content) VALUES ('reference-answer','reference-turn','assistant','Public reference content [K700]')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_request_evidence(request_id,ordinal,reference_json,display_json) VALUES ('reference-turn',700,'{}','{}')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_request_sources(request_id,source_id,revision) VALUES ('reference-turn',?,1)")
+            .bind(format!("document:{}",attached.attachment.id)).execute(&pool).await.unwrap();
         delete(&pool, "aster", &attached.attachment.id)
             .await
             .unwrap();
@@ -300,5 +310,25 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM knowledge_requests WHERE id='reference-turn'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "invalidated");
+        let content: String = sqlx::query_scalar(
+            "SELECT content FROM knowledge_messages WHERE id='reference-answer'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(content.is_empty());
+        let maps: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_request_evidence WHERE request_id='reference-turn'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(maps, 0);
     }
 }

@@ -31,7 +31,7 @@ impl DocumentFormat {
             "pdf" => Ok(Self::Pdf),
             "docx" => Ok(Self::Docx),
             "txt" => Ok(Self::Text),
-            "md" | "markdown" => Ok(Self::Markdown),
+            "md" => Ok(Self::Markdown),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }

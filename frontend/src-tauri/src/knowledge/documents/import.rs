@@ -326,6 +326,47 @@ mod tests {
             .is_empty());
     }
     #[tokio::test]
+    async fn abandoned_import_waiter_retains_lease_until_staging_is_cleaned() {
+        struct Lease(tokio::sync::oneshot::Sender<()>);
+        impl Drop for Lease {
+            fn drop(&mut self) {}
+        }
+        // A cancellation-aware fake replaces only parsing; production staging, supervision and DB publication run.
+        let pool = pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("reference.txt");
+        std::fs::write(&selected, b"Public reference").unwrap();
+        let root = temp.path().join("originals");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(import_using(
+            pool.clone(),
+            root.clone(),
+            "aster".into(),
+            selected,
+            CancellationToken::new(),
+            Arc::new(AtomicBool::new(false)),
+            Lease(released_tx),
+            |_, _, cancel, _| async move {
+                started_tx.send(()).unwrap();
+                cancel.cancelled().await;
+                Err(DocumentError::Cancelled)
+            },
+        ));
+        started_rx.await.unwrap();
+        handle.abort();
+        let _ = handle.await;
+        // Sender is dropped with the lease after the detached supervisor has removed the staged file.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), released_rx)
+            .await
+            .unwrap();
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+        assert!(super::super::store::list(&pool, "aster")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    #[tokio::test]
     async fn original_is_app_owned_and_hash_checked_before_publication() {
         let pool = pool().await;
         let temp = tempfile::tempdir().unwrap();
