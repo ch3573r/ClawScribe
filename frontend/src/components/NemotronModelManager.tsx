@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import { Loader2, CheckCircle2, Download, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 type ModelStatus =
   | 'Available'
@@ -190,8 +191,8 @@ export function NemotronModelManager({
                   <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
                     {variantTag(model.name)}
                   </span>
-                  <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
-                    BETA
+                  <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-warning-foreground">
+                    Beta
                   </span>
                   {isSelected && isAvailable && (
                     <span className="flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground">
@@ -208,33 +209,33 @@ export function NemotronModelManager({
 
               <div className="flex items-center gap-2">
                 {isAvailable && (
-                  <div className="flex items-center gap-1.5 text-emerald-500">
-                    <div className="h-2 w-2 rounded-full bg-emerald-500" />
+                  <div className="flex items-center gap-1.5 text-success-foreground">
+                    <div className="h-2 w-2 rounded-full bg-success-foreground" />
                     <span className="text-xs font-medium">Ready</span>
                   </div>
                 )}
                 {isMissing && (
-                  <button
+                  <Button variant="ghost"
                     onClick={(e) => {
                       e.stopPropagation();
                       download(model);
                     }}
-                    className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                    className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 h-auto hover:text-primary-foreground"
                   >
                     <Download className="h-4 w-4" />
                     Download
-                  </button>
+                  </Button>
                 )}
                 {progress === null && isError && (
-                  <button
+                  <Button variant="ghost"
                     onClick={(e) => {
                       e.stopPropagation();
                       download(model);
                     }}
-                    className="rounded-md bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground transition-colors hover:bg-destructive/90"
+                    className="rounded-md bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground transition-colors hover:bg-destructive/90 h-auto hover:text-destructive-foreground"
                   >
                     Retry
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
@@ -253,16 +254,16 @@ export function NemotronModelManager({
                       <span className="text-sm font-medium">Downloading…</span>
                       <span className="text-sm font-semibold">{Math.round(progress)}%</span>
                     </div>
-                    <button
+                    <Button variant="ghost"
                       onClick={(e) => {
                         e.stopPropagation();
                         cancel(model);
                       }}
-                      className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive h-auto [&_svg]:!size-3"
                     >
                       <X className="h-3 w-3" />
                       Cancel
-                    </button>
+                    </Button>
                   </div>
                   <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                     <motion.div

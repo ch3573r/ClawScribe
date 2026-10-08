@@ -11,6 +11,9 @@ import {
   getModelDisplayName,
   formatFileSize
 } from '../lib/parakeet';
+import { Button } from '@/components/ui/button';
+
+const MotionButton = motion(Button);
 
 interface ParakeetModelManagerProps {
   selectedModel?: string;
@@ -341,9 +344,9 @@ export function ParakeetModelManager({
 
   if (error) {
     return (
-      <div className={`bg-red-50 border border-red-200 rounded-lg p-4 ${className}`}>
-        <p className="text-sm text-red-800">Failed to load models</p>
-        <p className="text-xs text-red-600 mt-1">{error}</p>
+      <div className={`bg-error border border-error-border/30 rounded-lg p-4 ${className}`}>
+        <p className="text-sm text-error-foreground">Failed to load models</p>
+        <p className="text-xs text-error-foreground mt-1">{error}</p>
       </div>
     );
   }
@@ -415,7 +418,7 @@ export function ParakeetModelManager({
         <motion.div
           initial={{ opacity: 0, y: -5 }}
           animate={{ opacity: 1, y: 0 }}
-          className="text-xs text-amber-600 text-center pt-2"
+          className="text-xs text-warning-foreground text-center pt-2"
         >
           Selected Parakeet model is no longer supported. Choose Lightning or SmoothQuant.
         </motion.div>
@@ -484,7 +487,7 @@ function ModelCard({
     >
       {/* Recommended Badge */}
       {isRecommended && (
-        <div className="absolute -top-2 -right-2 bg-primary text-white text-xs px-2 py-0.5 rounded-full font-medium">
+        <div className="absolute -top-2 -right-2 bg-primary text-primary-foreground text-xs px-2 py-0.5 rounded-full font-medium">
           Recommended
         </div>
       )}
@@ -500,7 +503,7 @@ function ModelCard({
                 <motion.span
                   initial={{ scale: 0 }}
                   animate={{ scale: 1 }}
-                  className="bg-primary text-white px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1"
+                  className="bg-primary text-primary-foreground px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1"
                 >
                   ✓
                 </motion.span>
@@ -515,13 +518,13 @@ function ModelCard({
           <div className="ml-4 flex items-center gap-2">
             {isAvailable && (
               <>
-                <div className="flex items-center gap-1.5 text-green-600">
-                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                <div className="flex items-center gap-1.5 text-success-foreground">
+                  <div className="w-2 h-2 bg-success-foreground rounded-full"></div>
                   <span className="text-xs font-medium">Ready</span>
                 </div>
                 <AnimatePresence>
                   {isHovered && (
-                    <motion.button
+                    <MotionButton variant="ghost"
                       initial={{ opacity: 0, scale: 0.8 }}
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.8 }}
@@ -530,62 +533,62 @@ function ModelCard({
                         e.stopPropagation();
                         onDelete();
                       }}
-                      className="text-muted-foreground hover:text-red-600 transition-colors p-1"
+                      className="text-muted-foreground hover:text-error-foreground transition-colors p-1 h-auto hover:bg-transparent"
                       title="Delete model to free up space"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                       </svg>
-                    </motion.button>
+                    </MotionButton>
                   )}
                 </AnimatePresence>
               </>
             )}
 
             {isMissing && (
-              <button
+              <Button variant="ghost"
                 onClick={(e) => {
                   e.stopPropagation();
                   onDownload();
                 }}
-                className="bg-primary text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors"
+                className="bg-primary text-primary-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors h-auto hover:text-primary-foreground"
               >
                 Download
-              </button>
+              </Button>
             )}
 
             {downloadProgress === null && isError && (
-              <button
+              <Button variant="ghost"
                 onClick={(e) => {
                   e.stopPropagation();
                   onDownload();
                 }}
-                className="bg-red-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-red-700 transition-colors"
+                className="bg-destructive text-destructive-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-destructive/90 transition-colors h-auto hover:text-destructive-foreground"
               >
                 Retry
-              </button>
+              </Button>
             )}
 
             {isCorrupted && (
               <div className="flex gap-2">
-                <button
+                <Button variant="ghost"
                   onClick={(e) => {
                     e.stopPropagation();
                     onDelete();
                   }}
-                  className="bg-orange-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-orange-700 transition-colors"
+                  className="bg-warning text-warning-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-warning/80 transition-colors h-auto hover:text-warning-foreground"
                 >
                   Delete
-                </button>
-                <button
+                </Button>
+                <Button variant="ghost"
                   onClick={(e) => {
                     e.stopPropagation();
                     onDownload();
                   }}
-                  className="bg-primary text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors"
+                  className="bg-primary text-primary-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors h-auto hover:text-primary-foreground"
                 >
                   Re-download
-                </button>
+                </Button>
               </div>
             )}
           </div>
@@ -604,16 +607,16 @@ function ModelCard({
                 <span className="text-sm font-medium text-primary">Downloading...</span>
                 <span className="text-sm font-semibold text-primary">{Math.round(downloadProgress)}%</span>
               </div>
-              <button
+              <Button variant="ghost"
                 onClick={(e) => {
                   e.stopPropagation();
                   onCancel();
                 }}
-                className="text-xs text-muted-foreground hover:text-red-600 font-medium transition-colors px-2 py-1 rounded hover:bg-red-50"
+                className="text-xs text-muted-foreground hover:text-error-foreground font-medium transition-colors px-2 py-1 rounded hover:bg-error h-auto"
                 title="Cancel download"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
             <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
               <motion.div
