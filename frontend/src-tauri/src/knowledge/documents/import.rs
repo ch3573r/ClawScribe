@@ -367,6 +367,70 @@ mod tests {
             .is_empty());
     }
     #[tokio::test]
+    async fn recording_preemption_interrupts_blocked_publication() {
+        let pool = pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("reference.txt");
+        std::fs::write(&selected, b"Public reference decision.").unwrap();
+        let root = temp.path().join("originals");
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let preempt = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(import_using(
+            pool.clone(),
+            root.clone(),
+            "aster".into(),
+            selected,
+            CancellationToken::new(),
+            preempt.clone(),
+            released_tx,
+            |_, format, _, _| async move {
+                ready_tx.send(()).unwrap();
+                continue_rx.await.unwrap();
+                super::super::extract::extract(format, b"Public reference decision.")
+            },
+        ));
+        ready_rx.await.unwrap();
+        let blocked = pool.acquire().await.unwrap();
+        continue_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let mut entries = tokio::fs::read_dir(&root).await.unwrap();
+                let mut published_copy = false;
+                while let Some(entry) = entries.next_entry().await.unwrap() {
+                    published_copy |= entry.path().extension().is_some_and(|e| e == "txt");
+                }
+                if published_copy {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Parsing has finished, while publication waits for the only database connection.
+        tokio::task::yield_now().await;
+        preempt.store(true, Ordering::Release);
+        let released_before_database =
+            tokio::time::timeout(std::time::Duration::from_millis(250), released_rx)
+                .await
+                .is_ok();
+        // Release the database even in RED, before checking the resource contract.
+        drop(blocked);
+        let result = task.await.unwrap();
+        assert!(
+            released_before_database,
+            "Recording waited on document database publication"
+        );
+        assert_eq!(result, Err(DocumentError::Cancelled));
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+        assert!(super::super::store::list(&pool, "aster")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    #[tokio::test]
     async fn original_is_app_owned_and_hash_checked_before_publication() {
         let pool = pool().await;
         let temp = tempfile::tempdir().unwrap();
