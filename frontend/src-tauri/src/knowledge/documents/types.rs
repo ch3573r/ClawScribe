@@ -69,7 +69,7 @@ pub enum DocumentError {
     FormatMismatch,
     #[error("Reference files must be 25 MiB or smaller.")]
     InputLimit,
-    #[error("Extracted reference text exceeds 2 MiB. Choose a shorter document.")]
+    #[error("Reference text or citation data exceeds the 2 MiB limit. Choose a shorter document.")]
     TextLimit,
     #[error("PDF references must contain at most 500 pages.")]
     PageLimit,

@@ -14,10 +14,15 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 pub struct Imports {
-    active: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    state: Arc<Mutex<ImportState>>,
+}
+#[derive(Default)]
+struct ImportState {
+    active: Option<(String, CancellationToken)>,
+    cancelled: std::collections::VecDeque<String>,
 }
 pub struct ImportLease {
-    registry: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    registry: Arc<Mutex<ImportState>>,
     id: String,
     pub cancel: CancellationToken,
 }
@@ -26,23 +31,36 @@ impl Imports {
         if uuid::Uuid::parse_str(id).is_err() {
             return Err(DocumentError::Malformed);
         }
-        let mut active = self.active.lock().map_err(|_| DocumentError::Busy)?;
-        if active.is_some() {
+        let mut state = self.state.lock().map_err(|_| DocumentError::Busy)?;
+        if state.cancelled.iter().any(|key| key == id) {
+            return Err(DocumentError::Cancelled);
+        }
+        if state.active.is_some() {
             return Err(DocumentError::Busy);
         }
         let cancel = CancellationToken::new();
-        *active = Some((id.to_owned(), cancel.clone()));
+        state.active = Some((id.to_owned(), cancel.clone()));
         Ok(ImportLease {
-            registry: self.active.clone(),
+            registry: self.state.clone(),
             id: id.to_owned(),
             cancel,
         })
     }
     pub fn cancel(&self, id: &str) {
-        if let Ok(active) = self.active.lock() {
-            if let Some((key, cancel)) = active.as_ref().filter(|(key, _)| key == id) {
-                let _ = key;
+        if uuid::Uuid::parse_str(id).is_err() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            if let Some((_, cancel)) = state.active.as_ref().filter(|(key, _)| key == id) {
                 cancel.cancel();
+            }
+            // Native invocation order is not guaranteed; remember a bounded set
+            // of early cancellations so a late registration cannot start work.
+            if !state.cancelled.iter().any(|key| key == id) {
+                if state.cancelled.len() == 32 {
+                    state.cancelled.pop_front();
+                }
+                state.cancelled.push_back(id.to_owned());
             }
         }
     }
@@ -50,9 +68,9 @@ impl Imports {
 impl Drop for ImportLease {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Ok(mut active) = self.registry.lock() {
-            if active.as_ref().is_some_and(|(id, _)| id == &self.id) {
-                *active = None;
+        if let Ok(mut state) = self.registry.lock() {
+            if state.active.as_ref().is_some_and(|(id, _)| id == &self.id) {
+                state.active = None;
             }
         }
     }

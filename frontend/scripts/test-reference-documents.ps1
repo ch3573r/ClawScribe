@@ -37,6 +37,8 @@ edition = "2021"
 path = "lib.rs"
 [dependencies]
 lopdf = { version = "=0.34.0", default-features = false, features = ["nom_parser"] }
+# Match the application's locked transitive version (Rust 1.66 minimum).
+rangemap = "=1.6.0"
 quick-xml = "=0.37.5"
 zip = "=2.4.2"
 serde = { version = "1", features = ["derive"] }

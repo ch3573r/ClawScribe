@@ -338,7 +338,7 @@ mod tests {
         std::fs::write(&selected, b"Public reference").unwrap();
         let root = temp.path().join("originals");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel::<()>();
         let handle = tokio::spawn(import_using(
             pool.clone(),
             root.clone(),
@@ -375,7 +375,7 @@ mod tests {
         let root = temp.path().join("originals");
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
-        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel::<()>();
         let preempt = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn(import_using(
             pool.clone(),
