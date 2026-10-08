@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Info } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 export interface BackendInfo {
   id: string;
@@ -92,20 +94,21 @@ export function AudioBackendSelector({
     <div className="space-y-2">
       <div className="flex items-center gap-2">
         <label className="text-sm font-medium text-foreground">
-          System Audio Backend
+          System audio backend
         </label>
         <div className="relative">
-          <button
+          <Button variant="ghost"
             type="button"
             onMouseEnter={() => setShowTooltip(true)}
             onMouseLeave={() => setShowTooltip(false)}
-            className="text-muted-foreground hover:text-muted-foreground transition-colors"
+            className="text-muted-foreground hover:text-muted-foreground transition-colors h-auto w-auto p-0 hover:bg-transparent"
+            aria-label="Audio capture methods"
           >
             <Info className="h-4 w-4" />
-          </button>
+          </Button>
           {showTooltip && (
             <div className="absolute z-10 left-6 top-0 w-64 p-3 text-xs bg-popover text-popover-foreground border border-border rounded-lg shadow-lg">
-              <p className="font-semibold mb-1">Audio Capture Methods:</p>
+              <p className="font-semibold mb-1">Audio capture methods:</p>
               <ul className="space-y-1">
                 {backends.map((backend) => (
                   <li key={backend.id}>
@@ -122,7 +125,7 @@ export function AudioBackendSelector({
       </div>
 
       {error && (
-        <div className="p-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md">
+        <div className="p-2 text-xs text-[hsl(var(--theme-error-fg))] bg-[hsl(var(--theme-error-bg))] border border-[hsl(var(--theme-error-fg)/0.3)] rounded-md">
           {error}
         </div>
       )}
@@ -142,14 +145,14 @@ export function AudioBackendSelector({
                   : 'border-border hover:border-border bg-card'
               } ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
             >
-              <input
+              <Input
                 type="radio"
                 name="audioBackend"
                 value={backend.id}
                 checked={currentBackend === backend.id}
                 onChange={() => handleBackendChange(backend.id)}
                 disabled={isDisabled}
-                className="mt-1 h-4 w-4 text-primary focus:ring-ring border-border"
+                className="mt-1 h-4 w-4 text-primary focus:ring-ring border-border p-0 shadow-none"
               />
               <div className="ml-3 flex-1">
                 <div className="flex items-center justify-between">
