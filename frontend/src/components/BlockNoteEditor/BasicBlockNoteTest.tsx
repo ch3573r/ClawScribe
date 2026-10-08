@@ -3,6 +3,7 @@ import { useCreateBlockNote } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/shadcn/style.css";
 import { ChangeEvent, useCallback, useEffect } from "react";
+import { Textarea } from "@/components/ui/textarea";
 
 const initialMarkdown = "Hello, **world!**";
 
@@ -33,10 +34,11 @@ export default function BasicBlockNoteTest() {
   return (
     <div className="views">
       <div className="view-wrapper">
-        <div className="view-label">Markdown Input</div>
+        <div className="view-label">Markdown input</div>
         <div className="view">
           <code>
-            <textarea
+            <Textarea
+              className="inline-block min-h-0 w-auto rounded-none border-0 p-0 !text-[length:inherit] shadow-none"
               defaultValue={initialMarkdown}
               onChange={markdownInputChanged}
             />
@@ -44,7 +46,7 @@ export default function BasicBlockNoteTest() {
         </div>
       </div>
       <div className="view-wrapper">
-        <div className="view-label">Editor Output</div>
+        <div className="view-label">Editor output</div>
         <div className="view">
           <BlockNoteView editor={editor} editable={true} />
         </div>

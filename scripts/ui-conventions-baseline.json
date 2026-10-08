@@ -40,7 +40,7 @@
     "frontend/src/components/BlockNoteEditor/BasicBlockNoteTest.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/BluetoothPlaybackWarning.tsx": {
       "paletteColors": 0,
@@ -73,12 +73,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/DatabaseImport/HomebrewDatabaseDetector.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/DatabaseImport/LegacyDatabaseImport.tsx": {
-      "paletteColors": 13,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -103,12 +103,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/ImportAudio/ImportAudioDialog.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/ImportAudio/ImportDropOverlay.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -138,7 +138,7 @@
       "nativeControls": 1
     },
     "frontend/src/components/LibraryBackup.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
