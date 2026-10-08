@@ -3,9 +3,9 @@
   "sourceCommit": "9178fb2828844c5599b61a23b540775c65e61c08",
   "files": {
     "frontend/src/app/_components/SettingsModal.tsx": {
-      "paletteColors": 21,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 3
+      "nativeControls": 0
     },
     "frontend/src/app/meeting-details/page.tsx": {
       "paletteColors": 4,
@@ -98,7 +98,7 @@
       "nativeControls": 0
     },
     "frontend/src/components/HomeDashboard.tsx": {
-      "paletteColors": 13,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -133,9 +133,9 @@
       "nativeControls": 0
     },
     "frontend/src/components/LanguageSelection.tsx": {
-      "paletteColors": 9,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/LibraryBackup.tsx": {
       "paletteColors": 2,
@@ -238,17 +238,17 @@
       "nativeControls": 0
     },
     "frontend/src/components/PermissionWarning.tsx": {
-      "paletteColors": 12,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/RecordingControls.tsx": {
-      "paletteColors": 17,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/RecordingHealthBanner.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -278,7 +278,7 @@
       "nativeControls": 3
     },
     "frontend/src/components/TranscriptRecovery/TranscriptRecovery.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
