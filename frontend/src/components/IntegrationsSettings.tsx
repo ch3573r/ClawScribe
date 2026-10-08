@@ -676,7 +676,7 @@ function PlannerPanel() {
                 </Button>
               </div>
               <Select
-                value={(selectedPlan) || EMPTY_OPTION}
+                value={ms.plans.some((plan) => plan.id === selectedPlan) ? selectedPlan : EMPTY_OPTION}
                 onValueChange={(value) => {
                   const nextValue = value === EMPTY_OPTION ? "" : value;
                   setSelectedPlan(nextValue);
@@ -685,11 +685,7 @@ function PlannerPanel() {
                 disabled={ms.loadingPlans}
               >
                 <SelectTrigger aria-label="Plan" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
-                  <SelectValue>
-                    {selectedPlan && !ms.plans.some((plan) => plan.id === selectedPlan)
-                      ? ms.loadingPlans ? "Loading…" : "Select a plan"
-                      : undefined}
-                  </SelectValue>
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={EMPTY_OPTION}>
@@ -708,7 +704,9 @@ function PlannerPanel() {
                 Default bucket
               </label>
               <Select
-                value={(creatingBucket ? NEW_OPTION : selectedBucket) || EMPTY_OPTION}
+                value={creatingBucket
+                  ? selectedPlan ? NEW_OPTION : EMPTY_OPTION
+                  : ms.buckets.some((bucket) => bucket.id === selectedBucket) ? selectedBucket : EMPTY_OPTION}
                 onValueChange={(value) => {
                   const nextValue = value === EMPTY_OPTION ? "" : value;
                   if (nextValue === NEW_OPTION) {
@@ -721,15 +719,7 @@ function PlannerPanel() {
                 disabled={!selectedPlan || ms.loadingBuckets}
               >
                 <SelectTrigger aria-label="Default bucket" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
-                  <SelectValue>
-                    {!creatingBucket && selectedBucket && !ms.buckets.some((bucket) => bucket.id === selectedBucket)
-                      ? ms.loadingBuckets
-                        ? "Loading…"
-                        : !selectedPlan
-                          ? "Select a plan first"
-                          : "Select a bucket"
-                      : undefined}
-                  </SelectValue>
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent onCloseAutoFocus={(event) => {
                   const input = newBucketInputRef.current;
