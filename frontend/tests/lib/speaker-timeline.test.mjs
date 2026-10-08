@@ -23,6 +23,7 @@ function timeline(props = {}) {
   const hooks = createHookHarness();
   const { SpeakerLaneTimeline } = loadTsModule(source('components/MeetingDetails/SpeakerLaneTimeline'), {
     react: { ...hooks.react, memo: fn => fn },
+    '@/components/ui/button': { Button: 'button' },
     'lucide-react': { Activity: 'Activity', Pause: 'Pause', Play: 'Play' },
   });
   const sought = [], played = [];

@@ -23,6 +23,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import {
   Dialog,
@@ -75,6 +76,7 @@ const documentLabels: Record<DocumentDestination, { title: string; description: 
   confluence: { title: "Export to Confluence", description: "Copy the selected content as a browser draft or publish it using your configured Confluence connection.", submit: "Export to Confluence" },
 };
 
+const EMPTY_NOTEBOOK_VALUE = "__unset_notebook__";
 const ONENOTE_NOTEBOOK_MAX = 128;
 function sanitizeNotebookName(raw: string): string {
   return raw
@@ -150,6 +152,8 @@ export function MeetingExportButtons({
   const [todoOpen, setToDoOpen] = useState(false);
   const [oneNoteNotebooks, setOneNoteNotebooks] = useState<NotebookInfo[]>([]);
   const [oneNoteNotebookId, setOneNoteNotebookId] = useState("");
+  const newNotebookInputRef = useRef<HTMLInputElement>(null);
+  const focusNewNotebookOnClose = useRef(false);
   const [oneNoteSavedNotebookName, setOneNoteSavedNotebookName] = useState<string | null>(null);
   const [oneNoteSectionName, setOneNoteSectionName] = useState("");
   const [oneNotePageTitle, setOneNotePageTitle] = useState("");
@@ -592,49 +596,57 @@ export function MeetingExportButtons({
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="onenote-notebook">Notebook</Label>
-                <button
+                <Button variant="ghost"
                   type="button"
-                  className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  className="h-auto gap-0 rounded-none p-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground disabled:opacity-50"
                   onClick={() => void loadOneNoteNotebooks()}
                   disabled={loadingOneNoteNotebooks || busy === "onenote"}
                 >
                   {loadingOneNoteNotebooks ? "Loading..." : "Reload"}
-                </button>
+                </Button>
               </div>
-              <select
-                id="onenote-notebook"
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                value={creatingNotebook ? "__new__" : oneNoteNotebookId}
-                onChange={(e) => {
-                  if (e.target.value === "__new__") {
+              <Select
+                value={creatingNotebook ? "__new__" : oneNoteNotebookId || EMPTY_NOTEBOOK_VALUE}
+                onValueChange={(value) => {
+                  if (value === "__new__") {
+                    focusNewNotebookOnClose.current = true;
                     setCreatingNotebook(true);
                     return;
                   }
                   setCreatingNotebook(false);
-                  setOneNoteNotebookId(e.target.value);
+                  setOneNoteNotebookId(value === EMPTY_NOTEBOOK_VALUE ? "" : value);
                   setOneNoteSavedNotebookName(null);
                 }}
                 disabled={loadingOneNoteNotebooks || busy === "onenote"}
               >
-                <option value="">
-                  {loadingOneNoteNotebooks ? "Loading..." : "Select a notebook"}
-                </option>
-                {oneNoteNotebooks.map((notebook) => (
-                  <option key={notebook.id} value={notebook.id}>
-                    {notebook.displayName}
-                  </option>
-                ))}
-                {selectedNotebookMissing && (
-                  <option value={oneNoteNotebookId}>
-                    {oneNoteSavedNotebookName ?? "Saved notebook"}
-                  </option>
-                )}
-                <option value="__new__">+ New notebook...</option>
-              </select>
+                <SelectTrigger id="onenote-notebook" className="h-auto w-full rounded-lg border border-border bg-background px-3 py-2 text-sm shadow-none"><SelectValue /></SelectTrigger>
+                <SelectContent onCloseAutoFocus={(event) => {
+                  if (focusNewNotebookOnClose.current) {
+                    focusNewNotebookOnClose.current = false;
+                    event.preventDefault();
+                    newNotebookInputRef.current?.focus();
+                  }
+                }}>
+                  <SelectItem value={EMPTY_NOTEBOOK_VALUE}>
+                    {loadingOneNoteNotebooks ? "Loading..." : "Select a notebook"}
+                  </SelectItem>
+                  {oneNoteNotebooks.map((notebook) => (
+                    <SelectItem key={notebook.id} value={notebook.id}>
+                      {notebook.displayName}
+                    </SelectItem>
+                  ))}
+                  {selectedNotebookMissing && (
+                    <SelectItem value={oneNoteNotebookId}>
+                      {oneNoteSavedNotebookName ?? "Saved notebook"}
+                    </SelectItem>
+                  )}
+                  <SelectItem value="__new__">+ New notebook...</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             {oneNoteNotebookListingLimited && (
-              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+              <p className="rounded-lg border border-[hsl(var(--theme-warning-fg)/0.3)] bg-[hsl(var(--theme-warning-bg))] p-3 text-sm text-[hsl(var(--theme-warning-fg))]">
                 {ONENOTE_LARGE_LIBRARY_MESSAGE}
               </p>
             )}
@@ -645,6 +657,7 @@ export function MeetingExportButtons({
                 <div className="flex items-center gap-2">
                   <Input
                     id="onenote-new-notebook"
+                    ref={newNotebookInputRef}
                     value={newNotebookName}
                     onChange={(e) => setNewNotebookName(sanitizeNotebookName(e.target.value))}
                     onKeyDown={(e) => {

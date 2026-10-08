@@ -2,6 +2,8 @@
 
 import { Block } from '@/types';
 import { useRef, useState, useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 
 interface BlockProps {
   block: Block;
@@ -36,7 +38,7 @@ const COMMANDS: CommandOption[] = [
   },
   { 
     id: 'bullet', 
-    label: 'Bullet List', 
+    label: 'Bullet list',
     type: 'bullet', 
     icon: '•', 
     description: 'Create a bulleted list' 
@@ -232,7 +234,7 @@ export const BlockComponent: React.FC<BlockProps> = ({
       )}
 
       <div className="relative flex-1 py-0.5 px-1">
-        <textarea
+        <Textarea
           ref={textareaRef}
           value={block.content}
           data-block-id={block.id}
@@ -244,11 +246,11 @@ export const BlockComponent: React.FC<BlockProps> = ({
           onContextMenu={onContextMenu}
           rows={1}
           className={`
-            w-full resize-none overflow-hidden bg-transparent border-none p-0 focus:outline-none focus:ring-0
+            inline-block min-h-0 shadow-none text-base md:text-base w-full resize-none overflow-hidden bg-transparent border-none p-0 focus:outline-none focus:ring-0 focus-visible:ring-0
             transition-all duration-150 ease-in-out
             ${block.color === 'gray' ? 'text-muted-foreground' : ''}
-            ${block.type === 'heading1' ? 'text-xl font-bold' : ''}
-            ${block.type === 'heading2' ? 'text-lg font-semibold' : ''}
+            ${block.type === 'heading1' ? 'text-xl md:text-xl font-bold' : ''}
+            ${block.type === 'heading2' ? 'text-lg md:text-lg font-semibold' : ''}
           `}
           placeholder="Type '/' for commands..."
         />
@@ -260,10 +262,10 @@ export const BlockComponent: React.FC<BlockProps> = ({
                        animate-in fade-in slide-in-from-top-2 duration-150"
           >
             {filteredCommands.map((cmd, index) => (
-              <button
+              <Button variant="ghost"
                 key={cmd.id}
                 className={`
-                  w-full text-left px-3 py-2 flex items-center space-x-3 hover:bg-muted
+                  h-auto rounded-none justify-start gap-0 font-normal text-base whitespace-normal hover:text-foreground w-full text-left px-3 py-2 flex items-center space-x-3 hover:bg-muted
                   ${index === selectedCommandIndex ? 'bg-muted' : ''}
                 `}
                 onClick={() => handleCommandSelect(cmd)}
@@ -276,7 +278,7 @@ export const BlockComponent: React.FC<BlockProps> = ({
                   <div className="font-medium">{cmd.label}</div>
                   <div className="text-sm text-muted-foreground">{cmd.description}</div>
                 </div>
-              </button>
+              </Button>
             ))}
           </div>
         )}

@@ -25,7 +25,7 @@ for (const hasModel of [false, true]) {
     const tree = EmptyStateSummary({ hasTranscript: false, hasModel, onGenerate() {} });
     assert.match(text(tree), /No transcript yet/);
     assert.match(text(tree), /Transcribe the recording first, then generate a summary\./);
-    assert.doesNotMatch(text(tree), /Generate Summary|select a model/);
+    assert.doesNotMatch(text(tree), /Generate summary|select a model/);
     assert.equal(nodes(tree).some(node => node.type === 'button'), false);
   });
 }
@@ -33,9 +33,9 @@ for (const hasModel of [false, true]) {
 test('a transcript with a model retains the working Generate action', () => {
   let generated = 0;
   const tree = EmptyStateSummary({ hasTranscript: true, hasModel: true, onGenerate: () => { generated++; } });
-  assert.match(text(tree), /No Summary Generated Yet/);
+  assert.match(text(tree), /No summary generated yet/);
   const button = nodes(tree).find(node => node.type === 'button');
-  assert.equal(text(button), 'Generate Summary');
+  assert.equal(text(button), 'Generate summary');
   assert.equal(button.props.disabled, false);
   button.props.onClick();
   assert.equal(generated, 1);
