@@ -27,6 +27,7 @@ export default {
         ]
       },
       colors: {
+        overlay: hsl('--kontron-black'),
         success: {
           DEFAULT: hsl('--theme-success-bg'),
           foreground: hsl('--theme-success-fg'),

@@ -13,7 +13,7 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-[hsl(var(--kontron-black)/0.5)] flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
       <div className="bg-card rounded-lg p-6 max-w-md w-full mx-4">
         <h2 className="text-xl font-semibold mb-4">Confirm delete</h2>
         <p className="text-muted-foreground mb-6">{text}</p>

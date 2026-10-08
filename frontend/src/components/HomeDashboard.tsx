@@ -120,11 +120,11 @@ export function HomeDashboard({
 
   const appStatus = isRecording
     ? recordingState.isPaused
-      ? { label: "Paused", dot: "bg-warning-foreground", ring: "ring-[hsl(var(--theme-warning-fg))]/20" }
-      : { label: "Recording", dot: "bg-error-foreground", ring: "ring-[hsl(var(--theme-error-fg))]/20" }
+      ? { label: "Paused", dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
+      : { label: "Recording", dot: "bg-error-foreground", ring: "ring-error-foreground/20" }
     : canRecord
-      ? { label: "Ready to record", dot: "bg-success-foreground", ring: "ring-[hsl(var(--theme-success-fg))]/20" }
-      : { label: "Microphone required", dot: "bg-warning-foreground", ring: "ring-[hsl(var(--theme-warning-fg))]/20" };
+      ? { label: "Ready to record", dot: "bg-success-foreground", ring: "ring-success-foreground/20" }
+      : { label: "Microphone required", dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" };
 
   const signalSteps = [
     {

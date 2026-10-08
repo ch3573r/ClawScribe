@@ -32,9 +32,9 @@ test('the canonical configs retain application fonts, sidebar colors, animations
 
 test('semantic status utilities compile with the active config, including foreground, border and opacity', async () => {
   const classes = ['success', 'warning', 'error', 'info'].flatMap(color => [
-    `bg-${color}`, `text-${color}-foreground`, `border-${color}-border`,
+    `bg-${color}`, `text-${color}-foreground`, `border-${color}-border`, `ring-${color}-foreground/20`,
     `bg-${color}/50`, `bg-${color}-foreground/25`, `border-${color}-border/30`,
-  ]);
+  ]).concat(['bg-overlay/50', 'bg-overlay/60']);
   const result = await postcss([tailwind({ ...loadConfig(path.join(frontend, 'tailwind.config.ts')), content: [{ raw: classes.join(' ') }] })])
     .process('@tailwind utilities;', { from: undefined });
   const selectors = new Set();
@@ -46,6 +46,7 @@ test('semantic status utilities compile with the active config, including foregr
     assert.ok(result.css.includes(`var(--theme-${color}-bg)`));
     assert.ok(result.css.includes(`var(--theme-${color}-fg)`));
   }
+  assert.ok(result.css.includes('var(--kontron-black)'));
   assert.ok(result.css.includes('var(--theme-blue-50)'));
   assert.ok(result.css.includes('var(--theme-blue-700)'));
 });
