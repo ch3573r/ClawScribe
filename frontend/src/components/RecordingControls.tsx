@@ -384,14 +384,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     ? 'flex items-center gap-3 bg-transparent p-0 shadow-none'
     : 'flex items-center space-x-2 bg-card rounded-full shadow-sm px-4 py-2';
   const startButtonClassName = isDashboard
-    ? `h-16 w-16 p-0 [&_svg]:!size-[26px] flex items-center justify-center rounded-full text-primary-foreground shadow-[0_0_34px_hsl(var(--primary)/0.42)] transition-all relative ${isStartPending || isProcessing || isRecordingDisabled ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-primary to-primary/70 hover:scale-105 hover:shadow-[0_0_44px_hsl(var(--primary)/0.6)]'}`
-    : `w-12 h-12 p-0 [&_svg]:!size-5 flex items-center justify-center ${isStartPending || isProcessing ? 'bg-muted text-foreground' : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'} rounded-full transition-colors relative`;
+    ? `h-16 w-16 p-0 [&_svg]:!size-[26px] flex items-center justify-center rounded-full text-primary-foreground hover:text-primary-foreground shadow-[0_0_34px_hsl(var(--primary)/0.42)] transition-all relative ${isStartPending || isProcessing || isRecordingDisabled ? 'bg-muted cursor-not-allowed' : 'bg-gradient-to-br from-primary to-primary/70 hover:scale-105 hover:shadow-[0_0_44px_hsl(var(--primary)/0.6)]'}`
+    : `w-12 h-12 p-0 [&_svg]:!size-5 flex items-center justify-center ${isStartPending || isProcessing ? 'bg-muted text-foreground hover:text-foreground' : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground hover:text-destructive-foreground'} rounded-full transition-colors relative`;
   const secondaryButtonClassName = isDashboard
-    ? `h-12 w-12 p-0 flex items-center justify-center rounded-full border border-border text-foreground transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-muted text-muted-foreground' : 'bg-muted hover:bg-accent'}`
-    : `w-10 h-10 p-0 flex items-center justify-center ${isPausing || isResuming || isStopping ? 'bg-muted border-2 border-border text-muted-foreground' : 'bg-card border-2 border-border text-muted-foreground hover:border-ring hover:bg-muted'} rounded-full transition-colors relative`;
+    ? `h-12 w-12 p-0 flex items-center justify-center rounded-full border border-border text-foreground hover:text-foreground transition-colors relative ${isPausing || isResuming || isStopping ? 'bg-muted text-muted-foreground hover:text-muted-foreground' : 'bg-muted hover:bg-accent'}`
+    : `w-10 h-10 p-0 flex items-center justify-center ${isPausing || isResuming || isStopping ? 'bg-muted border-2 border-border text-muted-foreground hover:text-muted-foreground' : 'bg-card border-2 border-border text-muted-foreground hover:text-muted-foreground hover:border-ring hover:bg-muted'} rounded-full transition-colors relative`;
   const stopButtonClassName = isDashboard
-    ? `h-12 w-12 p-0 flex items-center justify-center rounded-full transition-colors relative ${isStopping || isPausing || isResuming ? 'bg-muted cursor-not-allowed text-foreground' : 'bg-destructive hover:bg-destructive/80 text-destructive-foreground'}`
-    : `w-10 h-10 p-0 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-muted text-foreground' : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'} rounded-full transition-colors relative`;
+    ? `h-12 w-12 p-0 flex items-center justify-center rounded-full transition-colors relative ${isStopping || isPausing || isResuming ? 'bg-muted cursor-not-allowed text-foreground hover:text-foreground' : 'bg-destructive hover:bg-destructive/80 text-destructive-foreground hover:text-destructive-foreground'}`
+    : `w-10 h-10 p-0 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-muted text-foreground hover:text-foreground' : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground hover:text-destructive-foreground'} rounded-full transition-colors relative`;
   const waveformClassName = isDashboard
     ? 'flex items-center justify-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-4 py-3'
     : 'flex items-center space-x-1 mx-4';
@@ -431,7 +431,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 <>
                   <Button variant="ghost" size="icon"
                     onClick={handleStartRecording}
-                    className="w-10 h-10 p-0 flex items-center justify-center bg-destructive rounded-full text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                    className="w-10 h-10 p-0 flex items-center justify-center bg-destructive rounded-full text-destructive-foreground hover:bg-destructive/90 transition-colors hover:text-destructive-foreground"
                   >
                     <Mic size={16} />
                   </Button>
@@ -454,7 +454,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   </div>
 
                   <Button variant="ghost" size="icon"
-                    className="w-10 h-10 p-0 flex items-center justify-center bg-secondary rounded-full text-foreground cursor-not-allowed"
+                    className="w-10 h-10 p-0 flex items-center justify-center bg-secondary rounded-full text-foreground cursor-not-allowed hover:text-foreground"
                     disabled
                   >
                     <Play size={16} />
