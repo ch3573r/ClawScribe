@@ -1,4 +1,5 @@
 import React from 'react';
+import { Button } from '@/components/ui/button';
 import { AlertTriangle, Mic, Speaker, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { invoke } from '@tauri-apps/api/core';
@@ -55,45 +56,48 @@ export function PermissionWarning({
     <div className="max-w-md mb-4 space-y-3">
       {/* Combined Permission Warning - Show when either permission is missing */}
       {(!hasMicrophone || !hasSystemAudio) && (
-        <Alert variant="destructive" className="border-amber-400 bg-amber-50">
-          <AlertTriangle className="h-5 w-5 text-amber-600" />
-          <AlertTitle className="text-amber-900 font-semibold">
+        <Alert variant="destructive" className="border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))]">
+          <AlertTriangle className="h-5 w-5 text-[hsl(var(--theme-warning-fg))]" />
+          <AlertTitle className="text-[hsl(var(--theme-warning-fg))] font-semibold">
             <div className="flex items-center gap-2">
               {!hasMicrophone && <Mic className="h-4 w-4" />}
               {!hasSystemAudio && <Speaker className="h-4 w-4" />}
-              {!hasMicrophone && !hasSystemAudio ? 'Permissions Required' : !hasMicrophone ? 'Microphone Permission Required' : 'System Audio Permission Required'}
+              {!hasMicrophone && !hasSystemAudio ? 'Permissions required' : !hasMicrophone ? 'Microphone permission required' : 'System audio permission required'}
             </div>
           </AlertTitle>
           {/* Action Buttons */}
           <div className="mt-4 flex flex-wrap gap-2">
             {isMacOS && !hasMicrophone && (
-              <button
+              <Button
+                variant="ghost"
                 onClick={openMicrophoneSettings}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md transition-colors"
+                className="h-auto whitespace-normal inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-[hsl(var(--theme-warning-fg))] bg-[hsl(var(--theme-warning-bg))] hover:bg-[hsl(var(--theme-warning-bg))]/80 rounded-md transition-colors hover:text-[hsl(var(--theme-warning-fg))]"
               >
                 <Mic className="h-4 w-4" />
-                Open Microphone Settings
-              </button>
+                Open microphone settings
+              </Button>
             )}
             {isMacOS && !hasSystemAudio && (
-              <button
+              <Button
+                variant="ghost"
                 onClick={openScreenRecordingSettings}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-primary hover:bg-primary rounded-md transition-colors"
+                className="h-auto whitespace-normal inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-primary-foreground bg-primary hover:bg-primary rounded-md transition-colors hover:text-primary-foreground"
               >
                 <Speaker className="h-4 w-4" />
-                Open Screen Recording Settings
-              </button>
+                Open screen recording settings
+              </Button>
             )}
-            <button
+            <Button
+              variant="ghost"
               onClick={onRecheck}
               disabled={isRechecking}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-md transition-colors disabled:opacity-50"
+              className="h-auto whitespace-normal inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-[hsl(var(--theme-warning-fg))] bg-[hsl(var(--theme-warning-bg))] hover:bg-[hsl(var(--theme-warning-bg))]/80 rounded-md transition-colors disabled:opacity-50 hover:text-[hsl(var(--theme-warning-fg))]"
             >
               <RefreshCw className={`h-4 w-4 ${isRechecking ? 'animate-spin' : ''}`} />
               Recheck
-            </button>
+            </Button>
           </div>
-          <AlertDescription className="text-amber-800 mt-2">
+          <AlertDescription className="text-[hsl(var(--theme-warning-fg))] mt-2">
             {/* Microphone Warning */}
             {!hasMicrophone && (
               <>
