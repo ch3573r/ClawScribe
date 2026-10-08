@@ -150,7 +150,7 @@
     "frontend/src/components/MeetingDetails/MeetingBookmarks.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/MeetingChat.tsx": {
       "paletteColors": 0,
