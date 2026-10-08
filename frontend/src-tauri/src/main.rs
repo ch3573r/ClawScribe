@@ -8,5 +8,8 @@
 // We intentionally do NOT init env_logger here — only one global logger can be
 // set, and double-init panics.
 fn main() {
+    if let Some(code) = app_lib::knowledge::documents::worker::dispatch() {
+        std::process::exit(code);
+    }
     app_lib::run();
 }

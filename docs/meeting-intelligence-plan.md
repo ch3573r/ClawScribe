@@ -255,7 +255,7 @@ starting Phase 2.
 ### Task 5 Bounded document extraction and attachment persistence
 
 **Files:** Create `knowledge/documents/{mod.rs,extract.rs,import.rs,store.rs}`
-and `frontend/src-tauri/migrations/20261007000002_knowledge_documents.sql`.
+and `frontend/src-tauri/migrations/20261008000001_knowledge_documents.sql`.
 Modify `frontend/src-tauri/src/main.rs` for an early extraction-worker mode,
 `Cargo.toml`/`Cargo.lock` for tested parser dependencies and Windows Job Object
 APIs, and `knowledge/commands.rs` for document commands.
@@ -278,12 +278,12 @@ Commands: `knowledge_import_document`, `knowledge_list_documents`,
 `knowledge_get_document_blocks`. Read blocks by document ID and anchor with
 backend ownership checks.
 
-- [ ] Add public synthetic PDF/DOCX/TXT/Markdown fixtures and tests `format_mismatch_rejected`, `scanned_pdf_reports_no_text`, `encrypted_pdf_reports_unsupported`, `zip_expansion_limit`, `xml_external_relationship_ignored`, `invalid_utf8_rejected`, `cancelled_import_not_published`, and `shared_document_survives_detach`.
-- [ ] Assert every exact file/text/page/decompression limit from the design. Use a deliberately stalled test child to assert timeout/cancellation kills and reaps it and leaves no published attachment. Run and verify failure first.
-- [ ] Select and pin a Rust PDF extractor and `quick-xml` plus the existing ZIP implementation after Windows, Rust compatibility, and license checks. Extract actual PDF pages and DOCX paragraphs; do not use a whole-file PDF string with invented page numbers.
-- [ ] Implement the early child mode before Tauri single-instance/plugin initialization. Parent validates and copies inputs, applies the hidden-process/512 MiB Job Object boundary, bounds IPC output to 2 MiB, and terminates the child after 10 seconds.
-- [ ] Add document metadata, blocks, and meeting-attachment relations. Publish all database rows only after extraction succeeds; queue indexing through Task 2. Removing a relation preserves content attached elsewhere; explicit document deletion invalidates its evidence and dependent turns.
-- [ ] Run targeted Rust/parser tests and native cancellation/limit smoke on the designated runner, Rust checks, and the safety scan; commit `feat: add local reference document ingestion`.
+- [x] Add public synthetic PDF/DOCX/TXT/Markdown fixtures and tests `format_mismatch_rejected`, `scanned_pdf_reports_no_text`, `encrypted_pdf_reports_unsupported`, `zip_expansion_limit`, `xml_external_relationship_ignored`, `invalid_utf8_rejected`, `cancelled_import_not_published`, and `shared_document_survives_detach`.
+- [x] Assert every exact file/text/page/decompression limit from the design. Use a deliberately stalled test child to assert timeout/cancellation kills and reaps it and leaves no published attachment. Run and verify failure first.
+- [x] Select and pin a Rust PDF extractor and `quick-xml` plus the existing ZIP implementation after Windows, Rust compatibility, and license checks. Extract actual PDF pages and DOCX paragraphs; do not use a whole-file PDF string with invented page numbers.
+- [x] Implement the early child mode before Tauri single-instance/plugin initialization. Parent validates and copies inputs, applies the hidden-process/512 MiB Job Object boundary, bounds IPC output to 2 MiB, and terminates the child after 10 seconds.
+- [x] Add document metadata, blocks, and meeting-attachment relations. Publish all database rows only after extraction succeeds; queue indexing through Task 2. Removing a relation preserves content attached elsewhere; explicit document deletion invalidates its evidence and dependent turns.
+- [x] Run targeted Rust/parser tests and native cancellation/limit smoke on the designated runner, Rust checks, and the safety scan; commit `feat: add local reference document ingestion`.
 
 ### Task 6 Document selection, evidence UI, and portable archives
 

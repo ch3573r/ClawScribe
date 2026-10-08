@@ -11,6 +11,8 @@ on:
       - 'frontend/src-tauri/src/audio/hardware_detector.rs'
       - 'frontend/src-tauri/src/summary/**'
       - '.github/workflows/release-readiness.yml'
+      - 'frontend/src-tauri/src/knowledge/documents/**'
+      - 'frontend/scripts/test-reference-documents.ps1'
   workflow_dispatch:
 
 permissions:
@@ -25,6 +27,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  documents:
+    name: Reference document parser and child-process contracts
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
+    timeout-minutes: 15
+    steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Document tests require the configured local machine.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Public repository safety check
+        run: node scripts/verify-public-repo-safety.mjs
+      - name: Test production document parser and bounded child
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+        run: ./frontend/scripts/test-reference-documents.ps1
   core:
     name: Production core regression tests
     if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}

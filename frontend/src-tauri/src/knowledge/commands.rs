@@ -1,7 +1,94 @@
 //! Native saved-meeting and library conversation boundary.
 use super::{answers, conversations, evidence, types::*, KnowledgeState};
 use crate::state::AppState;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
+
+fn document_root(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.join("reference-documents"))
+        .map_err(|_| "Reference document storage is unavailable".into())
+}
+#[tauri::command]
+pub async fn knowledge_import_document(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
+    request_id: String,
+    meeting_id: String,
+    path: String,
+) -> Result<super::documents::DocumentAttachment, String> {
+    let lease = runtime
+        .documents
+        .begin(&request_id)
+        .map_err(|e| e.to_string())?;
+    let cancel = lease.cancel.clone();
+    let preempt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission = super::scheduler::claim_snapshot(preempt.clone()).map_err(|e| e.to_string())?;
+    let attachment = super::documents::import::import_document(
+        state.db_manager.pool().clone(),
+        document_root(&app)?,
+        meeting_id,
+        path.into(),
+        cancel,
+        preempt,
+        (admission, lease),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    runtime.index_worker.wake();
+    Ok(attachment)
+}
+#[tauri::command]
+pub fn knowledge_cancel_document_import(runtime: State<'_, KnowledgeState>, request_id: String) {
+    runtime.documents.cancel(&request_id);
+}
+#[tauri::command]
+pub async fn knowledge_list_documents(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> Result<Vec<super::documents::DocumentAttachment>, String> {
+    super::documents::store::list(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn knowledge_get_document_blocks(
+    state: State<'_, AppState>,
+    meeting_id: String,
+    document_id: String,
+) -> Result<Vec<super::documents::DocumentBlock>, String> {
+    super::documents::store::blocks(state.db_manager.pool(), &meeting_id, &document_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn knowledge_remove_attachment(
+    state: State<'_, AppState>,
+    meeting_id: String,
+    document_id: String,
+) -> Result<(), String> {
+    super::documents::store::detach(state.db_manager.pool(), &meeting_id, &document_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn knowledge_delete_document(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+    document_id: String,
+) -> Result<(), String> {
+    let root = document_root(&app)?;
+    let name = super::documents::store::delete(state.db_manager.pool(), &meeting_id, &document_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let path = super::documents::original_path(&root, &name).map_err(|e| e.to_string())?;
+    match tokio::fs::remove_file(path).await {
+        Ok(())=>Ok(()), Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(()),
+        Err(_)=>Err("The document was deleted, but its original file could not be removed. Check storage permissions.".into()),
+    }
+}
 
 #[tauri::command]
 pub async fn knowledge_ask(
