@@ -17,6 +17,25 @@ pub enum DocumentFormat {
     Text,
     Markdown,
 }
+impl DocumentFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+            Self::Text => "txt",
+            Self::Markdown => "md",
+        }
+    }
+    pub fn from_extension(value: &str) -> Result<Self, DocumentError> {
+        match value.to_ascii_lowercase().as_str() {
+            "pdf" => Ok(Self::Pdf),
+            "docx" => Ok(Self::Docx),
+            "txt" => Ok(Self::Text),
+            "md" | "markdown" => Ok(Self::Markdown),
+            _ => Err(DocumentError::UnsupportedFormat),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DocumentBlock {
