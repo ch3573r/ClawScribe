@@ -1,4 +1,5 @@
 import React from 'react';
+import { Button } from '@/components/ui/button';
 import { Check, Lock, Download, CheckCircle2, BrainCircuit } from 'lucide-react';
 
 interface ProgressIndicatorProps {
@@ -29,36 +30,36 @@ export function ProgressIndicator({ current, total, onStepClick }: ProgressIndic
           return (
             <React.Fragment key={step}>
               {/* Step Circle */}
-              <button
+              <Button variant="ghost"
                 type="button"
                 aria-label={`Step ${step} of ${total}: ${['Welcome', 'Setup overview', 'Downloads', 'Permissions'][step - 1] ?? 'Setup'}`}
                 aria-current={isActive ? 'step' : undefined}
                 onClick={() => isClickable && onStepClick(step)}
                 disabled={!isClickable}
-                className={`relative flex items-center justify-center transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
+                className={`p-0 disabled:opacity-100 relative flex items-center justify-center transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
                   isCompleted
-                    ? 'w-7 h-7 bg-green-600 rounded-full'
+                    ? 'w-7 h-7 bg-success-foreground hover:bg-success-foreground rounded-full'
                     : isActive
-                      ? 'w-8 h-8 bg-primary rounded-full'
-                      : 'w-6 h-6 bg-secondary rounded-full'
-                } ${isClickable ? 'cursor-pointer hover:scale-110 hover:shadow-md' : 'cursor-default'}`}
+                      ? 'w-8 h-8 bg-primary hover:bg-primary rounded-full'
+                      : 'w-6 h-6 bg-secondary hover:bg-secondary rounded-full'
+                } ${isClickable ? 'cursor-pointer hover:scale-110 hover:shadow-md' : 'cursor-default'} ${!isActive && !isCompleted ? '[&_svg]:!size-3' : ''}`}
               >
                 {isCompleted ? (
-                  <Check className="w-4 h-4 text-white" />
+                  <Check className="w-4 h-4 text-success" />
                 ) : (
                   <StepIcon
                     className={`transition-all duration-300 ${
-                      isActive ? 'w-4 h-4 text-white' : 'w-3 h-3 text-muted-foreground'
+                      isActive ? 'w-4 h-4 text-primary-foreground' : 'w-3 h-3 text-muted-foreground'
                     }`}
                   />
                 )}
-              </button>
+              </Button>
 
               {/* Connector Line */}
               {index < visibleSteps.length - 1 && (
                 <div
                   className={`h-0.5 w-6 transition-all duration-300 ${
-                    isCompleted ? 'bg-green-600' : 'bg-secondary'
+                    isCompleted ? 'bg-success-foreground' : 'bg-secondary'
                   }`}
                 />
               )}

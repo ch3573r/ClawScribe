@@ -313,27 +313,27 @@
       "nativeControls": 0
     },
     "frontend/src/components/onboarding/shared/PermissionRow.tsx": {
-      "paletteColors": 12,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/onboarding/shared/ProgressIndicator.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/onboarding/shared/StatusIndicator.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/onboarding/steps/DownloadProgressStep.tsx": {
-      "paletteColors": 7,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/onboarding/steps/PermissionsStep.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
