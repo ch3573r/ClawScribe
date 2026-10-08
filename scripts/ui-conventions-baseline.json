@@ -268,9 +268,9 @@
       "nativeControls": 0
     },
     "frontend/src/components/Sidebar/index.tsx": {
-      "paletteColors": 34,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/SummaryTemplateSettings.tsx": {
       "paletteColors": 0,
