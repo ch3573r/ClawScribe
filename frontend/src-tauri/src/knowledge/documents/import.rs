@@ -184,10 +184,13 @@ where
     Fut: Future<Output = Result<ExtractedDocument, DocumentError>>,
 {
     check(&cancel, &preempt)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?)")
-        .bind(&meeting)
-        .fetch_one(&pool)
-        .await?;
+    let exists: bool = super::store::cancellable(
+        &cancel,
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?)")
+            .bind(&meeting)
+            .fetch_one(&pool),
+    )
+    .await?;
     if !exists {
         return Err(DocumentError::NotFound);
     }

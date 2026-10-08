@@ -42,51 +42,72 @@ pub async fn publish(
             return Err(DocumentError::Malformed);
         }
     }
-    let mut tx = pool.begin().await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?)")
-        .bind(meeting)
-        .fetch_one(&mut *tx)
-        .await?;
+    let mut tx = cancellable(cancel, pool.begin()).await?;
+    let exists: bool = cancellable(
+        cancel,
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?)")
+            .bind(meeting)
+            .fetch_one(&mut *tx),
+    )
+    .await?;
     if !exists {
         return Err(DocumentError::NotFound);
     }
-    let duplicate: Option<String> =
+    let duplicate: Option<String> = cancellable(
+        cancel,
         sqlx::query_scalar("SELECT id FROM knowledge_documents WHERE sha256=? AND format=?")
             .bind(hash)
             .bind(extracted.format.extension())
-            .fetch_optional(&mut *tx)
-            .await?;
+            .fetch_optional(&mut *tx),
+    )
+    .await?;
     let original_kept = duplicate.is_none();
     let document_id = duplicate.as_deref().unwrap_or(id);
     if original_kept {
         let source = format!("document:{id}");
-        sqlx::query("INSERT INTO knowledge_sources(id,kind) VALUES (?,'document')")
-            .bind(&source)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO knowledge_documents(id,source_id,display_name,format,file_size,sha256,storage_name) VALUES (?,?,?,?,?,?,?)")
+        cancellable(
+            cancel,
+            sqlx::query("INSERT INTO knowledge_sources(id,kind) VALUES (?,'document')")
+                .bind(&source)
+                .execute(&mut *tx),
+        )
+        .await?;
+        cancellable(cancel,sqlx::query("INSERT INTO knowledge_documents(id,source_id,display_name,format,file_size,sha256,storage_name) VALUES (?,?,?,?,?,?,?)")
             .bind(id).bind(&source).bind(name).bind(extracted.format.extension()).bind(size as i64)
-            .bind(hash).bind(format!("{id}.{}",extracted.format.extension())).execute(&mut *tx).await?;
+            .bind(hash).bind(format!("{id}.{}",extracted.format.extension())).execute(&mut *tx)).await?;
         for (index, block) in extracted.blocks.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(DocumentError::Cancelled);
             }
-            sqlx::query("INSERT INTO knowledge_document_blocks(id,document_id,ordinal,page,paragraph,text) VALUES (?,?,?,?,?,?)")
+            cancellable(cancel,sqlx::query("INSERT INTO knowledge_document_blocks(id,document_id,ordinal,page,paragraph,text) VALUES (?,?,?,?,?,?)")
                 .bind(format!("{id}:{}",index+1)).bind(id).bind(index as i64+1).bind(block.page)
-                .bind(block.paragraph).bind(&block.text).execute(&mut *tx).await?;
+                .bind(block.paragraph).bind(&block.text).execute(&mut *tx)).await?;
         }
     }
-    sqlx::query("INSERT INTO knowledge_document_attachments(meeting_id,document_id) VALUES (?,?) ON CONFLICT DO NOTHING")
-        .bind(meeting).bind(document_id).execute(&mut *tx).await?;
-    let attachment = read_attachment(&mut *tx, meeting, document_id).await?;
+    cancellable(cancel,sqlx::query("INSERT INTO knowledge_document_attachments(meeting_id,document_id) VALUES (?,?) ON CONFLICT DO NOTHING")
+        .bind(meeting).bind(document_id).execute(&mut *tx)).await?;
+    let attachment = cancellable(cancel, read_attachment(&mut *tx, meeting, document_id)).await?;
     if cancel.is_cancelled() {
         return Err(DocumentError::Cancelled);
     }
+    // Once commit starts, retain the original and wait for its result. Dropping a
+    // pending commit could publish rows after cleanup has removed their file.
     tx.commit().await?;
     Ok(Publication {
         attachment,
         original_kept,
     })
+}
+
+pub(crate) async fn cancellable<T, E: Into<DocumentError>>(
+    cancel: &CancellationToken,
+    work: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, DocumentError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(DocumentError::Cancelled),
+        result = work => result.map_err(Into::into),
+    }
 }
 pub async fn list(
     pool: &SqlitePool,
