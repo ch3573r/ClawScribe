@@ -6,6 +6,7 @@ import { AudioLevelMeter, CompactAudioLevelMeter } from './AudioLevelMeter';
 import { AudioBackendSelector } from './AudioBackendSelector';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
 import Analytics from '@/lib/analytics';
 import type { SelectedDevices } from '@/lib/audioDevicePreferences';
 
@@ -238,33 +239,35 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-medium text-foreground">Audio Devices</h4>
+        <h4 className="text-sm font-medium text-foreground">Audio devices</h4>
         <div className="flex items-center space-x-2">
-          <button
+          <Button
+            variant="ghost"
             onClick={toggleAudioLevelMonitoring}
             disabled={disabled || inputDevices.length === 0}
-            className={`h-8 px-3 inline-flex items-center gap-2 rounded-md text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
+            className={`whitespace-normal py-0 [&_svg]:size-3.5 h-8 px-3 inline-flex items-center gap-2 rounded-md text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
               isMonitoring
-                ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/60'
-                : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/60'
+                ? 'bg-[hsl(var(--theme-error-bg))] text-[hsl(var(--theme-error-fg))] hover:bg-[hsl(var(--theme-error-fg)/0.15)] hover:text-[hsl(var(--theme-error-fg))]'
+                : 'bg-[hsl(var(--theme-success-bg))] text-[hsl(var(--theme-success-fg))] hover:bg-[hsl(var(--theme-success-fg)/0.15)] hover:text-[hsl(var(--theme-success-fg))]'
             }`}
             title={inputDevices.length === 0 ? 'No microphones available to test' : isMonitoring ? 'Stop microphone test' : 'Test microphone levels'}
           >
             <Mic className="h-3.5 w-3.5" />
-            {isMonitoring ? 'Stop Test' : 'Test Mic'}
-          </button>
-          <button
+            {isMonitoring ? 'Stop test' : 'Test mic'}
+          </Button>
+          <Button
+            variant="ghost"
             onClick={handleRefresh}
             disabled={refreshing || disabled}
-            className="h-8 w-8 p-0 inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+            className="whitespace-normal gap-0 hover:text-foreground h-8 w-8 p-0 inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
           >
             <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
+          </Button>
         </div>
       </div>
 
       {error && (
-        <div className="p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md">
+        <div className="p-3 text-sm text-[hsl(var(--theme-error-fg))] bg-[hsl(var(--theme-error-bg))] border border-[hsl(var(--theme-error-fg)/0.25)] rounded-md">
           {error}
         </div>
       )}
@@ -284,10 +287,10 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
             disabled={disabled}
           >
             <SelectTrigger id="mic-selection" className="w-full">
-              <SelectValue placeholder="Select Microphone" />
+              <SelectValue placeholder="Select microphone" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="default">Default Microphone</SelectItem>
+              <SelectItem value="default">Default microphone</SelectItem>
               {inputDevices.map((device) => (
                 <SelectItem
                   key={device.name}
@@ -306,7 +309,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
           {showLevels && monitoredInputDevices.length > 0 && (
             <div className="space-y-2 pt-2 border-t border-border">
               <p className="text-xs text-muted-foreground font-medium">
-                {monitoredInputDevices.length === 1 ? 'Microphone Level:' : 'Microphone Levels:'}
+                {monitoredInputDevices.length === 1 ? 'Microphone level:' : 'Microphone levels:'}
               </p>
               {monitoredInputDevices.map((device) => {
                 const levelData = audioLevels.get(device.name);
@@ -345,7 +348,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
           <div className="flex items-center gap-2">
             <Speaker className="h-4 w-4 text-muted-foreground" />
             <Label htmlFor="system-selection" className="text-sm font-medium text-foreground">
-              System Audio
+              System audio
             </Label>
           </div>
 
@@ -355,10 +358,10 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
             disabled={disabled}
           >
             <SelectTrigger id="system-selection" className="w-full">
-              <SelectValue placeholder="Select System Audio" />
+              <SelectValue placeholder="Select system audio" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="default">Default System Audio</SelectItem>
+              <SelectItem value="default">Default system audio</SelectItem>
               {outputDevices.map((device) => (
                 <SelectItem
                   key={device.name}
@@ -386,12 +389,12 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
       {/* Info text */}
       <div className="text-xs text-muted-foreground space-y-1">
         <p>• <strong>Microphone:</strong> Records your voice and ambient sound</p>
-        <p>• <strong>System Audio:</strong> Records computer audio (music, calls, etc.)</p>
+        <p>• <strong>System audio:</strong> Records computer audio (music, calls, etc.)</p>
         {isMonitoring && (
-          <p>• <strong>Mic Levels:</strong> Green = good, Yellow = loud, Red = too loud</p>
+          <p>• <strong>Mic levels:</strong> Green = good, yellow = loud, red = too loud</p>
         )}
         {!isMonitoring && inputDevices.length > 0 && (
-          <p>• <strong>Tip:</strong> Click "Test Mic" to check if your microphone is working</p>
+          <p>• <strong>Tip:</strong> Click "Test mic" to check if your microphone is working</p>
         )}
       </div>
     </div>
