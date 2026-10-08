@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 
 interface Section {
@@ -17,6 +18,7 @@ interface Template { name: string; description: string; sections: Section[] }
 const emptyTemplate = (): Template => ({
   name: '', description: '', sections: [{ title: 'Summary', instruction: 'Summarize the discussion and agreed decisions.', format: 'paragraph' }],
 });
+const EMPTY_TEMPLATE_SELECTION = '__clawscribe-empty-template-selection__';
 const fieldClass = 'w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
 export function SummaryTemplateSettings() {
@@ -67,17 +69,23 @@ export function SummaryTemplateSettings() {
     <div><h3 className="text-lg font-semibold">Summary templates</h3>
       <p className="text-sm text-muted-foreground">Choose the default for new summaries, or adapt the sections and instructions to your meetings.</p></div>
     <label className="block space-y-1 text-sm font-medium">Default template
-      <select className={fieldClass} value={templates.defaultTemplate} disabled={busy || templates.isLoading || dirty} onChange={e => void setDefault(e.target.value)}>
-        {!templates.defaultTemplate && <option value="">Loading templates…</option>}
-        {templates.availableTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-      </select>
+      <Select value={templates.defaultTemplate || EMPTY_TEMPLATE_SELECTION} disabled={busy || templates.isLoading || dirty} onValueChange={value => void setDefault(value === EMPTY_TEMPLATE_SELECTION ? '' : value)}>
+        <SelectTrigger className={`${fieldClass} h-auto`}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {!templates.defaultTemplate && <SelectItem value={EMPTY_TEMPLATE_SELECTION}>Loading templates…</SelectItem>}
+          {templates.availableTemplates.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </label>
     <div className="flex flex-wrap items-end gap-2">
       <label className="min-w-0 flex-1 space-y-1 text-sm font-medium">Edit a template
-        <select className={fieldClass} value={editingId} disabled={busy || dirty || templates.isLoading} onChange={e => e.target.value && void open(e.target.value)}>
-          <option value="">Choose a template</option>
-          {templates.availableTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
+        <Select value={editingId || EMPTY_TEMPLATE_SELECTION} disabled={busy || dirty || templates.isLoading} onValueChange={value => { const id = value === EMPTY_TEMPLATE_SELECTION ? '' : value; if (id) void open(id); }}>
+          <SelectTrigger className={`${fieldClass} h-auto`}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value={EMPTY_TEMPLATE_SELECTION}>Choose a template</SelectItem>
+            {templates.availableTemplates.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
       </label>
       <Button variant="outline" disabled={busy || dirty} onClick={() => { loadVersion.current++; setEditingId(''); setDraft(emptyTemplate()); setDirty(true); setError(''); }}><Plus className="mr-2 h-4 w-4" />New template</Button>
     </div>
@@ -90,7 +98,7 @@ export function SummaryTemplateSettings() {
           <Button variant="ghost" size="icon" aria-label={`Remove section ${index + 1}`} disabled={draft.sections.length === 1} onClick={() => update({ ...draft, sections: draft.sections.filter((_, i) => i !== index) })}><Trash2 className="h-4 w-4" /></Button></div>
         <label className="block space-y-1 text-sm">Heading<Input maxLength={200} value={section.title} onChange={e => updateSection(index, { title: e.target.value })} /></label>
         <label className="block space-y-1 text-sm">Instructions<Textarea rows={3} maxLength={16000} value={section.instruction} onChange={e => updateSection(index, { instruction: e.target.value })} /></label>
-        <label className="block space-y-1 text-sm">Format<select className={fieldClass} value={section.format} onChange={e => updateSection(index, { format: e.target.value })}><option value="paragraph">Paragraph</option><option value="list">List</option><option value="string">Short text</option></select></label>
+        <label className="block space-y-1 text-sm">Format<Select value={section.format} disabled={busy} onValueChange={value => updateSection(index, { format: value })}><SelectTrigger className={`${fieldClass} h-auto`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="paragraph">Paragraph</SelectItem><SelectItem value="list">List</SelectItem><SelectItem value="string">Short text</SelectItem></SelectContent></Select></label>
         <label className="block space-y-1 text-sm">Formatting example (optional)<Input value={section.item_format ?? section.example_item_format ?? ''} onChange={e => updateSection(index, { item_format: e.target.value, example_item_format: undefined })} /></label>
       </div>)}
       <Button variant="outline" disabled={draft.sections.length >= 30} onClick={() => update({ ...draft, sections: [...draft.sections, { title: '', instruction: '', format: 'list' }] })}><Plus className="mr-2 h-4 w-4" />Add section</Button>
