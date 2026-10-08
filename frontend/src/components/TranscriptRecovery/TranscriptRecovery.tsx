@@ -118,7 +118,7 @@ export function TranscriptRecovery({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl h-[80vh] flex flex-col p-0">
         <DialogHeader className="px-6 pt-6">
-          <DialogTitle className="text-2xl">Recover Interrupted Meetings</DialogTitle>
+          <DialogTitle className="text-2xl">Recover interrupted meetings</DialogTitle>
           <DialogDescription>
             We found {recoverableMeetings.length} meeting{recoverableMeetings.length !== 1 ? 's' : ''} that {recoverableMeetings.length !== 1 ? 'were' : 'was'} interrupted. Select a meeting to preview and recover it.
           </DialogDescription>
@@ -127,17 +127,17 @@ export function TranscriptRecovery({
         <div className="flex-1 flex gap-4 px-6 pb-6 overflow-hidden">
           {/* Meeting List */}
           <div className="w-1/3 flex flex-col">
-            <h3 className="text-sm font-medium mb-2">Interrupted Meetings</h3>
+            <h3 className="text-sm font-medium mb-2">Interrupted meetings</h3>
             <ScrollArea className="flex-1 border rounded-lg">
               <div className="p-2 space-y-2">
                 {recoverableMeetings.map((meeting) => (
-                  <button
+                  <Button variant="ghost"
                     key={meeting.meetingId}
                     onClick={() => handleMeetingSelect(meeting.meetingId)}
                     className={cn(
-                      'w-full text-left p-3 rounded-lg border transition-colors',
+                      'block h-auto font-normal text-base whitespace-normal hover:text-foreground w-full text-left p-3 rounded-lg border transition-colors',
                       selectedMeetingId === meeting.meetingId
-                        ? 'bg-primary/10 border-primary'
+                        ? 'bg-primary/10 hover:bg-primary/10 border-primary'
                         : 'hover:bg-muted border-transparent'
                     )}
                   >
@@ -145,25 +145,25 @@ export function TranscriptRecovery({
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-sm truncate">{meeting.title}</p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
-                          <Clock className="w-3 h-3" />
+                          <Clock className="!w-3 !h-3" />
                           {formatDistanceToNow(new Date(meeting.lastUpdated), { addSuffix: true })}
                         </p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
-                          <FileText className="w-3 h-3" />
+                          <FileText className="!w-3 !h-3" />
                           {meeting.transcriptCount} transcript{meeting.transcriptCount !== 1 ? 's' : ''}
                         </p>
                       </div>
                       {meeting.folderPath ? (
                         <span title="Audio available">
-                          <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
+                          <CheckCircle2 className="w-4 h-4 text-success-foreground flex-shrink-0" />
                         </span>
                       ) : (
                         <span title="No audio">
-                          <AlertCircle className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+                          <AlertCircle className="w-4 h-4 text-warning-foreground flex-shrink-0" />
                         </span>
                       )}
                     </div>
-                  </button>
+                  </Button>
                 ))}
               </div>
             </ScrollArea>
@@ -187,12 +187,12 @@ export function TranscriptRecovery({
                         {selectedMeeting.transcriptCount} transcripts
                       </span>
                       {selectedMeeting.folderPath ? (
-                        <span className="flex items-center gap-1 text-green-600">
+                        <span className="flex items-center gap-1 text-success-foreground">
                           <CheckCircle2 className="w-4 h-4" />
                           Audio available
                         </span>
                       ) : (
-                        <span className="flex items-center gap-1 text-yellow-600">
+                        <span className="flex items-center gap-1 text-warning-foreground">
                           <AlertCircle className="w-4 h-4" />
                           No audio
                         </span>

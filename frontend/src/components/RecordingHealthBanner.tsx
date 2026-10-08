@@ -26,7 +26,7 @@ export function RecordingHealthBanner() {
     };
   }, []);
   if (!warning) return null;
-  return <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
+  return <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-warning-border/40 bg-warning px-4 py-3 text-sm text-foreground">
     <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
     <p>{warning}</p>
   </div>;
