@@ -65,17 +65,17 @@ export function BluetoothPlaybackWarning({
 
   return (
     <Alert
-      className="mb-4 border-yellow-500 bg-yellow-50 text-yellow-900"
+      className="mb-4 border-[hsl(var(--theme-warning-fg))] bg-[hsl(var(--theme-warning-bg))] text-[hsl(var(--theme-warning-fg))]"
       role="alert"
       aria-live="polite"
     >
-      <Speaker className="h-4 w-4 text-yellow-600" />
+      <Speaker className="h-4 w-4 text-[hsl(var(--theme-warning-fg))]" />
       <div className="flex items-start justify-between w-full">
         <div className="flex-1">
-          <AlertTitle className="text-yellow-900 font-semibold">
-            Bluetooth Playback Detected
+          <AlertTitle className="text-[hsl(var(--theme-warning-fg))] font-semibold">
+            Bluetooth playback detected
           </AlertTitle>
-          <AlertDescription className="text-yellow-800 mt-1">
+          <AlertDescription className="text-[hsl(var(--theme-warning-fg))] mt-1">
             You're using <strong>{deviceName}</strong> for playback.
             Recordings may sound distorted or sped up through Bluetooth devices.
             For accurate review, please use <strong>computer speakers</strong> or{' '}
@@ -85,7 +85,7 @@ export function BluetoothPlaybackWarning({
               href="https://github.com/ch3573r/ClawScribe"
               onClick={event => { event.preventDefault(); void openExternal(event.currentTarget.href); }}
               rel="noopener noreferrer"
-              className="underline hover:text-yellow-900 font-medium mt-2 inline-block"
+              className="underline hover:text-[hsl(var(--theme-warning-fg))] font-medium mt-2 inline-block"
             >
               Learn why this happens →
             </a>
@@ -95,7 +95,7 @@ export function BluetoothPlaybackWarning({
           variant="ghost"
           size="icon"
           onClick={() => setIsDismissed(true)}
-          className="ml-4 h-6 w-6 text-yellow-700 hover:text-yellow-900 hover:bg-yellow-100"
+          className="ml-4 h-6 w-6 text-[hsl(var(--theme-warning-fg))] hover:text-[hsl(var(--theme-warning-fg))] hover:bg-[hsl(var(--theme-warning-bg)/0.8)]"
           aria-label="Dismiss warning"
         >
           <X className="h-4 w-4" />
