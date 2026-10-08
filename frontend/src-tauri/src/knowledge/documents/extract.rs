@@ -151,7 +151,7 @@ fn docx(bytes: &[u8], blocks: &mut Blocks) -> Result<(), DocumentError> {
             }
         }
         if xml {
-            reject_dtd(&captured)?;
+            validate_xml(&captured)?;
         }
         match name.as_str() {
             "word/document.xml" => document = Some(captured),
@@ -169,13 +169,42 @@ fn docx(bytes: &[u8], blocks: &mut Blocks) -> Result<(), DocumentError> {
     docx_paragraphs(&document.ok_or(DocumentError::FormatMismatch)?, blocks)
 }
 
-fn reject_dtd(bytes: &[u8]) -> Result<(), DocumentError> {
+fn validate_xml(bytes: &[u8]) -> Result<(), DocumentError> {
     let mut reader = quick_xml::Reader::from_reader(bytes);
+    let mut elements = Vec::new();
+    let mut roots = 0;
     loop {
         match reader.read_event().map_err(|_| DocumentError::Malformed)? {
             Event::DocType(_) => return Err(DocumentError::Malformed),
-            Event::Eof => return Ok(()),
+            Event::Start(tag) => {
+                if elements.is_empty() {
+                    roots += 1;
+                }
+                elements.push(tag.name().as_ref().to_vec());
+            }
+            Event::Empty(_) if elements.is_empty() => roots += 1,
+            Event::End(tag) => {
+                if elements.pop().as_deref() != Some(tag.name().as_ref()) {
+                    return Err(DocumentError::Malformed);
+                }
+            }
+            Event::Text(value) if elements.is_empty() => {
+                if !value.as_ref().iter().all(u8::is_ascii_whitespace) {
+                    return Err(DocumentError::Malformed);
+                }
+            }
+            Event::CData(_) if elements.is_empty() => return Err(DocumentError::Malformed),
+            Event::Eof => {
+                return if elements.is_empty() && roots == 1 {
+                    Ok(())
+                } else {
+                    Err(DocumentError::Malformed)
+                };
+            }
             _ => {}
+        }
+        if roots > 1 {
+            return Err(DocumentError::Malformed);
         }
     }
 }
@@ -185,52 +214,94 @@ fn docx_paragraphs(bytes: &[u8], blocks: &mut Blocks) -> Result<(), DocumentErro
     const STRICT: &[u8] = b"http://purl.oclc.org/ooxml/wordprocessingml/main";
     let mut reader = NsReader::from_reader(bytes);
     let mut ordinal = 0u32;
-    let mut in_paragraph = false;
-    let mut in_text = false;
-    let mut text = String::new();
+    struct Paragraph {
+        ordinal: u32,
+        in_text: bool,
+        text: String,
+    }
+    let mut paragraphs: Vec<Paragraph> = Vec::new();
+    let mut document_root = false;
     loop {
         let (namespace, event) = reader
             .read_resolved_event()
             .map_err(|_| DocumentError::Malformed)?;
         let word = matches!(namespace, ResolveResult::Bound(ns) if ns.as_ref() == WORD || ns.as_ref() == STRICT);
         match event {
+            Event::Start(ref tag) if !document_root => {
+                if !word || tag.local_name().as_ref() != b"document" {
+                    return Err(DocumentError::Malformed);
+                }
+                document_root = true;
+            }
+            Event::Empty(ref tag) if !document_root => {
+                if !word || tag.local_name().as_ref() != b"document" {
+                    return Err(DocumentError::Malformed);
+                }
+                document_root = true;
+            }
             Event::Start(ref tag) if word => match tag.local_name().as_ref() {
                 b"p" => {
-                    if in_paragraph {
-                        return Err(DocumentError::Malformed);
-                    }
                     ordinal += 1;
-                    in_paragraph = true;
-                    text.clear();
+                    paragraphs.push(Paragraph {
+                        ordinal,
+                        in_text: false,
+                        text: String::new(),
+                    });
                 }
-                b"t" if in_paragraph => in_text = true,
+                b"t" => {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.in_text = true;
+                    }
+                }
                 _ => {}
             },
             Event::Empty(ref tag) if word => match tag.local_name().as_ref() {
                 b"p" => ordinal += 1,
-                b"tab" if in_paragraph => text.push('\t'),
-                b"br" | b"cr" if in_paragraph => text.push('\n'),
+                b"tab" | b"br" | b"cr" => {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.text.push(if tag.local_name().as_ref() == b"tab" {
+                            '\t'
+                        } else {
+                            '\n'
+                        });
+                    }
+                }
                 _ => {}
             },
-            Event::Text(ref value) if in_text => {
-                text.push_str(&value.unescape().map_err(|_| DocumentError::Malformed)?);
-                if text.len() > TEXT_BYTES {
-                    return Err(DocumentError::TextLimit);
+            Event::Text(ref value) => {
+                if let Some(paragraph) = paragraphs.last_mut().filter(|p| p.in_text) {
+                    paragraph
+                        .text
+                        .push_str(&value.unescape().map_err(|_| DocumentError::Malformed)?);
+                    if paragraph.text.len() > TEXT_BYTES {
+                        return Err(DocumentError::TextLimit);
+                    }
                 }
             }
             Event::End(ref tag) if word => match tag.local_name().as_ref() {
-                b"t" => in_text = false,
+                b"t" => {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.in_text = false;
+                    }
+                }
                 b"p" => {
-                    blocks.push(None, ordinal, &text)?;
-                    in_paragraph = false;
-                    in_text = false;
+                    let paragraph = paragraphs.pop().ok_or(DocumentError::Malformed)?;
+                    blocks.push(None, paragraph.ordinal, &paragraph.text)?;
                 }
                 _ => {}
             },
             Event::DocType(_) => return Err(DocumentError::Malformed),
-            Event::Eof => break,
+            Event::Eof => {
+                if !document_root || !paragraphs.is_empty() {
+                    return Err(DocumentError::Malformed);
+                }
+                break;
+            }
             _ => {}
         }
     }
+    // Paragraph numbers follow XML start order, including empty and nested
+    // paragraphs. A text box closes before its enclosing paragraph.
+    blocks.items.sort_by_key(|block| block.paragraph);
     Ok(())
 }
