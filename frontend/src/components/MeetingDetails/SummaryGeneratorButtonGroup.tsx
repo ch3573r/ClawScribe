@@ -202,7 +202,7 @@ export function SummaryGeneratorButtonGroup({
       if (!models || models.length === 0) {
         // No models available, show message and open settings
         toast.error(
-          'No Ollama models found. Please download gemma2:2b from Model Settings.',
+          'No Ollama models found. Please download gemma2:2b from Model settings.',
           { duration: 5000 }
         );
         setSettingsDialogOpen(true);
@@ -275,7 +275,7 @@ export function SummaryGeneratorButtonGroup({
               ? 'Loading model configuration...'
               : isCheckingModels
                 ? 'Checking models...'
-                : hasSummary ? 'Regenerate AI Summary' : 'Generate AI Summary'
+                : hasSummary ? 'Regenerate AI summary' : 'Generate AI summary'
           }
         >
           {isCheckingModels || isModelConfigLoading ? (
@@ -286,7 +286,7 @@ export function SummaryGeneratorButtonGroup({
           ) : (
             <>
               <Sparkles className="2xl:mr-2" size={18} />
-              <span className="hidden 2xl:inline">{hasSummary ? 'Regenerate Summary' : 'Generate Summary'}</span>
+              <span className="hidden 2xl:inline">{hasSummary ? 'Regenerate summary' : 'Generate summary'}</span>
             </>
           )}
         </Button>
@@ -300,17 +300,17 @@ export function SummaryGeneratorButtonGroup({
           <Button
             variant="outline"
             size="sm"
-            title="Summary Settings"
+            title="Summary settings"
           >
             <Settings />
-            <span className="hidden 2xl:inline">AI Model</span>
+            <span className="hidden 2xl:inline">AI model</span>
           </Button>
         </DialogTrigger>
         <DialogContent
           aria-describedby={undefined}
         >
           <VisuallyHidden>
-            <DialogTitle>Model Settings</DialogTitle>
+            <DialogTitle>Model settings</DialogTitle>
           </VisuallyHidden>
           <ModelSettingsModal
             onSave={async (config) => {
@@ -348,7 +348,7 @@ export function SummaryGeneratorButtonGroup({
               >
                 <span>{template.name}</span>
                 {selectedTemplate === template.id && (
-                  <Check className="h-4 w-4 text-green-600" />
+                  <Check className="h-4 w-4 text-success-foreground" />
                 )}
               </DropdownMenuItem>
             ))}

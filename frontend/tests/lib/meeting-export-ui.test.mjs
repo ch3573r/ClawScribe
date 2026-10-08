@@ -24,6 +24,7 @@ async function setup({ connected = true, rest = false, restFailure = false, save
     '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
     '@/components/ui/input': names('Input'),
+    '@/components/ui/select': names('Select SelectContent SelectItem SelectTrigger SelectValue'),
     '@/components/ui/label': names('Label'),
     '@/components/ui/dropdown-menu': names('DropdownMenu DropdownMenuContent DropdownMenuItem DropdownMenuLabel DropdownMenuTrigger'),
     '@/components/ui/dialog': names('Dialog DialogContent DialogDescription DialogFooter DialogHeader DialogTitle'),
@@ -153,10 +154,14 @@ test('failed transcript reads prevent remote exports and leave the dialog open f
 });
 
 test('summary-only controls hide speakers and keep timestamps enabled without clearing choices', () => {
-  const { ExportContentOptions } = loadTsModule('src/components/MeetingDetails/ExportContentOptions.tsx', { 'react/jsx-runtime': { jsx, jsxs: jsx } });
+  const { ExportContentOptions } = loadTsModule('src/components/MeetingDetails/ExportContentOptions.tsx', {
+    'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/checkbox': names('Checkbox'),
+    '@/components/ui/select': names('Select SelectContent SelectItem SelectTrigger SelectValue'),
+  });
   for (const content of ['summary', 'transcript', 'both']) {
     const root = ExportContentOptions({ value: { content, speakers: true, timestamps: false }, onChange() {} });
-    const inputs = nodes(root).filter(node => node.type === 'input');
+    const inputs = nodes(root).filter(node => node.type === 'Checkbox');
     assert.equal(inputs.length, content === 'summary' ? 1 : 2);
     assert.ok(inputs.every(input => input.props.disabled === false));
     assert.equal(text(root).includes('Speaker labels'), content !== 'summary');

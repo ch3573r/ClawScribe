@@ -1,5 +1,6 @@
 "use client";
 
+import { Textarea } from '@/components/ui/textarea';
 import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
@@ -170,9 +171,9 @@ export function TranscriptPanel({
       {/* Custom prompt input at bottom of transcript section */}
       {!isRecording && convertedSegments.length > 0 && (
         <div className="border-t border-border p-2">
-          <textarea
+          <Textarea
             placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
-            className="min-h-[80px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+            className="min-h-[80px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm md:text-sm shadow-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
             disabled={contextLoading}
             aria-busy={contextLoading}
             value={customPrompt}

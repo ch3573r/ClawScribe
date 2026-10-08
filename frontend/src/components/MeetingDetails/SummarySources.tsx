@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 export interface ResolvedSummarySource {
   transcript_id: string; transcript_index: number; text: string; timestamp: number | null; stale: boolean;
@@ -59,12 +60,12 @@ export function SummarySources({ meetingId, revision, onReveal, onPlay, children
     {children}
     <div className="border-t border-border px-4 py-3 text-sm">
       {loadError ? <p role="status" className="text-muted-foreground">Source references could not be loaded. Reopen the meeting to retry.</p>
-        : sources.length ? <details><summary className="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Source passages ({sources.length})</summary>
+        : sources.length ? <Accordion type="single" collapsible><AccordionItem value="sources" className="group/details border-0"><AccordionTrigger className="cursor-pointer rounded py-0 font-medium hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Source passages ({sources.length})</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden">
           <p className="my-2 text-xs text-muted-foreground">Review these passages to check the summary’s claims. A source link does not guarantee the claim is correct.</p>
           <div className="flex flex-wrap gap-2">{sources.map((item, index) => <Button key={item.key} variant="outline" size="sm" onClick={() => void inspect(item.key)}>
             {item.timestamp === null ? `Source ${index + 1}` : new Date(item.timestamp * 1000).toISOString().slice(11, 19)}
           </Button>)}</div>
-        </details> : <p className="text-muted-foreground">No source links in this summary. Generate new notes to request links to supporting passages.</p>}
+        </AccordionContent></AccordionItem></Accordion> : <p className="text-muted-foreground">No source links in this summary. Generate new notes to request links to supporting passages.</p>}
     </div>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
@@ -72,7 +73,7 @@ export function SummarySources({ meetingId, revision, onReveal, onPlay, children
         {busy && <p role="status">Opening passage…</p>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {source && <>
-          {source.stale && <p role="alert" className="text-sm text-amber-700 dark:text-amber-400">This passage has changed since the summary was generated. The current transcript appears below. Regenerate notes to refresh the reference.</p>}
+          {source.stale && <p role="alert" className="text-sm text-warning-foreground">This passage has changed since the summary was generated. The current transcript appears below. Regenerate notes to refresh the reference.</p>}
           <blockquote className="whitespace-pre-wrap break-words border-l-2 border-primary pl-3 text-sm">{source.text}</blockquote>
           <div className="flex flex-wrap gap-2">
             <Button disabled={busy || source.stale || !onReveal} onClick={() => void action(false)}>Show in transcript</Button>

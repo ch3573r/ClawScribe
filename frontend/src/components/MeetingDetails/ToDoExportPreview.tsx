@@ -5,6 +5,8 @@ import { toast } from "sonner";
 import { CalendarClock, CheckSquare2, Loader2, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -160,16 +162,16 @@ export function ToDoExportPreview({
         ) : (
           <>
             <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
-              <button
+              <Button variant="ghost"
                 type="button"
-                className="font-medium hover:text-foreground"
+                className="h-auto gap-0 rounded-none p-0 text-xs font-medium hover:bg-transparent hover:text-foreground"
                 onClick={() => {
                   const next = !allSelected;
                   setRows((prev) => prev.map((r) => ({ ...r, include: next })));
                 }}
               >
                 {allSelected ? "Deselect all" : "Select all"}
-              </button>
+              </Button>
               <span>{selectedCount} of {rows.length} selected</span>
             </div>
 
@@ -184,20 +186,19 @@ export function ToDoExportPreview({
                   }`}
                 >
                   <div className="flex items-start gap-3">
-                    <input
-                      type="checkbox"
+                    <Checkbox
                       checked={row.include}
-                      onChange={(e) => update(index, { include: e.target.checked })}
+                      onCheckedChange={(checked) => update(index, { include: checked === true })}
                       aria-label={`Include "${row.title}"`}
-                      className="mt-1.5 h-4 w-4 shrink-0 accent-primary"
+                      className="mt-1.5 h-4 w-4 shrink-0"
                     />
                     <div className="min-w-0 flex-1 space-y-2">
-                      <input
+                      <Input
                         type="text"
                         value={row.title}
                         onChange={(e) => update(index, { title: e.target.value })}
                         disabled={!row.include}
-                        className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed"
+                        className="h-auto shadow-none md:text-sm disabled:opacity-100 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed"
                       />
                       <label className="block space-y-1.5">
                         <span className="text-xs font-medium text-muted-foreground">

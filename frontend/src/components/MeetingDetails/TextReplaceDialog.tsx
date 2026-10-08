@@ -1,4 +1,5 @@
 'use client';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useEffect, useRef, useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -37,7 +38,7 @@ export function TextReplaceDialog({ open, onOpenChange, title, preview, apply }:
       <fieldset disabled={busy} className="space-y-3">
         <label className="block space-y-1 text-sm">Find<Input autoFocus maxLength={1000} value={options.query} onChange={e => update({ query: e.target.value })} /></label>
         <label className="block space-y-1 text-sm">Replace with<Input maxLength={4000} value={options.replacement} onChange={e => update({ replacement: e.target.value })} /></label>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={options.matchCase} onChange={e => update({ matchCase: e.target.checked })} />Match case</label>
+        <label className="flex items-center gap-2 text-sm"><Checkbox className="h-[13px] w-[13px]" checked={options.matchCase} onCheckedChange={checked => update({ matchCase: checked === true })} />Match case</label>
       </fieldset>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {result && <div className="space-y-3"><p role="status" className="text-sm font-medium">{result.matches} replacements in {result.segments} passages</p>

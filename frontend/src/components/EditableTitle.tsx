@@ -1,6 +1,8 @@
 'use client';
 
 import { useRef, useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 
 interface EditableTitleProps {
   title: string;
@@ -37,7 +39,7 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
 
   return isEditing ? (
     <div className="flex-1">
-      <textarea
+      <Textarea
         ref={titleInputRef}
         value={title}
         onChange={(e) => onChange(e.target.value)}
@@ -49,7 +51,7 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
             onFinishEditing();
           }
         }}
-        className="text-2xl font-bold bg-muted border border-border focus:outline-none focus:ring-2 focus:ring-ring rounded px-3 py-1 w-full resize-none overflow-hidden"
+        className="inline-block min-h-0 shadow-none md:text-2xl focus-visible:ring-2 text-2xl font-bold bg-muted border border-border focus:outline-none focus:ring-2 focus:ring-ring rounded px-3 py-1 w-full resize-none overflow-hidden"
         style={{ minWidth: '300px', minHeight: '40px' }}
         autoFocus
         rows={1}
@@ -64,10 +66,11 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
         {title}
       </h1>
       <div className="flex space-x-1">
-        <button 
+        <Button variant="ghost"
           onClick={onStartEditing}
-          className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-muted rounded"
+          className="h-auto w-auto gap-0 font-normal text-base hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-muted rounded"
           title="Edit section title"
+          aria-label="Edit section title"
         >
           <svg 
             xmlns="http://www.w3.org/2000/svg" 
@@ -82,12 +85,13 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
           >
             <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
           </svg>
-        </button>
+        </Button>
         {onDelete && (
-          <button 
+          <Button variant="ghost"
             onClick={onDelete}
-            className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-muted rounded text-red-600"
+            className="h-auto w-auto gap-0 font-normal text-base hover:text-error-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-muted rounded text-error-foreground"
             title="Delete section"
+            aria-label="Delete section"
           >
             <svg 
               xmlns="http://www.w3.org/2000/svg" 
@@ -104,7 +108,7 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
               <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
               <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
             </svg>
-          </button>
+          </Button>
         )}
       </div>
     </div>

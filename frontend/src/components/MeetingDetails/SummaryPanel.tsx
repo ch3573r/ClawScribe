@@ -1,5 +1,6 @@
 "use client";
 
+import { Input } from '@/components/ui/input';
 import { Summary, SummaryResponse, Transcript } from '@/types';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { EmptyStateSummary } from '@/components/EmptyStateSummary';
@@ -387,7 +388,7 @@ export function SummaryPanel({
         <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
           <div className="min-w-0 flex-1 basis-64">
             {isEditingTitle ? (
-              <input
+              <Input
                 value={meetingTitle}
                 disabled={isSummaryLoading}
                 onChange={(e) => onTitleChange(e.target.value)}
@@ -396,18 +397,18 @@ export function SummaryPanel({
                   if (e.key === 'Enter') onFinishEditTitle();
                   if (e.key === 'Escape') onFinishEditTitle();
                 }}
-                className="w-full min-w-0 rounded-md border border-input bg-background px-2 py-1 text-sm font-semibold text-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+                className="h-auto shadow-none w-full min-w-0 rounded-md border border-input bg-background px-2 py-1 text-sm md:text-sm font-semibold text-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
                 autoFocus
               />
             ) : (
-              <button
+              <Button variant="ghost"
                 type="button"
                 onClick={onStartEditTitle}
-                className="block max-w-full truncate rounded px-1 text-left text-sm font-semibold text-foreground hover:bg-muted"
+                className="h-auto gap-0 py-0  hover:text-foreground block max-w-full truncate rounded px-1 text-left text-sm font-semibold text-foreground hover:bg-muted"
                 title="Edit meeting title"
               >
                 {meetingTitle}
-              </button>
+              </Button>
             )}
             <p className="mt-0.5 truncate px-1 text-xs text-muted-foreground">
               Summary document · {meetingDateLabel}
@@ -477,7 +478,7 @@ export function SummaryPanel({
       {isFindOpen && aiSummary && !isSummaryLoading && (
         <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
           <Search className="h-4 w-4 text-muted-foreground" />
-          <input
+          <Input
             ref={findInputRef}
             value={findQuery}
             onChange={(event) => {
@@ -496,7 +497,7 @@ export function SummaryPanel({
               }
             }}
             placeholder="Find in summary"
-            className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
+            className="shadow-none py-0 h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm md:text-sm text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
           />
           <span className="min-w-[4.5rem] text-right text-xs tabular-nums text-muted-foreground">
             {findQuery.trim()
@@ -591,10 +592,10 @@ export function SummaryPanel({
         <div className="flex-1 overflow-y-auto min-h-0">
           {summaryResponse && (
             <div className="fixed bottom-0 left-0 right-0 bg-card shadow-lg p-4 max-h-1/3 overflow-y-auto">
-              <h3 className="text-lg font-semibold mb-2">Meeting Summary</h3>
+              <h3 className="text-lg font-semibold mb-2">Meeting summary</h3>
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-background p-4 rounded-lg shadow-sm">
-                  <h4 className="font-medium mb-1">Key Points</h4>
+                  <h4 className="font-medium mb-1">Key points</h4>
                   <ul className="list-disc pl-4">
                     {summaryResponse.summary.key_points.blocks.map((block, i) => (
                       <li key={i} className="text-sm">{block.content}</li>
@@ -602,7 +603,7 @@ export function SummaryPanel({
                   </ul>
                 </div>
                 <div className="bg-background p-4 rounded-lg shadow-sm mt-4">
-                  <h4 className="font-medium mb-1">Action Items</h4>
+                  <h4 className="font-medium mb-1">Action items</h4>
                   <ul className="list-disc pl-4">
                     {summaryResponse.summary.action_items.blocks.map((block, i) => (
                       <li key={i} className="text-sm">{block.content}</li>
@@ -618,7 +619,7 @@ export function SummaryPanel({
                   </ul>
                 </div>
                 <div className="bg-background p-4 rounded-lg shadow-sm mt-4">
-                  <h4 className="font-medium mb-1">Main Topics</h4>
+                  <h4 className="font-medium mb-1">Main topics</h4>
                   <ul className="list-disc pl-4">
                     {summaryResponse.summary.main_topics.blocks.map((block, i) => (
                       <li key={i} className="text-sm">{block.content}</li>
@@ -628,14 +629,14 @@ export function SummaryPanel({
               </div>
               {summaryResponse.raw_summary ? (
                 <div className="mt-4">
-                  <h4 className="font-medium mb-1">Full Summary</h4>
+                  <h4 className="font-medium mb-1">Full summary</h4>
                   <p className="text-sm whitespace-pre-wrap">{summaryResponse.raw_summary}</p>
                 </div>
               ) : null}
             </div>
           )}
           <div ref={summarySearchRootRef} className="w-full bg-background/60 p-5">
-            <div className="mx-auto max-w-[72rem] rounded-xl bg-card p-4 text-foreground sm:p-8 shadow-sm ring-1 ring-black/10 dark:ring-white/10">
+            <div className="mx-auto max-w-[72rem] rounded-xl bg-card p-4 text-foreground sm:p-8 shadow-sm ring-1 ring-foreground/10">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
               <BlockNoteSummaryView
                 key={`${meeting.id}:${summaryRevision}`}
@@ -662,8 +663,8 @@ export function SummaryPanel({
             </div>
           </div>
           {summaryStatus !== 'idle' && (
-            <div className={`mt-4 p-4 rounded-lg ${summaryStatus === 'error' ? 'bg-red-100 text-red-700' :
-              summaryStatus === 'completed' ? 'bg-green-100 text-green-700' :
+            <div className={`mt-4 p-4 rounded-lg ${summaryStatus === 'error' ? 'bg-error text-error-foreground' :
+              summaryStatus === 'completed' ? 'bg-success text-success-foreground' :
                 'bg-secondary text-primary'
               }`}>
               <p className="text-sm font-medium">{getSummaryStatusMessage(summaryStatus)}</p>

@@ -365,7 +365,7 @@ export function RetranscribeDialog({
             {isCancelling ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                {isRetranscription ? 'Cancelling Retranscription...' : 'Cancelling Transcription...'}
+                {isRetranscription ? 'Cancelling retranscription...' : 'Cancelling transcription...'}
               </>
             ) : isProcessing ? (
               <>
@@ -374,18 +374,18 @@ export function RetranscribeDialog({
               </>
             ) : error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
-                {isRetranscription ? 'Retranscription Failed' : 'Transcription Failed'}
+                <AlertCircle className="h-5 w-5 text-destructive" />
+                {isRetranscription ? 'Retranscription failed' : 'Transcription failed'}
               </>
             ) : stats ? (
               <>
-                <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                {isRetranscription ? 'Retranscription Complete' : 'Transcription Complete'}
+                <CheckCircle2 className="h-5 w-5 text-success-foreground" />
+                {isRetranscription ? 'Retranscription complete' : 'Transcription complete'}
               </>
             ) : (
               <>
                 <RefreshCw className="h-5 w-5 text-primary" />
-                {isRetranscription ? 'Retranscribe Meeting' : 'Transcribe Meeting'}
+                {isRetranscription ? 'Retranscribe meeting' : 'Transcribe meeting'}
               </>
             )}
           </DialogTitle>
@@ -508,8 +508,8 @@ export function RetranscribeDialog({
           )}
 
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
+            <div className="bg-error border border-error-border/25 rounded-lg p-3">
+              <p className="text-sm text-error-foreground">{error}</p>
             </div>
           )}
 
@@ -579,7 +579,7 @@ export function RetranscribeDialog({
                 disabled={!meetingFolderPath}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                {isRetranscription ? 'Replace Transcript' : 'Start Transcription'}
+                {isRetranscription ? 'Replace transcript' : 'Start transcription'}
               </Button>
             </>
           )}

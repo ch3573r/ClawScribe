@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Summary, Block } from '@/types';
 import { Section } from './Section';
 import { EditableTitle } from '../EditableTitle';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { ExclamationTriangleIcon, CheckCircleIcon, ClipboardDocumentCheckIcon } from '@heroicons/react/24/outline';
 
 interface Props {
@@ -606,13 +608,13 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
   };
 
   const renderErrorState = () => (
-    <div className="w-full p-4 bg-red-50 border border-red-200 rounded-lg">
+    <div className="w-full p-4 bg-error border border-error-border/30 rounded-lg">
       <div className="flex items-center mb-2">
-        <ExclamationTriangleIcon className="h-5 w-5 text-red-500 mr-2" />
-        <h3 className="text-red-700 font-medium">Error Generating Summary</h3>
+        <ExclamationTriangleIcon className="h-5 w-5 text-error-foreground mr-2" />
+        <h3 className="text-error-foreground font-medium">Error generating summary</h3>
       </div>
-      <p className="text-red-600 text-sm">{error}</p>
-      <p className="text-red-500 text-xs mt-2">Please check your model configuration and API keys, or try again.</p>
+      <p className="text-error-foreground text-sm">{error}</p>
+      <p className="text-error-foreground text-xs mt-2">Please check your model configuration and API keys, or try again.</p>
     </div>
   );
 
@@ -622,7 +624,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
         <div className="animate-spin rounded-full h-5 w-5 border-2 border-primary border-t-transparent"></div>
         <div>
           <h3 className="text-primary font-medium">
-            {status === 'processing' ? 'Processing Transcript' : 'Generating Summary'}
+            {status === 'processing' ? 'Processing transcript' : 'Generating summary'}
           </h3>
           <p className="text-primary text-sm">
             {status === 'processing' 
@@ -660,9 +662,9 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
 
       
       {selectedBlocks.length > 1 && (
-        <textarea
+        <Textarea
           ref={hiddenInputRef}
-          className="sr-only"
+          className="inline-block sr-only w-px h-px min-h-0 p-0 border-0"
           readOnly
           value={getSelectedBlocksContent()}
           tabIndex={-1}
@@ -680,35 +682,35 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
           }}
           onClick={e => e.stopPropagation()}
         >
-          <button
-            className="w-full px-4 py-2 text-left hover:bg-muted flex items-center space-x-2"
+          <Button variant="ghost"
+            className="h-auto rounded-none justify-start gap-0 font-normal text-base whitespace-normal hover:text-foreground w-full px-4 py-2 text-left hover:bg-muted flex items-center space-x-2"
             onClick={handleCopyBlocks}
           >
             <span className="text-muted-foreground">📋</span>
             <span>Copy {selectedBlocks.length > 1 ? `${selectedBlocks.length} blocks` : 'block'}</span>
-          </button>
-          <button
-            className="w-full px-4 py-2 text-left hover:bg-muted text-red-600 flex items-center space-x-2"
+          </Button>
+          <Button variant="ghost"
+            className="h-auto rounded-none justify-start gap-0 font-normal text-base whitespace-normal hover:text-error-foreground w-full px-4 py-2 text-left hover:bg-muted text-error-foreground flex items-center space-x-2"
             onClick={handleDeleteBlocks}
           >
             <span>🗑️</span>
             <span>Delete {selectedBlocks.length > 1 ? `${selectedBlocks.length} blocks` : 'block'}</span>
-          </button>
+          </Button>
         </div>
       )}
 
       {/* <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-2">
           <span className="text-2xl">✨</span>
-          <h2 className="text-2xl font-semibold bg-gradient-to-r from-purple-600 to-blue-500 bg-clip-text text-transparent">
-            AI Enhanced Summary
+          <h2 className="text-2xl font-semibold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+            AI enhanced summary
           </h2>
         </div>
         <div className="flex items-center space-x-2">
-          <button
+          <Button variant="ghost"
             onClick={handleUndo}
             disabled={currentHistoryIndex === 0}
-            className="p-2 hover:bg-muted rounded disabled:opacity-50"
+            className="h-auto gap-0 font-normal text-base hover:text-foreground p-2 hover:bg-muted rounded disabled:opacity-50"
             title="Undo"
           >
             <svg
@@ -725,11 +727,11 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
               <path d="M3 7v6h6" />
               <path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13" />
             </svg>
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={handleRedo}
             disabled={currentHistoryIndex === history.length - 1}
-            className="p-2 hover:bg-muted rounded disabled:opacity-50"
+            className="h-auto gap-0 font-normal text-base hover:text-foreground p-2 hover:bg-muted rounded disabled:opacity-50"
             title="Redo"
           >
             <svg
@@ -746,10 +748,10 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
               <path d="M21 7v6h-6" />
               <path d="M3 17a9 9 0 019-9 9 9 0 016 2.3l3 2.7" />
             </svg>
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={handleAddSection}
-            className="p-2 hover:bg-muted rounded"
+            className="h-auto gap-0 font-normal text-base hover:text-foreground p-2 hover:bg-muted rounded"
             title="Add new section"
           >
             <svg
@@ -766,27 +768,27 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
               <path d="M12 5v14" />
               <path d="M5 12h14" />
             </svg>
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={() => {
               const markdown = convertToMarkdown();
               navigator.clipboard.writeText(markdown);
             }}
-            className="px-2 py-1 text-sm bg-muted hover:bg-secondary rounded-md flex items-center space-x-1"
+            className="h-auto gap-0 font-normal hover:text-foreground px-2 py-1 text-sm bg-muted hover:bg-secondary rounded-md flex items-center space-x-1"
           >
             <span>📋</span>
             <span>Copy</span>
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={onRegenerateSummary}
-            className="px-2 py-1 text-sm bg-muted hover:bg-secondary rounded-md flex items-center space-x-1"
-            title="Regenerate Summary"
+            className="h-auto gap-0 font-normal hover:text-foreground px-2 py-1 text-sm bg-muted hover:bg-secondary rounded-md flex items-center space-x-1"
+            title="Regenerate summary"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
             <span className="ml-1">Regenerate</span>
-          </button>
+          </Button>
         </div>
       </div> */}
 

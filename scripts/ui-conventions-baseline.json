@@ -8,19 +8,19 @@
       "nativeControls": 0
     },
     "frontend/src/app/meeting-details/page.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/AISummary/Block.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/AISummary/index.tsx": {
-      "paletteColors": 9,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/AudioBackendSelector.tsx": {
       "paletteColors": 0,
@@ -88,12 +88,12 @@
       "nativeControls": 0
     },
     "frontend/src/components/EditableTitle.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/EmptyStateSummary.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
@@ -145,7 +145,7 @@
     "frontend/src/components/MeetingDetails/ExportContentOptions.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 3
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/MeetingBookmarks.tsx": {
       "paletteColors": 0,
@@ -155,67 +155,67 @@
     "frontend/src/components/MeetingDetails/MeetingChat.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 7
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/MeetingExportButtons.tsx": {
-      "paletteColors": 4,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/PlannerExportPreview.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 2
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/RetranscribeDialog.tsx": {
-      "paletteColors": 5,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/SpeakerDiarizationDialog.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/SpeakerLaneTimeline.tsx": {
       "paletteColors": 0,
-      "hexColors": 7,
+      "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/SummaryGeneratorButtonGroup.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/SummaryPanel.tsx": {
-      "paletteColors": 6,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/SummarySources.tsx": {
-      "paletteColors": 2,
+      "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/TextReplaceDialog.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/ToDoExportPreview.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/TranscriptCorrections.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/TranscriptPanel.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/ModelDownloadProgress.tsx": {
       "paletteColors": 0,
