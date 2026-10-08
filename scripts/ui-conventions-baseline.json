@@ -40,7 +40,7 @@
     "frontend/src/components/BlockNoteEditor/BasicBlockNoteTest.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
-      "nativeControls": 1
+      "nativeControls": 0
     },
     "frontend/src/components/BluetoothPlaybackWarning.tsx": {
       "paletteColors": 10,
