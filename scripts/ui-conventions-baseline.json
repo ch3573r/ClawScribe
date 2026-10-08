@@ -123,7 +123,7 @@
       "nativeControls": 8
     },
     "frontend/src/components/KeyboardShortcutsSettings.tsx": {
-      "paletteColors": 1,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },

@@ -148,7 +148,7 @@ export function KeyboardShortcutsSettings() {
                 <p className="text-sm font-medium text-foreground">{label}</p>
                 <p className="text-xs text-muted-foreground">{description}</p>
                 {(isReserved || conflicted) && (
-                  <p className="mt-1 flex items-center gap-1 text-xs text-amber-500">
+                  <p className="mt-1 flex items-center gap-1 text-xs text-[hsl(var(--theme-warning-fg))]">
                     <AlertTriangle className="h-3.5 w-3.5" />
                     {conflicted
                       ? "In use by Windows or another app — not active."
