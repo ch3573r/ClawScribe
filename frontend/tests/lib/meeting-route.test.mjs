@@ -18,6 +18,7 @@ function createView({ fromRecording = false } = {}) {
     react: { ...harness.react, Suspense: 'Suspense' },
     'react/jsx-runtime': { jsx, jsxs: jsx },
     './page-content': { default: 'PageContent', __esModule: true },
+    '@/components/ui/button': { Button: 'button' },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => sidebar },
     'next/navigation': { useRouter: () => router, useSearchParams: () => ({ get: key => key === 'id' ? meetingId : fromRecording ? 'recording' : null }) },
     '@/lib/analytics': { default: { trackPageView() {} }, __esModule: true },

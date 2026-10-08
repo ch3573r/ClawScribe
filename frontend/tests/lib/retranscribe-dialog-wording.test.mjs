@@ -43,9 +43,9 @@ async function setup(hasTranscript, editStateFails = false) {
 test('first transcription offers creation without replacement or edit-state lookup', async () => {
   const view = await setup(false);
   const content = text(view.render());
-  assert.match(content, /Transcribe Meeting/);
+  assert.match(content, /Transcribe meeting/);
   assert.match(content, /Create a transcript from the saved audio/);
-  assert.match(content, /Start Transcription/);
+  assert.match(content, /Start transcription/);
   assert.doesNotMatch(content, /replace|corrections/i);
   assert.deepEqual(view.calls, []);
   view.hooks.unmount();
@@ -54,9 +54,9 @@ test('first transcription offers creation without replacement or edit-state look
 test('existing transcript keeps replacement wording and correction warnings', async () => {
   const view = await setup(true);
   const content = text(view.render());
-  assert.match(content, /Retranscribe Meeting/);
+  assert.match(content, /Retranscribe meeting/);
   assert.match(content, /Replace the current transcript using the saved audio/);
-  assert.match(content, /Replace Transcript/);
+  assert.match(content, /Replace transcript/);
   assert.match(content, /Retranscription replaces the current transcript\./);
   assert.match(content, /Your corrections will be replaced/);
   assert.deepEqual(view.calls, ['api_get_transcript_edit_state']);
@@ -84,14 +84,14 @@ for (const hasTranscript of [false, true]) {
     } });
     const name = hasTranscript ? 'Retranscription' : 'Transcription';
     assert.equal(view.messages[0], `${name} complete! 3 segments created.`);
-    assert.match(text(view.render()), new RegExp(`${name} Complete`));
+    assert.match(text(view.render()), new RegExp(`${name} complete`));
     view.hooks.unmount();
   });
 
   test(`${hasTranscript ? 'replacement' : 'first'} transcription uses the matching failure title`, async () => {
     const view = await setup(hasTranscript);
     await view.listeners.get('retranscription-error')({ payload: { meeting_id: 'synthetic-meeting', error: 'Synthetic failure' } });
-    assert.match(text(view.render()), new RegExp(`${hasTranscript ? 'Retranscription' : 'Transcription'} Failed`));
+    assert.match(text(view.render()), new RegExp(`${hasTranscript ? 'Retranscription' : 'Transcription'} failed`));
     view.hooks.unmount();
   });
 }

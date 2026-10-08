@@ -1,3 +1,5 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { MeetingExportOptions } from '@/lib/meetingExportContent';
 
 export function ExportContentOptions({ value, onChange, disabled = false }: {
@@ -7,21 +9,24 @@ export function ExportContentOptions({ value, onChange, disabled = false }: {
 }) {
   return <div className="space-y-4">
     <label className="grid gap-2 text-sm">Include
-      <select className="rounded-md border border-input bg-background p-2" value={value.content}
-        onChange={event => onChange({ ...value, content: event.target.value as MeetingExportOptions['content'] })} disabled={disabled}>
-        <option value="both">Summary and transcript</option>
-        <option value="summary">Summary only</option>
-        <option value="transcript">Transcript only</option>
-      </select>
+      <Select value={value.content}
+        onValueChange={content => onChange({ ...value, content: content as MeetingExportOptions['content'] })} disabled={disabled}>
+        <SelectTrigger className="h-auto rounded-md border border-input bg-background p-2 shadow-none"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="both">Summary and transcript</SelectItem>
+          <SelectItem value="summary">Summary only</SelectItem>
+          <SelectItem value="transcript">Transcript only</SelectItem>
+        </SelectContent>
+      </Select>
     </label>
     {value.content !== 'summary' && <label className="flex items-center gap-2 text-sm">
-      <input className="accent-[hsl(var(--primary))]" type="checkbox" checked={value.speakers}
-        disabled={disabled} onChange={event => onChange({ ...value, speakers: event.target.checked })} />
+      <Checkbox className="h-[13px] w-[13px]" checked={value.speakers}
+        disabled={disabled} onCheckedChange={checked => onChange({ ...value, speakers: checked === true })} />
       Speaker labels
     </label>}
     <label className="flex items-center gap-2 text-sm">
-      <input className="accent-[hsl(var(--primary))]" type="checkbox" checked={value.timestamps}
-        disabled={disabled} onChange={event => onChange({ ...value, timestamps: event.target.checked })} />
+      <Checkbox className="h-[13px] w-[13px]" checked={value.timestamps}
+        disabled={disabled} onCheckedChange={checked => onChange({ ...value, timestamps: checked === true })} />
       <span>Timestamps<span className="block text-xs text-muted-foreground">Source times in the summary and line times in the transcript</span></span>
     </label>
   </div>;

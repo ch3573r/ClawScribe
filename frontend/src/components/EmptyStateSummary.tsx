@@ -27,7 +27,7 @@ export function EmptyStateSummary({ onGenerate, hasModel, hasTranscript, isGener
     >
       <FileQuestion className="w-16 h-16 text-muted-foreground mb-4" />
       <h3 className="text-lg font-semibold text-foreground mb-2">
-        {hasTranscript ? 'No Summary Generated Yet' : 'No transcript yet'}
+        {hasTranscript ? 'No summary generated yet' : 'No transcript yet'}
       </h3>
       <p className="text-sm text-muted-foreground mb-6 max-w-md">
         {hasTranscript
@@ -45,7 +45,7 @@ export function EmptyStateSummary({ onGenerate, hasModel, hasTranscript, isGener
                 className="gap-2"
               >
                 <Sparkles className="w-4 h-4" />
-                {isGenerating ? 'Generating...' : 'Generate Summary'}
+                {isGenerating ? 'Generating...' : 'Generate summary'}
               </Button>
             </div>
           </TooltipTrigger>
@@ -58,7 +58,7 @@ export function EmptyStateSummary({ onGenerate, hasModel, hasTranscript, isGener
       </TooltipProvider>}
 
       {hasTranscript && !hasModel && (
-        <p className="text-xs text-amber-600 mt-3">
+        <p className="text-xs text-warning-foreground mt-3">
           Please select a model in Settings first
         </p>
       )}

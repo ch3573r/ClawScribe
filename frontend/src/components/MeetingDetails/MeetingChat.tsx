@@ -1,6 +1,10 @@
 "use client";
 import { useMemo, useState } from "react";
 import { MessageSquare } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { MultiSelect } from "@/components/ui/multi-select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import {
   Dialog,
@@ -62,12 +66,12 @@ export function MeetingChat({
         }}
       >
         <DialogTrigger asChild>
-          <button
+          <Button variant="ghost"
             aria-label="Chat with this meeting"
-            className="fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="gap-0 p-0 [&_svg]:size-5 fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <MessageSquare className="h-5 w-5" />
-          </button>
+          </Button>
         </DialogTrigger>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
           <DialogHeader>
@@ -79,20 +83,20 @@ export function MeetingChat({
           <fieldset className="space-y-3 rounded-lg border border-border p-3">
             <legend className="px-1 text-sm font-medium">Question scope</legend>
             <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
+              <Checkbox
+                className="h-[13px] w-[13px]"
                 checked={expanded}
-                onChange={(e) => setExpanded(e.target.checked)}
+                onCheckedChange={(checked) => setExpanded(checked === true)}
               />
               Include other saved meetings
             </label>
             {expanded && (
               <>
                 <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
+                  <Checkbox
+                    className="h-[13px] w-[13px]"
                     checked={all}
-                    onChange={(e) => setAll(e.target.checked)}
+                    onCheckedChange={(checked) => setAll(checked === true)}
                   />
                   Search all saved meetings
                 </label>
@@ -103,13 +107,12 @@ export function MeetingChat({
                         key={meeting.id}
                         className="flex items-start gap-2 text-sm"
                       >
-                        <input
-                          type="checkbox"
-                          className="mt-1"
+                        <Checkbox
+                          className="mt-1 h-[13px] w-[13px]"
                           checked={selected.includes(meeting.id)}
-                          onChange={(e) =>
+                          onCheckedChange={(checked) =>
                             setSelected((ids) =>
-                              e.target.checked
+                              checked === true
                                 ? [...ids, meeting.id]
                                 : ids.filter((id) => id !== meeting.id),
                             )
@@ -122,7 +125,7 @@ export function MeetingChat({
                 )}
                 <label className="block text-xs">
                   Projects (Ctrl or Command selects several)
-                  <select
+                  <MultiSelect
                     multiple
                     aria-label="Question project filters"
                     disabled={
@@ -147,34 +150,36 @@ export function MeetingChat({
                         {tag}
                       </option>
                     ))}
-                  </select>
+                  </MultiSelect>
                 </label>
                 <div className="flex flex-wrap items-center gap-3">
                   <label className="text-xs">
                     Match{" "}
-                    <select
+                    <Select
                       value={project.mode}
-                      className="rounded border border-input bg-background p-2"
-                      onChange={(e) =>
+                      onValueChange={(value) =>
                         setProject((current) => ({
                           ...current,
-                          mode: e.target.value as "any" | "all",
+                          mode: value as "any" | "all",
                         }))
                       }
                     >
-                      <option value="any">Any project</option>
-                      <option value="all">All projects</option>
-                    </select>
+                      <SelectTrigger className="inline-flex h-auto w-auto rounded border border-input bg-background p-2 text-xs shadow-none"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="any">Any project</SelectItem>
+                        <SelectItem value="all">All projects</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </label>
                   <label className="flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
+                    <Checkbox
+                      className="h-[13px] w-[13px]"
                       checked={project.untagged}
-                      onChange={(e) =>
+                      onCheckedChange={(checked) =>
                         setProject((current) => ({
                           ...current,
                           tags: [],
-                          untagged: e.target.checked,
+                          untagged: checked === true,
                         }))
                       }
                     />
@@ -193,17 +198,19 @@ export function MeetingChat({
             )}
             <label className="flex items-center gap-2 text-xs">
               Retrieval{" "}
-              <select
+              <Select
                 value={mode}
-                className="rounded border border-input bg-background p-2"
-                onChange={(e) => {
+                onValueChange={(value) => {
                   state.cancel();
-                  setMode(e.target.value as SearchMode);
+                  setMode(value as SearchMode);
                 }}
               >
-                <option value="keyword">Keyword</option>
-                <option value="hybrid">Semantic + keyword</option>
-              </select>
+                <SelectTrigger className="inline-flex h-auto w-auto rounded border border-input bg-background p-2 text-xs shadow-none"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="keyword">Keyword</SelectItem>
+                  <SelectItem value="hybrid">Semantic + keyword</SelectItem>
+                </SelectContent>
+              </Select>
             </label>
           </fieldset>
           {expanded && (

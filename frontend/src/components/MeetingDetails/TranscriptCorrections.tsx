@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { ReplaceOptions, ReplacePreview, TextReplaceDialog } from './TextReplaceDialog';
@@ -64,18 +65,18 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
         <Button size="sm" variant="ghost" disabled={busy || !state.can_undo} onClick={() => void change('api_undo_transcript_edit', {})}>Undo last correction</Button>
         {state.can_restore_previous && <Button size="sm" variant="outline" disabled={busy} onClick={() => void change('api_restore_previous_transcript', {})}>Restore previous transcript</Button>}</div>
       {state.has_edits && <p className="text-muted-foreground">Transcript corrected. Regenerate notes to include the changes.</p>}
-      {state.pending_file_sync && <p role="alert">Corrections are saved in ClawScribe. The recording-folder copy needs updating. <button className="underline" disabled={busy} onClick={async () => {
+      {state.pending_file_sync && <p role="alert">Corrections are saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
         setBusy(true); setError('');
         try { await invoke('api_sync_transcript_file', { meetingId }); await refresh(); }
         catch { setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
         finally { setBusy(false); }
-      }}>Retry file update</button></p>}
+      }}>Retry file update</Button></p>}
       {!editing && error && <p role="alert" className="text-destructive">{error}</p>}
     </div>
     <Dialog open={Boolean(editing)} onOpenChange={open => { if (!open && !busy) onClose(); }}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Correct transcript</DialogTitle><DialogDescription>Keep the spoken meaning. The audio and segment timestamps stay unchanged; undo restores the previous text.</DialogDescription></DialogHeader>
         <label className="space-y-2 text-sm">Transcript text<Textarea autoFocus rows={8} value={text} disabled={busy} onChange={e => setText(e.target.value)} /></label>
-        {editing?.original_text && <details className="text-sm"><summary className="cursor-pointer">Original recognition</summary><p className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{editing.original_text}</p></details>}
+        {editing?.original_text && <Accordion type="single" collapsible className="text-sm"><AccordionItem value="recognition" className="group/details border-0"><AccordionTrigger className="cursor-pointer rounded-none py-0 font-normal hover:no-underline">Original recognition</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden"><p className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{editing.original_text}</p></AccordionContent></AccordionItem></Accordion>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change('api_update_transcript_text', { transcriptId: editing.id, expectedText: editing.text, text })}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
       </DialogContent>
