@@ -60,7 +60,8 @@ pub struct DocumentAttachment {
     pub indexing_status: String,
 }
 
-#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, thiserror::Error, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum DocumentError {
     #[error("Choose a PDF, DOCX, TXT or Markdown file.")]
     UnsupportedFormat,
