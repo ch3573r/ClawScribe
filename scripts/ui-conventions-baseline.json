@@ -293,7 +293,7 @@
       "nativeControls": 1
     },
     "frontend/src/components/VirtualizedTranscriptView.tsx": {
-      "paletteColors": 3,
+      "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
