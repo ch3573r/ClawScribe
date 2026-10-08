@@ -3,6 +3,8 @@ pub mod answers;
 pub mod chunking;
 pub mod commands;
 pub mod conversations;
+#[cfg(test)]
+mod document_contract_tests;
 pub mod embedding;
 pub mod evidence;
 pub mod indexer;
@@ -11,8 +13,6 @@ pub mod retrieval;
 pub mod scheduler;
 pub mod store;
 pub mod types;
-#[cfg(test)]
-mod document_contract_tests;
 use std::sync::Arc;
 pub struct KnowledgeState {
     pub answers: Arc<answers::AnswerRegistry>,
