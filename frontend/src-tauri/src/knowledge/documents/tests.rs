@@ -39,6 +39,50 @@ fn docx_tables_keep_document_paragraph_order_and_empty_paragraph_anchors() {
 }
 
 #[test]
+fn docx_text_box_paragraphs_keep_independent_stable_anchors() {
+    let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Outer before. </w:t><w:drawing><w:txbxContent><w:p><w:r><w:t>Text box decision.</w:t></w:r></w:p><w:p/></w:txbxContent></w:drawing><w:t>Outer after.</w:t></w:r></w:p><w:p><w:r><w:t>Following paragraph.</w:t></w:r></w:p></w:body></w:document>"#;
+    let document = extract(DocumentFormat::Docx, &fixtures::docx(xml, &[])).unwrap();
+    let paragraphs: Vec<_> = document
+        .blocks
+        .iter()
+        .map(|b| (b.paragraph, b.text.as_str()))
+        .collect();
+    assert_eq!(
+        paragraphs,
+        vec![
+            (1, "Outer before. Outer after."),
+            (2, "Text box decision."),
+            (4, "Following paragraph.")
+        ]
+    );
+}
+
+#[test]
+fn truncated_docx_xml_rejects_preceding_completed_paragraphs() {
+    let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Completed decision.</w:t></w:r></w:p><w:p><w:r><w:t>Unfinished decision."#;
+    assert_eq!(
+        extract(DocumentFormat::Docx, &fixtures::docx(xml, &[])),
+        Err(DocumentError::Malformed)
+    );
+    let complete = fixtures::table_document();
+    for invalid in [
+        b"<Relationships><Relationship/>".as_slice(),
+        b"<Relationships/><Relationships/>".as_slice(),
+    ] {
+        assert_eq!(
+            extract(
+                DocumentFormat::Docx,
+                &fixtures::docx(
+                    &complete,
+                    &[("word/_rels/document.xml.rels", invalid.to_vec())]
+                )
+            ),
+            Err(DocumentError::Malformed)
+        );
+    }
+}
+
+#[test]
 fn format_mismatch_rejected() {
     assert_eq!(
         extract(DocumentFormat::Pdf, b"A plain reference"),

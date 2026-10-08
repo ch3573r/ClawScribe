@@ -434,6 +434,41 @@ mod tests {
             .is_empty());
     }
     #[tokio::test]
+    async fn truncated_docx_is_not_published_and_leaves_no_original() {
+        let pool = pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("truncated.docx");
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Completed decision.</w:t></w:r></w:p><w:p><w:r><w:t>Unfinished decision."#;
+        std::fs::write(&selected, super::super::fixtures::docx(xml, &[])).unwrap();
+        let root = temp.path().join("originals");
+        let result = import_using(
+            pool.clone(),
+            root.clone(),
+            "aster".into(),
+            selected,
+            CancellationToken::new(),
+            Arc::new(AtomicBool::new(false)),
+            (),
+            |path, format, _, _| async move {
+                super::super::extract::extract(format, &std::fs::read(path).unwrap())
+            },
+        )
+        .await;
+        assert_eq!(result, Err(DocumentError::Malformed));
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+        for table in [
+            "knowledge_documents",
+            "knowledge_document_blocks",
+            "knowledge_document_attachments",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+    #[tokio::test]
     async fn original_is_app_owned_and_hash_checked_before_publication() {
         let pool = pool().await;
         let temp = tempfile::tempdir().unwrap();
