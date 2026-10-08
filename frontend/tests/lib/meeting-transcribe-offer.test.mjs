@@ -27,6 +27,7 @@ function panel(overrides = {}) {
     './MeetingBookmarks': stubs(['MeetingBookmarks']),
     './TranscriptCorrections': stubs(['TranscriptCorrections']),
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/textarea': { Textarea: 'textarea' },
   });
   const props = {
     transcripts: [], customPrompt: '', isRecording: false,
@@ -95,6 +96,8 @@ for (const props of [
 function transcriptView(props = {}) {
   const hooks = createHookHarness();
   const { VirtualizedTranscriptView } = loadTsModule(component('VirtualizedTranscriptView'), {
+    './ui/button': { Button: 'button' },
+    './ui/input': { Input: 'input' },
     react: { ...hooks.react, memo: fn => fn, useReducer: () => [0, () => {}] },
     '@tanstack/react-virtual': { useVirtualizer: () => ({}) },
     '@/hooks/useAutoScroll': { useAutoScroll: () => ({ autoScroll: false, scrollToBottom() {} }) },
@@ -132,6 +135,7 @@ test('toolbar opens and closes the controlled transcription dialog', () => {
     '@tauri-apps/api/event': { listen: async () => () => {} },
     '@/lib/analytics': { trackButtonClick() {} },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/textarea': { Textarea: 'textarea' },
     '@/components/ui/button-group': stubs(['ButtonGroup']),
     '@/components/ui/dropdown-menu': {},
     './RetranscribeDialog': stubs(['RetranscribeDialog']),

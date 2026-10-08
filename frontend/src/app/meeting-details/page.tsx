@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { listen } from '@tauri-apps/api/event';
@@ -307,13 +308,14 @@ function MeetingDetailsContent() {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
-          <p className="text-red-500 mb-4">{error}</p>
-          <button
+          <p className="text-destructive mb-4">{error}</p>
+          <Button
+            variant="ghost"
             onClick={() => router.push('/')}
-            className="px-4 py-2 bg-primary text-white rounded hover:bg-primary"
+            className="h-auto gap-0 whitespace-normal text-base font-normal px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary hover:text-primary-foreground"
           >
-            Go Back
-          </button>
+            Go back
+          </Button>
         </div>
       </div>
     );
@@ -329,7 +331,7 @@ function MeetingDetailsContent() {
   }
 
   return <div className="flex h-full min-h-0 flex-col">
-    {recoveryMessage && <div role="alert" className="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
+    {recoveryMessage && <div role="alert" className="shrink-0 border-b border-[hsl(var(--theme-warning-fg)/0.4)] bg-[hsl(var(--theme-warning-bg))] px-4 py-3 text-sm text-foreground">
       <strong>Meeting needs review. </strong>{recoveryMessage} Automatic notes are paused.
     </div>}
     <div className="min-h-0 flex-1"><PageContent

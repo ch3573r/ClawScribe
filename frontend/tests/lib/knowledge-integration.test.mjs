@@ -51,7 +51,8 @@ function component(file, name, props, invoke) {
     "@/components/ui/checkbox": { Checkbox: "checkbox" },
     "@/components/ui/switch": { Switch: "switch" },
     "@/components/ui/progress": { Progress: "progress" },
-    "@/components/ui/select": {},
+    "@/components/ui/select": { Select: "select", SelectContent: "select-content", SelectItem: "select-item", SelectTrigger: "select-trigger", SelectValue: "select-value" },
+    "@/components/ui/multi-select": { MultiSelect: "select" },
     "@/components/ui/popover": { Popover: "popover", PopoverTrigger: "trigger", PopoverContent: "content" },
     "@/components/ui/dialog": {
       Dialog: "dialog",
