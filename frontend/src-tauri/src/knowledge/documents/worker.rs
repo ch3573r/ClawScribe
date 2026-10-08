@@ -342,6 +342,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[ignore = "Executed by the designated parser-worker harness with its separately built child"]
     async fn bounded_child_extracts_real_pdf_pages() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("reference.pdf");

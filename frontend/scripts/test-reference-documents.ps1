@@ -7,6 +7,7 @@ if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
 }
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../src-tauri/src/knowledge/documents')).Path.Replace('\', '/')
 $testRoot = Join-Path $env:RUNNER_TEMP "clawscribe-document-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+$env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_WORKSPACE '.clawscribe-reference-tests'
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../src-tauri/migrations') -Destination $testRoot -Recurse -Force
 $storeModule = ''
@@ -75,6 +76,6 @@ $workerBinary
 rustc --version
 if ($workerBinary) {
     cargo build --manifest-path (Join-Path $testRoot 'Cargo.toml') --bin reference-worker
-    $env:CLAWSCRIBE_DOCUMENT_TEST_WORKER = Join-Path $testRoot 'target/debug/reference-worker.exe'
+    $env:CLAWSCRIBE_DOCUMENT_TEST_WORKER = Join-Path $env:CARGO_TARGET_DIR 'debug/reference-worker.exe'
 }
-cargo test --manifest-path (Join-Path $testRoot 'Cargo.toml') --lib -- --test-threads=1
+cargo test --manifest-path (Join-Path $testRoot 'Cargo.toml') --lib -- --include-ignored --test-threads=1
