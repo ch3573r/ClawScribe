@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import {
   ArrowRight,
   AudioLines,
@@ -119,11 +120,11 @@ export function HomeDashboard({
 
   const appStatus = isRecording
     ? recordingState.isPaused
-      ? { label: "Paused", dot: "bg-amber-400", ring: "ring-amber-400/20" }
-      : { label: "Recording", dot: "bg-red-400", ring: "ring-red-400/20" }
+      ? { label: "Paused", dot: "bg-[hsl(var(--theme-warning-fg))]", ring: "ring-[hsl(var(--theme-warning-fg))]/20" }
+      : { label: "Recording", dot: "bg-[hsl(var(--theme-error-fg))]", ring: "ring-[hsl(var(--theme-error-fg))]/20" }
     : canRecord
-      ? { label: "Ready to record", dot: "bg-emerald-400", ring: "ring-emerald-400/20" }
-      : { label: "Microphone required", dot: "bg-amber-400", ring: "ring-amber-400/20" };
+      ? { label: "Ready to record", dot: "bg-[hsl(var(--theme-success-fg))]", ring: "ring-[hsl(var(--theme-success-fg))]/20" }
+      : { label: "Microphone required", dot: "bg-[hsl(var(--theme-warning-fg))]", ring: "ring-[hsl(var(--theme-warning-fg))]/20" };
 
   const signalSteps = [
     {
@@ -157,7 +158,7 @@ export function HomeDashboard({
       <div className="mx-auto flex min-h-full w-full max-w-[1680px] flex-col gap-5 px-5 py-6 md:px-8 md:py-8">
         <header className="grid gap-5 lg:grid-cols-[1fr_auto] lg:items-end">
           <div className="max-w-3xl">
-            <div className="mb-3 flex items-center gap-3 font-mono text-[11px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
+            <div className="mb-3 flex items-center gap-3 font-mono text-[11px] font-medium tracking-[0.2em] text-muted-foreground">
               <span className="h-px w-8 bg-primary" aria-hidden="true" />
               Capture workspace
             </div>
@@ -174,14 +175,15 @@ export function HomeDashboard({
               <span className={`h-2 w-2 rounded-full ring-4 ${appStatus.dot} ${appStatus.ring}`} />
               {appStatus.label}
             </div>
-            <button
+            <Button
+              variant="ghost"
               type="button"
               onClick={() => openImportDialog()}
-              className="inline-flex h-10 items-center gap-2 rounded-md border border-border bg-card px-3.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:border-primary/40 hover:bg-primary/10"
+              className="h-auto whitespace-normal inline-flex h-10 items-center gap-2 rounded-md border border-border bg-card px-3.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:border-primary/40 hover:bg-primary/10 hover:text-foreground"
             >
               <Upload className="h-4 w-4 text-primary" />
               Import media
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -193,7 +195,7 @@ export function HomeDashboard({
                 backgroundImage:
                   "linear-gradient(hsl(var(--border) / 0.22) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--border) / 0.22) 1px, transparent 1px)",
                 backgroundSize: "34px 34px",
-                maskImage: "linear-gradient(to bottom, black, transparent 86%)",
+                maskImage: "linear-gradient(to bottom, hsl(var(--foreground)), transparent 86%)",
               }}
               aria-hidden="true"
             />
@@ -202,14 +204,14 @@ export function HomeDashboard({
             <div className="relative flex h-full min-h-[390px] flex-col p-6 md:p-8">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">
+                  <div className="font-mono text-[11px] tracking-[0.18em] text-primary">
                     New capture
                   </div>
                   <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
                     Record this meeting
                   </h2>
                 </div>
-                <div className="hidden items-center gap-2 rounded-md border border-border bg-background/75 px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground backdrop-blur-sm sm:flex">
+                <div className="hidden items-center gap-2 rounded-md border border-border bg-background/75 px-3 py-2 font-mono text-[11px] tracking-wider text-muted-foreground backdrop-blur-sm sm:flex">
                   <Radio className="h-3.5 w-3.5 text-primary" />
                   Microphone + system audio
                 </div>
@@ -245,7 +247,7 @@ export function HomeDashboard({
                     />
                     </div>
                   ) : (
-                    <div className="max-w-sm rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-800 dark:text-amber-100">
+                    <div className="max-w-sm rounded-md border border-[hsl(var(--theme-warning-fg))]/30 bg-[hsl(var(--theme-warning-bg))] px-4 py-3 text-left text-sm text-[hsl(var(--theme-warning-fg))]">
                       Microphone access is required before recording.
                     </div>
                   )}
@@ -255,19 +257,20 @@ export function HomeDashboard({
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-2">
                   {isLocalTranscription ? (
-                    <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                    <ShieldCheck className="h-4 w-4 text-[hsl(var(--theme-success-fg))]" />
                   ) : (
                     <Radio className="h-4 w-4 text-primary" />
                   )}
                   {isLocalTranscription ? "Transcription stays on this device" : "Hosted transcription is selected"}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
                   type="button"
                   onClick={() => router.push("/settings?tab=recording")}
-                  className="inline-flex items-center gap-1.5 font-medium text-foreground transition-colors hover:text-primary"
+                  className="h-auto whitespace-normal p-0 text-xs hover:bg-transparent inline-flex items-center gap-1.5 font-medium text-foreground transition-colors hover:text-primary"
                 >
-                  Recording settings <ArrowRight className="h-3.5 w-3.5" />
-                </button>
+                  Recording settings <ArrowRight className="!h-3.5 !w-3.5" />
+                </Button>
               </div>
             </div>
           </section>
@@ -275,7 +278,7 @@ export function HomeDashboard({
           <aside className="rounded-lg border border-border bg-card p-6 shadow-sm">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                <div className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
                   Active configuration
                 </div>
                 <h2 className="mt-2 text-xl font-semibold tracking-tight text-foreground">
@@ -290,18 +293,19 @@ export function HomeDashboard({
 
             <div className="relative mt-6 space-y-3 before:absolute before:bottom-7 before:left-[1.15rem] before:top-7 before:w-px before:bg-border">
               {signalSteps.map((step) => (
-                <button
+                <Button
+                  variant="ghost"
                   key={step.number}
                   type="button"
                   onClick={step.onClick}
-                  className="group relative grid w-full grid-cols-[2.3rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-3.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/5"
+                  className="h-auto whitespace-normal font-normal group relative grid w-full grid-cols-[2.3rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-3.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground"
                 >
                   <span className="relative z-10 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card font-mono text-[10px] text-muted-foreground group-hover:border-primary/40 group-hover:text-primary">
                     {step.number}
                   </span>
                   <span className="min-w-0">
                     <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <step.icon className="h-3.5 w-3.5" />
+                      <step.icon className="!h-3.5 !w-3.5" />
                       {step.label}
                     </span>
                     <span className="mt-1 block truncate text-sm font-medium text-foreground" title={step.value}>
@@ -312,18 +316,19 @@ export function HomeDashboard({
                     </span>
                   </span>
                   <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
-                </button>
+                </Button>
               ))}
             </div>
 
-            <button
+            <Button
+              variant="ghost"
               type="button"
               onClick={() => router.push("/settings?tab=recording")}
-              className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-primary/40 hover:bg-primary/10"
+              className="h-auto whitespace-normal mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-primary/40 hover:bg-primary/10 hover:text-foreground"
             >
               <Settings2 className="h-4 w-4 text-primary" />
               Configure audio devices
-            </button>
+            </Button>
           </aside>
         </div>
 
@@ -333,7 +338,7 @@ export function HomeDashboard({
           <section className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
             <div className="flex items-end justify-between gap-4 border-b border-border px-6 py-5">
               <div>
-                <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                <div className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
                   Library
                 </div>
                 <h2 className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">
@@ -348,11 +353,12 @@ export function HomeDashboard({
             <div className="divide-y divide-border">
               {recentMeetings.length > 0 ? (
                 recentMeetings.map((meeting, index) => (
-                  <button
+                  <Button
+                    variant="ghost"
                     key={meeting.id}
                     type="button"
                     onClick={() => router.push(`/meeting-details?id=${meeting.id}`)}
-                    className="group grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-4 px-6 py-4 text-left transition-colors hover:bg-muted"
+                    className="h-auto whitespace-normal font-normal rounded-none group grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-4 px-6 py-4 text-left transition-colors hover:bg-muted hover:text-foreground"
                   >
                     <span className="font-mono text-[11px] text-muted-foreground">
                       {(index + 1).toString().padStart(2, "0")}
@@ -362,14 +368,14 @@ export function HomeDashboard({
                         {meeting.title}
                       </span>
                       <span className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <Clock3 className="h-3.5 w-3.5" />
+                        <Clock3 className="!h-3.5 !w-3.5" />
                         {formatMeetingDate(meeting.created_at ?? meeting.updated_at)}
                       </span>
                     </span>
                     <span className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors group-hover:border-border group-hover:bg-card group-hover:text-primary">
                       <ArrowRight className="h-4 w-4" />
                     </span>
-                  </button>
+                  </Button>
                 ))
               ) : (
                 <div className="flex flex-col items-center px-6 py-12 text-center">
@@ -386,7 +392,7 @@ export function HomeDashboard({
           </section>
 
           <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
-            <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            <div className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
               Workbench
             </div>
             <h2 className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">
@@ -417,11 +423,12 @@ export function HomeDashboard({
                   onClick: () => router.push("/settings?tab=summary"),
                 },
               ].map((item) => (
-                <button
+                <Button
+                  variant="ghost"
                   key={item.label}
                   type="button"
                   onClick={item.onClick}
-                  className="group flex w-full items-center gap-3 rounded-md border border-border bg-background px-3.5 py-3 text-left transition-colors hover:border-primary/40 hover:bg-primary/5"
+                  className="h-auto whitespace-normal font-normal group flex w-full items-center gap-3 rounded-md border border-border bg-background px-3.5 py-3 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground"
                 >
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                     <item.icon className="h-4 w-4" />
@@ -431,7 +438,7 @@ export function HomeDashboard({
                     <span className="mt-0.5 block truncate text-xs text-muted-foreground">{item.detail}</span>
                   </span>
                   <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary" />
-                </button>
+                </Button>
               ))}
             </div>
           </section>
