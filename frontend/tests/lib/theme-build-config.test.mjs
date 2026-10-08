@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 const require = createRequire(import.meta.url);
 const postcss = require('postcss');
@@ -14,6 +15,8 @@ const frontend = fileURLToPath(new URL('../../', import.meta.url));
 
 test('the canonical configs retain application fonts, sidebar colors, animations and CSS prefixing', async () => {
   assert.equal(path.resolve(resolveDefaultConfigPath()), path.join(frontend, 'tailwind.config.ts'));
+  const componentConfig = JSON.parse(await readFile(path.join(frontend, 'components.json'), 'utf8'));
+  assert.equal(componentConfig.tailwind.config, 'tailwind.config.ts');
   const config = loadConfig(path.join(frontend, 'tailwind.config.ts'));
   assert.equal(config.theme.extend.fontFamily.sans[0], 'var(--font-app-sans)');
   assert.equal(config.theme.extend.fontFamily.mono[0], 'var(--font-plex-mono)');
