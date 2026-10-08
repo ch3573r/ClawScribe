@@ -49,6 +49,16 @@ pub struct ExtractedDocument {
     pub format: DocumentFormat,
     pub blocks: Vec<DocumentBlock>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DocumentAttachment {
+    pub id: String,
+    pub display_name: String,
+    pub format: DocumentFormat,
+    pub file_size: u64,
+    pub sha256: String,
+    pub extraction_status: String,
+    pub indexing_status: String,
+}
 
 #[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum DocumentError {

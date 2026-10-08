@@ -8,6 +8,11 @@ if ([string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../src-tauri/src/knowledge/documents')).Path.Replace('\', '/')
 $testRoot = Join-Path $env:RUNNER_TEMP "clawscribe-document-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../src-tauri/migrations') -Destination $testRoot -Recurse -Force
+$storeModule = ''
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'store.rs')) {
+    $storeModule = "#[path = `"$sourceRoot/store.rs`"] pub mod store;"
+}
 $workerModule = ''
 $workerBinary = ''
 if (Test-Path -LiteralPath (Join-Path $sourceRoot 'worker.rs')) {
@@ -32,6 +37,7 @@ pub mod documents {
     pub use types::*;
     #[path = "$sourceRoot/extract.rs"] pub mod extract;
     $workerModule
+    $storeModule
     #[cfg(test)] #[path = "$sourceRoot/fixtures.rs"] pub mod fixtures;
     #[cfg(test)] #[path = "$sourceRoot/tests.rs"] mod tests;
 }
@@ -55,6 +61,8 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 tempfile = "3"
 windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+uuid = { version = "1", features = ["v4"] }
 $workerBinary
 "@ | Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Encoding utf8NoBOM
 # Shared production parser/worker modules, without the unrelated desktop/ML link.
