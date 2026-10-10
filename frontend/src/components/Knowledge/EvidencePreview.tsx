@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle } from '@/components/ui/dialog';
 import { createEvidenceIntent } from '@/lib/knowledge-navigation';
 import { knowledgeService } from '@/services/knowledgeService';
+import { documentAnchor } from '@/lib/knowledge-documents';
 import type { KnowledgeSearchState } from '@/hooks/useKnowledgeSearch';
 export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;onNavigate?:()=>void}) {
   const router=useRouter();const {setCurrentMeeting}=useSidebar();
@@ -25,20 +26,23 @@ export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;o
     }catch{if(current())void state.inspect(preview.reference,preview.metadata,preview.contextReference);}
   }
   const preview=state.preview;const resolved=preview?.resolved;const valid=resolved?.status==='current'&&!!resolved.navigation;
+  const locator=resolved?.passage?.evidence?.locator ?? preview?.reference.locator;
+  const document=locator?.kind==='document';
   return <Dialog open={!!preview} onOpenChange={open=>{if(!open)state.closePreview();}}>
     <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"><DialogHeader>
-      <DialogTitle>Source passage</DialogTitle><DialogDescription>Review the original evidence, then reveal the current transcript or play its saved recording.</DialogDescription>
+      <DialogTitle>{document?'Reference passage':'Source passage'}</DialogTitle><DialogDescription>{document?'Review the verified extracted text and its document anchor.':'Review the original evidence, then reveal the current transcript or play its saved recording.'}</DialogDescription>
     </DialogHeader>
     {preview&&<><h3 className="break-words font-semibold">{preview.metadata.title}</h3><p className="text-xs text-muted-foreground">Original source · {preview.metadata.date}{preview.metadata.speaker?` · ${preview.metadata.speaker}`:''}</p></>}
-    {(preview?.metadata.metadata_truncated||resolved?.passage?.metadata_truncated)&&<p className="text-xs text-muted-foreground">Source labels were shortened. Inspect the transcript for the complete meeting context.</p>}
+    {(preview?.metadata.metadata_truncated||resolved?.passage?.metadata_truncated)&&<p className="text-xs text-muted-foreground">Source labels were shortened. Inspect the source for the complete context.</p>}
+    {document&&<p className="text-sm font-medium">{documentAnchor(locator)}</p>}
     {state.previewBusy&&<p role="status">Resolving canonical source…</p>}
     {state.error&&<p role="alert" className="text-sm text-destructive">{state.error}</p>}
     {resolved&&<p role="status" className="text-sm text-muted-foreground">{resolved.status==='current'?'Current verified source.':resolved.status==='stale'?'This reference is historical or the source changed. Ask again to retrieve fresh evidence.':resolved.status==='missing'?'The source was deleted or is unavailable. Ask again using the remaining meetings.':'This source reference could not be verified. It cannot navigate.'}</p>}
     {resolved?.passage&&<><p className="text-xs text-muted-foreground">Current source · {resolved.passage.title} · {resolved.passage.date}</p><blockquote className="whitespace-pre-wrap break-words border-l-2 border-primary pl-3 text-sm">{resolved.passage.text}</blockquote></>}
-    <div className="flex flex-wrap gap-2"><Button disabled={!valid||state.previewBusy} onClick={()=>void navigate(false)}>Show in transcript</Button>
-      <Button variant="outline" disabled={!valid||state.previewBusy||resolved?.navigation?.start_seconds==null} onClick={()=>void navigate(true)}>Play from here</Button>
+    <div className="flex flex-wrap gap-2">{!document&&<><Button disabled={!valid||state.previewBusy} onClick={()=>void navigate(false)}>Show in transcript</Button>
+      <Button variant="outline" disabled={!valid||state.previewBusy||resolved?.navigation?.start_seconds==null} onClick={()=>void navigate(true)}>Play from here</Button></>}
       {preview&&<Button variant="ghost" disabled={state.previewBusy} onClick={()=>void state.inspect(preview.reference,preview.metadata,preview.contextReference)}>Retry</Button>}</div>
-    <p className="text-xs text-muted-foreground">Playback requires this meeting’s saved audio. Unknown audio offsets cannot play from a citation.</p>
+    {!document&&<p className="text-xs text-muted-foreground">Playback requires this meeting’s saved audio. Unknown audio offsets cannot play from a citation.</p>}
     </DialogContent>
   </Dialog>;
 }

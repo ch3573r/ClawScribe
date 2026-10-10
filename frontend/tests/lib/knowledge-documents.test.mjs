@@ -24,6 +24,16 @@ function select(state,id,enabled=true) {
   state.selectDocument(id,enabled);
 }
 
+test('empty library scope leaves references empty without reporting a loading failure',async()=>{
+  const scope={kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:[],tag_mode:'any',untagged:false,from:null,to:null}};
+  const app=view({scopeDocuments:async()=>{throw new Error('Native scope validation rejects an empty selection');}},{scope,owner:null});
+  await ready(app);
+  assert.deepEqual([...app.render().documents],[]);
+  assert.equal(app.render().documentsLoading,false);
+  assert.equal(app.render().documentsError,'');
+  app.unmount();
+});
+
 test('unselected_document_not_retrieved: search and answer carry only explicitly selected IDs',async()=>{
   const searches=[],asks=[];
   const app=view({search:async request=>{searches.push(request);return searchResult('search');},ask:async request=>{asks.push(request);}});
@@ -91,6 +101,25 @@ test('enabling library document sharing lazily creates one durable conversation 
 const jsx=(type,props)=>({type,props});
 const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
 const text=node=>typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(text).join(''):node?text(node.props?.children):'';
+
+for(const [provider,selectedDocumentIds] of [['codex',[]],['builtin-ai',['selected']]]) {
+  test(`${provider} questions without external reference context stay available during permission reads`,()=>{
+    const hooks=createHookHarness();
+    const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
+      react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
+      'lucide-react':{Info:'info',MoreHorizontal:'more'},
+      '@/services/knowledgeService':{knowledgeService:{}},
+      '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},
+      '@/components/ui/scroll-area':{ScrollArea:'scroll-area'},
+      '@/components/ui/tooltip':{},'@/components/ui/dropdown-menu':{},
+    });
+    const state={scope:meeting('one'),owner:{kind:'meeting',id:'one'},threads:[],messages:[],historyLoading:false,sending:false,creating:false,selectedDocumentIds,sharingEnabled:false,sharingLoading:true,ask:async()=>{}};
+    const render=()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider,model:'fixture'}));
+    nodes(render()).find(node=>node.type==='textarea').props.onChange({target:{value:'What was decided?'}});
+    assert.equal(nodes(render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);
+    hooks.unmount();
+  });
+}
 const documentRef={source_id:'document:reference',source_revision:1,chunk_id:'block',fingerprint:'fixture',locator:{kind:'document',document_id:'reference',page:7,paragraph:3,spans:[{transcript_id:'block',start_byte:0,end_byte:24}]}};
 test('document evidence opens the actual page and paragraph without transcript or playback controls',()=>{
   const {EvidencePreview}=loadTsModule('src/components/Knowledge/EvidencePreview.tsx',{

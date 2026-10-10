@@ -12,6 +12,7 @@ import type {
   ResolvedEvidence,
   SearchMode,
   SearchResponse,
+  ScopedDocument,
 } from "@/types/knowledge";
 
 const errorText = (error: unknown) =>
@@ -49,6 +50,22 @@ export function useKnowledgeSearch(
   const [error, setError] = useState("");
   const [eventError, setEventError] = useState("");
   const [libraryRevision, setLibraryRevision] = useState(0);
+  const [documentRevision, setDocumentRevision] = useState(0);
+  const [documentRows, setDocumentRows] = useState<{scope: string; rows: ScopedDocument[]}>({scope:'',rows:[]});
+  const [chosenDocuments, setChosenDocuments] = useState<string[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentsError, setDocumentsError] = useState('');
+  const [sharing, setSharing] = useState<{owner:string;enabled:boolean}>({owner:'',enabled:false});
+  const [sharingLoading, setSharingLoading] = useState(false);
+  const [sharingSaving, setSharingSaving] = useState(false);
+  const [sharingError, setSharingError] = useState('');
+  const sharingPending = useRef(false);
+  const sharingRead = useRef(0);
+  const documentScope = JSON.stringify({scope,libraryRevision});
+  const ownerIdentity = JSON.stringify(owner);
+  const documents = documentRows.scope === documentScope ? documentRows.rows : [];
+  const selectedDocumentIds = chosenDocuments.filter(id => documents.some(row => row.attachment.id === id));
+  const sharingEnabled = sharing.owner === ownerIdentity && sharing.enabled;
   const [creating, setCreating] = useState(false);
   const createPending = useRef(false);
   const adoptionError = useRef<{ ownerId: string; error: string } | null>(null);
@@ -65,11 +82,12 @@ export function useKnowledgeSearch(
     owner,
     libraryRevision,
     answerConfiguration,
+    selectedDocumentIds,
   });
   // Only automatic owner adoption may carry a failed first turn across identities.
   // Scope, provider, library revision, and ordinary thread changes discard it.
   if (adoptedRetry.current && adoptedRetry.current.identity !== identity) adoptedRetry.current = null;
-  controller.configure({ scope, owner, libraryRevision, answerConfiguration });
+  controller.configure({ scope, owner, libraryRevision, answerConfiguration, selectedDocumentIds });
   const [visibleFor, setVisibleFor] = useState(identity);
   const reset = () => {
     controller.invalidate();
@@ -148,6 +166,81 @@ export function useKnowledgeSearch(
       void subscription.then((unlisten) => unlisten()).catch(() => {});
     };
   }, [controller]);
+  // Scope reads have their own lifetime: changing a selected document must not
+  // cancel a still-needed list or consent read and leave its loading state stuck.
+  useEffect(() => {
+    let active = true;
+    setDocumentsLoading(true);
+    setDocumentsError('');
+    void knowledgeService.scopeDocuments(scope).then(rows => {
+      if (!active) return;
+      setDocumentRows({scope:documentScope,rows});
+      setChosenDocuments(ids => ids.filter(id => rows.some(row => row.attachment.id === id)));
+    }).catch(() => {
+      if (active) {
+        setDocumentRows({scope:documentScope,rows:[]});
+        setChosenDocuments([]);
+        setDocumentsError('Reference documents could not be loaded. Retry loading references.');
+      }
+    }).finally(() => { if (active) setDocumentsLoading(false); });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentScope, documentRevision]);
+  useEffect(() => {
+    let active = true;
+    const read = ++sharingRead.current;
+    setSharingError('');
+    setSharing({owner:ownerIdentity,enabled:false});
+    setSharingLoading(!!owner);
+    if (owner) void knowledgeService.documentSharing(owner).then(enabled => {
+      if (active && read === sharingRead.current) setSharing({owner:ownerIdentity,enabled});
+    }).catch(() => {
+      if (active && read === sharingRead.current) setSharingError('Reference sharing could not be checked. Retry before asking with references.');
+    }).finally(() => { if (active && read === sharingRead.current) setSharingLoading(false); });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownerIdentity]);
+  async function setDocumentSharing(enabled: boolean) {
+    if (sharingPending.current || createPending.current || controller.pendingRequest()) return;
+    if (!owner && (scope.kind !== 'library' || !scopeReady(scope))) return;
+    sharingPending.current = true;
+    sharingRead.current++;
+    setSharingLoading(false);
+    reset();
+    setSharingSaving(true);
+    setSharingError('');
+    const current = controller.ticket('document-sharing');
+    let requestOwner = owner;
+    let createdOwner: ConversationOwner | null = null;
+    try {
+      if (!requestOwner) {
+        createPending.current = true;
+        setCreating(true);
+        requestOwner = await knowledgeService.createConversation();
+        if (!current()) return;
+        createdOwner = requestOwner;
+      }
+      if (!current()) return;
+      await knowledgeService.setDocumentSharing(requestOwner, enabled);
+      if (!current()) return;
+      setSharing({owner:JSON.stringify(requestOwner),enabled});
+    } catch {
+      if (current()) setSharingError('Reference sharing could not be saved. Try again.');
+    } finally {
+      sharingPending.current = false;
+      setSharingSaving(false);
+      if (createdOwner) createPending.current = false;
+      // A failed create also releases the synchronous creation guard.
+      if (!owner) createPending.current = false;
+      if (current()) {
+        setCreating(false);
+        if (createdOwner) {
+          setThreads(rows => [createdOwner!, ...rows.filter(row => row.id !== createdOwner!.id)]);
+          setOwner(createdOwner);
+        }
+      }
+    }
+  }
   async function search(query: string, mode: SearchMode) {
     reset();
     setResponse(null);
@@ -168,7 +261,7 @@ export function useKnowledgeSearch(
             scope,
             query: query.trim(),
             mode,
-            document_ids: [],
+            document_ids: [...selectedDocumentIds],
           }),
         (value) => {
           setResponse(value);
@@ -202,7 +295,7 @@ export function useKnowledgeSearch(
   }
   async function ask(question: string, mode: SearchMode) {
     if (!question.trim() || historyLoading) return;
-    if (controller.pendingRequest() || createPending.current) return;
+    if (controller.pendingRequest() || createPending.current || sharingPending.current) return;
     if (!scopeReady(scope)) {
       setError(
         "Select one or more meetings, or explicitly choose all saved meetings. Check the date range.",
@@ -238,7 +331,7 @@ export function useKnowledgeSearch(
           await knowledgeService.ask({
             request_id,
             owner: requestOwner,
-            search: { scope, query: question.trim(), mode, document_ids: [] },
+            search: { scope, query: question.trim(), mode, document_ids: [...selectedDocumentIds] },
           });
           if (!current()) return null;
           const history = await knowledgeService.history(requestOwner);
@@ -267,7 +360,7 @@ export function useKnowledgeSearch(
           if (submissionError) {
             adoptionError.current = { ownerId: value.id, error: submissionError };
             adoptedRetry.current = {
-              identity: JSON.stringify({ scope, owner: value, libraryRevision, answerConfiguration }),
+              identity: JSON.stringify({ scope, owner: value, libraryRevision, answerConfiguration, selectedDocumentIds }),
               question: question.trim(),
               id: submittedId,
             };
@@ -365,6 +458,20 @@ export function useKnowledgeSearch(
   const visible = visibleFor === identity;
   return {
     scope,
+    documents,
+    selectedDocumentIds,
+    documentsLoading: documentRows.scope !== documentScope || documentsLoading,
+    documentsError,
+    sharingEnabled,
+    sharingLoading: sharingSaving || sharingLoading || (!!owner && sharing.owner !== ownerIdentity),
+    sharingError,
+    setDocumentSharing,
+    reloadDocuments: () => { reset(); setDocumentRevision(value => value + 1); },
+    selectDocument: (id: string, enabled: boolean) => {
+      if (!documents.some(row => row.attachment.id === id)) return;
+      reset();
+      setChosenDocuments(ids => enabled ? [...new Set([...ids,id])] : ids.filter(value => value !== id));
+    },
     owner,
     threads,
     creating,
