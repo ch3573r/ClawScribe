@@ -57,7 +57,7 @@ function createView(delaySubscriptions = false, snapshotOverride) {
   };
 }
 
-const recording = { is_recording: true, is_paused: false, is_active: true, recording_duration: 10, active_duration: 10, recording_mode: 'live' };
+const recording = { session_id: 'session-current', recording_generation: '2', is_recording: true, is_paused: false, is_active: true, recording_duration: 10, active_duration: 10, recording_mode: 'live' };
 
 test('listeners resolving after unmount are immediately removed and cannot start polling', async () => {
   const view = createView(true);
@@ -315,6 +315,39 @@ test('adjacent native generations beyond JavaScript integer precision still dist
     view.callbacks.Stopped({ session_id: 'session-b', recording_generation: '9007199254740993' });
     assert.deepEqual(observed, ['stopping'], 'the adjacent greater generation owns the genuine Stop');
     replacement.resolve(liveSnapshot('session-b', '9007199254740993')); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
+
+test('matching UUID alone cannot promote a start with a different canonical native generation', async () => {
+  const view = createView(false, () => Promise.resolve(liveSnapshot('session-b', '4')));
+  view.render(); await flush();
+  try {
+    view.render().setStatus('starting');
+    view.callbacks.Started('live', 'session-b', '3'); await flush();
+    assert.equal(view.render().status, 'starting'); assert.equal(view.render().isRecording, false);
+    assert.equal(view.intervals.size, 0, 'a mismatched producer pair cannot start active polling');
+  } finally { view.unmount(); }
+});
+
+test('started-event bursts coalesce canonical checks and current Stop clears queued promotion', async () => {
+  const check = deferred(); let checks = 0;
+  const view = createView(false, () => { checks++; return check.promise; });
+  const observed = []; view.render(); await flush();
+  try {
+    view.render().setStatus('starting');
+    view.render().subscribeLifecycle(status => observed.push(status));
+    for (let generation = 1; generation <= 32; generation++) {
+      view.callbacks.Started('live', `session-${generation}`, String(generation));
+      view.callbacks.Started('audio_only', `session-${generation}`, String(generation));
+    }
+    assert.equal(checks, 1, 'only one canonical invocation may remain outstanding during the burst');
+    view.callbacks.Stopped({ session_id: 'session-31', recording_generation: '31' });
+    assert.deepEqual(observed, [], 'the newer native producer owns lifecycle invalidation');
+    view.callbacks.Stopped({ session_id: 'session-32', recording_generation: '32' });
+    assert.deepEqual(observed, ['stopping']);
+    check.resolve(liveSnapshot('session-32', '32')); await flush();
+    assert.equal(checks, 1, 'Stop must abandon the coalesced candidate without another lookup');
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });

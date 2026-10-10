@@ -22,7 +22,7 @@ export interface SearchRequest {scope:KnowledgeScope;query:string;document_ids:s
 export interface SearchResponse {passages:Passage[];mode:SearchMode;index_status:IndexStatus}
 export interface AskRequest {request_id:string;owner:ConversationOwner;search:SearchRequest}
 export interface LiveSnapshot {
-  session_id: string; finalized_through_seconds: number;
+  session_id: string; recording_generation: string; finalized_through_seconds: number;
   segments: { sequence_id: number; text: string; start_seconds: number | null; end_seconds: number | null }[];
   transcription_incomplete: boolean; transcription_available: boolean;
 }

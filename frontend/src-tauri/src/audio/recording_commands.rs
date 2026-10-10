@@ -61,7 +61,8 @@ mod stop_tests {
         let _admission = crate::audio::inference::claim_job().unwrap();
         let runtime = crate::knowledge::KnowledgeState::default();
         let mut first_manager = RecordingManager::new();
-        let (first_start, first_sink) = prepare_live_recording(&runtime, &mut first_manager, true);
+        let (first_start, first_sink) =
+            prepare_live_recording(&runtime, &mut first_manager, true).unwrap();
         let first = first_start.session_id.clone();
         assert_eq!(first_manager.live_session_id(), Some(first.as_str()));
         let mut update = TranscriptUpdate {
@@ -88,7 +89,7 @@ mod stop_tests {
         );
         let mut second_manager = RecordingManager::new();
         let (second_start, second_sink) =
-            prepare_live_recording(&runtime, &mut second_manager, true);
+            prepare_live_recording(&runtime, &mut second_manager, true).unwrap();
         let second = second_start.commit();
         assert_ne!(first, second);
         assert!(uuid::Uuid::parse_str(&second).is_ok());
@@ -101,7 +102,10 @@ mod stop_tests {
             runtime.live.snapshot(&second).unwrap().segments[0].text,
             "Ja"
         );
-        assert_eq!(stop_live_assistance(&runtime), Some(second.clone()));
+        assert_eq!(
+            stop_live_assistance(&runtime).map(|identity| identity.session_id),
+            Some(second.clone())
+        );
         assert!(runtime.live.snapshot(&second).is_err());
     }
 
@@ -124,7 +128,8 @@ mod stop_tests {
         let mut previous = 0;
         for transcribes in [true, false, true] {
             let mut manager = RecordingManager::new();
-            let (startup, _sink) = prepare_live_recording(&runtime, &mut manager, transcribes);
+            let (startup, _sink) =
+                prepare_live_recording(&runtime, &mut manager, transcribes).unwrap();
             let id = startup.commit();
             let canonical = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
             let producer = serde_json::to_value(manager.live_snapshot().unwrap()).unwrap();
@@ -152,13 +157,15 @@ mod stop_tests {
         let _admission = crate::audio::inference::claim_job().unwrap();
         let runtime = crate::knowledge::KnowledgeState::default();
         let mut first_manager = RecordingManager::new();
-        let (first_start, _first_sink) = prepare_live_recording(&runtime, &mut first_manager, true);
+        let (first_start, _first_sink) =
+            prepare_live_recording(&runtime, &mut first_manager, true).unwrap();
         let first = first_start.commit();
         let first_wire = serde_json::to_value(runtime.live.snapshot(&first).unwrap()).unwrap();
         let stopped = stop_live_assistance(&runtime);
         assert!(runtime.live.snapshot(&first).is_err());
         let mut next_manager = RecordingManager::new();
-        let (next_start, _next_sink) = prepare_live_recording(&runtime, &mut next_manager, false);
+        let (next_start, _next_sink) =
+            prepare_live_recording(&runtime, &mut next_manager, false).unwrap();
         let next = next_start.commit();
         let next_wire = serde_json::to_value(runtime.live.snapshot(&next).unwrap()).unwrap();
         // Serialize the captured shutdown result only after the replacement
@@ -181,12 +188,12 @@ mod stop_tests {
         let runtime = crate::knowledge::KnowledgeState::default();
         let mut failed_manager = RecordingManager::new();
         let (failed_start, _failed_sink) =
-            prepare_live_recording(&runtime, &mut failed_manager, true);
+            prepare_live_recording(&runtime, &mut failed_manager, true).unwrap();
         let failed = failed_start.session_id.clone();
         let failed_wire = serde_json::to_value(runtime.live.snapshot(&failed).unwrap()).unwrap();
         let mut current_manager = RecordingManager::new();
         let (current_start, _current_sink) =
-            prepare_live_recording(&runtime, &mut current_manager, true);
+            prepare_live_recording(&runtime, &mut current_manager, true).unwrap();
         let current = current_start.commit();
         let before = serde_json::to_value(runtime.live.snapshot(&current).unwrap()).unwrap();
         drop(failed_start);
@@ -223,7 +230,7 @@ mod stop_tests {
         };
         let runtime = crate::knowledge::KnowledgeState::default();
         let mut manager = RecordingManager::new();
-        let (startup, _sink) = prepare_live_recording(&runtime, &mut manager, true);
+        let (startup, _sink) = prepare_live_recording(&runtime, &mut manager, true).unwrap();
         let id = startup.commit();
         let snapshot = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
         *RECORDING_MANAGER.lock().unwrap() = Some(manager);
@@ -340,17 +347,21 @@ fn prepare_live_recording(
     runtime: &crate::knowledge::KnowledgeState,
     manager: &mut RecordingManager,
     transcribes: bool,
-) -> (
-    crate::knowledge::live::LiveStartup,
-    super::recording_manager::LiveTranscriptSink,
-) {
-    let startup = runtime.live.prepare(transcribes);
+) -> Result<
+    (
+        crate::knowledge::live::LiveStartup,
+        super::recording_manager::LiveTranscriptSink,
+    ),
+    String,
+> {
+    let startup = runtime.live.prepare(transcribes)?;
     let sink = super::recording_manager::LiveTranscriptSink::new(
         runtime.live.clone(),
         startup.session_id.clone(),
+        startup.recording_generation,
     );
     manager.bind_live_session(sink.clone());
-    (startup, sink)
+    Ok((startup, sink))
 }
 pub(crate) fn live_snapshot() -> Result<crate::knowledge::live::LiveSnapshot, String> {
     if is_stopping() {
@@ -366,10 +377,12 @@ pub(crate) fn live_snapshot() -> Result<crate::knowledge::live::LiveSnapshot, St
         .live_snapshot()
 }
 /// Stop never waits for provider/configuration/index locks or assistance cleanup.
-pub(crate) fn stop_live_assistance(runtime: &crate::knowledge::KnowledgeState) -> Option<String> {
-    let id = runtime.live.current_session_id();
-    runtime.live.stop();
-    id
+pub(crate) fn stop_live_assistance(
+    runtime: &crate::knowledge::KnowledgeState,
+) -> Option<crate::knowledge::live::RecordingIdentity> {
+    // Capture the same producer's pair atomically before clearing its memory;
+    // delayed event emission must never consult a newer global identity.
+    runtime.live.stop()
 }
 
 fn store_recording_manager(manager: RecordingManager) {
@@ -659,7 +672,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         &app.state::<crate::knowledge::KnowledgeState>(),
         &mut manager,
         mode.transcribes(),
-    );
+    )?;
     let manager_timer = Instant::now();
     let transcription_receiver = manager
         .start_recording(
@@ -669,6 +682,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         )
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
+    let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     info!(
         "✅ Recording manager opened streams in {:?}",
@@ -720,6 +734,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         serde_json::json!({
             "message": "Recording started",
             "session_id": live_session_id,
+            "recording_generation": recording_generation,
             "recording_mode": mode,
             "devices": ["Default Microphone", "Default System Audio"],
             "workers": if mode.transcribes() { 1 } else { 0 }
@@ -881,12 +896,13 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         &app.state::<crate::knowledge::KnowledgeState>(),
         &mut manager,
         mode.transcribes(),
-    );
+    )?;
     let manager_timer = Instant::now();
     let transcription_receiver = manager
         .start_recording(mic_device, system_device, mode.saves_audio(auto_save))
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
+    let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     info!(
         "✅ Recording manager opened streams in {:?}",
@@ -938,6 +954,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         serde_json::json!({
             "message": "Recording started",
             "session_id": live_session_id,
+            "recording_generation": recording_generation,
             "recording_mode": mode,
             "devices": [
                 mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
@@ -979,7 +996,7 @@ pub async fn stop_recording<R: Runtime>(
         return Ok(false);
     }
     IS_STOPPING.store(true, Ordering::Release);
-    let stopped_live_session_id =
+    let stopped_live_identity =
         stop_live_assistance(&app.state::<crate::knowledge::KnowledgeState>());
     let _stop_state = StopState;
     crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
@@ -1385,7 +1402,8 @@ pub async fn stop_recording<R: Runtime>(
                 "Recording stopped - frontend will save after all transcripts received"
             },
             "folder_path": folder_path_str,
-            "session_id": stopped_live_session_id,
+            "session_id": stopped_live_identity.as_ref().map(|identity| &identity.session_id),
+            "recording_generation": stopped_live_identity.as_ref().map(|identity| identity.recording_generation),
             "meeting_name": meeting_name_str,
             "recording_mode": if transcribes { "live" } else { "audio_only" },
             "transcription_incomplete": transcription_incomplete,
@@ -1554,6 +1572,8 @@ pub async fn get_recording_state() -> serde_json::Value {
     if let Some(manager) = manager_guard.as_ref() {
         serde_json::json!({
             "is_recording": is_recording,
+            "session_id": manager.live_session_id(),
+            "recording_generation": manager.live_recording_generation(),
             "recording_mode": if LIVE_TRANSCRIPTION.load(Ordering::SeqCst) { "live" } else { "audio_only" },
             "is_paused": manager.is_paused(),
             "is_active": manager.is_active(),
@@ -1565,6 +1585,8 @@ pub async fn get_recording_state() -> serde_json::Value {
     } else {
         serde_json::json!({
             "is_recording": is_recording,
+            "session_id": null,
+            "recording_generation": null,
             "recording_mode": if LIVE_TRANSCRIPTION.load(Ordering::SeqCst) { "live" } else { "audio_only" },
             "is_paused": false,
             "is_active": false,

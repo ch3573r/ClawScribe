@@ -9,6 +9,32 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Native lifecycle order; decimal strings preserve all u64 bits in JavaScript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecordingGeneration(u64);
+impl serde::Serialize for RecordingGeneration {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+impl<'de> serde::Deserialize<'de> for RecordingGeneration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let decimal = <String as serde::Deserialize>::deserialize(deserializer)?;
+        let value = decimal
+            .parse::<u64>()
+            .map_err(|_| serde::de::Error::custom("Invalid recording generation"))?;
+        if value == 0 || decimal != value.to_string() {
+            return Err(serde::de::Error::custom("Invalid recording generation"));
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecordingIdentity {
+    pub session_id: String,
+    pub recording_generation: RecordingGeneration,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveEvidenceSegment {
     pub sequence_id: u64,
@@ -19,6 +45,7 @@ pub struct LiveEvidenceSegment {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveSnapshot {
     pub session_id: String,
+    pub recording_generation: RecordingGeneration,
     pub finalized_through_seconds: f64,
     pub segments: Vec<LiveEvidenceSegment>,
     pub transcription_incomplete: bool,
@@ -38,6 +65,9 @@ pub struct LiveState {
 #[derive(Default, Debug)]
 struct Inner {
     session: Option<Session>,
+    // The app owns one LiveState for its process lifetime. Stop and failed
+    // startup never reset this counter or retain a growing identity history.
+    last_generation: u64,
     sharing: bool,
     consent_revision: u64,
     consent_pending: bool,
@@ -47,6 +77,7 @@ struct Inner {
 #[derive(Debug)]
 struct Session {
     id: String,
+    generation: RecordingGeneration,
     transcribes: bool,
     finalized_through: f64,
     segments: BTreeMap<u64, LiveEvidenceSegment>,
@@ -72,6 +103,7 @@ pub struct LiveLease {
 }
 pub struct LiveStartup {
     pub session_id: String,
+    pub recording_generation: RecordingGeneration,
     state: Arc<LiveState>,
     committed: bool,
 }
@@ -105,16 +137,33 @@ impl Drop for LiveLease {
     }
 }
 impl LiveState {
-    pub fn prepare(self: &Arc<Self>, transcribes: bool) -> LiveStartup {
-        LiveStartup {
-            session_id: self.start(transcribes),
+    pub fn prepare(self: &Arc<Self>, transcribes: bool) -> Result<LiveStartup, String> {
+        let identity = self.allocate_session(transcribes)?;
+        Ok(LiveStartup {
+            session_id: identity.session_id,
+            recording_generation: identity.recording_generation,
             state: self.clone(),
             committed: false,
-        }
+        })
     }
-    pub fn start(&self, transcribes: bool) -> String {
+    #[cfg(test)]
+    pub fn start(&self, transcribes: bool) -> Result<String, String> {
+        self.allocate_session(transcribes)
+            .map(|identity| identity.session_id)
+    }
+    fn allocate_session(&self, transcribes: bool) -> Result<RecordingIdentity, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Live recording state unavailable")?;
+        // Fail before touching the current producer or its request on exhaustion.
+        let next = inner
+            .last_generation
+            .checked_add(1)
+            .ok_or("Recording generation exhausted; restart ClawScribe")?;
         let id = uuid::Uuid::new_v4().to_string();
-        let mut inner = self.inner.lock().unwrap();
+        let generation = RecordingGeneration(next);
+        inner.last_generation = next;
         inner.early_cancellations.clear();
         if let Some(session) = inner.session.take() {
             if let Some((_, token)) = session.request {
@@ -123,6 +172,7 @@ impl LiveState {
         }
         inner.session = Some(Session {
             id: id.clone(),
+            generation,
             transcribes,
             finalized_through: 0.,
             segments: BTreeMap::new(),
@@ -132,17 +182,25 @@ impl LiveState {
             request: None,
             history: VecDeque::new(),
         });
-        id
+        Ok(RecordingIdentity {
+            session_id: id,
+            recording_generation: generation,
+        })
     }
-    pub fn stop(&self) {
+    pub fn stop(&self) -> Option<RecordingIdentity> {
         if let Ok(mut inner) = self.inner.lock() {
             inner.early_cancellations.clear();
             if let Some(session) = inner.session.take() {
                 if let Some((_, token)) = session.request {
                     token.cancel();
                 }
+                return Some(RecordingIdentity {
+                    session_id: session.id,
+                    recording_generation: session.generation,
+                });
             }
         }
+        None
     }
     pub(crate) fn stop_session(&self, id: &str) {
         if let Ok(mut inner) = self.inner.lock() {
@@ -224,6 +282,7 @@ impl LiveState {
             .ok_or("This recording session has ended")?;
         Ok(LiveSnapshot {
             session_id: session.id.clone(),
+            recording_generation: session.generation,
             finalized_through_seconds: session.finalized_through,
             segments: session.segments.values().cloned().collect(),
             transcription_incomplete: session.incomplete,
@@ -883,6 +942,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exhausted_recording_generation_preserves_the_current_producer_and_request() {
+        let (state, id) = ready();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let lease = state.claim(&id, &request_id, "openai").unwrap();
+        let before = serde_json::to_value(state.snapshot(&id).unwrap()).unwrap();
+        state.inner.lock().unwrap().last_generation = u64::MAX;
+        let result = state.prepare(true);
+        assert!(matches!(result, Err(message) if message.contains("generation exhausted")));
+        assert_eq!(state.current_session_id(), Some(id.clone()));
+        assert_eq!(
+            serde_json::to_value(state.snapshot(&id).unwrap()).unwrap(),
+            before
+        );
+        assert!(
+            !lease.token.is_cancelled(),
+            "exhaustion must not retire the current producer"
+        );
+    }
+
     thread_local! {
         static COMPLETION_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             std::cell::RefCell::new(None);
@@ -951,14 +1030,15 @@ mod tests {
     async fn stale_pending_producer_cannot_enter_restored_recording() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let state = Arc::new(LiveState::default());
-        let old_id = state.start(true);
-        let id = state.start(true);
+        let old_id = state.start(true).unwrap();
+        let id = state.start(true).unwrap();
         let mut manager = crate::audio::RecordingManager::new();
         manager.bind_live_session(crate::audio::recording_manager::LiveTranscriptSink::new(
             state.clone(),
             id.clone(),
+            state.snapshot(&id).unwrap().recording_generation,
         ));
-        state.stop(); // Stop clears live memory before restoring the saver.
+        let _ = state.stop(); // Stop clears live memory before restoring the saver.
         let rows = crate::audio::recording_commands::test_queue_and_restore(
             manager,
             vec![
@@ -979,8 +1059,9 @@ mod tests {
         manager.bind_live_session(crate::audio::recording_manager::LiveTranscriptSink::new(
             state.clone(),
             id.clone(),
+            state.snapshot(&id).unwrap().recording_generation,
         ));
-        state.stop();
+        let _ = state.stop();
         let rows = crate::audio::recording_commands::test_queue_and_restore(
             manager,
             vec![
@@ -999,7 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn dispatched_live_budget_cannot_orphan_a_short_reply() {
         let state = Arc::new(LiveState::default());
-        let id = state.start(true);
+        let id = state.start(true).unwrap();
         let pool = enabled_pool(&state).await;
         let source_question = format!("Is this proposal approved {}?", "x".repeat(1950));
         assert!(source_question.len() < 2048);
@@ -1040,7 +1121,7 @@ mod tests {
     #[tokio::test]
     async fn dispatched_live_short_reply_preserves_source_question_metadata() {
         let state = Arc::new(LiveState::default());
-        let id = state.start(true);
+        let id = state.start(true).unwrap();
         let pool = enabled_pool(&state).await;
         state.ingest(&id, &update(1, 10., "Is the supplier approved?", false));
         state.ingest(&id, &update(2, 11., "Nein", false));
@@ -1089,7 +1170,7 @@ mod tests {
     }
     fn ready() -> (Arc<LiveState>, String) {
         let state = Arc::new(LiveState::default());
-        let id = state.start(true);
+        let id = state.start(true).unwrap();
         state.set_sharing(true);
         state.ingest(&id, &update(1, 7., "Ja", false));
         (state, id)
@@ -1175,20 +1256,20 @@ mod tests {
     fn failed_start_clears_live_state_without_clearing_remembered_consent() {
         let state = Arc::new(LiveState::default());
         state.set_sharing(true);
-        let startup = state.prepare(true);
+        let startup = state.prepare(true).unwrap();
         let id = startup.session_id.clone();
         assert!(state.snapshot(&id).is_ok());
         drop(startup);
         assert!(state.snapshot(&id).is_err());
         assert!(state.sharing());
-        let next = state.prepare(true).commit();
+        let next = state.prepare(true).unwrap().commit();
         assert_ne!(id, next);
         assert!(state.snapshot(&next).is_ok());
     }
     #[test]
     fn audio_only_has_no_live_context() {
         let state = Arc::new(LiveState::default());
-        let id = state.start(false);
+        let id = state.start(false).unwrap();
         state.set_sharing(true);
         state.ingest(&id, &update(1, 7., "Unrelated", false));
         assert!(state.snapshot(&id).unwrap().segments.is_empty());
@@ -1209,8 +1290,8 @@ mod tests {
     fn every_recording_has_a_fresh_uuid_and_rejects_old_ingestion() {
         let (state, first) = ready();
         assert_eq!(uuid::Uuid::parse_str(&first).unwrap().to_string(), first);
-        state.stop();
-        let second = state.start(true);
+        let _ = state.stop();
+        let second = state.start(true).unwrap();
         assert_ne!(first, second);
         state.ingest(&first, &update(9, 15., "Late old result", false));
         assert!(state.snapshot(&second).unwrap().segments.is_empty());
@@ -1235,7 +1316,7 @@ mod tests {
     #[test]
     fn live_sharing_is_independent_off_by_default_and_revocation_cancels() {
         let state = Arc::new(LiveState::default());
-        let id = state.start(true);
+        let id = state.start(true).unwrap();
         state.ingest(&id, &update(1, 7., "Ja", false));
         assert!(!state.sharing());
         assert!(state
@@ -1261,8 +1342,8 @@ mod tests {
             .unwrap();
         state.set_document_sharing(&id, false).unwrap();
         assert!(lease.token.is_cancelled());
-        state.stop();
-        let second = state.start(true);
+        let _ = state.stop();
+        let second = state.start(true).unwrap();
         assert!(state.sharing(), "Remembered live opt-in survives sessions");
         assert!(!state.document_sharing(&second).unwrap());
         assert!(state.set_document_sharing(&id, true).is_err());
@@ -1273,8 +1354,8 @@ mod tests {
         let lease = state
             .claim(&id, &uuid::Uuid::new_v4().to_string(), "openai")
             .unwrap();
-        state.stop();
-        let _second = state.start(true);
+        let _ = state.stop();
+        let _second = state.start(true).unwrap();
         assert!(lease.token.is_cancelled());
         assert!(state.validate(&lease, false).is_err());
     }
@@ -1328,7 +1409,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let before = std::time::Instant::now();
-        state.stop();
+        let _ = state.stop();
         assert!(before.elapsed() < Duration::from_millis(100));
         assert!(token.is_cancelled());
         assert!(tokio::time::timeout(Duration::from_millis(100), task)
@@ -1403,9 +1484,9 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "Live state must not create durable {table}");
         }
-        state.stop();
+        let _ = state.stop();
         assert!(state.history(&id).is_err());
-        let second = state.start(true);
+        let second = state.start(true).unwrap();
         assert!(state.history(&second).unwrap().is_empty());
     }
     #[tokio::test]
@@ -1417,7 +1498,7 @@ mod tests {
         let restarted = LiveState::default();
         assert!(load_sharing(&pool, &restarted).await.unwrap());
         assert!(restarted.sharing());
-        let id = restarted.start(true);
+        let id = restarted.start(true).unwrap();
         assert!(!restarted.document_sharing(&id).unwrap());
         save_sharing(&pool, &restarted, false).await.unwrap();
         assert!(!load_sharing(&pool, &LiveState::default()).await.unwrap());
@@ -1478,7 +1559,8 @@ mod tests {
             .unwrap();
         let _pending_index_lock = runtime.configuration.lock().await;
         assert_eq!(
-            crate::audio::recording_commands::stop_live_assistance(&runtime),
+            crate::audio::recording_commands::stop_live_assistance(&runtime)
+                .map(|identity| identity.session_id),
             Some(id.clone())
         );
         assert!(state.snapshot(&id).is_err());
@@ -1594,7 +1676,7 @@ mod tests {
     #[tokio::test]
     async fn configured_builtin_branch_is_rejected_before_model_or_durable_work() {
         let runtime = super::super::KnowledgeState::default();
-        let id = runtime.live.start(true);
+        let id = runtime.live.start(true).unwrap();
         let pool = enabled_pool(&runtime.live).await;
         sqlx::query("INSERT INTO settings(id,provider,model,whisperModel) VALUES('1','builtin-ai','synthetic','tiny')").execute(&pool).await.unwrap();
         let result = super::super::answers::ask(
@@ -1625,8 +1707,8 @@ mod tests {
             lease,
             8192,
             move |_, _| async move {
-                changing.stop();
-                changing.start(true);
+                let _ = changing.stop();
+                changing.start(true).unwrap();
                 Ok(ConfiguredTextReply {
                     text: "Old completed answer [K1]".into(),
                     provider: "openai".into(),
@@ -1811,7 +1893,7 @@ mod tests {
             state.resolve(&invented).unwrap().status,
             super::super::evidence::EvidenceStatus::Invalid
         );
-        state.stop();
+        let _ = state.stop();
         assert_eq!(
             state.resolve(&passage.evidence).unwrap().status,
             super::super::evidence::EvidenceStatus::Missing

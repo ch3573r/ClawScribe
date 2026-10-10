@@ -7,6 +7,21 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type RecordingMode = 'live' | 'audio_only';
 
+type RecordingIdentity = { id: string; generation: string };
+const maximumGeneration = '18446744073709551615';
+function recordingIdentity(id: unknown, generation: unknown): RecordingIdentity | null {
+  if (typeof id !== 'string' || !id || typeof generation !== 'string' ||
+    !/^[1-9][0-9]*$/.test(generation) || generation.length > maximumGeneration.length ||
+    (generation.length === maximumGeneration.length && generation > maximumGeneration)) return null;
+  return { id, generation };
+}
+function compareGeneration(left: string, right: string): number {
+  return left.length === right.length ? (left === right ? 0 : left > right ? 1 : -1) : left.length - right.length;
+}
+function sameIdentity(left: RecordingIdentity | null, right: RecordingIdentity): boolean {
+  return left !== null && left.id === right.id && left.generation === right.generation;
+}
+
 /**
  * Recording state synchronized with backend
  * This context provides a single source of truth for recording state
@@ -125,9 +140,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     let active = true;
     let revision = 0;
     let syncing = false;
-    let backendSessionId: string | null = null;
-    let stoppedSessionId: string | null = null;
-    let pendingStart: { id: string; phase: number } | null = null;
+    let backendSession: RecordingIdentity | null = null;
+    let lifecycleOwner: RecordingIdentity | null = null;
+    let stoppedGeneration: string | null = null;
+    type StartCheck = { identity: RecordingIdentity; mode: RecordingMode; request: number; phase: number };
+    let queuedStart: StartCheck | null = null;
+    let checkingStart = false;
     let polling: ReturnType<typeof setInterval> | undefined;
     const unsubscribers: (() => void)[] = [];
     const stopPolling = () => {
@@ -146,12 +164,19 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         const backend = await recordingService.getRecordingState();
         // A stop/pause event is newer than a poll that began before it.
         if (!active || request !== revision || phase !== lifecycleRevision.current) return;
-        if (backend.is_recording && backendSessionId === null && lifecycleStatus.current === RecordingStatus.IDLE) {
+        const metadata = recordingIdentity(backend.session_id, backend.recording_generation);
+        if (backend.is_recording && backend.session_id && !metadata) return;
+        if (backend.is_recording && metadata && lifecycleOwner && !sameIdentity(lifecycleOwner, metadata)) return;
+        if (backend.is_recording && backendSession === null && lifecycleStatus.current === RecordingStatus.IDLE) {
           // Bind reload recovery once too; rejected old start events must not
           // leave the stopped-event filter without the current identity.
           const snapshot = await knowledgeService.liveSnapshot().catch(() => null);
           if (!active || request !== revision || phase !== lifecycleRevision.current) return;
-          if (snapshot) backendSessionId = snapshot.session_id;
+          const canonical = snapshot && recordingIdentity(snapshot.session_id, snapshot.recording_generation);
+          if (!canonical || (metadata && !sameIdentity(metadata, canonical)) ||
+            (stoppedGeneration && compareGeneration(canonical.generation, stoppedGeneration) <= 0)) return;
+          backendSession = canonical;
+          lifecycleOwner = canonical;
         }
         if (backend.is_recording) startPolling();
         else stopPolling();
@@ -193,48 +218,72 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         if (active) console.error('Could not subscribe to recording state changes.');
       }
     };
+    const verifyStart = (): void => {
+      if (!active || checkingStart || !queuedStart) return;
+      const candidate = queuedStart;
+      queuedStart = null;
+      if (candidate.phase !== lifecycleRevision.current || candidate.request !== revision) return;
+      checkingStart = true;
+      void knowledgeService.liveSnapshot().then(snapshot => {
+        if (!active || candidate.request !== revision || candidate.phase !== lifecycleRevision.current) return;
+        const canonical = recordingIdentity(snapshot.session_id, snapshot.recording_generation);
+        if (!canonical || !sameIdentity(candidate.identity, canonical) || !sameIdentity(lifecycleOwner, canonical)) return;
+        backendSession = canonical;
+        revision++;
+        lifecycleRevision.current++;
+        lifecycleStatus.current = RecordingStatus.RECORDING;
+        setState(prev => ({
+          ...prev, sessionMode: candidate.mode, isRecording: true, isPaused: false,
+          isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined,
+        }));
+        startPolling();
+      }).catch(() => {
+        if (active && candidate.request === revision && candidate.phase === lifecycleRevision.current)
+          console.error('Could not verify the current recording session.');
+      }).finally(() => {
+        checkingStart = false;
+        verifyStart();
+      });
+    };
     // Register all events before the initial snapshot, including after a WebView reload.
     void Promise.all([
-      subscribe(recordingService.onRecordingStarted((mode, sessionId) => {
+      subscribe(recordingService.onRecordingStarted((mode, sessionId, generation) => {
         if (!active) return;
         if ([RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING,
           RecordingStatus.COMPLETED, RecordingStatus.ERROR].includes(lifecycleStatus.current)) return;
-        if (sessionId && (sessionId === backendSessionId || sessionId === stoppedSessionId)) return;
-        const request = revision;
-        const phase = lifecycleRevision.current;
-        // A replacement is not active until the snapshot validates it, but its
-        // pending identity distinguishes its Stop from the completed session's.
-        const candidate = sessionId && [RecordingStatus.STARTING, RecordingStatus.IDLE].includes(lifecycleStatus.current)
-          ? { id: sessionId, phase } : null;
-        if (candidate) pendingStart = candidate;
-        void knowledgeService.liveSnapshot().then(snapshot => {
-          if (!active || request !== revision || phase !== lifecycleRevision.current) return;
-          if (sessionId && snapshot.session_id !== sessionId) return;
-          // Retain only the latest backend identity. A duplicate from its
-          // completed lifecycle cannot be the next STARTING session.
-          if (snapshot.session_id === backendSessionId) return;
-          backendSessionId = snapshot.session_id;
-          revision++;
-          lifecycleRevision.current++;
-          lifecycleStatus.current = RecordingStatus.RECORDING;
-          setState(prev => ({
-            ...prev, sessionMode: mode, isRecording: true, isPaused: false,
-            isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined,
-          }));
-          startPolling();
-        }).catch(() => {
-          if (active && request === revision && phase === lifecycleRevision.current)
-            console.error('Could not verify the current recording session.');
-        }).finally(() => {
-          if (candidate && pendingStart === candidate) pendingStart = null;
-        });
+        const identity = recordingIdentity(sessionId, generation);
+        if (!identity || (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0)) return;
+        if (lifecycleOwner) {
+          const order = compareGeneration(identity.generation, lifecycleOwner.generation);
+          if (order < 0 || (order === 0 && !sameIdentity(lifecycleOwner, identity))) return;
+          if (order === 0 && (sameIdentity(backendSession, identity) || checkingStart || queuedStart)) return;
+        }
+        // Native generations order admitted producers independently of delivery
+        // order. Only a canonical snapshot may promote the matching producer.
+        lifecycleOwner = identity;
+        revision++;
+        queuedStart = { identity, mode, request: revision, phase: lifecycleRevision.current };
+        verifyStart();
       })),
       subscribe(recordingService.onRecordingStopped(payload => {
         if (!active) return;
-        const expectedSessionId = pendingStart?.phase === lifecycleRevision.current ? pendingStart.id : backendSessionId;
-        if (payload?.session_id && expectedSessionId && payload.session_id !== expectedSessionId) return;
-        stoppedSessionId = payload?.session_id ?? expectedSessionId;
-        pendingStart = null;
+        const identity = recordingIdentity(payload?.session_id, payload?.recording_generation);
+        if (payload?.recording_generation != null && !identity) return;
+        if (identity) {
+          if (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0) return;
+          if (lifecycleOwner) {
+            const order = compareGeneration(identity.generation, lifecycleOwner.generation);
+            if (order < 0 || (order === 0 && !sameIdentity(lifecycleOwner, identity))) return;
+          }
+          lifecycleOwner = identity;
+          stoppedGeneration = identity.generation;
+        } else {
+          // Compatibility for older unidentified events; identified native
+          // events always use the ordered producer pair above.
+          if (payload?.session_id && lifecycleOwner && payload.session_id !== lifecycleOwner.id) return;
+          stoppedGeneration = lifecycleOwner?.generation ?? stoppedGeneration;
+        }
+        queuedStart = null;
         revision++;
         lifecycleRevision.current++;
         if (![RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]

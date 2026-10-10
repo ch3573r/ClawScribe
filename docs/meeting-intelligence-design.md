@@ -343,6 +343,13 @@ session. Keep live conversation state in memory initially, and clear it on
 stop rather than introducing an implicit new retention policy. Navigation and
 panel visibility changes cannot create duplicate transcript subscriptions.
 
+Recording lifecycle metadata also pairs the UUID with an increasing native
+generation, encoded as a decimal string. Started/Stopped events and canonical
+reload/snapshot metadata use the same producer pair. The frontend compares its
+order without relying on delivery order; canonical validation still gates
+recording promotion. Keep identity retention and validation work bounded, and
+capture Stop metadata before clearing or draining that producer.
+
 Transcript backlog and incomplete-capture state remain visible beside live
 assistance. Answers identify the latest finalized transcript time; they must
 not imply that delayed transcription describes the current moment.

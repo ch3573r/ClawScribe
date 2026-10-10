@@ -12,7 +12,8 @@ const hour = Array.from({ length: 720 }, (_, i) => ({
   start_seconds: i * 5,
   end_seconds: (i + 1) * 5,
 }));
-const snapshot = id => ({ session_id: id, finalized_through_seconds: 3540,
+const nativeGeneration = id => ({ 'session-one': '2', 'session-two': '3', 'session-prior': '1' }[id]);
+const snapshot = (id, generation = nativeGeneration(id)) => ({ session_id: id, recording_generation: generation, finalized_through_seconds: 3540,
   segments: hour.filter(segment => segment.end_seconds > 2940 && segment.end_seconds <= 3540),
   transcription_incomplete: true, transcription_available: true });
 const document = (id, meeting) => ({ attachment: { id, display_name: 'Public reference', format: 'text',
@@ -31,7 +32,13 @@ function fixture(overrides = {}, options = {}) {
   };
   const owner = createLiveAssistanceStore({
     service: { ...service, ask: request => { requests.push(JSON.parse(JSON.stringify(request))); return service.ask(request); } },
-    listen: async (event, callback) => { registrations.push(event); handlers.set(event, callback); return () => handlers.delete(event); },
+    listen: async (event, callback) => {
+      registrations.push(event);
+      handlers.set(event, payload => callback({
+        ...payload, recording_generation: payload.recording_generation ?? nativeGeneration(payload.session_id),
+      }));
+      return () => handlers.delete(event);
+    },
     interval: callback => { timers.add(callback); return () => timers.delete(callback); },
     uuid: () => `request-${++sequence}`,
   });
@@ -297,5 +304,64 @@ test('byte-budget eviction keeps the newest fitting reply and drops only older e
     assert.equal(state.error, null); assert.equal(state.pending, false);
     assert.deepEqual(Array.from(state.messages, entry => entry.question), ['Question 2', 'Question 3']);
     assert.ok(Buffer.byteLength(JSON.stringify(state.messages), 'utf8') <= 65536);
+  } finally { app.disconnect(); }
+});
+
+test('a pending current native Stop clears Live before its recording-context callback', async () => {
+  const replacement = deferred(); const older = deferred();
+  let read = Promise.resolve(snapshot('session-one'));
+  const app = await active({ liveSnapshot: () => read });
+  try {
+    app.owner.setRecording('stopping'); app.owner.setRecording('starting');
+    read = replacement.promise;
+    app.handlers.get('recording-started')({ session_id: 'session-two', recording_generation: '3', recording_mode: 'live' });
+    read = older.promise;
+    app.handlers.get('recording-started')({ session_id: 'session-prior', recording_generation: '1', recording_mode: 'live' });
+    older.resolve(snapshot('session-two')); await flush();
+    app.handlers.get('recording-stopped')({ session_id: 'session-two', recording_generation: '3' });
+    // No setRecording('stopping') callback is supplied for this native Stop.
+    replacement.resolve(snapshot('session-two')); await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null, 'current Stop must invalidate the pending native adoption directly');
+    assert.equal(app.owner.getSnapshot().snapshot, null); assert.equal(app.owner.getSnapshot().messages.length, 0);
+  } finally { app.disconnect(); }
+});
+
+test('an older captured canonical snapshot cannot adopt Live after a newer native Started generation', async () => {
+  const older = deferred(); const replacement = deferred(); let read;
+  const app = fixture({ liveSnapshot: () => read ?? Promise.reject('No active recording') });
+  await flush();
+  try {
+    app.owner.setRecording('starting');
+    // The older producer's canonical snapshot was captured before the newer
+    // start, but its RPC result arrives after the newer native event.
+    read = older.promise;
+    app.handlers.get('recording-started')({ session_id: 'session-prior', recording_generation: '1', recording_mode: 'live' });
+    read = replacement.promise;
+    app.handlers.get('recording-started')({ session_id: 'session-two', recording_generation: '3', recording_mode: 'live' });
+    older.resolve(snapshot('session-prior', '1')); await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null, 'the newer generation must invalidate older canonical completion');
+    replacement.resolve(snapshot('session-two')); await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-two');
+    assert.equal(app.owner.getSnapshot().snapshot.recording_generation, '3');
+  } finally { app.disconnect(); }
+});
+
+test('a native Started burst keeps one Live canonical check in flight and coalesces the newest producer', async () => {
+  const check = deferred(); let delayed = false; let lookups = 0;
+  const app = fixture({ liveSnapshot: () => {
+    if (!delayed) return Promise.reject('No active recording');
+    lookups++; return check.promise;
+  } });
+  await flush();
+  try {
+    app.owner.setRecording('starting'); delayed = true;
+    for (let generation = 1; generation <= 32; generation++) {
+      app.handlers.get('recording-started')({ session_id: `session-${generation}`, recording_generation: String(generation), recording_mode: 'live' });
+    }
+    assert.equal(lookups, 1, 'a native event burst must not create an unbounded snapshot backlog');
+    check.resolve(snapshot('session-32', '32')); await flush();
+    assert.equal(lookups, 2, 'only the first check and newest coalesced check may run');
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-32');
+    assert.equal(app.owner.getSnapshot().snapshot.recording_generation, '32');
   } finally { app.disconnect(); }
 });
