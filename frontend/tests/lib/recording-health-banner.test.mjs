@@ -22,3 +22,43 @@ test('repeated segment warnings keep the recording banner visible', () => {
   assert.equal(hooks.render(RecordingHealthBanner), null);
   hooks.unmount();
 });
+
+function createWarningView() {
+  const hooks = createHookHarness();
+  const listeners = new Map();
+  const { RecordingHealthBanner } = loadTsModule(fileURLToPath(new URL('../../src/components/RecordingHealthBanner.tsx', import.meta.url)), {
+    react: hooks.react,
+    '@tauri-apps/api/event': { listen: async (event, callback) => { listeners.set(event, callback); return () => listeners.delete(event); } },
+    'lucide-react': { AlertTriangle: 'Icon' },
+  });
+  return { ...hooks, listeners, render: () => hooks.render(RecordingHealthBanner) };
+}
+
+test('late system audio clears the matching recording warning', () => {
+  const view = createWarningView();
+  const systemWarning = 'No system-audio samples have arrived yet.';
+  try {
+    view.render();
+    view.listeners.get('recording-warning')({ payload: systemWarning });
+    assert.equal(view.render().props.children[1].props.children, systemWarning);
+    view.listeners.get('recording-warning-cleared')?.({ payload: systemWarning });
+    assert.equal(view.render(), null, 'Recovered system audio must remove its stale warning');
+  } finally {
+    view.unmount();
+  }
+});
+
+test('system audio recovery cannot hide a newer capture warning', () => {
+  const view = createWarningView();
+  const systemWarning = 'No system-audio samples have arrived yet.';
+  const captureWarning = 'Some audio could not be saved.';
+  try {
+    view.render();
+    view.listeners.get('recording-warning')({ payload: systemWarning });
+    view.listeners.get('recording-warning')({ payload: captureWarning });
+    view.listeners.get('recording-warning-cleared')?.({ payload: systemWarning });
+    assert.equal(view.render().props.children[1].props.children, captureWarning);
+  } finally {
+    view.unmount();
+  }
+});
