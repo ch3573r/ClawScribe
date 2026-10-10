@@ -351,3 +351,94 @@ test('started-event bursts coalesce canonical checks and current Stop clears que
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });
+
+async function rejectedStartingView() {
+  const checks = [];
+  const view = createView(false, () => {
+    const check = deferred(); checks.push(check); return check.promise;
+  });
+  view.render(); await flush();
+  view.render().setStatus('starting');
+  view.callbacks.Started('live', 'session-b', '3');
+  assert.equal(checks.length, 1);
+  checks[0].reject(new Error('Public fixture metadata failure')); await flush();
+  return { view, checks };
+}
+
+function retryVerification(view) {
+  const state = view.render();
+  assert.equal(typeof state.retryVerification, 'function', 'the global recording owner exposes manual verification retry');
+  state.retryVerification();
+}
+
+test('rejected initial Started verification is visible and manual retry restores global recording and polling', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    assert.equal(view.render().status, 'starting'); assert.equal(view.intervals.size, 0);
+    assert.match(view.render().verificationError ?? '', /verify|recording|retry/i, 'the current verification failure is visible to consumers');
+    retryVerification(view);
+    assert.equal(checks.length, 2, 'retry performs a fresh canonical lookup without a second Started event');
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    const recovered = view.render();
+    assert.equal(recovered.status, 'recording'); assert.equal(recovered.isRecording, true);
+    assert.equal(recovered.sessionMode, 'live'); assert.equal(recovered.verificationError, null);
+    assert.equal(view.intervals.size, 1, 'successful verification restores global recording-state polling');
+    view.tick(); assert.equal(view.requests.length, 2);
+    assert.equal(checks.length, 2, 'polling does not repeat successful Started verification');
+  } finally { view.unmount(); }
+});
+
+test('current Stop synchronously retires a deferred recording-verification retry', async () => {
+  const { view, checks } = await rejectedStartingView(); const observed = [];
+  try {
+    view.render().subscribeLifecycle(status => observed.push(status));
+    retryVerification(view); assert.equal(checks.length, 2);
+    view.callbacks.Stopped({ session_id: 'session-b', recording_generation: '3' });
+    assert.deepEqual(observed, ['stopping'], 'Stop reaches consumers before retry completion or a React render');
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
+    assert.equal(view.render().verificationError, null); assert.equal(view.intervals.size, 0);
+    retryVerification(view); await flush();
+    assert.equal(checks.length, 2, 'a stopped producer cannot be retried');
+  } finally { view.unmount(); }
+});
+
+test('a newer producer supersedes a deferred recording retry and obtains its own fresh canonical result', async () => {
+  const { view, checks } = await rejectedStartingView(); const observed = [];
+  try {
+    retryVerification(view); assert.equal(checks.length, 2);
+    view.callbacks.Started('audio_only', 'session-newest', '4');
+    assert.equal(checks.length, 2, 'the Started lane coalesces the newer candidate behind the retry');
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    assert.equal(view.render().status, 'starting'); assert.equal(view.render().isRecording, false);
+    assert.equal(checks.length, 3, 'the old retry result cannot stand in for the newer producer');
+    checks[2].resolve({ ...liveSnapshot('session-newest', '4'), transcription_available: false }); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().sessionMode, 'audio_only');
+    assert.equal(view.intervals.size, 1);
+    view.render().subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Stopped({ session_id: 'session-b', recording_generation: '3' });
+    assert.deepEqual(observed, []); assert.equal(view.render().isRecording, true);
+    view.callbacks.Stopped({ session_id: 'session-newest', recording_generation: '4' });
+    assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
+
+test('recording retry failures remain bounded and matching UUID alone never recovers a producer', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    for (let i = 0; i < 32; i++) retryVerification(view);
+    assert.equal(checks.length, 2, 'repeated manual clicks share one outstanding Started verification');
+    checks[1].reject(new Error('Public fixture second metadata failure')); await flush();
+    assert.equal(checks.length, 2, 'a rejected retry does not create an automatic retry storm');
+    assert.equal(view.render().status, 'starting'); assert.equal(view.intervals.size, 0);
+    assert.match(view.render().verificationError ?? '', /verify|recording|retry/i);
+    retryVerification(view); assert.equal(checks.length, 3);
+    checks[2].resolve(liveSnapshot('session-b', '4')); await flush();
+    assert.equal(view.render().status, 'starting'); assert.equal(view.render().isRecording, false);
+    assert.equal(view.intervals.size, 0, 'a different native generation cannot bypass exact-pair verification');
+    retryVerification(view); assert.equal(checks.length, 4);
+    checks[3].resolve(liveSnapshot('session-b', '3')); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().verificationError, null);
+    assert.equal(view.intervals.size, 1);
+  } finally { view.unmount(); }
+});

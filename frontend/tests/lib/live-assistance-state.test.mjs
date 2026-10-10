@@ -57,6 +57,87 @@ function reply(request, overrides = {}) {
 }
 async function active(overrides, options) { const app = fixture(overrides, options); await flush(); await app.start(); return app; }
 
+async function rejectedStartingStore() {
+  const checks = []; let started = false;
+  const app = fixture({ liveSnapshot: () => {
+    if (!started) return Promise.reject(new Error('Public fixture has no active recording'));
+    const check = deferred(); checks.push(check); return check.promise;
+  } });
+  await flush(); app.owner.setRecording('starting'); started = true;
+  app.handlers.get('recording-started')({ session_id: 'session-two', recording_generation: '3', recording_mode: 'live' });
+  assert.equal(checks.length, 1);
+  checks[0].reject(new Error('Public fixture metadata failure')); await flush();
+  assert.match(app.owner.getSnapshot().snapshotError ?? '', /verify|retry/i);
+  return { app, checks };
+}
+
+test('existing Live refresh retries rejected Started verification while starting without automatic provider work', async () => {
+  const { app, checks } = await rejectedStartingStore();
+  try {
+    assert.equal(app.owner.getSnapshot().sessionId, null); assert.equal(app.requests.length, 0);
+    const retry = app.owner.refresh();
+    assert.equal(checks.length, 2, 'the offered Retry performs a canonical lookup while Starting');
+    checks[1].resolve(snapshot('session-two', '3')); await retry; await flush();
+    const state = app.owner.getSnapshot();
+    assert.equal(state.sessionId, 'session-two'); assert.equal(state.snapshot.transcription_available, true);
+    assert.equal(state.snapshot.recording_generation, '3'); assert.equal(state.snapshotError, null);
+    assert.equal('segments' in state.snapshot, false); assert.equal(app.requests.length, 0);
+    await app.owner.ask('What remains open?'); assert.equal(app.requests.length, 1);
+    assert.equal(app.requests[0].owner.id, 'session-two', 'only an explicit action sends a provider request after recovery');
+  } finally { app.disconnect(); }
+});
+
+test('current native Stop clears a deferred Live retry before the recording-context callback', async () => {
+  const { app, checks } = await rejectedStartingStore();
+  try {
+    const retry = app.owner.refresh(); assert.equal(checks.length, 2);
+    app.handlers.get('recording-stopped')({ session_id: 'session-two', recording_generation: '3' });
+    // The global recording-context callback has not run: native ownership must suffice.
+    assert.equal(app.owner.getSnapshot().sessionId, null); assert.equal(app.owner.getSnapshot().snapshotError, null);
+    checks[1].resolve(snapshot('session-two', '3')); await retry; await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null); assert.equal(app.owner.getSnapshot().snapshot, null);
+    await app.owner.refresh(); assert.equal(checks.length, 2, 'Stop retires the retry owner synchronously');
+    assert.equal(app.requests.length, 0);
+  } finally { app.disconnect(); }
+});
+
+test('newer Started ownership supersedes a deferred Live retry without accepting its captured old snapshot', async () => {
+  const { app, checks } = await rejectedStartingStore();
+  try {
+    const retry = app.owner.refresh(); assert.equal(checks.length, 2);
+    app.handlers.get('recording-started')({ session_id: 'session-newest', recording_generation: '4', recording_mode: 'live' });
+    assert.equal(checks.length, 2, 'the direct store keeps one canonical lane during retry and newer Started');
+    checks[1].resolve(snapshot('session-two', '3')); await retry; await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null, 'the captured older retry cannot adopt a session');
+    assert.equal(checks.length, 3, 'the newest producer receives a fresh canonical lookup');
+    checks[2].resolve(snapshot('session-newest', '4')); await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-newest');
+    assert.equal(app.owner.getSnapshot().snapshot.recording_generation, '4'); assert.equal(app.requests.length, 0);
+    app.handlers.get('recording-stopped')({ session_id: 'session-two', recording_generation: '3' });
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-newest');
+    app.handlers.get('recording-stopped')({ session_id: 'session-newest', recording_generation: '4' });
+    assert.equal(app.owner.getSnapshot().sessionId, null);
+  } finally { app.disconnect(); }
+});
+
+test('Live retry clicks and failures stay bounded and recovery still requires the exact producer pair', async () => {
+  const { app, checks } = await rejectedStartingStore();
+  try {
+    const retries = Array.from({ length: 32 }, () => app.owner.refresh());
+    assert.equal(checks.length, 2, 'manual Retry clicks do not queue another lookup behind the in-flight retry');
+    checks[1].reject(new Error('Public fixture second metadata failure')); await Promise.all(retries); await flush();
+    assert.equal(checks.length, 2, 'settled rejection requires another explicit Retry, with no automatic storm');
+    assert.equal(app.owner.getSnapshot().sessionId, null); assert.match(app.owner.getSnapshot().snapshotError ?? '', /verify|retry/i);
+    const mismatch = app.owner.refresh(); assert.equal(checks.length, 3);
+    checks[2].resolve(snapshot('session-two', '4')); await mismatch; await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null, 'matching UUID with another generation is insufficient');
+    const recovery = app.owner.refresh(); assert.equal(checks.length, 4);
+    checks[3].resolve(snapshot('session-two', '3')); await recovery; await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-two'); assert.equal(app.owner.getSnapshot().snapshotError, null);
+    assert.equal(app.requests.length, 0);
+  } finally { app.disconnect(); }
+});
+
 test('route_change_does_not_duplicate_listener', async () => {
   const answer = deferred(); const app = await active({ ask: () => answer.promise });
   try {

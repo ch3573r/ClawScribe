@@ -9,19 +9,22 @@ const text = node => typeof node === 'string' || typeof node === 'number' ? Stri
 const liveSnapshot = { session_id: 'session-ui', recording_generation: '1', finalized_through_seconds: 3540, segments: [{ sequence_id: 700, text: 'Public finalized fixture', start_seconds: 3535, end_seconds: 3540 }], transcription_incomplete: true, transcription_available: true };
 const reply = request => ({ request_id: request.request_id, message_id: 'assistant-ui', content: 'The rollout remains open.', evidence: [], evidence_metadata: [], cited_tags: [], context_links: [], retrieval_mode: 'keyword', provider: 'custom-openai', model: 'actual-model', live_context: { session_id: 'session-ui', finalized_through_seconds: 3500, transcription_incomplete: true } });
 
-async function panel({ sharing = true, available = true, provider = 'custom-openai', ask } = {}) {
+async function panel({ sharing = true, available = true, provider = 'custom-openai', ask, snapshotRead, recordingState, status = 'recording' } = {}) {
   const requests = []; const cancelled = [];
+  const events = new Map();
   const { createLiveAssistanceStore } = loadTsModule('src/lib/live-assistance-state.ts');
   const owner = createLiveAssistanceStore({ service: {
-    liveSnapshot: async () => ({ ...liveSnapshot, transcription_available: available }), liveSharing: async () => sharing,
+    liveSnapshot: () => snapshotRead ? snapshotRead() : Promise.resolve({ ...liveSnapshot, transcription_available: available }), liveSharing: async () => sharing,
     documentSharing: async () => false, setLiveSharing: async () => {}, setDocumentSharing: async () => {}, scopeDocuments: async () => [],
     ask: async request => { requests.push(request); return ask ? ask(request) : reply(request); }, cancel: async id => { cancelled.push(id); },
-  }, listen: async () => () => {}, interval: () => () => {}, uuid: () => `ui-request-${requests.length + 1}` });
-  owner.configureProvider(provider, 'selected-model'); const disconnect = owner.connect(); await flush(); owner.setRecording('recording'); await flush();
+  }, listen: async (event, callback) => { events.set(event, callback); return () => events.delete(event); }, interval: () => () => {}, uuid: () => `ui-request-${requests.length + 1}` });
+  owner.configureProvider(provider, 'selected-model'); const disconnect = owner.connect(); await flush(); owner.setRecording(status);
+  if (status === 'starting') events.get('recording-started')({ session_id: 'session-ui', recording_generation: '1', recording_mode: 'live' });
+  await flush();
   const hooks = createHookHarness(); const { LiveAssistancePanel } = loadTsModule('src/components/LiveAssistancePanel.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/hooks/useLiveAssistance': { useLiveAssistance: () => ({ state: owner.getSnapshot(), actions: owner }) },
-    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: true, sessionMode: available ? 'live' : 'audio_only' }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => recordingState ?? ({ isRecording: true, sessionMode: available ? 'live' : 'audio_only' }) },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [{ id: 'saved-ui', title: 'Public meeting' }], currentMeeting: null }) },
     '@/components/ui/button': { Button: 'button' }, '@/components/ui/textarea': { Textarea: 'textarea' },
     '@/components/ui/switch': { Switch: 'switch' }, '@/components/ui/checkbox': { Checkbox: 'checkbox' },
@@ -38,6 +41,31 @@ async function panel({ sharing = true, available = true, provider = 'custom-open
   const expand = () => { const toggle = nodes(render()).find(node => node.type === 'button' && node.props['aria-controls'] === 'live-assistance-body'); assert.ok(toggle, 'a keyboard-accessible collapse toggle exists'); toggle.props.onClick(); };
   return { owner, requests, cancelled, render, button, expand, dispose() { hooks.unmount(); disconnect(); } };
 }
+
+test('existing Retry status shows global verification failure and retries both owners during Starting', async () => {
+  let reads = 0; let contextRetries = 0;
+  const recordingState = {
+    isRecording: false, sessionMode: 'live', status: 'starting',
+    verificationError: 'Could not verify the current recording. Retry status.',
+    retryVerification() { contextRetries++; recordingState.verificationError = null; recordingState.isRecording = true; recordingState.status = 'recording'; },
+  };
+  const app = await panel({ status: 'starting', recordingState, snapshotRead: async () => {
+    reads++;
+    if (reads <= 2) throw new Error('Public fixture metadata failure');
+    return liveSnapshot;
+  } });
+  try {
+    app.expand(); assert.equal(reads, 2); assert.equal(app.requests.length, 0);
+    assert.match(text(app.render()), /Could not verify the current recording\. Retry status\./, 'the global context failure is visible in the existing panel');
+    const retry = app.button('Retry status'); assert.ok(retry, 'the existing status retry is available while Starting');
+    retry.props.onClick(); await flush();
+    assert.equal(contextRetries, 1, 'Retry reaches the global recording owner');
+    assert.equal(reads, 3, 'Retry also performs the production Live owner canonical read');
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-ui'); assert.equal(app.owner.getSnapshot().snapshotError, null);
+    assert.equal(app.owner.getSnapshot().snapshot.transcription_available, true);
+    assert.equal(app.button('Summarize so far').props.disabled, false); assert.equal(app.requests.length, 0);
+  } finally { app.dispose(); }
+});
 
 test('manual panel stays quiet, reports finalized lag while collapsed, and Enter submits once', async () => {
   const pending = deferred(); const app = await panel({ ask: () => pending.promise });
