@@ -676,8 +676,9 @@ metadata is explicitly marked incomplete.
 ### Recording-scoped live assistance backend
 
 Both recording start paths allocate a fresh UUID and increasing native recording
-generation after admission and validation. The manager and transcription
-producer capture the same pair before emission. Generation metadata uses a
+generation within the app process after admission and validation. The manager
+and transcription producer capture the same pair before emission. Generation
+metadata uses a
 canonical positive decimal u64 string so JavaScript never rounds its ordering;
 checked exhaustion rejects startup without retiring an existing producer.
 Start/Stop events, recording-state reload metadata and live snapshots carry the
@@ -736,13 +737,17 @@ without awaiting it. Unmount releases listeners, including registrations that
 finish after cleanup. UI history is capped at 32 answers and 64 KiB serialized;
 it is cleared at Stop and never written to durable history.
 
-The recording context orders native producer generations before handling Stop,
-so delayed events cannot replace the current owner while canonical validation
-is pending. Recording promotion still requires a matching snapshot UUID and
-generation. It retains bounded current/validated identities and one stopped
-generation, with one canonical check in flight and one coalesced newer candidate;
-it does not accumulate retired UUIDs or pending checks. Duplicate starts preserve
-the current pause state, and first Stop invalidates pending promotion immediately.
+The recording context and live store share exact decimal generation validation
+and order native producers before handling Stop. Delayed events and captured
+older snapshots cannot replace the current owner while canonical validation is
+pending. Promotion requires a matching snapshot UUID and generation. Each owner
+retains bounded current/validated identities, one stopped generation and one
+coalesced newer candidate; it does not accumulate retired UUIDs or pending checks.
+The live store shares one snapshot invocation lane across event checks, polls
+and reloads. Current native Stop clears its pending adoption synchronously even
+before the recording context's callback. The context's first Stop subscription
+also clears assistance immediately. Duplicate starts preserve the current pause
+state, and later canonical reloads can recover a fresh producer.
 
 The collapsible Home panel sits within the existing transcript scroll view,
 preserving recording controls and the global recording health banner. Ask,

@@ -14,7 +14,7 @@ export function LiveAssistanceProvider({ children }: { children: ReactNode }) {
   const { modelConfig } = useConfig();
   const [owner] = useState(() => createLiveAssistanceStore({
     service: knowledgeService,
-    listen: (event, callback) => listen<{ session_id?: string; recording_mode?: string }>(event, message => callback(message.payload)),
+    listen: (event, callback) => listen<{ session_id?: string; recording_generation?: string; recording_mode?: string }>(event, message => callback(message.payload)),
     interval: (callback, milliseconds) => { const timer = setInterval(callback, milliseconds); return () => clearInterval(timer); },
     uuid: () => globalThis.crypto.randomUUID(),
   }));

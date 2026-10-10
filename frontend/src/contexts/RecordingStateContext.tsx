@@ -3,24 +3,10 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { recordingService } from '@/services/recordingService';
 import { knowledgeService } from '@/services/knowledgeService';
+import { recordingIdentity, compareGeneration, sameIdentity, type RecordingIdentity } from '@/lib/recording-identity';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type RecordingMode = 'live' | 'audio_only';
-
-type RecordingIdentity = { id: string; generation: string };
-const maximumGeneration = '18446744073709551615';
-function recordingIdentity(id: unknown, generation: unknown): RecordingIdentity | null {
-  if (typeof id !== 'string' || !id || typeof generation !== 'string' ||
-    !/^[1-9][0-9]*$/.test(generation) || generation.length > maximumGeneration.length ||
-    (generation.length === maximumGeneration.length && generation > maximumGeneration)) return null;
-  return { id, generation };
-}
-function compareGeneration(left: string, right: string): number {
-  return left.length === right.length ? (left === right ? 0 : left > right ? 1 : -1) : left.length - right.length;
-}
-function sameIdentity(left: RecordingIdentity | null, right: RecordingIdentity): boolean {
-  return left !== null && left.id === right.id && left.generation === right.generation;
-}
 
 /**
  * Recording state synchronized with backend

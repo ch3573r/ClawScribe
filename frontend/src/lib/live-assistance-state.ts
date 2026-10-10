@@ -1,4 +1,5 @@
 import type { LiveAskRequest, LiveReply, LiveSnapshot, ScopedDocument } from '@/types/knowledge';
+import { recordingIdentity, compareGeneration, sameIdentity, type RecordingIdentity } from '@/lib/recording-identity';
 export interface LiveAssistanceState {
   sessionId: string | null;
   snapshot: Omit<LiveSnapshot, 'segments'> | null;
@@ -30,7 +31,7 @@ export interface LiveAssistanceDependencies {
     ask(request: LiveAskRequest): Promise<LiveReply>;
     cancel(id: string, sessionId: string): Promise<void>;
   };
-  listen(event: string, callback: (payload: { session_id?: string; recording_mode?: string }) => void): Promise<() => void>;
+  listen(event: string, callback: (payload: { session_id?: string; recording_generation?: string; recording_mode?: string }) => void): Promise<() => void>;
   interval(callback: () => void, milliseconds: number): () => void;
   uuid(): string;
 }
@@ -57,11 +58,13 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
   let snapshotRevision = 0;
   let recording = 'idle';
   let lifecycleRevision = 0;
-  // Only the most recently stopped identity is retained, never a session cache.
-  let stoppedSessionId: string | null = null;
+  let lifecycleOwner: RecordingIdentity | null = null;
+  let stoppedGeneration: string | null = null;
   let connected = false;
   let connectionRevision = 0;
   let reading: Promise<void> | null = null;
+  let refreshQueued = false;
+  let queuedStart: { identity: RecordingIdentity; version: number; phase: number; connection: number } | null = null;
   let pending: { id: string; sessionId: string; promise: Promise<void> } | null = null;
   const current = (version: number, sessionId: string | null) =>
     generation === version && state.sessionId === sessionId;
@@ -81,7 +84,6 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     snapshotRevision++;
     documentRevision++;
     referenceRevision++;
-    reading = null;
     cancel(false);
     update({ sessionId: null, snapshot: null, messages: [], documentSharing: false,
       documentSharingBusy: false, documents: [], documentsLoading: false,
@@ -104,25 +106,68 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     all_meetings: false, meeting_ids: [...meetingIds], tags: [], tag_mode: 'any', untagged: false, from: null, to: null,
   });
   const refresh = (): Promise<void> => {
-    if (reading) return reading;
-    if (['stopping', 'processing', 'saving', 'completed', 'error', 'starting'].includes(recording)) return Promise.resolve();
+    if (!connected || ['stopping', 'processing', 'saving', 'completed', 'error', 'starting'].includes(recording)) return Promise.resolve();
+    if (reading) { refreshQueued = true; return reading; }
     const version = generation;
     const revision = ++snapshotRevision;
-    const work = service.liveSnapshot().then(snapshot => {
-      if (generation !== version || snapshotRevision !== revision) return;
+    const phase = lifecycleRevision;
+    const work: Promise<void> = service.liveSnapshot().then(snapshot => {
+      if (generation !== version || snapshotRevision !== revision || lifecycleRevision !== phase) return;
+      const identity = recordingIdentity(snapshot.session_id, snapshot.recording_generation);
+      if (!identity || (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0)) return;
+      if (lifecycleOwner && !sameIdentity(lifecycleOwner, identity) &&
+        compareGeneration(identity.generation, lifecycleOwner.generation) <= 0) return;
       if (state.sessionId && snapshot.session_id !== state.sessionId) return;
-      if (!state.sessionId && snapshot.session_id === stoppedSessionId) return;
+      lifecycleOwner = identity;
       if (!state.sessionId) startSession(snapshot.session_id);
       // Text is native evidence only. Retain bounded metadata, never a second UI transcript.
       const { segments: _segments, ...metadata } = snapshot;
       update({ snapshot: metadata, snapshotError: null });
     }).catch(() => {
-      if (generation === version && snapshotRevision === revision && state.sessionId)
+      if (generation === version && snapshotRevision === revision && lifecycleRevision === phase && state.sessionId)
         update({ snapshotError: 'Could not read finalized transcript status. Retry before asking.' });
-    }).finally(() => { if (reading === work) reading = null; });
+    }).finally(() => finishRead(work));
     reading = work;
     return work;
   };
+  const retireOwner = () => {
+    if (lifecycleOwner && (!stoppedGeneration || compareGeneration(lifecycleOwner.generation, stoppedGeneration) > 0))
+      stoppedGeneration = lifecycleOwner.generation;
+    queuedStart = null;
+    refreshQueued = false;
+  };
+  function finishRead(work: Promise<void>): void {
+    if (reading !== work) return;
+    reading = null;
+    if (queuedStart) verifyStart();
+    // A context phase change can retire a queued event check while still
+    // requiring the canonical reload/read. Both kinds share this one lane.
+    if (!reading && refreshQueued) { refreshQueued = false; void refresh(); }
+  }
+  function verifyStart(): void {
+    if (reading || !queuedStart) return;
+    const candidate = queuedStart;
+    queuedStart = null;
+    if (!connected || candidate.connection !== connectionRevision || candidate.version !== generation ||
+      candidate.phase !== lifecycleRevision) return;
+    const work: Promise<void> = service.liveSnapshot().then(snapshot => {
+      if (!connected || candidate.connection !== connectionRevision || candidate.version !== generation ||
+        candidate.phase !== lifecycleRevision) return;
+      const identity = recordingIdentity(snapshot.session_id, snapshot.recording_generation);
+      if (!identity || !sameIdentity(candidate.identity, identity) || !sameIdentity(lifecycleOwner, identity)) return;
+      recording = 'recording';
+      lifecycleRevision++;
+      snapshotRevision++;
+      startSession(identity.id);
+      const { segments: _segments, ...metadata } = snapshot;
+      update({ snapshot: metadata, snapshotError: null });
+    }).catch(() => {
+      if (connected && candidate.connection === connectionRevision && candidate.version === generation &&
+        candidate.phase === lifecycleRevision)
+        update({ snapshotError: 'Could not verify the current recording. Retry finalized transcript status before asking.' });
+    }).finally(() => finishRead(work));
+    reading = work;
+  }
   const api = {
     getSnapshot: () => state,
     subscribe(callback: () => void) { subscribers.add(callback); return () => { subscribers.delete(callback); }; },
@@ -132,7 +177,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
       const connection = ++connectionRevision;
       let disposed = false;
       const unlisteners: (() => void)[] = [];
-      const register = (event: string, callback: (payload: { session_id?: string; recording_mode?: string }) => void) => {
+      const register = (event: string, callback: (payload: { session_id?: string; recording_generation?: string; recording_mode?: string }) => void) => {
         void dependencies.listen(event, payload => { if (!disposed) callback(payload); }).then(unlisten => {
           if (disposed) unlisten(); else unlisteners.push(unlisten);
         }).catch(() => {
@@ -140,30 +185,32 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
         });
       };
       register('recording-started', payload => {
-        if (!payload.session_id) return;
         if (['stopping', 'processing', 'saving', 'completed', 'error'].includes(recording)) return;
-        const version = generation;
-        const phase = lifecycleRevision;
-        // Events can arrive late. Adopt only the backend's current identity,
-        // and never let an asynchronous check cross the caller's first Stop.
-        void service.liveSnapshot().then(snapshot => {
-          if (disposed || generation !== version || lifecycleRevision !== phase) return;
-          if (snapshot.session_id !== payload.session_id || snapshot.session_id === stoppedSessionId) return;
-          recording = 'recording';
-          lifecycleRevision++;
-          snapshotRevision++;
-          reading = null;
-          startSession(snapshot.session_id);
-          const { segments: _segments, ...metadata } = snapshot;
-          update({ snapshot: metadata, snapshotError: null });
-        }).catch(() => {
-          if (!disposed && generation === version && lifecycleRevision === phase)
-            update({ snapshotError: 'Could not verify the current recording. Retry finalized transcript status before asking.' });
-        });
+        const identity = recordingIdentity(payload.session_id, payload.recording_generation);
+        if (!identity || (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0)) return;
+        if (lifecycleOwner) {
+          const order = compareGeneration(identity.generation, lifecycleOwner.generation);
+          if (order < 0 || (order === 0 && !sameIdentity(lifecycleOwner, identity))) return;
+          if (order === 0 && (state.sessionId === identity.id || reading || queuedStart)) return;
+        }
+        // Supersede older native work before awaiting any canonical result.
+        lifecycleOwner = identity;
+        clearSession();
+        queuedStart = { identity, version: generation, phase: lifecycleRevision, connection };
+        verifyStart();
       });
       register('recording-stopped', payload => {
-        if (payload.session_id && payload.session_id !== state.sessionId) return;
-        stoppedSessionId = state.sessionId ?? stoppedSessionId;
+        const identity = recordingIdentity(payload.session_id, payload.recording_generation);
+        if (payload.recording_generation != null && !identity) return;
+        if (identity) {
+          if (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0) return;
+          if (lifecycleOwner) {
+            const order = compareGeneration(identity.generation, lifecycleOwner.generation);
+            if (order < 0 || (order === 0 && !sameIdentity(lifecycleOwner, identity))) return;
+          }
+          lifecycleOwner = identity;
+        } else if (payload.session_id && payload.session_id !== lifecycleOwner?.id) return;
+        retireOwner();
         recording = 'stopping';
         lifecycleRevision++;
         clearSession();
@@ -183,10 +230,13 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
         if (disposed || connection !== connectionRevision) return;
         disposed = true;
         connected = false;
+        queuedStart = null;
+        refreshQueued = false;
         stopInterval();
         unlisteners.forEach(unlisten => unlisten());
         recording = 'idle';
         clearSession();
+        lifecycleOwner = null;
       };
     },
     setRecording(status: string) {
@@ -195,7 +245,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
       recording = status;
       if (status === 'recording') void refresh();
       else if (status !== 'starting') {
-        stoppedSessionId = state.sessionId ?? stoppedSessionId;
+        retireOwner();
         clearSession();
       }
     },

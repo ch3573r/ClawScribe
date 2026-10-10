@@ -6,7 +6,7 @@ import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 const jsx = (type, props) => ({ type, props });
 const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions), ...nodes(node.props?.title)];
 const text = node => typeof node === 'string' || typeof node === 'number' ? String(node) : Array.isArray(node) ? node.map(text).join('') : node ? text(node.props?.children) : '';
-const liveSnapshot = { session_id: 'session-ui', finalized_through_seconds: 3540, segments: [{ sequence_id: 700, text: 'Public finalized fixture', start_seconds: 3535, end_seconds: 3540 }], transcription_incomplete: true, transcription_available: true };
+const liveSnapshot = { session_id: 'session-ui', recording_generation: '1', finalized_through_seconds: 3540, segments: [{ sequence_id: 700, text: 'Public finalized fixture', start_seconds: 3535, end_seconds: 3540 }], transcription_incomplete: true, transcription_available: true };
 const reply = request => ({ request_id: request.request_id, message_id: 'assistant-ui', content: 'The rollout remains open.', evidence: [], evidence_metadata: [], cited_tags: [], context_links: [], retrieval_mode: 'keyword', provider: 'custom-openai', model: 'actual-model', live_context: { session_id: 'session-ui', finalized_through_seconds: 3500, transcription_incomplete: true } });
 
 async function panel({ sharing = true, available = true, provider = 'custom-openai', ask } = {}) {

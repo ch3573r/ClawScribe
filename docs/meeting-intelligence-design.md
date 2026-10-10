@@ -347,8 +347,12 @@ Recording lifecycle metadata also pairs the UUID with an increasing native
 generation, encoded as a decimal string. Started/Stopped events and canonical
 reload/snapshot metadata use the same producer pair. The frontend compares its
 order without relying on delivery order; canonical validation still gates
-recording promotion. Keep identity retention and validation work bounded, and
-capture Stop metadata before clearing or draining that producer.
+recording and live-store promotion. Both owners use the same decimal validation
+and reject captured older snapshots. Keep identity retention and validation
+work bounded: one canonical lookup and one newest coalesced candidate per owner;
+the live store uses the same lookup lane for polls and reloads. Native current
+Stop must clear pending live adoption synchronously without relying on context
+callback order. Capture Stop metadata before clearing or draining that producer.
 
 Transcript backlog and incomplete-capture state remain visible beside live
 assistance. Answers identify the latest finalized transcript time; they must
