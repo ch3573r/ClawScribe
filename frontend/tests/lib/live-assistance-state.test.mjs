@@ -230,3 +230,72 @@ test('disconnect releases registrations that finish after cleanup and rejects pe
   const cleanup = owner.connect(); cleanup(); subscriptions.forEach(subscription => subscription.resolve(() => released++)); await flush();
   assert.equal(subscriptions.length, 2); assert.equal(released, 2);
 });
+
+test('a duplicate start after first Stop cannot revive Live, but a fresh backend session can start', async () => {
+  const app = await active();
+  try {
+    await app.owner.ask('Before Stop');
+    app.owner.setRecording('stopping');
+    // Native Stop has not run yet: its old snapshot is still readable.
+    app.handlers.get('recording-started')({ session_id: 'session-one', recording_mode: 'live' });
+    await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null, 'first Stop is final even while the native snapshot remains old');
+    assert.equal(app.owner.getSnapshot().snapshot, null);
+    await app.owner.ask('After Stop'); assert.equal(app.requests.length, 1);
+    app.owner.setRecording('starting'); await app.start('session-two');
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-two');
+    await app.owner.ask('Fresh recording'); assert.equal(app.requests.at(-1).owner.id, 'session-two');
+  } finally { app.disconnect(); }
+});
+
+test('a prior start followed by its Stop cannot replace the authoritative current Live session', async () => {
+  const app = await active();
+  try {
+    app.owner.setRecording('stopping'); app.owner.setRecording('starting'); await app.start('session-two');
+    await app.owner.ask('Current answer');
+    app.handlers.get('recording-started')({ session_id: 'session-one', recording_mode: 'audio_only' });
+    await flush();
+    app.handlers.get('recording-stopped')({ session_id: 'session-one' });
+    assert.equal(app.owner.getSnapshot().sessionId, 'session-two');
+    assert.equal(app.owner.getSnapshot().messages[0].question, 'Current answer');
+    assert.equal(app.owner.getSnapshot().snapshot.session_id, 'session-two');
+    await app.owner.ask('Still current'); assert.equal(app.requests.at(-1).owner.id, 'session-two');
+  } finally { app.disconnect(); }
+});
+
+test('a delayed start identity check cannot complete after first Stop', async () => {
+  const check = deferred(); let delayed = false;
+  const app = await active({ liveSnapshot: () => delayed ? check.promise : Promise.resolve(snapshot('session-one')) });
+  try {
+    delayed = true;
+    app.handlers.get('recording-started')({ session_id: 'session-one', recording_mode: 'live' });
+    app.owner.setRecording('stopping'); check.resolve(snapshot('session-one')); await flush();
+    assert.equal(app.owner.getSnapshot().sessionId, null); assert.equal(app.owner.getSnapshot().snapshot, null);
+  } finally { app.disconnect(); }
+});
+
+test('an oversized newest reply shows an actionable error and preserves bounded previous answers', async () => {
+  let oversized = false;
+  const app = await active({ ask: async request => reply(request, { content: oversized ? '界'.repeat(24000) : 'Previous usable answer' }) });
+  try {
+    await app.owner.ask('Previous question'); oversized = true;
+    await app.owner.ask('Large question');
+    const state = app.owner.getSnapshot();
+    assert.equal(state.pending, false); assert.match(state.error, /answer.*(large|size)|shorter|narrower/i);
+    assert.equal(state.messages.length, 1); assert.equal(state.messages[0].question, 'Previous question');
+    assert.ok(Buffer.byteLength(JSON.stringify(state.messages), 'utf8') <= 65536);
+    oversized = false; await app.owner.ask('Narrower question');
+    assert.equal(app.owner.getSnapshot().error, null); assert.equal(app.owner.getSnapshot().messages.at(-1).question, 'Narrower question');
+  } finally { app.disconnect(); }
+});
+
+test('byte-budget eviction keeps the newest fitting reply and drops only older entries', async () => {
+  const app = await active({ ask: async request => reply(request, { content: '界'.repeat(8000) }) });
+  try {
+    for (let i = 0; i < 4; i++) await app.owner.ask(`Question ${i}`);
+    const state = app.owner.getSnapshot();
+    assert.equal(state.error, null); assert.equal(state.pending, false);
+    assert.deepEqual(state.messages.map(entry => entry.question), ['Question 2', 'Question 3']);
+    assert.ok(Buffer.byteLength(JSON.stringify(state.messages), 'utf8') <= 65536);
+  } finally { app.disconnect(); }
+});

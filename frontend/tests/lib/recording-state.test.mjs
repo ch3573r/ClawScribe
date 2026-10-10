@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
-function createView(delaySubscriptions = false) {
+function createView(delaySubscriptions = false, snapshotOverride) {
   const harness = createHookHarness();
   const callbacks = {};
   const subscriptions = [];
@@ -12,6 +12,7 @@ function createView(delaySubscriptions = false) {
   const intervals = new Map();
   let nextTimer = 0;
   let unsubscribed = 0;
+  let backendSessionId = 'session-current';
   const service = { getRecordingState() { const request = deferred(); requests.push(request); return request.promise; } };
   for (const name of ['Started', 'Stopped', 'Paused', 'Resumed']) {
     service[`onRecording${name}`] = callback => {
@@ -32,6 +33,8 @@ function createView(delaySubscriptions = false) {
       react: harness.react,
       'react/jsx-runtime': { jsx: (_type, props) => props },
       '@/services/recordingService': { recordingService: service },
+      '@/services/knowledgeService': { knowledgeService: { liveSnapshot: () => snapshotOverride
+        ? snapshotOverride() : Promise.resolve({ session_id: backendSessionId }) } },
       '@tauri-apps/api/core': { invoke: async () => 'live' },
       '@tauri-apps/api/event': { listen: async () => () => {} },
     }));
@@ -42,6 +45,7 @@ function createView(delaySubscriptions = false) {
   return {
     ...harness, callbacks, requests, intervals, subscriptions,
     get unsubscribed() { return unsubscribed; },
+    setBackendSession(id) { backendSessionId = id; },
     render: () => harness.render(() => RecordingStateProvider({ children: null })).value,
     tick() { for (const callback of intervals.values()) callback(); },
   };
@@ -108,12 +112,52 @@ test('first stopping status notifies lifecycle consumers synchronously before Re
 test('a stopped event from the prior backend session cannot invalidate the replacement recording', async () => {
   const view = createView(); const observed = []; view.render(); await flush();
   try {
-    view.callbacks.Started('live', 'session-current');
+    view.callbacks.Started('live', 'session-current'); await flush();
     const state = view.render(); state.subscribeLifecycle(status => observed.push(status));
     view.callbacks.Stopped({ session_id: 'session-prior', message: 'Old recording finished' });
     assert.deepEqual(observed, [], 'stale Stop must not reach the global Live owner');
     assert.equal(view.render().isRecording, true); assert.equal(view.render().status, 'recording');
     view.callbacks.Stopped({ session_id: 'session-current', message: 'Current recording finished' });
     assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
+
+test('a delayed duplicate start cannot reverse synchronous Stop while the backend still reports the old session', async () => {
+  const view = createView(); view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-current'); await flush();
+    view.requests[0].resolve(recording); await flush();
+    const state = view.render(); state.setStatus('stopping');
+    view.callbacks.Started('audio_only', 'session-current'); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().sessionMode, 'live');
+    view.callbacks.Stopped({ session_id: 'session-current' });
+    view.render().setStatus('starting'); view.setBackendSession('session-next');
+    view.callbacks.Started('live', 'session-next'); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().isRecording, true);
+  } finally { view.unmount(); }
+});
+
+test('a prior started event and prior Stop cannot replace the authoritative current recording identity or phase', async () => {
+  const view = createView(); const observed = []; view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-current'); await flush();
+    view.render().subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Started('audio_only', 'session-prior'); await flush();
+    view.callbacks.Stopped({ session_id: 'session-prior' });
+    const current = view.render();
+    assert.deepEqual(observed, []); assert.equal(current.status, 'recording');
+    assert.equal(current.sessionMode, 'live'); assert.equal(current.isRecording, true);
+    view.callbacks.Stopped({ session_id: 'session-current' });
+    assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
+
+test('a pending authoritative start check cannot apply after synchronous Stop', async () => {
+  const check = deferred(); const view = createView(false, () => check.promise); view.render(); await flush();
+  try {
+    view.render().setStatus('starting');
+    view.callbacks.Started('live', 'session-current'); view.render().setStatus('stopping');
+    check.resolve({ session_id: 'session-current' }); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });
