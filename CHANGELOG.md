@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.54
+
+- Add manual live assistance during recording: ask a question, summarize so far or list open questions using the latest ten minutes of finalized speech and explicitly selected saved references. Show the configured provider, latest finalized time, transcription lag and cited evidence.
+- Add remembered live transcript sharing, off by default, independent of reference-document sharing for each recording. Keep one active request with a 30-second deadline; Cancel and first Stop invalidate requests without waiting on the provider. Live messages remain in memory and clear on Stop.
+- Bind recording and assistance state to an ordered native producer identity. Reject delayed events and replies from earlier recordings, recover failed status checks through Retry status, and preserve Pause/Resume state during recovery. Report oversized answers without deleting prior messages.
+- Keep audio-only and Built-in AI unavailable for live assistance during capture, with saved-meeting alternatives. Do not introduce automatic provider requests or another capture pipeline.
+- Disclose a bounded overlap of at most two recording-context metadata reads and a sharing-control label-association issue when Home and Settings are rendered together. Installed provider/UI/citation, exact-build recording/update and comparable two-hour performance acceptance remain pending. See `docs/releases/0.5.54.md`.
+- Advance installer/runtime/updater version to 0.5.54 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
+
 ## 0.5.53
 
 - Add locally parsed PDF, DOCX, text and Markdown reference attachments. Extraction uses a short-lived, cancelable Windows child with bounded input/text/decompression, a 512 MiB process-memory limit and real page/paragraph anchors. Scanned/encrypted PDFs and malformed inputs fail visibly; OCR is not included.
