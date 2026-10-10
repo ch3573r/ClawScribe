@@ -621,6 +621,10 @@ async fn skipped_meeting_keeps_shared_documents_for_new_owners() {
 async fn document_id_collision_remaps_originals_blocks_and_historical_references() {
     let (source, request, originals) = document_fixture().await;
     let manifest = raw_v2(&source).await;
+    let expected_blocks = manifest.tables["knowledge_document_blocks"]
+        .iter()
+        .filter(|block| block["document_id"] == PDF_ID)
+        .count();
     let destination = super::tests::empty_conversation_destination().await;
     sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('archive-source','Existing local meeting','2026-09-01','2026-09-01')")
         .execute(&destination).await.unwrap();
@@ -712,6 +716,38 @@ async fn document_id_collision_remaps_originals_blocks_and_historical_references
     .await
     .unwrap();
     assert_eq!(original_dependency, 0);
+    let restored_input: String =
+        sqlx::query_scalar("SELECT input_json FROM knowledge_requests WHERE id=?")
+            .bind(&request.request_id)
+            .fetch_one(&destination)
+            .await
+            .unwrap();
+    let restored_input: AskRequest = serde_json::from_str(&restored_input).unwrap();
+    assert!(restored_input.search.document_ids.contains(&remapped));
+    assert!(!restored_input
+        .search
+        .document_ids
+        .iter()
+        .any(|id| id == PDF_ID));
+    let fingerprint: String =
+        sqlx::query_scalar("SELECT input_fingerprint FROM knowledge_requests WHERE id=?")
+            .bind(&request.request_id)
+            .fetch_one(&destination)
+            .await
+            .unwrap();
+    assert_eq!(
+        fingerprint,
+        conversations::input_fingerprint(&restored_input, "builtin-ai", "qwen3.5:4b").unwrap()
+    );
+    let blocks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_document_blocks WHERE document_id=? AND id LIKE ?",
+    )
+    .bind(&remapped)
+    .bind(format!("{remapped}:%"))
+    .fetch_one(&destination)
+    .await
+    .unwrap();
+    assert_eq!(blocks as usize, expected_blocks);
 }
 
 #[tokio::test]
@@ -747,4 +783,37 @@ async fn restore_failure_rolls_back_documents_and_keeps_existing_originals_and_a
     assert_eq!(std::fs::read_dir(&restored_originals).unwrap().count(), 1);
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing original");
     assert_eq!(std::fs::read(&audio).unwrap(), b"existing playable fixture");
+}
+
+#[tokio::test]
+async fn commit_failure_removes_published_originals_without_touching_existing_files() {
+    let (source, _, originals) = document_fixture().await;
+    let manifest = raw_v2(&source).await;
+    let destination = super::tests::empty_conversation_destination().await;
+    // A deferred violation admits every row and reaches original publication,
+    // then rejects commit. This exercises cleanup after files became visible.
+    sqlx::query("CREATE TABLE public_fixture_commit_failure(parent_id TEXT REFERENCES meetings(id) DEFERRABLE INITIALLY DEFERRED)")
+        .execute(&destination).await.unwrap();
+    sqlx::query("CREATE TRIGGER public_fixture_fail_commit AFTER INSERT ON knowledge_document_attachments BEGIN INSERT INTO public_fixture_commit_failure VALUES ('missing-public-fixture-parent'); END")
+        .execute(&destination).await.unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let restored_originals = target.path().join("references");
+    std::fs::create_dir(&restored_originals).unwrap();
+    let sentinel = restored_originals.join("existing-original.txt");
+    std::fs::write(&sentinel, b"existing original").unwrap();
+    let archive = target.path().join("commit-failure.zip");
+    raw_archive(&archive, &manifest, originals.path(), false);
+    let (manifest, stage) =
+        unpack(&archive, &target.path().join("stage"), &HashSet::new()).unwrap();
+    let stage_path = stage.path().to_path_buf();
+    assert!(
+        import_manifest_with_documents(&destination, manifest, stage, &restored_originals)
+            .await
+            .is_err()
+    );
+    assert!(!stage_path.exists());
+    assert!(rows(&destination, "knowledge_documents").await.is_empty());
+    assert!(rows(&destination, "meetings").await.is_empty());
+    assert_eq!(std::fs::read_dir(&restored_originals).unwrap().count(), 1);
+    assert_eq!(std::fs::read(sentinel).unwrap(), b"existing original");
 }

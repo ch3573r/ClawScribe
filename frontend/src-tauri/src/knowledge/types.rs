@@ -58,6 +58,7 @@ pub enum TagMatch {
 pub struct SearchRequest {
     pub scope: KnowledgeScope,
     pub query: String,
+    #[serde(default)]
     pub document_ids: Vec<String>,
     pub mode: SearchMode,
 }
@@ -91,6 +92,8 @@ pub enum EvidenceLocator {
         document_id: String,
         page: Option<u32>,
         paragraph: u32,
+        #[serde(default)]
+        spans: Vec<TextSpan>,
     },
     Live {
         session_id: String,

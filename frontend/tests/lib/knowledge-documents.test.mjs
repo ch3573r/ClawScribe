@@ -98,6 +98,16 @@ test('enabling library document sharing lazily creates one durable conversation 
   assert.equal(writes.length,1);assert.equal(writes[0].owner.id,'references-thread');assert.equal(app.render().owner.id,'references-thread');app.unmount();
 });
 
+test('failed library sharing remains visible after its newly created owner is adopted',async()=>{
+  const scope={kind:'library',filter:{all_meetings:false,meeting_ids:['one'],tags:[],tag_mode:'any',untagged:false,from:null,to:null}};
+  const app=view({createConversation:async()=>({kind:'library',id:'references-thread'}),setDocumentSharing:async()=>{throw new Error('Permission storage unavailable');}},{scope,owner:null});
+  await ready(app);await app.render().setDocumentSharing(true);await ready(app);
+  assert.equal(app.render().owner.id,'references-thread');
+  assert.equal(app.render().sharingEnabled,false);
+  assert.match(app.render().sharingError,/could not be saved/i);
+  app.unmount();
+});
+
 const jsx=(type,props)=>({type,props});
 const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
 const text=node=>typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(text).join(''):node?text(node.props?.children):'';

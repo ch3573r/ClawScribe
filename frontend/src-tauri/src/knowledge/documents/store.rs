@@ -139,6 +139,13 @@ pub async fn blocks(
         })
         .collect())
 }
+pub async fn get(
+    pool: &SqlitePool,
+    meeting: &str,
+    id: &str,
+) -> Result<DocumentAttachment, DocumentError> {
+    read_attachment(&mut *pool.acquire().await?, meeting, id).await
+}
 pub async fn detach(pool: &SqlitePool, meeting: &str, id: &str) -> Result<(), DocumentError> {
     sqlx::query("DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?")
         .bind(meeting)

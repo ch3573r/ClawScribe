@@ -10,6 +10,8 @@ pub const CANDIDATES: usize = 64;
 pub const VECTOR_PAGE: usize = 512;
 pub const RESULT_LIMIT: usize = 12;
 pub const RRF_CONSTANT: f64 = 60.;
+const SCOPE_CTE: &str = "WITH allowed AS (SELECT value FROM json_each(?)), selected_documents AS (SELECT value FROM json_each(?))";
+const SCOPED_SOURCE: &str = "(s.meeting_id IN(SELECT value FROM allowed) OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d JOIN knowledge_document_attachments a ON a.document_id=d.id WHERE d.source_id=s.id AND d.id IN(SELECT value FROM selected_documents) AND a.meeting_id IN(SELECT value FROM allowed))))";
 #[cfg(test)]
 tokio::task_local! { static MOVE_AFTER_FTS: std::cell::RefCell<Option<(String,String)>>; }
 #[cfg(test)]
@@ -20,6 +22,7 @@ pub(crate) static MAPPING_PEAK: std::sync::atomic::AtomicUsize =
 pub struct FrozenScope {
     pub scope: KnowledgeScope,
     pub meeting_ids: Vec<String>,
+    pub document_ids: Vec<String>,
 }
 fn valid_scope_date(value: &str) -> bool {
     value.len() == 10
@@ -111,7 +114,22 @@ pub async fn freeze_scope_in_connection(
     Ok(FrozenScope {
         scope: scope.clone(),
         meeting_ids,
+        document_ids: Vec::new(),
     })
+}
+
+pub async fn freeze_search_in_connection(
+    connection: &mut sqlx::SqliteConnection,
+    request: &SearchRequest,
+) -> Result<FrozenScope, KnowledgeError> {
+    let mut frozen = freeze_scope_in_connection(connection, &request.scope).await?;
+    frozen.document_ids = super::document_context::validate_selection(
+        connection,
+        &frozen.meeting_ids,
+        &request.document_ids,
+    )
+    .await?;
+    Ok(frozen)
 }
 
 pub async fn recheck_scope(pool: &SqlitePool, frozen: &FrozenScope) -> Result<(), KnowledgeError> {
@@ -129,6 +147,13 @@ pub async fn recheck_scope_in_connection(
     {
         return Err(KnowledgeError::Superseded);
     }
+    super::document_context::validate_selection(
+        connection,
+        &frozen.meeting_ids,
+        &frozen.document_ids,
+    )
+    .await
+    .map_err(|_| KnowledgeError::Superseded)?;
     Ok(())
 }
 
@@ -146,6 +171,8 @@ pub async fn search_channels(
     }
     let allowed =
         serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
+    let documents =
+        serde_json::to_string(&scope.document_ids).map_err(|_| KnowledgeError::InvalidInput)?;
     let active_space = vector
         .map(|(space, _)| space.to_owned())
         .unwrap_or_else(|| super::model::PINS.space().id);
@@ -249,7 +276,8 @@ pub async fn search_channels(
             .collect::<Vec<_>>()
             .join(" OR ");
         let expression = format!("text: ({body_expression}) OR speaker: ({speaker_expression})");
-        let selected:Vec<store::SelectedRow>=sqlx::query_as("SELECT f.transcript_id,s.id AS source_id,s.meeting_id,s.revision,s.generation FROM knowledge_fts f JOIN transcripts t ON t.id=f.transcript_id JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN json_each(?) allowed ON allowed.value=t.meeting_id WHERE knowledge_fts MATCH ? ORDER BY bm25(knowledge_fts),f.transcript_id LIMIT 64").bind(&allowed).bind(expression).fetch_all(pool).await?;
+        let selected:Vec<store::SelectedRow>=sqlx::query_as("WITH allowed AS (SELECT value FROM json_each(?)), selected_documents AS (SELECT value FROM json_each(?)) SELECT transcript_id,source_id,meeting_id,revision,generation FROM (SELECT f.transcript_id,s.id AS source_id,s.meeting_id,s.revision,s.generation,bm25(knowledge_fts) AS score FROM knowledge_fts f JOIN transcripts t ON t.id=f.transcript_id JOIN knowledge_sources s ON s.meeting_id=t.meeting_id WHERE t.meeting_id IN(SELECT value FROM allowed) AND knowledge_fts MATCH ? UNION ALL SELECT f.block_id AS transcript_id,s.id AS source_id,(SELECT MIN(a.meeting_id) FROM knowledge_document_attachments a WHERE a.document_id=d.id AND a.meeting_id IN(SELECT value FROM allowed)) AS meeting_id,s.revision,s.generation,bm25(knowledge_document_fts) AS score FROM knowledge_document_fts f JOIN knowledge_document_blocks b ON b.id=f.block_id JOIN knowledge_documents d ON d.id=b.document_id JOIN knowledge_sources s ON s.id=d.source_id WHERE d.id IN(SELECT value FROM selected_documents) AND EXISTS(SELECT 1 FROM knowledge_document_attachments a WHERE a.document_id=d.id AND a.meeting_id IN(SELECT value FROM allowed)) AND knowledge_document_fts MATCH ?) ORDER BY score,transcript_id LIMIT 64")
+            .bind(&allowed).bind(&documents).bind(expression).bind(&body_expression).fetch_all(pool).await?;
         #[cfg(test)]
         if let Ok(Some((id, owner))) = MOVE_AFTER_FTS.try_with(|slot| slot.borrow_mut().take()) {
             sqlx::query("UPDATE transcripts SET meeting_id=? WHERE id=?")
@@ -284,7 +312,7 @@ pub async fn search_channels(
         }
     }
     let semantic = if let Some((space, vector)) = vector {
-        semantic_candidates(pool, &allowed, space, vector).await?
+        semantic_candidates(pool, &allowed, &documents, space, vector).await?
     } else {
         Vec::new()
     };
@@ -310,6 +338,11 @@ pub async fn search_channels(
     for mut candidate in candidates {
         if !scope.meeting_ids.contains(&candidate.meeting_id) {
             return Err(KnowledgeError::Superseded);
+        }
+        if let EvidenceLocator::Document { document_id, .. } = &candidate.evidence.locator {
+            if !scope.document_ids.contains(document_id) {
+                return Err(KnowledgeError::Superseded);
+            }
         }
         if result
             .iter()
@@ -341,6 +374,7 @@ pub async fn search_channels(
             .then_with(|| a.evidence.chunk_id.cmp(&b.evidence.chunk_id))
     });
     result.truncate(RESULT_LIMIT);
+    recheck_scope(pool, scope).await?;
     Ok(result)
 }
 
@@ -354,6 +388,10 @@ fn contained(a: &Passage, b: &Passage) -> bool {
         (
             EvidenceLocator::Transcript { spans: a, .. },
             EvidenceLocator::Transcript { spans: b, .. },
+        )
+        | (
+            EvidenceLocator::Document { spans: a, .. },
+            EvidenceLocator::Document { spans: b, .. },
         ) if a.len() == 1 && b.len() == 1 => {
             a[0].transcript_id == b[0].transcript_id
                 && a[0].start_byte <= b[0].start_byte
@@ -361,6 +399,47 @@ fn contained(a: &Passage, b: &Passage) -> bool {
         }
         _ => false,
     }
+}
+
+/// A selected reference gets its own bounded candidate budget when transcript
+/// matches consume the global answer shortlist. It never broadens attachment scope.
+pub async fn document_matches(
+    pool: &SqlitePool,
+    scope: &FrozenScope,
+    document: &str,
+    query: &str,
+) -> Result<Vec<Passage>, KnowledgeError> {
+    if !scope.document_ids.iter().any(|id| id == document) || query.len() > 1024 {
+        return Err(KnowledgeError::InvalidInput);
+    }
+    let terms: Vec<String> = query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
+        .filter(|term| !term.is_empty())
+        .take(64)
+        .map(str::to_owned)
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let expression = terms
+        .iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let allowed =
+        serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
+    let rows: Vec<store::SelectedRow> = sqlx::query_as("WITH allowed AS (SELECT value FROM json_each(?)) SELECT f.block_id AS transcript_id,s.id AS source_id,(SELECT MIN(a.meeting_id) FROM knowledge_document_attachments a WHERE a.document_id=d.id AND a.meeting_id IN(SELECT value FROM allowed)) AS meeting_id,s.revision,s.generation FROM knowledge_document_fts f JOIN knowledge_document_blocks b ON b.id=f.block_id JOIN knowledge_documents d ON d.id=b.document_id JOIN knowledge_sources s ON s.id=d.source_id WHERE d.id=? AND EXISTS(SELECT 1 FROM knowledge_document_attachments a WHERE a.document_id=d.id AND a.meeting_id IN(SELECT value FROM allowed)) AND knowledge_document_fts MATCH ? ORDER BY bm25(knowledge_document_fts),b.ordinal LIMIT 3")
+        .bind(allowed).bind(document).bind(expression).fetch_all(pool).await?;
+    let mut result = Vec::new();
+    for selected in rows {
+        if let Some(hit) =
+            store::locate(pool, &selected, query.to_owned(), terms.clone(), Vec::new()).await?
+        {
+            result.push(store::materialize(pool, &selected, hit.lexical, false).await?);
+        }
+    }
+    recheck_scope(pool, scope).await?;
+    Ok(result)
 }
 #[derive(Debug)]
 struct Scored {
@@ -390,18 +469,19 @@ impl Ord for Scored {
 async fn semantic_candidates(
     pool: &SqlitePool,
     allowed: &str,
+    documents: &str,
     space: &str,
     query: &[f32],
 ) -> Result<Vec<Passage>, KnowledgeError> {
     let query = super::embedding::normalize(query.to_vec())?;
     // Empty or stale generations do not reduce another source's budget.
-    let eligible: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT s.id) FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space")
-        .bind(allowed).bind(space).fetch_one(pool).await?;
+    let eligible: i64 = sqlx::query_scalar(&format!("{SCOPE_CTE} SELECT COUNT(DISTINCT s.id) FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space"))
+        .bind(allowed).bind(documents).bind(space).fetch_one(pool).await?;
     let per_source = if eligible >= 2 { 3 } else { CANDIDATES };
     let mut heap = BinaryHeap::<Scored>::new();
     let mut after = String::new();
     loop {
-        let page:Vec<(String,Vec<u8>,String)>=sqlx::query_as("SELECT c.id,v.vector,s.id FROM knowledge_vectors v JOIN knowledge_chunks c ON c.id=v.chunk_id JOIN knowledge_sources s ON s.id=c.source_id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE v.space=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND c.id>? ORDER BY c.id LIMIT ?").bind(allowed).bind(space).bind(space).bind(&after).bind(VECTOR_PAGE as i64).fetch_all(pool).await?;
+        let page:Vec<(String,Vec<u8>,String)>=sqlx::query_as(&format!("{SCOPE_CTE} SELECT c.id,v.vector,s.id FROM knowledge_vectors v JOIN knowledge_chunks c ON c.id=v.chunk_id JOIN knowledge_sources s ON s.id=c.source_id WHERE {SCOPED_SOURCE} AND v.space=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND c.id>? ORDER BY c.id LIMIT ?")).bind(allowed).bind(documents).bind(space).bind(space).bind(&after).bind(VECTOR_PAGE as i64).fetch_all(pool).await?;
         if page.is_empty() {
             break;
         }
@@ -450,7 +530,7 @@ async fn semantic_candidates(
     best.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     let mut result = Vec::new();
     for hit in best {
-        let chunk=sqlx::query("SELECT c.transcript_id,c.start_byte,c.end_byte,c.fingerprint,s.id AS source_id,s.meeting_id,s.revision,s.generation FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE c.id=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=?").bind(allowed).bind(&hit.id).bind(space).fetch_optional(pool).await?;
+        let chunk=sqlx::query(&format!("{SCOPE_CTE} SELECT c.transcript_id,c.start_byte,c.end_byte,c.fingerprint,s.id AS source_id,COALESCE(s.meeting_id,(SELECT MIN(a.meeting_id) FROM knowledge_document_attachments a JOIN knowledge_documents d ON d.id=a.document_id WHERE d.source_id=s.id AND a.meeting_id IN(SELECT value FROM allowed))) AS meeting_id,s.revision,s.generation FROM knowledge_chunks c JOIN knowledge_sources s ON s.id=c.source_id WHERE {SCOPED_SOURCE} AND c.id=? AND c.revision=s.revision AND c.generation=s.generation AND s.semantic_revision=s.revision AND s.semantic_space=?")).bind(allowed).bind(documents).bind(&hit.id).bind(space).fetch_optional(pool).await?;
         if let Some(chunk) = chunk {
             let selected = store::SelectedRow::from_row(&chunk)?;
             let fingerprint: String = chunk.try_get("fingerprint")?;
@@ -473,13 +553,10 @@ pub async fn retrieve(
     runtime: &super::KnowledgeState,
     request: &SearchRequest,
 ) -> Result<SearchResponse, KnowledgeError> {
-    if request.query.trim().is_empty()
-        || request.query.len() > 1024
-        || !request.document_ids.is_empty()
-    {
+    if request.query.trim().is_empty() || request.query.len() > 1024 {
         return Err(KnowledgeError::InvalidInput);
     }
-    let scope = freeze_scope(pool, &request.scope).await?;
+    let scope = freeze_search_in_connection(&mut *pool.acquire().await?, request).await?;
     retrieve_frozen(pool, runtime, request, &scope).await
 }
 
@@ -492,7 +569,12 @@ pub async fn retrieve_frozen(
 ) -> Result<SearchResponse, KnowledgeError> {
     if request.query.trim().is_empty()
         || request.query.len() > 1024
-        || !request.document_ids.is_empty()
+        || request.scope != scope.scope
+        || {
+            let mut selected = request.document_ids.clone();
+            selected.sort();
+            selected != scope.document_ids
+        }
     {
         return Err(KnowledgeError::InvalidInput);
     }
@@ -500,8 +582,10 @@ pub async fn retrieve_frozen(
     let mut status = super::store::status(pool, runtime.scheduler.is_enabled(), &space.id).await?;
     let allowed =
         serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
-    let scoped_ready: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id JOIN json_each(?) allowed ON allowed.value=s.meeting_id WHERE s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)")
-        .bind(allowed).bind(&space.id).fetch_one(pool).await?;
+    let documents =
+        serde_json::to_string(&scope.document_ids).map_err(|_| KnowledgeError::InvalidInput)?;
+    let scoped_ready: bool = sqlx::query_scalar(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)"))
+        .bind(allowed).bind(documents).bind(&space.id).fetch_one(pool).await?;
     let vector = if request.mode == SearchMode::Hybrid && scoped_ready {
         match runtime
             .scheduler
