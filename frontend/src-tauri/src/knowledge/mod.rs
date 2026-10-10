@@ -10,6 +10,7 @@ pub mod documents;
 pub mod embedding;
 pub mod evidence;
 pub mod indexer;
+pub mod live;
 pub mod model;
 pub mod retrieval;
 pub mod scheduler;
