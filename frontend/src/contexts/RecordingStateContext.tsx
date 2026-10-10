@@ -132,18 +132,6 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     type StartCheck = { identity: RecordingIdentity; mode: RecordingMode; request: number; phase: number };
     let queuedStart: StartCheck | null = null;
     let checkingStart = false;
-    type CanonicalRead = ReturnType<typeof knowledgeService.liveSnapshot>;
-    let canonicalRead: CanonicalRead | null = null;
-    const readCanonical = (): CanonicalRead => {
-      if (canonicalRead) return canonicalRead;
-      // Recovery and Started validation share one native invocation. Each
-      // consumer still checks its own lifecycle revision and exact producer pair.
-      const work: CanonicalRead = knowledgeService.liveSnapshot().finally(() => {
-        if (canonicalRead === work) canonicalRead = null;
-      });
-      canonicalRead = work;
-      return work;
-    };
     let polling: ReturnType<typeof setInterval> | undefined;
     const unsubscribers: (() => void)[] = [];
     const stopPolling = () => {
@@ -168,7 +156,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         if (backend.is_recording && backendSession === null && lifecycleStatus.current === RecordingStatus.IDLE) {
           // Bind reload recovery once too; rejected old start events must not
           // leave the stopped-event filter without the current identity.
-          const snapshot = await readCanonical().catch(() => null);
+          const snapshot = await knowledgeService.liveSnapshot().catch(() => null);
           if (!active || request !== revision || phase !== lifecycleRevision.current) return;
           const canonical = snapshot && recordingIdentity(snapshot.session_id, snapshot.recording_generation);
           if (!canonical || (metadata && !sameIdentity(metadata, canonical)) ||
@@ -222,7 +210,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       queuedStart = null;
       if (candidate.phase !== lifecycleRevision.current || candidate.request !== revision) return;
       checkingStart = true;
-      void readCanonical().then(snapshot => {
+      void knowledgeService.liveSnapshot().then(snapshot => {
         if (!active || candidate.request !== revision || candidate.phase !== lifecycleRevision.current) return;
         const canonical = recordingIdentity(snapshot.session_id, snapshot.recording_generation);
         if (!canonical || !sameIdentity(candidate.identity, canonical) || !sameIdentity(lifecycleOwner, canonical)) return;

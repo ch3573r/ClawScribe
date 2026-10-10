@@ -354,6 +354,11 @@ the live store uses the same lookup lane for polls and reloads. Native current
 Stop must clear pending live adoption synchronously without relying on context
 callback order. Capture Stop metadata before clearing or draining that producer.
 
+Preview limitation: the recording context retains separate reload and Started
+validation lanes, bounded to two overlapping metadata lookups. Both retain
+producer/revision guards; the live store retains one lane. Unifying the context
+lanes remains follow-up work and does not add provider requests or audio work.
+
 Transcript backlog and incomplete-capture state remain visible beside live
 assistance. Answers identify the latest finalized transcript time; they must
 not imply that delayed transcription describes the current moment.
