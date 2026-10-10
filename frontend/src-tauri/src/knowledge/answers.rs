@@ -489,7 +489,10 @@ async fn balanced_selection(
     for meeting in &frozen.meeting_ids {
         if candidates
             .iter()
-            .filter(|row| &row.meeting_id == meeting)
+            .filter(|row| {
+                &row.meeting_id == meeting
+                    && matches!(row.evidence.locator, EvidenceLocator::Transcript { .. })
+            })
             .count()
             >= 3
         {
