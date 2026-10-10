@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.53
+
+- Add locally parsed PDF, DOCX, text and Markdown reference attachments. Extraction uses a short-lived, cancelable Windows child with bounded input/text/decompression, a 512 MiB process-memory limit and real page/paragraph anchors. Scanned/encrypted PDFs and malformed inputs fail visibly; OCR is not included.
+- Include explicitly selected documents in keyword and optional semantic meeting-memory retrieval. Distinguish written reference material from spoken evidence in prompts and citation previews. External answers require owner-specific reference sharing, off by default; revocation cancels active document-context requests.
+- Extend portable archives to version 2 with original reference files and canonical blocks. Preserve version-1 restore and existing citations; validate hashes and paths, remap collisions and roll back failed publication. Derived indexes, model files and sharing permissions are excluded.
+- Align Settings microphone tests with Windows recording fallback and show the actual opened endpoint. Clear a stale system-audio silence warning once system audio arrives without hiding other recording warnings.
+- Advance installer/runtime/updater version to 0.5.53 for a Windows GPU preview. Stage a draft, verify uploaded assets, then publish as a prerelease with latest=false. Stable remains 0.5.48. Live assistance remains planned for Phase 3.
+- Installed document/provider/citation/backup, light/dark/focus/narrow-layout, exact-build dual-source capture, upgrade/update and sustained-device acceptance remain pending before stable promotion. Identical file hashes with conflicting canonical extraction must restore into a separate library. See `docs/releases/0.5.53.md`.
+
 ## 0.5.52
 
 - Apply shared UI controls, semantic theme colors and sentence-case labels across shared components, Settings, Home and recording, Meeting details, Onboarding, and import/backup screens. Preserve application behavior and layout.

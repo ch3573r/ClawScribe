@@ -7,11 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.52**. This Windows GPU preview applies shared controls,
-sentence-case labels and semantic theme colors across Settings, Home and
-recording, Meeting details, Onboarding, import and backup screens. Existing
-meeting-memory search and cited conversations remain available. See the
-[0.5.52 preview notes](docs/releases/0.5.52.md) and the
+Source version: **0.5.53**. This Windows GPU preview adds locally parsed reference
+documents, explicitly selected document context with page/paragraph citations,
+and portable document backups. It also fixes microphone-test fallback and
+stale system-audio warnings. See the
+[0.5.53 preview notes](docs/releases/0.5.53.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
 previews; drafts are excluded from updates. Installed acceptance remains
@@ -238,18 +238,21 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What changed in 0.5.52 preview
+## What changed in 0.5.53 preview
 
-- Use shared controls and sentence-case labels across the six UI areas.
-- Replace raw status colors, rings and Home overlays with named theme colors.
-- Consolidate Tailwind/PostCSS configuration while preserving application fonts,
-  sidebar colors, animations and CSS prefixing.
-- Reduce all 68 files in the UI conventions baseline to zero recorded violations.
-- Provide a preview for installed light/dark, accent, keyboard and narrow-layout
-  review. Application behavior, provider and recording logic are unchanged.
+- Attach and preview PDF, DOCX, text and Markdown references locally.
+- Select references for keyword/semantic search and cited questions. External
+  providers receive document context only after sharing is enabled for that owner.
+- Keep original files, canonical extracted blocks and citations in version-2
+  backups while retaining version-1 restoration.
+- Show the actual microphone used by Settings tests after a stale device falls
+  back to the Windows default. Clear an earlier system-silence warning when
+  system audio arrives, preserving other recording warnings.
+- Keep live assistance planned for the next phase. Installed document, provider,
+  light/dark, recording and update acceptance remains pending before stable promotion.
 
-See the [preview notes](docs/releases/0.5.52.md), the
-[previous meeting-memory preview](docs/releases/0.5.51.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.53.md), the
+[previous UI preview](docs/releases/0.5.52.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 
