@@ -724,6 +724,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn document_candidates_do_not_satisfy_selected_meeting_transcript_coverage() {
+        let (pool, mut request, _dir) = document_answer_fixture().await;
+        request.search.query = "meeting_budget".into();
+        let frozen = retrieval::freeze_search_in_connection(
+            &mut *pool.acquire().await.unwrap(),
+            &request.search,
+        )
+        .await
+        .unwrap();
+        let document = &request.search.document_ids[0];
+        let job: store::SourceJob = sqlx::query_as(
+            "SELECT id AS source_id,'aster' AS meeting_id,revision,generation FROM knowledge_sources WHERE id=?",
+        )
+        .bind(format!("document:{document}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM knowledge_document_blocks WHERE document_id=? ORDER BY ordinal LIMIT 3",
+        )
+        .bind(document)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ids.len(), 3);
+        let mut candidates = Vec::new();
+        for id in ids {
+            let row = store::SelectedRow::for_job(&job, id.clone());
+            let (text, total) = store::body_window(&pool, &row, 0).await.unwrap();
+            assert_eq!(text.len(), total);
+            candidates.push(
+                store::materialize(
+                    &pool,
+                    &row,
+                    TextSpan {
+                        transcript_id: id,
+                        start_byte: 0,
+                        end_byte: total,
+                    },
+                    false,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let documents: Vec<_> = candidates.iter().map(|row| row.evidence.clone()).collect();
+        let (selected, _) = balanced_selection(
+            &pool,
+            &super::super::KnowledgeState::default(),
+            &request.search,
+            &frozen,
+            candidates,
+            SearchMode::Keyword,
+        )
+        .await
+        .unwrap();
+        assert!(
+            selected.iter().any(|row| {
+                row.meeting_id == "aster"
+                    && matches!(row.evidence.locator, EvidenceLocator::Transcript { .. })
+                    && row.text.contains("meeting_budget")
+            }),
+            "Selected references must not prevent retrieval of the meeting's spoken evidence"
+        );
+        assert!(documents
+            .iter()
+            .all(|reference| selected.iter().any(|row| &row.evidence == reference)));
+    }
+
+    #[tokio::test]
     async fn mixed_reference_answer_is_distinct_and_deselection_omits_prior_context() {
         let (pool, request, dir) = document_answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
