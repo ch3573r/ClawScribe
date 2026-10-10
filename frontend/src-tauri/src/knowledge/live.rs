@@ -518,6 +518,9 @@ impl LiveState {
     }
 }
 fn validate_in(inner: &Inner, lease: &LiveLease, documents: bool) -> Result<(), String> {
+    if lease.token.is_cancelled() || tokio::time::Instant::now() >= lease.deadline {
+        return Err("Live request cancelled or deadline expired".into());
+    }
     let session = inner
         .session
         .as_ref()
@@ -580,10 +583,10 @@ where
                 passages.push(passage);
             }
         }
-        let (prompt, selected) = super::answers::build_prompt(
+        let (prompt, selected, contexts) = super::live_context::build_prompt(
+            &snapshot,
             &request.search.query,
             &passages,
-            "",
             budget.saturating_sub(512),
         )?;
         let mut envelope: serde_json::Value =
@@ -615,12 +618,13 @@ where
             evidence: selected.iter().map(|p| p.evidence.clone()).collect(),
             evidence_metadata: selected
                 .iter()
-                .map(|p| EvidenceDisplay {
+                .enumerate()
+                .map(|(index, p)| EvidenceDisplay {
                     title: p.title.clone(),
                     date: p.date.clone(),
                     speaker: p.speaker.clone(),
                     metadata_truncated: p.metadata_truncated,
-                    preceding_question_tag: None,
+                    preceding_question_tag: contexts[index],
                 })
                 .collect(),
             cited_tags: vec![],
@@ -636,6 +640,17 @@ where
         };
         let mut reply = reply;
         reply.cited_tags = super::evidence::tag_numbers(&reply.content, reply.evidence.len());
+        reply.context_links = reply
+            .cited_tags
+            .iter()
+            .filter_map(|tag| {
+                contexts[tag - 1].map(|context_tag| CitationContextLink {
+                    kind: CitationContextKind::PrecedingQuestion,
+                    cited_tag: *tag,
+                    context_tag,
+                })
+            })
+            .collect();
         state.complete(&lease, &request, &reply)?;
         Ok(reply)
     };

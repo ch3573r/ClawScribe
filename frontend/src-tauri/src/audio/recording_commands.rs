@@ -156,8 +156,12 @@ pub(crate) fn bookmark_position() -> Result<(String, f64), String> {
     Ok((folder.to_string_lossy().into_owned(), seconds))
 }
 static TRANSCRIPTION_TASK: Mutex<Option<transcription::TranscriptionTask>> = Mutex::new(None);
-static PENDING_TRANSCRIPT_SEGMENTS: Mutex<Vec<crate::audio::recording_saver::TranscriptSegment>> =
-    Mutex::new(Vec::new());
+static PENDING_TRANSCRIPT_SEGMENTS: Mutex<
+    Vec<(
+        Option<String>,
+        crate::audio::recording_saver::TranscriptSegment,
+    )>,
+> = Mutex::new(Vec::new());
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
@@ -195,7 +199,7 @@ fn persist_transcript_update(update: TranscriptUpdate) {
             }
             manager.add_transcript_segment(segment);
         } else if let Ok(mut pending) = PENDING_TRANSCRIPT_SEGMENTS.lock() {
-            pending.push(segment);
+            pending.push((session_id, segment));
         }
     }
 }
@@ -245,7 +249,13 @@ fn store_recording_manager(manager: RecordingManager) {
     if let (Some(manager), Ok(mut pending)) =
         (manager_guard.as_ref(), PENDING_TRANSCRIPT_SEGMENTS.lock())
     {
-        for segment in pending.drain(..) {
+        for (session_id, segment) in pending.drain(..) {
+            if session_id
+                .as_deref()
+                .is_some_and(|id| Some(id) != manager.live_session_id())
+            {
+                continue;
+            }
             manager.add_transcript_segment(segment);
         }
     }

@@ -102,6 +102,117 @@ pub(crate) fn lexical(snapshot: &LiveSnapshot, query: &str, limit: usize) -> Vec
     selected.sort_by_key(|s| s.sequence_id);
     selected.into_iter().map(|s| passage(snapshot, s)).collect()
 }
+
+fn preceding_question(snapshot: &LiveSnapshot, row: &Passage) -> Option<EvidenceRef> {
+    let EvidenceLocator::Live {
+        session_id,
+        sequence_ids,
+    } = &row.evidence.locator
+    else {
+        return None;
+    };
+    if session_id != &snapshot.session_id
+        || sequence_ids.len() != 1
+        || row.text.len() > 64
+        || row.text.trim_end().ends_with('?')
+    {
+        return None;
+    }
+    snapshot
+        .segments
+        .iter()
+        .rev()
+        .find(|segment| segment.sequence_id < sequence_ids[0])
+        .filter(|segment| segment.text.trim_end().ends_with('?'))
+        .map(|segment| passage(snapshot, segment).evidence)
+}
+
+/// Keep positional short-reply context atomic through the final byte budget.
+/// Reuse saved-answer serialization without changing its selection behavior.
+pub(crate) fn build_prompt(
+    snapshot: &LiveSnapshot,
+    question: &str,
+    passages: &[Passage],
+    budget: usize,
+) -> Result<(String, Vec<Passage>, Vec<Option<usize>>), String> {
+    let sources: Vec<_> = passages
+        .iter()
+        .map(|row| {
+            preceding_question(snapshot, row).and_then(|reference| {
+                passages
+                    .iter()
+                    .position(|source| source.evidence == reference)
+            })
+        })
+        .collect();
+    let (mut prompt, mut selected) = super::answers::build_prompt(question, &[], "", budget)?;
+    let mut contexts = vec![];
+    let mut handled = vec![false; passages.len()];
+    for index in 0..passages.len() {
+        if handled[index] {
+            continue;
+        }
+        let group = if let Some(reply) = sources.iter().position(|source| *source == Some(index)) {
+            vec![index, reply]
+        } else if let Some(source) = sources[index] {
+            vec![source, index]
+        } else {
+            vec![index]
+        };
+        let mut candidate = selected.clone();
+        for member in group {
+            handled[member] = true;
+            if !candidate
+                .iter()
+                .any(|row| row.evidence == passages[member].evidence)
+            {
+                candidate.push(passages[member].clone());
+            }
+        }
+        let (candidate_prompt, accepted) =
+            super::answers::build_prompt(question, &candidate, "", budget)?;
+        if accepted.len() != candidate.len() {
+            continue;
+        }
+        let candidate_contexts: Vec<_> = accepted
+            .iter()
+            .map(|row| {
+                preceding_question(snapshot, row)
+                    .and_then(|reference| {
+                        accepted
+                            .iter()
+                            .position(|source| source.evidence == reference)
+                    })
+                    .map(|index| index + 1)
+            })
+            .collect();
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&candidate_prompt).map_err(|_| "Invalid live evidence prompt")?;
+        for row in envelope["transcript_evidence"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            let index = row["tag"]
+                .as_str()
+                .and_then(|tag| tag.strip_prefix("[K"))
+                .and_then(|tag| tag.strip_suffix(']'))
+                .and_then(|tag| tag.parse::<usize>().ok())
+                .and_then(|tag| tag.checked_sub(1));
+            if let Some(context) = index.and_then(|index| candidate_contexts.get(index)) {
+                row["preceding_question_tag"] = serde_json::json!(context);
+            }
+        }
+        let candidate_prompt = envelope.to_string();
+        if candidate_prompt.len() > budget {
+            continue;
+        }
+        prompt = candidate_prompt;
+        selected = accepted;
+        contexts = candidate_contexts;
+    }
+    Ok((prompt, selected, contexts))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
