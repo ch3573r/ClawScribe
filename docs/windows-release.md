@@ -263,11 +263,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.5.52, installer filenames are:
+For source version 0.5.53, installer filenames are:
 
 ```text
-ClawScribe_0.5.52_x64-setup.exe
-ClawScribe_0.5.52_x64_en-US.msi
+ClawScribe_0.5.53_x64-setup.exe
+ClawScribe_0.5.53_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).
