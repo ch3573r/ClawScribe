@@ -205,3 +205,81 @@ test('a genuine replacement Stop invalidates its pending start check without acc
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });
+
+function liveSnapshot(sessionId) {
+  return {
+    session_id: sessionId, finalized_through_seconds: 0, segments: [],
+    transcription_incomplete: false, transcription_available: true,
+  };
+}
+
+test('a rejected older start cannot erase the genuine pending identity before its native Stop', async () => {
+  const replacement = deferred(); const older = deferred();
+  let snapshot = Promise.resolve(liveSnapshot('session-a'));
+  const view = createView(false, () => snapshot); const observed = [];
+  view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-a'); await flush();
+    assert.equal(view.render().status, 'recording');
+    view.render().setStatus('stopping'); view.callbacks.Stopped({ session_id: 'session-a' });
+    view.render().setStatus('starting');
+    view.render().subscribeLifecycle(status => observed.push(status));
+    snapshot = replacement.promise; view.callbacks.Started('live', 'session-b');
+    snapshot = older.promise; view.callbacks.Started('audio_only', 'session-c');
+    older.resolve(liveSnapshot('session-b')); await flush();
+    assert.equal(view.render().status, 'starting', 'the mismatched older event cannot promote a recording');
+    view.callbacks.Stopped({ session_id: 'session-b' });
+    assert.deepEqual(observed, ['stopping'], 'rejecting C must not make the current native Stop(B) disappear');
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
+    replacement.resolve(liveSnapshot('session-b')); await flush();
+    assert.equal(view.render().status, 'stopping', 'the pre-Stop snapshot must not revive B');
+    assert.equal(view.render().isRecording, false); assert.equal(view.intervals.size, 0);
+  } finally { view.unmount(); }
+});
+
+test('a stale Stop for a second unverified start cannot invalidate the genuine pending recording', async () => {
+  const replacement = deferred(); const older = deferred();
+  let snapshot = Promise.resolve(liveSnapshot('session-a'));
+  const view = createView(false, () => snapshot); const observed = [];
+  view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-a'); await flush();
+    view.render().setStatus('stopping'); view.callbacks.Stopped({ session_id: 'session-a' });
+    view.render().setStatus('starting');
+    view.render().subscribeLifecycle(status => observed.push(status));
+    snapshot = replacement.promise; view.callbacks.Started('live', 'session-b');
+    snapshot = older.promise; view.callbacks.Started('audio_only', 'session-c');
+    view.callbacks.Stopped({ session_id: 'session-c' });
+    assert.deepEqual(observed, [], 'unverified C must not gain lifecycle ownership from event arrival order');
+    assert.equal(view.render().status, 'starting');
+    older.resolve(liveSnapshot('session-b')); await flush();
+    replacement.resolve(liveSnapshot('session-b')); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().isRecording, true);
+    assert.equal(view.render().sessionMode, 'live', 'the genuine event retains its recording mode');
+    view.callbacks.Stopped({ session_id: 'session-b' });
+    assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
+
+test('an older start arriving first cannot own Stop while the genuine replacement identity is unverified', async () => {
+  const replacement = deferred(); const older = deferred();
+  let snapshot = Promise.resolve(liveSnapshot('session-a'));
+  const view = createView(false, () => snapshot); const observed = [];
+  view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-a'); await flush();
+    view.render().setStatus('stopping'); view.callbacks.Stopped({ session_id: 'session-a' });
+    view.render().setStatus('starting');
+    view.render().subscribeLifecycle(status => observed.push(status));
+    snapshot = older.promise; view.callbacks.Started('audio_only', 'session-c');
+    snapshot = replacement.promise; view.callbacks.Started('live', 'session-b');
+    view.callbacks.Stopped({ session_id: 'session-c' });
+    assert.deepEqual(observed, [], 'pinning the first unverified event would let stale C stop B');
+    assert.equal(view.render().status, 'starting');
+    view.callbacks.Stopped({ session_id: 'session-b' });
+    assert.deepEqual(observed, ['stopping'], 'the current native Stop must invalidate either arrival order');
+    replacement.resolve(liveSnapshot('session-b')); older.resolve(liveSnapshot('session-b')); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
+    assert.equal(view.intervals.size, 0);
+  } finally { view.unmount(); }
+});
