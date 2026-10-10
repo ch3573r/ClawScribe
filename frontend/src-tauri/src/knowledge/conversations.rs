@@ -43,11 +43,12 @@ pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<ConversationOwner>,
         .collect())
 }
 pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
-    if uuid::Uuid::parse_str(&request.request_id)
-        .map(|id| id.to_string())
-        .ok()
-        .as_deref()
-        != Some(&request.request_id)
+    if request.live_reference_scope.is_some()
+        || uuid::Uuid::parse_str(&request.request_id)
+            .map(|id| id.to_string())
+            .ok()
+            .as_deref()
+            != Some(&request.request_id)
         || request.search.query.trim().is_empty()
         || request.search.query.len() > 1024
         || request.search.document_ids.len() > super::evidence::MAX_EVIDENCE_ENTRIES
@@ -468,6 +469,7 @@ async fn reply_in(connection: &mut SqliteConnection, id: &str) -> Result<Assista
         },
         provider: row.get("provider"),
         model: row.get("model"),
+        live_context: None,
     })
 }
 pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<(), String> {
@@ -945,6 +947,7 @@ pub(crate) mod tests {
 
     fn request(owner: ConversationOwner) -> AskRequest {
         AskRequest {
+            live_reference_scope: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             owner,
             search: SearchRequest {

@@ -125,6 +125,8 @@ pub fn reset_speech_detected_flag() {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranscriptUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub text: String,
     pub timestamp: String, // Wall-clock time for reference (e.g., "14:30:05")
     pub source: String,
@@ -148,6 +150,7 @@ pub struct TranscriptUpdate {
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: TranscriptionQueueReceiver,
+    live_sink: crate::audio::recording_manager::LiveTranscriptSink,
 ) -> TranscriptionTask {
     let metrics = transcription_receiver.metrics();
     metrics.set_worker_active(true);
@@ -220,6 +223,7 @@ pub fn start_transcription_task<R: Runtime>(
             let chunks_queued_clone = chunks_queued.clone();
             let metrics_clone = task_metrics.clone();
             let failure_notice = failure_notice.clone();
+            let live_sink = live_sink.clone();
 
             worker_handles.spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -369,6 +373,7 @@ pub fn start_transcription_task<R: Runtime>(
                                         // Emit transcript update with NEW recording-relative timestamps
 
                                         let update = TranscriptUpdate {
+                                            session_id: Some(live_sink.session_id.clone()),
                                             text: transcript,
                                             timestamp: format_current_timestamp(), // Wall-clock for reference
                                             source: source_label.to_string(),
@@ -383,6 +388,8 @@ pub fn start_transcription_task<R: Runtime>(
                                             word_timestamps,
                                         };
 
+                                        // Ingest before UI emission, retaining the producer's session identity and partial flag.
+                                        live_sink.ingest(&update);
                                         if let Err(_e) = app_clone.emit("transcript-update", &update)
                                         {
                                             error!("Failed to emit transcript update");

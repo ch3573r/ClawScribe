@@ -147,6 +147,9 @@ pub struct AskRequest {
     pub request_id: String,
     pub owner: ConversationOwner,
     pub search: SearchRequest,
+    /// Live requests may supplement their session with explicitly selected saved meetings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_reference_scope: Option<MeetingFilter>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -165,6 +168,8 @@ pub struct AssistantReply {
     pub retrieval_mode: SearchMode,
     pub provider: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_context: Option<super::live::LiveReplyContext>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

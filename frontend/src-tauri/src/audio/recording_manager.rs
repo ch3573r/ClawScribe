@@ -22,9 +22,27 @@ use super::transcription::queue::{transcription_queue, TranscriptionQueueReceive
 pub enum StreamManagerType {
     Standard(AudioStreamManager),
 }
+/// Captured at producer startup; never resolves a session ID from global state.
+#[derive(Clone)]
+pub struct LiveTranscriptSink {
+    pub session_id: String,
+    state: Arc<crate::knowledge::live::LiveState>,
+}
+impl LiveTranscriptSink {
+    pub(crate) fn new(state: Arc<crate::knowledge::live::LiveState>, session_id: String) -> Self {
+        Self { state, session_id }
+    }
+    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) {
+        self.state.ingest(&self.session_id, update);
+    }
+    fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
+        self.state.snapshot(&self.session_id)
+    }
+}
 
 /// Simplified recording manager that coordinates all audio components
 pub struct RecordingManager {
+    live: Option<LiveTranscriptSink>,
     mode: super::recording_mode::RecordingMode,
     state: Arc<RecordingState>,
     stream_manager: AudioStreamManager,
@@ -46,6 +64,7 @@ impl RecordingManager {
         let (device_monitor, device_event_receiver) = AudioDeviceMonitor::new();
 
         Self {
+            live: None,
             mode: super::recording_mode::RecordingMode::Live,
             state,
             stream_manager,
@@ -60,6 +79,29 @@ impl RecordingManager {
     pub fn set_mode(&mut self, mode: super::recording_mode::RecordingMode) {
         self.mode = mode;
         self.recording_saver.set_mode(mode);
+    }
+    pub(crate) fn bind_live_session(&mut self, sink: LiveTranscriptSink) {
+        self.live = Some(sink);
+    }
+    pub(crate) fn live_session_id(&self) -> Option<&str> {
+        self.live.as_ref().map(|sink| sink.session_id.as_str())
+    }
+    pub(crate) fn live_snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
+        let mut snapshot = self
+            .live
+            .as_ref()
+            .ok_or("No active live session")?
+            .snapshot()?;
+        snapshot.transcription_incomplete |= self.state.capture_incomplete();
+        if self.mode.transcribes() {
+            snapshot.transcription_incomplete |=
+                super::transcription::current_transcription_metrics().is_none_or(|metrics| {
+                    metrics.failed_chunks > 0
+                        || metrics.chunks_in_queue > 0
+                        || metrics.is_processing
+                });
+        }
+        Ok(snapshot)
     }
 
     /// Start recording with specified devices

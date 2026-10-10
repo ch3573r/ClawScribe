@@ -1495,6 +1495,7 @@ mod tests {
             sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,'archive-source',?,'2026-09-01')").bind(id).bind(text).execute(&pool).await.unwrap();
         }
         let request = AskRequest {
+            live_reference_scope: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             owner: conversations::create_library(&pool).await.unwrap(),
             search: SearchRequest {
@@ -1676,6 +1677,7 @@ mod tests {
             sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Public upgrade fixture','2026-09-02','2026-09-02')").bind(&meeting).execute(&source).await.unwrap();
             sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,?,?,'2026-09-02')").bind(&transcript).bind(&meeting).bind(text).execute(&source).await.unwrap();
             let request = AskRequest {
+                live_reference_scope: None,
                 request_id: uuid::Uuid::new_v4().to_string(),
                 owner: conversations::create_library(&source).await.unwrap(),
                 search: SearchRequest {
@@ -2081,6 +2083,7 @@ mod tests {
         use crate::knowledge::{conversations, retrieval, types::*};
         let source = empty_conversation_destination().await;
         let request = AskRequest {
+            live_reference_scope: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             owner: conversations::create_library(&source).await.unwrap(),
             search: SearchRequest {
