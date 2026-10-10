@@ -161,3 +161,47 @@ test('a pending authoritative start check cannot apply after synchronous Stop', 
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });
+
+test('a delayed prior Stop cannot invalidate a genuine replacement while its authoritative start check is pending', async () => {
+  const replacement = deferred(); let backendId = 'session-a'; const checks = [];
+  const view = createView(false, () => {
+    checks.push(backendId);
+    return backendId === 'session-b' ? replacement.promise : Promise.resolve({ session_id: backendId });
+  });
+  const observed = []; view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-a'); await flush();
+    assert.equal(view.render().status, 'recording');
+    view.render().setStatus('stopping'); view.callbacks.Stopped({ session_id: 'session-a' });
+    view.render().setStatus('starting'); backendId = 'session-b';
+    view.render().subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Started('live', 'session-b'); await flush();
+    assert.equal(checks.at(-1), 'session-b', 'the production owner has started the authoritative identity check');
+    view.callbacks.Stopped({ session_id: 'session-a' });
+    assert.deepEqual(observed, [], 'the already completed recording must not clear the replacement Live owner');
+    assert.equal(view.render().status, 'starting');
+    replacement.resolve({ session_id: 'session-b' }); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().isRecording, true);
+    view.callbacks.Stopped({ session_id: 'session-a' }); assert.deepEqual(observed, []);
+    view.callbacks.Stopped({ session_id: 'session-b' });
+    assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
+
+test('a genuine replacement Stop invalidates its pending start check without accepting the retired identity', async () => {
+  const replacement = deferred(); let backendId = 'session-a';
+  const view = createView(false, () => backendId === 'session-b'
+    ? replacement.promise : Promise.resolve({ session_id: backendId }));
+  const observed = []; view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-a'); await flush();
+    view.render().setStatus('stopping'); view.callbacks.Stopped({ session_id: 'session-a' });
+    view.render().setStatus('starting'); backendId = 'session-b';
+    view.render().subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Started('live', 'session-b'); await flush();
+    view.callbacks.Stopped({ session_id: 'session-b' });
+    assert.deepEqual(observed, ['stopping'], 'current native Stop must reach Live even before start validation completes');
+    replacement.resolve({ session_id: 'session-b' }); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});
