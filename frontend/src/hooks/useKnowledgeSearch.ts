@@ -61,6 +61,7 @@ export function useKnowledgeSearch(
   const [sharingError, setSharingError] = useState('');
   const sharingPending = useRef(false);
   const sharingRead = useRef(0);
+  const sharingAdoptionError = useRef<{ ownerId: string; error: string } | null>(null);
   const documentScope = JSON.stringify({scope,libraryRevision});
   const ownerIdentity = JSON.stringify(owner);
   const documents = documentRows.scope === documentScope ? documentRows.rows : [];
@@ -170,8 +171,14 @@ export function useKnowledgeSearch(
   // cancel a still-needed list or consent read and leave its loading state stuck.
   useEffect(() => {
     let active = true;
-    setDocumentsLoading(true);
     setDocumentsError('');
+    if (!scopeReady(scope)) {
+      setDocumentRows({scope:documentScope,rows:[]});
+      setChosenDocuments([]);
+      setDocumentsLoading(false);
+      return () => { active = false; };
+    }
+    setDocumentsLoading(true);
     void knowledgeService.scopeDocuments(scope).then(rows => {
       if (!active) return;
       setDocumentRows({scope:documentScope,rows});
@@ -189,7 +196,8 @@ export function useKnowledgeSearch(
   useEffect(() => {
     let active = true;
     const read = ++sharingRead.current;
-    setSharingError('');
+    setSharingError(sharingAdoptionError.current && sharingAdoptionError.current.ownerId === owner?.id ? sharingAdoptionError.current.error : '');
+    sharingAdoptionError.current = null;
     setSharing({owner:ownerIdentity,enabled:false});
     setSharingLoading(!!owner);
     if (owner) void knowledgeService.documentSharing(owner).then(enabled => {
@@ -225,7 +233,11 @@ export function useKnowledgeSearch(
       if (!current()) return;
       setSharing({owner:JSON.stringify(requestOwner),enabled});
     } catch {
-      if (current()) setSharingError('Reference sharing could not be saved. Try again.');
+      if (current()) {
+        const message = 'Reference sharing could not be saved. Try again.';
+        setSharingError(message);
+        if (createdOwner) sharingAdoptionError.current = {ownerId:createdOwner.id,error:message};
+      }
     } finally {
       sharingPending.current = false;
       setSharingSaving(false);

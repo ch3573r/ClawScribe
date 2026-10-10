@@ -94,8 +94,9 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const end = useRef<HTMLDivElement>(null);
   const pending = useRef<{ text: string; scope: string; owner?: string; provider?: string; model?: string; started: boolean; finished: boolean } | null>(null);
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
-  const needsSharing = !!state.selectedDocumentIds?.length && provider !== "builtin-ai" && !state.sharingEnabled;
-  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && !state.sharingLoading;
+  const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
+  const needsSharing = externalReferences && !state.sharingEnabled;
+  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
   useEffect(() => { end.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [state.messages, state.sending]);
   useEffect(() => {
     const request = pending.current;

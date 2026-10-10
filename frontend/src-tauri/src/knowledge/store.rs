@@ -819,7 +819,7 @@ pub fn evidence(
     })
 }
 pub async fn next_job(pool: &SqlitePool) -> Result<Option<SourceJob>, KnowledgeError> {
-    Ok(sqlx::query_as("SELECT j.source_id,COALESCE(s.meeting_id,'') AS meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE s.kind IN('meeting','document') AND j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
+    Ok(sqlx::query_as("SELECT j.source_id,COALESCE(s.meeting_id,'') AS meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE (s.kind='meeting' OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d WHERE d.source_id=s.id))) AND j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
 }
 pub async fn current(pool: &SqlitePool, job: &SourceJob) -> Result<bool, KnowledgeError> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_sources s JOIN knowledge_index_jobs j ON j.source_id=s.id WHERE s.id=? AND s.revision=? AND s.generation=? AND j.generation=s.generation AND j.paused=0").bind(&job.source_id).bind(job.revision).bind(job.generation).fetch_one(pool).await? == 1)
@@ -1546,6 +1546,20 @@ mod tests {
             "saved opt-in must be visible without a ready runtime"
         );
         assert_eq!(missing.reason.as_deref(), Some("model_unavailable"));
+    }
+    #[tokio::test]
+    async fn canonical_document_source_enters_shared_index_worker() {
+        let (pool, document) = super::super::document_context::tests::fixture().await;
+        let source = format!("document:{document}");
+        sqlx::query("DELETE FROM knowledge_index_jobs WHERE source_id<>?")
+            .bind(&source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = next_job(&pool).await.unwrap().unwrap();
+        assert_eq!(job.source_id, source);
+        assert!(job.meeting_id.is_empty());
+        assert!(current(&pool, &job).await.unwrap());
     }
     #[tokio::test]
     async fn reserved_document_source_does_not_enter_meeting_worker() {
