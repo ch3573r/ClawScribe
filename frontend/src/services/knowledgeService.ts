@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AskRequest, AssistantReply, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, LiveAskRequest, LiveReply, LiveSnapshot, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
+import type { AskRequest, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, LiveAskRequest, LiveReply, LiveSnapshot, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
 
 /** The single native boundary for meeting memory. No provider credentials enter the UI request. */
 export const knowledgeService = {

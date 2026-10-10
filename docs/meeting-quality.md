@@ -60,6 +60,31 @@ or stop event.
 Live transcription failures produce one user-facing failure notice per recording;
 later failures do not repeat it. Live wall-clock timestamps use local time.
 
+The **Live assistance** preview panel uses finalized backend speech from the
+latest ten-minute context window. **Summarize so far** summarizes that bounded
+context, which may omit earlier discussion and recent untranscribed speech.
+Current finalized-through time remains visible while collapsed, and each answer
+shows its own timestamp and incomplete status. Assistance/provider errors are
+separate from the recording health banner; they do not certify or change capture
+health. Review generated claims against the transcript and saved audio.
+
+No answer runs automatically. Live transcript sharing is remembered but off
+until explicitly enabled. Selected saved references and per-recording document
+sharing are independent controls. Cancel hides late replies, and first Stop
+clears temporary messages without waiting for assistance. After saving, use
+**Open saved meeting** and its chat or transcription controls. Built-in AI cannot
+run a live answer during capture. Ollama runs separately and can contend for
+memory and compute; reduce or cancel assistance when transcription falls behind.
+
+Exact-build installed navigation/cancellation, provider failures, keyboard and
+theme checks remain pending. A release-like two-hour microphone/system-audio
+recording with Live enabled and a comparable disabled baseline is also pending.
+Record engine/model/language/backend, memory trend, transcription elapsed time
+and backlog, search/answer times, Stop time, saved playback and second-start
+behavior. Fixtures do not measure capture gaps, notebook performance or playable
+audio. A clearly labeled preview may precede these checks under the Windows
+release policy; stable readiness requires the real-device evidence.
+
 Nemotron's **Auto** uses the system locale for its language prompt, including
 imports and retranscription. It does not detect the spoken language or translate;
 choose the spoken language explicitly when it differs from the system setting.

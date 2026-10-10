@@ -182,7 +182,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     async setTranscriptSharing(enabled: boolean) {
       if (state.sharingBusy) return;
       const revision = ++permissionRevision;
-      if (!enabled) cancel(false);
+      cancel(false);
       update({ sharingBusy: true, sharingReady: true, transcriptSharing: false, error: null });
       try {
         await service.setLiveSharing(enabled);
@@ -239,7 +239,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
         : !sessionId || !snapshot?.transcription_available ? 'No live transcript is available. Ask after transcription in the saved meeting.'
         : !state.provider || !state.model ? 'Choose a summary provider and model in Settings.'
         : !state.sharingReady || !state.transcriptSharing || state.sharingBusy ? 'Enable live transcript sharing before asking.'
-        : state.documentSharingBusy || state.documentsLoading || state.referenceError ? 'Wait for references or retry their error before asking.'
+        : state.documentSharingBusy || state.documentsLoading || state.referenceError && state.meetingIds.length ? 'Wait for references or retry their error before asking.'
         : state.snapshotError ? 'Retry finalized transcript status before asking.'
         : snapshot.finalized_through_seconds <= 0 ? 'Waiting for finalized transcript. Try again when speech has been transcribed.'
         : utf8Bytes(text) > 1024 ? 'Keep your question within 1,024 UTF-8 bytes.' : null;

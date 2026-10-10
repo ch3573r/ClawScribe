@@ -104,3 +104,16 @@ test('first stopping status notifies lifecycle consumers synchronously before Re
     cleanup(); state.setStatus('saving'); assert.deepEqual(observed, ['stopping']);
   } finally { view.unmount(); await flush(); }
 });
+
+test('a stopped event from the prior backend session cannot invalidate the replacement recording', async () => {
+  const view = createView(); const observed = []; view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-current');
+    const state = view.render(); state.subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Stopped({ session_id: 'session-prior', message: 'Old recording finished' });
+    assert.deepEqual(observed, [], 'stale Stop must not reach the global Live owner');
+    assert.equal(view.render().isRecording, true); assert.equal(view.render().status, 'recording');
+    view.callbacks.Stopped({ session_id: 'session-current', message: 'Current recording finished' });
+    assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+  } finally { view.unmount(); }
+});

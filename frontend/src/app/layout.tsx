@@ -24,6 +24,7 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { RecordingStateProvider } from '@/contexts/RecordingStateContext'
+import { LiveAssistanceProvider } from '@/contexts/LiveAssistanceContext'
 import { OllamaDownloadProvider } from '@/contexts/OllamaDownloadContext'
 import { TranscriptProvider } from '@/contexts/TranscriptContext'
 import { ConfigProvider } from '@/contexts/ConfigContext'
@@ -379,6 +380,7 @@ export default function RootLayout({
             <AudioDeviceHotSwapMonitor />
             <TranscriptProvider>
               <ConfigProvider>
+                <LiveAssistanceProvider>
                 <OllamaDownloadProvider>
                   <OnboardingProvider>
                     <UpdateCheckProvider>
@@ -418,6 +420,7 @@ export default function RootLayout({
                   </OnboardingProvider>
 
                 </OllamaDownloadProvider>
+                </LiveAssistanceProvider>
               </ConfigProvider>
             </TranscriptProvider>
           </RecordingStateProvider>

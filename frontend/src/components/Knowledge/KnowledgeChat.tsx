@@ -30,13 +30,13 @@ function sourceTime(reply: AssistantReply, tag: number) {
   const seconds = Math.max(0, Math.floor(locator.start_seconds));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
-function Citation({ reply, state, tag }: { reply: AssistantReply; state: KnowledgeSearchState; tag: number }) {
+function Citation({ reply, state, tag }: { reply: AssistantReply; state: Pick<KnowledgeSearchState, 'inspect'>; tag: number }) {
   return <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="sm"
     className="mx-0.5 inline-flex h-5 min-w-5 align-super rounded px-1 text-xs text-primary"
     aria-label={`Open source ${tag}`} onClick={event => { event.preventDefault(); event.stopPropagation(); void state.inspect(reply.evidence[tag - 1], reply.evidence_metadata[tag - 1]); }}>{reply.evidence[tag - 1].locator.kind === "document" ? sourceTime(reply, tag) : tag}</Button></TooltipTrigger>
     <TooltipContent>{reply.evidence_metadata[tag - 1].title} · {sourceTime(reply, tag)}</TooltipContent></Tooltip>;
 }
-function CitedAnswer({ reply, state }: { reply: AssistantReply; state: KnowledgeSearchState }) {
+export function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Pick<KnowledgeSearchState, 'inspect'> }) {
   const count = reply.evidence.length === reply.evidence_metadata.length && reply.evidence.length <= MAX_EVIDENCE_ENTRIES ? reply.evidence.length : 0;
   const inline = (children: ReactNode) => Children.map(children, child => typeof child === "string"
     ? citationParts(child, count, reply.cited_tags).map((part, index) => part.tags

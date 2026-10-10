@@ -47,6 +47,7 @@ interface RecordingStateContextType extends RecordingState {
   setRecordingMode: (mode: RecordingMode) => Promise<void>;
   // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
+  subscribeLifecycle: (callback: (status: RecordingStatus) => void) => () => void;
 
   // Computed helpers (derived from status)
   isStarting: boolean;
@@ -102,7 +103,16 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     statusMessage: undefined,       // NEW: No message initially
   });
 
+  const lifecycleListeners = useRef(new Set<(status: RecordingStatus) => void>());
+  const subscribeLifecycle = useCallback((callback: (status: RecordingStatus) => void) => {
+    lifecycleListeners.current.add(callback);
+    return () => { lifecycleListeners.current.delete(callback); };
+  }, []);
+
   const setStatus = useCallback((status: RecordingStatus, message?: string) => {
+    // Ephemeral assistance invalidates at the caller's first Stop, before any
+    // React render or backend recording-stopped event can be awaited.
+    lifecycleListeners.current.forEach(callback => callback(status));
     setState(prev => ({ ...prev, status, statusMessage: message }));
   }, []);
 
@@ -181,6 +191,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         if (!active) return;
         revision++;
         stopPolling();
+        lifecycleListeners.current.forEach(callback => callback(RecordingStatus.STOPPING));
         setState(prev => {
           const status = [RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
             .includes(prev.status) ? prev.status : RecordingStatus.STOPPING;
@@ -214,12 +225,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   const contextValue = useMemo(() => ({
     recordingMode, modeError, isSavingMode, setRecordingMode,
     ...state,
-    setStatus,
+    setStatus, subscribeLifecycle,
     isStarting: state.status === RecordingStatus.STARTING,
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
     isSaving: state.status === RecordingStatus.SAVING,
-  }), [state, setStatus, recordingMode, modeError, isSavingMode, setRecordingMode]);
+  }), [state, setStatus, subscribeLifecycle, recordingMode, modeError, isSavingMode, setRecordingMode]);
 
   return (
     <RecordingStateContext.Provider value={contextValue}>

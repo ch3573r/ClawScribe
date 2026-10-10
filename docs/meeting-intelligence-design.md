@@ -4,8 +4,9 @@ Status: Phase 1 meeting memory and Phase 2 reference documents are implemented
 in source. Reference controls, selected context and portable document archives
 are included for the next preview. Installed offline, actual-provider,
 citation/playback and document UI acceptance remains pending under the Windows
-preview policy. Phase 3 recording-scoped backend requests are implemented;
-the manual panel and installed/performance acceptance remain planned.
+preview policy. Phase 3 recording-scoped backend requests and the manual Home
+panel are implemented in source. Installed and comparable two-hour
+enabled/disabled performance acceptance remain pending.
 
 ClawScribe should help users find decisions across saved meetings, bring their
 own reference documents into meeting questions, and ask for assistance during a
@@ -345,6 +346,17 @@ panel visibility changes cannot create duplicate transcript subscriptions.
 Transcript backlog and incomplete-capture state remain visible beside live
 assistance. Answers identify the latest finalized transcript time; they must
 not imply that delayed transcription describes the current moment.
+
+The root Live provider owns the production request store across navigation;
+opening or collapsing the panel does not install new transcript listeners.
+The Home panel shares the transcript view's scrollbar and leaves recording
+controls and health visible. Memory settings and the panel share one remembered
+text-sharing switch. Saved references require explicit meeting/document
+selection, with independent session document consent. First Stop clears UI
+session/messages and abandons async replies through the recording context's
+synchronous lifecycle subscription, before recording-stopped arrives. Current
+finalized status stays visible while collapsed; answers retain their individual
+snapshot time and actual provider. UI history is bounded and memory-only.
 
 ## Validation and rollout
 

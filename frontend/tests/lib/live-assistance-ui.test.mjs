@@ -84,10 +84,11 @@ test('sharing remains an explicit separate control and unavailable modes offer s
 
 test('global Live provider connects once across subscribers and receives synchronous Stop invalidation', async () => {
   const hooks = createHookHarness(); let lifecycle; let subscriptions = 0; let released = 0;
+  const subscribeLifecycle = callback => { lifecycle = callback; return () => { lifecycle = null; }; };
   const events = new Map(); const pending = deferred(); const requests = [];
   const { LiveAssistanceProvider } = loadTsModule('src/contexts/LiveAssistanceContext.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ status: 'recording', subscribeLifecycle: callback => { lifecycle = callback; return () => { lifecycle = null; }; } }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ status: 'recording', subscribeLifecycle }) },
     '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: { provider: 'custom-openai', model: 'selected-model' } }) },
     '@tauri-apps/api/event': { listen: async (event, callback) => { subscriptions++; events.set(event, callback); return () => { released++; events.delete(event); }; } },
     '@/services/knowledgeService': { knowledgeService: {
