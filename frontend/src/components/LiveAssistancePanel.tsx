@@ -45,9 +45,10 @@ export function LiveAssistancePanel() {
   }, [state.sessionId]);
   const audioOnly = recording.sessionMode === 'audio_only' || state.snapshot?.transcription_available === false;
   const builtin = state.provider === 'builtin-ai';
+  const statusError = recording.verificationError ?? state.snapshotError;
   const ready = !!state.sessionId && !!state.snapshot?.transcription_available && state.snapshot.finalized_through_seconds > 0 &&
     !!state.provider && !!state.model && !builtin && state.sharingReady && state.transcriptSharing && !state.sharingBusy &&
-    !state.pending && !state.documentSharingBusy && !state.documentsLoading && !state.snapshotError &&
+    !state.pending && !state.documentSharingBusy && !state.documentsLoading && !statusError &&
     !(state.referenceError && state.meetingIds.length);
   const submit = (text: string) => { if (ready && text.trim()) void actions.ask(text); };
   async function inspect(reference: EvidenceRef, metadata: EvidenceDisplay, contextReference?: EvidenceRef) {
@@ -84,8 +85,8 @@ export function LiveAssistancePanel() {
         ? `Finalized through ${time(state.snapshot.finalized_through_seconds)}${state.snapshot.transcription_incomplete ? ' · Transcript incomplete' : ''}`
         : state.sessionId ? 'Reading finalized transcript status…' : 'Available during a recording with live transcription.'}</p>
       <p className="text-xs text-muted-foreground">Uses the last 10 minutes of finalized speech. Recent speech may still be behind.</p>
-      {state.snapshotError && <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-xs text-destructive">{state.snapshotError}</p>
-        <Button variant="outline" size="sm" onClick={() => void actions.refresh()}>Retry status</Button></div>}
+      {statusError && <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-xs text-destructive">{statusError}</p>
+        <Button variant="outline" size="sm" onClick={() => { recording.retryVerification(); void actions.refresh(); }}>Retry status</Button></div>}
     </div>
     {expanded && <div id="live-assistance-body" className="space-y-4 border-t border-border p-4">
       <div className="flex flex-wrap items-center gap-2 text-sm"><span>Provider: {knowledgeProviderLabel(state.provider)}</span>

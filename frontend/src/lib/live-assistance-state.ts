@@ -64,7 +64,9 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
   let connectionRevision = 0;
   let reading: Promise<void> | null = null;
   let refreshQueued = false;
-  let queuedStart: { identity: RecordingIdentity; version: number; phase: number; connection: number } | null = null;
+  type StartCheck = { identity: RecordingIdentity; version: number; phase: number; connection: number };
+  let queuedStart: StartCheck | null = null;
+  let retryStart: StartCheck | null = null;
   let pending: { id: string; sessionId: string; promise: Promise<void> } | null = null;
   const current = (version: number, sessionId: string | null) =>
     generation === version && state.sessionId === sessionId;
@@ -80,6 +82,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     });
   };
   const clearSession = () => {
+    retryStart = null;
     generation++;
     snapshotRevision++;
     documentRevision++;
@@ -106,7 +109,17 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     all_meetings: false, meeting_ids: [...meetingIds], tags: [], tag_mode: 'any', untagged: false, from: null, to: null,
   });
   const refresh = (): Promise<void> => {
-    if (!connected || ['stopping', 'processing', 'saving', 'completed', 'error', 'starting'].includes(recording)) return Promise.resolve();
+    if (!connected || ['stopping', 'processing', 'saving', 'completed', 'error'].includes(recording)) return Promise.resolve();
+    if (recording === 'starting' || retryStart) {
+      // Manual retry shares the Started lane. Repeated clicks must not queue
+      // automatic work when this verification is already outstanding.
+      if (reading) return reading;
+      if (!retryStart || !currentStart(retryStart)) return Promise.resolve();
+      queuedStart = retryStart;
+      retryStart = null;
+      verifyStart();
+      return reading ?? Promise.resolve();
+    }
     if (reading) { refreshQueued = true; return reading; }
     const version = generation;
     const revision = ++snapshotRevision;
@@ -134,6 +147,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     if (lifecycleOwner && (!stoppedGeneration || compareGeneration(lifecycleOwner.generation, stoppedGeneration) > 0))
       stoppedGeneration = lifecycleOwner.generation;
     queuedStart = null;
+    retryStart = null;
     refreshQueued = false;
   };
   function finishRead(work: Promise<void>): void {
@@ -142,30 +156,34 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     if (queuedStart) verifyStart();
     // A context phase change can retire a queued event check while still
     // requiring the canonical reload/read. Both kinds share this one lane.
-    if (!reading && refreshQueued) { refreshQueued = false; void refresh(); }
+    if (!reading && refreshQueued) { refreshQueued = false; if (!retryStart) void refresh(); }
+  }
+  function currentStart(candidate: StartCheck): boolean {
+    return connected && candidate.connection === connectionRevision && candidate.version === generation &&
+      candidate.phase === lifecycleRevision && sameIdentity(lifecycleOwner, candidate.identity);
+  }
+  function failedStart(candidate: StartCheck): void {
+    if (!currentStart(candidate)) return;
+    retryStart = candidate;
+    update({ snapshotError: 'Could not verify the current recording. Retry finalized transcript status before asking.' });
   }
   function verifyStart(): void {
     if (reading || !queuedStart) return;
     const candidate = queuedStart;
     queuedStart = null;
-    if (!connected || candidate.connection !== connectionRevision || candidate.version !== generation ||
-      candidate.phase !== lifecycleRevision) return;
+    if (!currentStart(candidate)) return;
     const work: Promise<void> = service.liveSnapshot().then(snapshot => {
-      if (!connected || candidate.connection !== connectionRevision || candidate.version !== generation ||
-        candidate.phase !== lifecycleRevision) return;
+      if (!currentStart(candidate)) return;
       const identity = recordingIdentity(snapshot.session_id, snapshot.recording_generation);
-      if (!identity || !sameIdentity(candidate.identity, identity) || !sameIdentity(lifecycleOwner, identity)) return;
+      if (!identity || !sameIdentity(candidate.identity, identity)) { failedStart(candidate); return; }
+      retryStart = null;
       recording = 'recording';
       lifecycleRevision++;
       snapshotRevision++;
       startSession(identity.id);
       const { segments: _segments, ...metadata } = snapshot;
       update({ snapshot: metadata, snapshotError: null });
-    }).catch(() => {
-      if (connected && candidate.connection === connectionRevision && candidate.version === generation &&
-        candidate.phase === lifecycleRevision)
-        update({ snapshotError: 'Could not verify the current recording. Retry finalized transcript status before asking.' });
-    }).finally(() => finishRead(work));
+    }).catch(() => failedStart(candidate)).finally(() => finishRead(work));
     reading = work;
   }
   const api = {
@@ -225,7 +243,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
       // Covers an active backend recording after a WebView reload. Events are
       // registered first and every read is guarded against a newer lifecycle.
       void refresh();
-      const stopInterval = dependencies.interval(() => { if (state.sessionId || recording === 'recording') void refresh(); }, 5000);
+      const stopInterval = dependencies.interval(() => { if (!retryStart && (state.sessionId || recording === 'recording')) void refresh(); }, 5000);
       return () => {
         if (disposed || connection !== connectionRevision) return;
         disposed = true;
@@ -241,6 +259,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     },
     setRecording(status: string) {
       if (status === recording) return;
+      retryStart = null;
       lifecycleRevision++;
       recording = status;
       if (status === 'recording') void refresh();

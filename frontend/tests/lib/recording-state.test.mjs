@@ -361,6 +361,9 @@ async function rejectedStartingView() {
   view.render().setStatus('starting');
   view.callbacks.Started('live', 'session-b', '3');
   assert.equal(checks.length, 1);
+  // Settle the already stale initial sync so successful retry can later poll.
+  // Its revision predates Started, so it cannot open the separate reload lane.
+  view.requests[0].resolve(recording); await flush();
   checks[0].reject(new Error('Public fixture metadata failure')); await flush();
   return { view, checks };
 }

@@ -359,6 +359,13 @@ validation lanes, bounded to two overlapping metadata lookups. Both retain
 producer/revision guards; the live store retains one lane. Unifying the context
 lanes remains follow-up work and does not add provider requests or audio work.
 
+If initial canonical recording verification fails, show the failure in the Live
+panel and retain only the current candidate for manual Retry status. Retry checks
+both recording and Live metadata, promotes only the exact current producer pair,
+and resumes recording-state polling after success. Repeated clicks share the
+outstanding verification; rejection does not start automatic retries or provider
+requests. Stop and newer producers invalidate retained and outstanding retries.
+
 Transcript backlog and incomplete-capture state remain visible beside live
 assistance. Answers identify the latest finalized transcript time; they must
 not imply that delayed transcription describes the current moment.

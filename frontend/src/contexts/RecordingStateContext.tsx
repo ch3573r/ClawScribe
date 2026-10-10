@@ -40,6 +40,7 @@ interface RecordingState {
   // NEW: Lifecycle status
   status: RecordingStatus;
   statusMessage?: string;  // Optional message for current status
+  verificationError: string | null;
 }
 
 interface RecordingStateContextType extends RecordingState {
@@ -50,6 +51,7 @@ interface RecordingStateContextType extends RecordingState {
   // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
   subscribeLifecycle: (callback: (status: RecordingStatus) => void) => () => void;
+  retryVerification: () => void;
 
   // Computed helpers (derived from status)
   isStarting: boolean;
@@ -103,11 +105,14 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     activeDuration: null,
     status: RecordingStatus.IDLE,  // NEW: Initialize with IDLE status
     statusMessage: undefined,       // NEW: No message initially
+    verificationError: null,
   });
 
   const lifecycleListeners = useRef(new Set<(status: RecordingStatus) => void>());
   const lifecycleStatus = useRef(RecordingStatus.IDLE);
   const lifecycleRevision = useRef(0);
+  const retryStartWork = useRef<() => void>(() => {});
+  const retryVerification = useCallback(() => retryStartWork.current(), []);
   const subscribeLifecycle = useCallback((callback: (status: RecordingStatus) => void) => {
     lifecycleListeners.current.add(callback);
     return () => { lifecycleListeners.current.delete(callback); };
@@ -119,7 +124,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     lifecycleStatus.current = status;
     lifecycleRevision.current++;
     lifecycleListeners.current.forEach(callback => callback(status));
-    setState(prev => ({ ...prev, status, statusMessage: message }));
+    setState(prev => ({ ...prev, status, statusMessage: message, verificationError: null }));
   }, []);
 
   useEffect(() => {
@@ -131,6 +136,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     let stoppedGeneration: string | null = null;
     type StartCheck = { identity: RecordingIdentity; mode: RecordingMode; request: number; phase: number };
     let queuedStart: StartCheck | null = null;
+    let retryStart: StartCheck | null = null;
     let checkingStart = false;
     let polling: ReturnType<typeof setInterval> | undefined;
     const unsubscribers: (() => void)[] = [];
@@ -204,32 +210,47 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         if (active) console.error('Could not subscribe to recording state changes.');
       }
     };
+    const currentStart = (candidate: StartCheck) => active && candidate.request === revision &&
+      candidate.phase === lifecycleRevision.current && sameIdentity(lifecycleOwner, candidate.identity);
+    const failedStart = (candidate: StartCheck) => {
+      if (!currentStart(candidate)) return;
+      // Retain only the current failed candidate. It requires an explicit retry,
+      // rather than entering the automatic newest-Started queue again.
+      retryStart = candidate;
+      setState(prev => ({ ...prev, verificationError: 'Could not verify the current recording. Retry status.' }));
+    };
     const verifyStart = (): void => {
       if (!active || checkingStart || !queuedStart) return;
       const candidate = queuedStart;
       queuedStart = null;
-      if (candidate.phase !== lifecycleRevision.current || candidate.request !== revision) return;
+      if (!currentStart(candidate)) return;
       checkingStart = true;
       void knowledgeService.liveSnapshot().then(snapshot => {
-        if (!active || candidate.request !== revision || candidate.phase !== lifecycleRevision.current) return;
+        if (!currentStart(candidate)) return;
         const canonical = recordingIdentity(snapshot.session_id, snapshot.recording_generation);
-        if (!canonical || !sameIdentity(candidate.identity, canonical) || !sameIdentity(lifecycleOwner, canonical)) return;
+        if (!canonical || !sameIdentity(candidate.identity, canonical)) { failedStart(candidate); return; }
+        retryStart = null;
         backendSession = canonical;
         revision++;
         lifecycleRevision.current++;
         lifecycleStatus.current = RecordingStatus.RECORDING;
         setState(prev => ({
           ...prev, sessionMode: candidate.mode, isRecording: true, isPaused: false,
-          isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined,
+          isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined, verificationError: null,
         }));
         startPolling();
-      }).catch(() => {
-        if (active && candidate.request === revision && candidate.phase === lifecycleRevision.current)
-          console.error('Could not verify the current recording session.');
-      }).finally(() => {
+      }).catch(() => failedStart(candidate)).finally(() => {
         checkingStart = false;
         verifyStart();
       });
+    };
+    const invalidateStart = () => { retryStart = null; queuedStart = null; };
+    lifecycleListeners.current.add(invalidateStart);
+    retryStartWork.current = () => {
+      if (checkingStart || !retryStart || !currentStart(retryStart)) return;
+      queuedStart = retryStart;
+      retryStart = null;
+      verifyStart();
     };
     // Register all events before the initial snapshot, including after a WebView reload.
     void Promise.all([
@@ -248,6 +269,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         // order. Only a canonical snapshot may promote the matching producer.
         lifecycleOwner = identity;
         revision++;
+        retryStart = null;
+        setState(prev => prev.verificationError === null ? prev : { ...prev, verificationError: null });
         queuedStart = { identity, mode, request: revision, phase: lifecycleRevision.current };
         verifyStart();
       })),
@@ -270,6 +293,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
           stoppedGeneration = lifecycleOwner?.generation ?? stoppedGeneration;
         }
         queuedStart = null;
+        retryStart = null;
         revision++;
         lifecycleRevision.current++;
         if (![RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
@@ -284,6 +308,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
             statusMessage: status === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
             isRecording: false, isPaused: false, isActive: false,
             recordingDuration: null, activeDuration: null,
+            verificationError: null,
           };
         });
       })),
@@ -300,6 +325,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     ]).then(sync);
     return () => {
       active = false;
+      retryStartWork.current = () => {};
+      lifecycleListeners.current.delete(invalidateStart);
+      invalidateStart();
       stopPolling();
       unsubscribers.forEach(unsubscribe => unsubscribe());
     };
@@ -309,12 +337,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   const contextValue = useMemo(() => ({
     recordingMode, modeError, isSavingMode, setRecordingMode,
     ...state,
-    setStatus, subscribeLifecycle,
+    setStatus, subscribeLifecycle, retryVerification,
     isStarting: state.status === RecordingStatus.STARTING,
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
     isSaving: state.status === RecordingStatus.SAVING,
-  }), [state, setStatus, subscribeLifecycle, recordingMode, modeError, isSavingMode, setRecordingMode]);
+  }), [state, setStatus, subscribeLifecycle, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode]);
 
   return (
     <RecordingStateContext.Provider value={contextValue}>
