@@ -17,11 +17,12 @@ import { SearchResults } from "./SearchResults";
 import { KnowledgeChat } from "./KnowledgeChat";
 import { EvidencePreview } from "./EvidencePreview";
 import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
+import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferenceButton";
 import type { ProjectFilter } from "@/lib/library";
 import type { IndexStatus, SearchMode } from "@/types/knowledge";
 
 export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFilter, projectControl }: {
-  meetings: { id: string; title: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; projectControl?: ReactNode;
+  meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; projectControl?: ReactNode;
 }) {
   const { modelConfig } = useConfig();
   const [query, setQuery] = useState("");
@@ -35,6 +36,7 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [referenceReveal, setReferenceReveal] = useState(0);
   useEffect(() => {
     let active = true, reading = false;
     const refresh = async () => {
@@ -55,8 +57,17 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
   const matchingMeetings = meetings.filter(meeting => meeting.title.toLocaleLowerCase().includes(meetingQuery.trim().toLocaleLowerCase()));
   const invalidDates = !!from && !!to && from > to;
   const sourcesReady = (all || selected.length > 0) && !invalidDates;
+  const attachmentMeetings = meetings.filter(meeting => {
+    const date = meeting.created_at?.slice(0, 10);
+    return !invalidDates && (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
+  });
+  const attachmentMeetingId = !all && selected.length === 1 && attachmentMeetings.some(meeting => meeting.id === selected[0]) ? selected[0] : undefined;
+  const attached = (id: string) => {
+    if (!all) setSelected(ids => [...new Set([...ids, id])]);
+    state.reloadDocuments(); setReferenceReveal(value => value + 1);
+  };
   const secondary = <div className="space-y-3">
-    <ReferenceDocuments state={state} provider={modelConfig?.provider} />
+    <ReferenceDocuments state={state} provider={modelConfig?.provider} reveal={referenceReveal} />
     <Button variant="ghost" size="sm" className="text-muted-foreground" aria-expanded={searchOpen} aria-controls="transcript-search" onClick={() => setSearchOpen(value => !value)}>
       <ChevronDown className={searchOpen ? "rotate-180" : ""} />Source search
     </Button>
@@ -105,6 +116,7 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
             {(from || to) && <Button variant="ghost" size="sm" onClick={() => { setFrom(""); setTo(""); }}>Clear dates</Button>}
           </PopoverContent>
         </Popover>
+        <AttachReferenceButton meetingId={attachmentMeetingId} meetings={attachmentMeetings} scopeKey={JSON.stringify(scope)} onAttached={attached} />
       </div>
       {!all && selected.length > 0 && <TooltipProvider><div className="flex flex-wrap gap-2" aria-label="Selected meetings">
         {selected.slice(0, 3).map(id => {

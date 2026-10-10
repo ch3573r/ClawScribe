@@ -1,19 +1,12 @@
 "use client";
 import { useMemo, useState } from "react";
-import { MessageSquare } from "lucide-react";
+import { ChevronDown, MessageSquare, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { MultiSelect } from "@/components/ui/multi-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { KnowledgeChat } from "@/components/Knowledge/KnowledgeChat";
 import { EvidencePreview } from "@/components/Knowledge/EvidencePreview";
 import { ReferenceDocuments } from "./ReferenceDocuments";
@@ -32,6 +25,7 @@ export function MeetingChat({
   model?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState<string[]>([meetingId]);
   const [all, setAll] = useState(false);
@@ -58,7 +52,8 @@ export function MeetingChat({
   );
   return (
     <>
-      <Dialog
+      <Popover
+        modal={false}
         open={open}
         onOpenChange={(value) => {
           setOpen(value);
@@ -66,23 +61,24 @@ export function MeetingChat({
           else void state.reloadHistory();
         }}
       >
-        <DialogTrigger asChild>
+        <PopoverTrigger asChild>
           <Button variant="ghost"
             aria-label="Chat with this meeting"
             className="gap-0 p-0 [&_svg]:size-5 fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <MessageSquare className="h-5 w-5" />
           </Button>
-        </DialogTrigger>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Chat with this meeting</DialogTitle>
-            <DialogDescription>
-              Ask cited questions using your configured summary provider.
-            </DialogDescription>
-          </DialogHeader>
+        </PopoverTrigger>
+        <PopoverContent side="top" align="end" sideOffset={12} collisionPadding={24} aria-label="Chat with this meeting"
+          onInteractOutside={event => event.preventDefault()}
+          className="flex h-[32rem] max-h-[calc(100vh-6rem)] w-[26rem] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
+          <KnowledgeChat state={state} mode={mode} provider={provider} model={model} title="Chat with this meeting" compact
+            headerActions={<Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Close meeting chat" onClick={() => {setOpen(false);state.cancel();}}><X className="h-4 w-4" /></Button>}
+            secondary={<div className="space-y-3">
+              <Button variant="ghost" size="sm" className="text-muted-foreground" aria-expanded={sourcesOpen} aria-controls={`meeting-chat-scope-${meetingId}`} onClick={() => setSourcesOpen(value => !value)}><ChevronDown className={sourcesOpen ? 'rotate-180' : ''} />Question scope</Button>
+              {sourcesOpen && <div id={`meeting-chat-scope-${meetingId}`} className="space-y-3">
           <fieldset className="space-y-3 rounded-lg border border-border p-3">
-            <legend className="px-1 text-sm font-medium">Question scope</legend>
+            <legend className="sr-only">Question scope</legend>
             <label className="flex items-center gap-2 text-sm">
               <Checkbox
                 className="h-[13px] w-[13px]"
@@ -102,7 +98,7 @@ export function MeetingChat({
                   Search all saved meetings
                 </label>
                 {!all && (
-                  <div className="max-h-32 space-y-2 overflow-y-auto">
+                  <div className="space-y-2">
                     {meetings.map((meeting) => (
                       <label
                         key={meeting.id}
@@ -217,20 +213,16 @@ export function MeetingChat({
           {expanded && (
             <p className="text-xs text-muted-foreground">
               Cross-meeting questions use a separate saved library conversation.
-              Create or choose one below. Turn off this scope to return to this
+              The first question starts one automatically. Turn off this scope to return to this
               meeting’s history.
             </p>
           )}
-          <KnowledgeChat
-            state={state}
-            mode={mode}
-            provider={provider}
-            model={model}
-            title="Ask this meeting"
-            secondary={<ReferenceDocuments state={state} provider={provider} attachMeetingId={meetingId} />}
+              </div>}
+              <ReferenceDocuments state={state} provider={provider} attachMeetingId={meetingId} />
+            </div>}
           />
-        </DialogContent>
-      </Dialog>
+        </PopoverContent>
+      </Popover>
       <EvidencePreview
         state={state}
         onNavigate={() => {

@@ -129,10 +129,13 @@ evidence. Existing meeting chat is preserved and defaults to this meeting only.
 Expanding to other meetings uses a separate saved library conversation; switching
 back restores the meeting's history.
 Saved meetings also accept PDF, DOCX, TXT and Markdown reference documents.
-Attach and preview them locally, then explicitly select which references a
+Use **Attach file** directly in **Meetings → Meeting memory**; a single selected
+meeting is the destination, otherwise choose a saved meeting there. The compact
+corner chat on a meeting's details also has **Attach file** under **Reference
+documents**. Attach and preview files locally, then explicitly select which references a
 question may use. Citations open the extracted page or paragraph, keeping
 reference material distinct from the recorded discussion. Sending excerpts to
-an external answer provider requires **Allow reference sharing** for that
+an external answer provider requires **Use selected references for answers** for that
 conversation, off by default.
 
 Source also includes a collapsible **Live assistance** panel above the Home

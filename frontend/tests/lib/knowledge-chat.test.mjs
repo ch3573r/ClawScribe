@@ -77,3 +77,27 @@ test('accepted questions clear immediately and failed requests restore the quest
   assert.equal(input(render()).props.value,'What did we decide?');
   hooks.unmount();
 });
+
+test('typing through a long cited conversation reuses unchanged answer elements',()=>{
+  const hooks=createHookHarness();
+  const answer=reply('**Decision**\n\n- Reference the agreed plan [K700].\n\n'+ 'Meeting context. '.repeat(150),700);
+  const state=stateFor(answer);
+  state.messages=Array.from({length:120},(_,index)=>({...state.messages[0],id:`answer-${index}`}));
+  const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
+    ...mocks,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
+    '@/components/ui/textarea':{Textarea:'textarea'},
+  });
+  const render=()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider:'codex',model:'gpt-6.1-sol'}));
+  const articles=tree=>nodes(tree).filter(node=>node.type==='article');
+  const original=articles(render());assert.equal(original.length,120);
+  for(let i=1;i<=40;i++){
+    const tree=render(),input=nodes(tree).find(node=>node.type==='textarea');
+    input.props.onChange({target:{value:'What about the agreed decision?'.slice(0,i)}});
+    const next=articles(render());
+    assert.equal(next[0],original[0],'typing must not rebuild every answer and its Markdown/citation tree');
+    assert.equal(next[119],original[119]);
+  }
+  state.messages=[...state.messages,{...state.messages[0],id:'new-answer'}];
+  assert.equal(articles(render()).length,121,'new answers must still update immediately');
+  hooks.unmount();
+});
