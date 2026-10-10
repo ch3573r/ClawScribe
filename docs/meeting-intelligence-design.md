@@ -1,9 +1,10 @@
 # Meeting Intelligence Design
 
-Status: Phase 1 meeting memory is implemented in the preview source branch.
-Installed offline, provider-failure and citation/playback acceptance is pending
-under the Windows preview policy. Reference documents and live assistance are
-follow-up design work; their controls are not exposed in the preview.
+Status: Phase 1 meeting memory and Phase 2 reference documents are implemented
+in source. Reference controls, selected context and portable document archives
+are included for the next preview. Installed offline, actual-provider,
+citation/playback and document UI acceptance remains pending under the Windows
+preview policy. Phase 3 manual live assistance remains planned.
 
 ClawScribe should help users find decisions across saved meetings, bring their
 own reference documents into meeting questions, and ask for assistance during a

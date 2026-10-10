@@ -12,6 +12,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null})},
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
+    '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{},
     '@/components/ui/textarea':{Textarea:'textarea'},'@/components/ui/scroll-area':{ScrollArea:'scroll-area'},'@/components/ui/tooltip':{},
     '@/components/ui/input':{Input:'input'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},

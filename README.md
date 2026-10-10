@@ -123,8 +123,12 @@ and invalid sources remain explicitly identified and cannot navigate as current
 evidence. Existing meeting chat is preserved and defaults to this meeting only.
 Expanding to other meetings uses a separate saved library conversation; switching
 back restores the meeting's history.
-Document attachments and live assistance are planned separately and have no
-controls in this preview. Installed offline, provider-failure, focus, citation,
+Saved meetings also accept PDF, DOCX, TXT and Markdown reference documents.
+Attach and preview them locally, then explicitly select which references a
+question may use. Citations open the extracted page or paragraph, keeping
+reference material distinct from the recorded discussion. Sending excerpts to
+an external answer provider requires **Allow reference sharing** for that
+conversation, off by default. Live assistance is the next planned phase. Installed offline, provider-failure, focus, citation,
 and playback acceptance remains pending; see the
 [local library guide](docs/local-library.md#meeting-memory) and
 [preview acceptance policy](docs/windows-release.md#required-real-device-acceptance).
@@ -205,7 +209,9 @@ and recordings. Restore adds missing meetings and skips existing IDs. Backups
 continue when recording folders are missing and report affected meetings,
 excluded recovery files, and unavailable audio. Archives exclude credentials and
 models and are not encrypted.
-Saved knowledge conversations and their original citation labels are included.
+Saved knowledge conversations, attached reference originals and extracted blocks,
+and their original citation labels are included. Reference sharing permissions
+are excluded and remain off after restore.
 Restored references remain historical until a new question establishes fresh
 evidence; interrupted answers are never resubmitted automatically.
 

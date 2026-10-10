@@ -7,7 +7,7 @@ export type KnowledgeScope = { kind: 'meeting'; meeting_id: string } | { kind: '
 export type ConversationOwner = { kind: 'meeting' | 'library'; id: string };
 export interface TextSpan { transcript_id: string; start_byte: number; end_byte: number }
 export type EvidenceLocator = {kind:'transcript';meeting_id:string;transcript_ids:string[];spans:TextSpan[];start_seconds:number|null}
-  | {kind:'document';document_id:string;page:number|null;paragraph:number}
+  | {kind:'document';document_id:string;page:number|null;paragraph:number;spans?:TextSpan[]}
   | {kind:'live';session_id:string;sequence_ids:number[]};
 export interface EvidenceRef { historical?: boolean; source_id:string;source_revision:number;chunk_id:string;fingerprint:string;locator:EvidenceLocator }
 export interface EvidenceDisplay {title:string;date:string;speaker:string|null;metadata_truncated:boolean;preceding_question_tag?:number|null}
@@ -29,3 +29,9 @@ export interface AssistantReply {
 export interface HistoryMessage {id:string;request_id:string|null;role:string;content:string;created_at:string;status:string;legacy:boolean;reply:AssistantReply|null}
 export interface EvidenceNavigation {meeting_id:string;transcript_id:string;transcript_index:number;start_seconds:number|null}
 export interface ResolvedEvidence {status:'current'|'stale'|'missing'|'invalid';passage:Passage|null;navigation:EvidenceNavigation|null}
+export interface DocumentAttachment {
+  id:string;display_name:string;format:'pdf'|'docx'|'text'|'markdown';file_size:number;sha256:string;
+  extraction_status:string;indexing_status:string;
+}
+export interface DocumentBlock {page:number|null;paragraph:number;text:string}
+export interface ScopedDocument {attachment:DocumentAttachment;meeting_ids:string[]}

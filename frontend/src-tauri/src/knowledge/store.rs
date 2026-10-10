@@ -35,6 +35,12 @@ struct Snapshot {
     audio_start_time: Option<f64>,
     audio_end_time: Option<f64>,
     duration: Option<f64>,
+    #[sqlx(default)]
+    document: bool,
+    #[sqlx(default)]
+    page: Option<u32>,
+    #[sqlx(default)]
+    paragraph: u32,
 }
 static READERS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
@@ -137,8 +143,13 @@ async fn read_snapshot<T: Send + 'static>(
             let mut tx=context.setup(observe_pending(pool.begin())).await?;
             #[cfg(not(test))]
             let mut tx=context.setup(pool.begin()).await?;
-            let row:Snapshot=context.setup(sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
-                .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx)).await?.ok_or(KnowledgeError::Superseded)?;
+            let row:Snapshot=if selected.source_id.starts_with("document:") {
+                context.setup(sqlx::query_as("SELECT b.rowid,d.rowid AS meeting_rowid,1 AS speaker_null,1 AS words_null,NULL AS audio_start_time,NULL AS audio_end_time,NULL AS duration,1 AS document,b.page,b.paragraph FROM knowledge_document_blocks b JOIN knowledge_documents d ON d.id=b.document_id JOIN knowledge_sources s ON s.id=d.source_id WHERE b.id=? AND s.id=? AND s.revision=? AND s.generation=? AND (?='' OR EXISTS(SELECT 1 FROM knowledge_document_attachments a WHERE a.document_id=d.id AND a.meeting_id=?))")
+                    .bind(&selected.transcript_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).bind(&selected.meeting_id).bind(&selected.meeting_id).fetch_optional(&mut *tx)).await?.ok_or(KnowledgeError::Superseded)?
+            } else {
+                context.setup(sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
+                    .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx)).await?.ok_or(KnowledgeError::Superseded)?
+            };
             let result={
                 let mut handle=context.setup((&mut *tx).lock_handle()).await?;
                 context.check()?;
@@ -196,7 +207,7 @@ impl<'a> TextBlob<'a> {
             raw,
             len,
             #[cfg(test)]
-            body: column == c"transcript",
+            body: column == c"transcript" || column == c"text",
             _guard: std::marker::PhantomData,
         })
     }
@@ -282,6 +293,17 @@ impl Drop for TextBlob<'_> {
     }
 }
 
+fn body_blob<'a>(
+    handle: &'a mut sqlx::sqlite::LockedSqliteHandle<'_>,
+    row: &Snapshot,
+) -> Result<TextBlob<'a>, KnowledgeError> {
+    if row.document {
+        TextBlob::open(handle, c"knowledge_document_blocks", c"text", row.rowid)
+    } else {
+        TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)
+    }
+}
+
 pub async fn row_ids_page(
     pool: &SqlitePool,
     job: &SourceJob,
@@ -291,7 +313,7 @@ pub async fn row_ids_page(
     // the index job), or while indexing is paused/failed. Worker admission
     // remains guarded separately by current, stage_evidence and publish.
     let source_current: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND meeting_id=? AND kind='meeting' AND revision=? AND generation=?)",
+        "SELECT EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND (meeting_id=? OR kind='document') AND revision=? AND generation=?)",
     )
     .bind(&job.source_id)
     .bind(&job.meeting_id)
@@ -302,6 +324,10 @@ pub async fn row_ids_page(
     if !source_current {
         return Err(KnowledgeError::Superseded);
     }
+    if let Some(id) = job.source_id.strip_prefix("document:") {
+        return Ok(sqlx::query_scalar("SELECT id FROM knowledge_document_blocks WHERE document_id=? AND (? IS NULL OR ordinal>(SELECT ordinal FROM knowledge_document_blocks WHERE id=? AND document_id=?)) ORDER BY ordinal LIMIT 32")
+            .bind(id).bind(after).bind(after).bind(id).fetch_all(pool).await?);
+    }
     Ok(sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id=? AND (? IS NULL OR (timestamp,id)>(SELECT timestamp,id FROM transcripts WHERE id=?)) ORDER BY timestamp,id LIMIT 32").bind(&job.meeting_id).bind(after).bind(after).fetch_all(pool).await?)
 }
 pub async fn body_window(
@@ -310,7 +336,7 @@ pub async fn body_window(
     start: usize,
 ) -> Result<(String, usize), KnowledgeError> {
     read_snapshot(pool, selected.clone(), true, move |handle, row, context| {
-        let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+        let blob = body_blob(handle, row)?;
         let (_, text) = blob.window(start, READ_BYTES, false, context)?;
         Ok((text, blob.len))
     })
@@ -335,7 +361,7 @@ pub async fn locate(
         false,
         move |handle, row, context| {
             let hit = {
-                let body = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+                let body = body_blob(handle, row)?;
                 scan(&body, &query, &terms, context)?
             };
             let hit = if hit.is_some() {
@@ -359,7 +385,7 @@ pub async fn locate(
             let Some((start, end)) = hit else {
                 return Ok(None);
             };
-            let body = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+            let body = body_blob(handle, row)?;
             let begin = if body.len <= super::chunking::LEXICAL_BYTES {
                 0
             } else {
@@ -523,7 +549,7 @@ pub async fn materialize(
             return Err(KnowledgeError::InvalidInput);
         }
         let text = {
-            let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
+            let blob = body_blob(handle, row)?;
             let (_, text) = blob.window(
                 span.start_byte,
                 span.end_byte - span.start_byte,
@@ -535,6 +561,9 @@ pub async fn materialize(
             }
             text
         };
+        if row.document {
+            return document_passage(handle, row, context, selected, span, text);
+        }
         let mut hash = Sha256::new();
         hash.update(b"[");
         hash_value(&mut hash, &"canonical-transcript-v1")?;
@@ -620,6 +649,83 @@ pub async fn materialize(
         })
     })
     .await
+}
+
+fn document_passage(
+    handle: &mut sqlx::sqlite::LockedSqliteHandle<'_>,
+    row: &Snapshot,
+    context: &ReadContext,
+    selected: SelectedRow,
+    span: TextSpan,
+    text: String,
+) -> Result<Passage, KnowledgeError> {
+    let document_id = selected
+        .source_id
+        .strip_prefix("document:")
+        .ok_or(KnowledgeError::InvalidInput)?
+        .to_owned();
+    let mut hash = Sha256::new();
+    hash_value(
+        &mut hash,
+        &(
+            "canonical-document-v1",
+            &document_id,
+            row.page,
+            row.paragraph,
+            &span,
+            &text,
+        ),
+    )?;
+    for column in [c"display_name", c"sha256", c"format", c"created_at"] {
+        hash.update(b",");
+        let blob = TextBlob::open(handle, c"knowledge_documents", column, row.meeting_rowid)?;
+        hash_text(&mut hash, &blob, context)?;
+    }
+    let fingerprint = format!("{:x}", hash.finalize());
+    let identity = serde_json::to_vec(&(
+        "evidence-v1",
+        &selected.source_id,
+        selected.revision,
+        &span,
+        &fingerprint,
+    ))
+    .map_err(|_| KnowledgeError::InvalidInput)?;
+    let (title, title_clipped) = display(
+        handle,
+        c"knowledge_documents",
+        c"display_name",
+        row.meeting_rowid,
+        context,
+    )?;
+    let (date, date_clipped) = display(
+        handle,
+        c"knowledge_documents",
+        c"created_at",
+        row.meeting_rowid,
+        context,
+    )?;
+    Ok(Passage {
+        evidence: EvidenceRef {
+            historical: false,
+            source_id: selected.source_id,
+            source_revision: selected.revision,
+            chunk_id: format!("{:x}", Sha256::digest(identity)),
+            fingerprint,
+            locator: EvidenceLocator::Document {
+                document_id,
+                page: row.page,
+                paragraph: row.paragraph,
+                spans: vec![span],
+            },
+        },
+        meeting_id: selected.meeting_id,
+        title,
+        date,
+        speaker: None,
+        metadata_truncated: title_clipped || date_clipped,
+        text,
+        rank: 0.,
+    })
 }
 #[cfg(test)]
 pub(crate) static BODY_PEAK: std::sync::atomic::AtomicUsize =
@@ -713,7 +819,7 @@ pub fn evidence(
     })
 }
 pub async fn next_job(pool: &SqlitePool) -> Result<Option<SourceJob>, KnowledgeError> {
-    Ok(sqlx::query_as("SELECT j.source_id,s.meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE s.kind='meeting' AND j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
+    Ok(sqlx::query_as("SELECT j.source_id,COALESCE(s.meeting_id,'') AS meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE (s.kind='meeting' OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d WHERE d.source_id=s.id))) AND j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
 }
 pub async fn current(pool: &SqlitePool, job: &SourceJob) -> Result<bool, KnowledgeError> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_sources s JOIN knowledge_index_jobs j ON j.source_id=s.id WHERE s.id=? AND s.revision=? AND s.generation=? AND j.generation=s.generation AND j.paused=0").bind(&job.source_id).bind(job.revision).bind(job.generation).fetch_one(pool).await? == 1)
@@ -766,8 +872,11 @@ pub async fn stage_evidence(
     vector: &[f32],
     space: &str,
 ) -> Result<(), KnowledgeError> {
-    let EvidenceLocator::Transcript { spans, .. } = &reference.locator else {
-        return Err(KnowledgeError::InvalidInput);
+    let spans = match &reference.locator {
+        EvidenceLocator::Transcript { spans, .. } | EvidenceLocator::Document { spans, .. } => {
+            spans
+        }
+        _ => return Err(KnowledgeError::InvalidInput),
     };
     if spans.len() != 1
         || reference.source_id != job.source_id
@@ -839,18 +948,24 @@ pub async fn record_failure(
 
 pub async fn requeue(pool: &SqlitePool, ids: &[String]) -> Result<(), KnowledgeError> {
     let ids = serde_json::to_string(ids).map_err(|_| KnowledgeError::InvalidInput)?;
+    let sources:Vec<String> = sqlx::query_scalar("WITH allowed AS(SELECT value FROM json_each(?)) SELECT id FROM knowledge_sources WHERE meeting_id IN(SELECT value FROM allowed) OR id IN(SELECT d.source_id FROM knowledge_documents d JOIN knowledge_document_attachments a ON a.document_id=d.id WHERE a.meeting_id IN(SELECT value FROM allowed))")
+        .bind(ids).fetch_all(pool).await?;
+    requeue_sources(pool, &sources).await
+}
+pub async fn requeue_sources(pool: &SqlitePool, sources: &[String]) -> Result<(), KnowledgeError> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let ids = serde_json::to_string(sources).map_err(|_| KnowledgeError::InvalidInput)?;
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE knowledge_sources SET generation=generation+1,semantic_revision=NULL,semantic_space=NULL WHERE meeting_id IN(SELECT value FROM json_each(?))").bind(&ids).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO knowledge_index_jobs(source_id,revision,generation) SELECT id,revision,generation FROM knowledge_sources WHERE meeting_id IN(SELECT value FROM json_each(?)) ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision,generation=excluded.generation,attempts=0,failure=NULL,paused=0").bind(ids).execute(&mut *tx).await?;
+    sqlx::query("UPDATE knowledge_sources SET generation=generation+1,semantic_revision=NULL,semantic_space=NULL WHERE id IN(SELECT value FROM json_each(?))").bind(&ids).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO knowledge_index_jobs(source_id,revision,generation) SELECT id,revision,generation FROM knowledge_sources WHERE id IN(SELECT value FROM json_each(?)) ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision,generation=excluded.generation,attempts=0,failure=NULL,paused=0").bind(ids).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 pub async fn invalidate_other_spaces(pool: &SqlitePool, space: &str) -> Result<(), KnowledgeError> {
-    let ids:Vec<String>=sqlx::query_scalar("SELECT meeting_id FROM knowledge_sources WHERE kind='meeting' AND semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
-    if !ids.is_empty() {
-        requeue(pool, &ids).await?;
-    }
-    Ok(())
+    let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM knowledge_sources WHERE kind IN('meeting','document') AND semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
+    requeue_sources(pool, &ids).await
 }
 pub async fn status(
     pool: &SqlitePool,
@@ -1431,6 +1546,20 @@ mod tests {
             "saved opt-in must be visible without a ready runtime"
         );
         assert_eq!(missing.reason.as_deref(), Some("model_unavailable"));
+    }
+    #[tokio::test]
+    async fn canonical_document_source_enters_shared_index_worker() {
+        let (pool, document) = super::super::document_context::tests::fixture().await;
+        let source = format!("document:{document}");
+        sqlx::query("DELETE FROM knowledge_index_jobs WHERE source_id<>?")
+            .bind(&source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = next_job(&pool).await.unwrap().unwrap();
+        assert_eq!(job.source_id, source);
+        assert!(job.meeting_id.is_empty());
+        assert!(current(&pool, &job).await.unwrap());
     }
     #[tokio::test]
     async fn reserved_document_source_does_not_enter_meeting_worker() {

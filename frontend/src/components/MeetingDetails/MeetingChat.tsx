@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { KnowledgeChat } from "@/components/Knowledge/KnowledgeChat";
 import { EvidencePreview } from "@/components/Knowledge/EvidencePreview";
+import { ReferenceDocuments } from "./ReferenceDocuments";
 import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
 import { libraryScope } from "@/lib/knowledge-state";
 import type { ProjectFilter } from "@/lib/library";
@@ -226,6 +227,7 @@ export function MeetingChat({
             provider={provider}
             model={model}
             title="Ask this meeting"
+            secondary={<ReferenceDocuments state={state} provider={provider} attachMeetingId={meetingId} />}
           />
         </DialogContent>
       </Dialog>

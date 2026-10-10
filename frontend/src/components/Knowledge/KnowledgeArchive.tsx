@@ -16,6 +16,7 @@ import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
 import { SearchResults } from "./SearchResults";
 import { KnowledgeChat } from "./KnowledgeChat";
 import { EvidencePreview } from "./EvidencePreview";
+import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
 import type { ProjectFilter } from "@/lib/library";
 import type { IndexStatus, SearchMode } from "@/types/knowledge";
 
@@ -55,12 +56,13 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
   const invalidDates = !!from && !!to && from > to;
   const sourcesReady = (all || selected.length > 0) && !invalidDates;
   const secondary = <div className="space-y-3">
+    <ReferenceDocuments state={state} provider={modelConfig?.provider} />
     <Button variant="ghost" size="sm" className="text-muted-foreground" aria-expanded={searchOpen} aria-controls="transcript-search" onClick={() => setSearchOpen(value => !value)}>
-      <ChevronDown className={searchOpen ? "rotate-180" : ""} />Transcript search
+      <ChevronDown className={searchOpen ? "rotate-180" : ""} />Source search
     </Button>
     {searchOpen && <div id="transcript-search" className="space-y-3 border-b border-border pb-4">
       <form className="flex flex-wrap items-end gap-3" onSubmit={event => { event.preventDefault(); if (sourcesReady && query.trim() && !state.loading) void state.search(query, mode); }}>
-        <label className="min-w-40 flex-1 space-y-1 text-xs font-medium">Search transcripts
+        <label className="min-w-40 flex-1 space-y-1 text-xs font-medium">Search sources
           <Input value={query} onChange={event => { setQuery(event.target.value); state.cancel(); }} placeholder="Search what was said…" />
         </label>
         <div className="w-52 space-y-1"><label htmlFor="memory-search-mode" className="text-xs font-medium">Search mode</label>
@@ -71,7 +73,7 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
             </SelectContent>
           </Select>
         </div>
-        <Button variant="outline" disabled={!sourcesReady || state.loading || !query.trim()} type="submit">{state.loading ? "Searching…" : "Search transcripts"}</Button>
+        <Button variant="outline" disabled={!sourcesReady || state.loading || !query.trim()} type="submit">{state.loading ? "Searching…" : "Search sources"}</Button>
       </form>
       {indexError && <p role="status" className="text-xs text-muted-foreground">Search status is unavailable. Keyword search is available.</p>}
       <SearchResults state={state} />

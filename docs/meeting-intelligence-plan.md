@@ -9,8 +9,8 @@
 live assistance without compromising recording or local data control.
 
 **Delivery split:** The first preview delivers meeting memory only (Phase 1,
-Tasks 1–4). Reference documents and live assistance remain the follow-up plan
-(Tasks 5–8); their controls are not exposed in this preview. Automated frontend
+Tasks 1–4). Reference documents (Tasks 5–6) are now implemented in source for
+the next preview. Live assistance (Tasks 7–8) remains planned. Automated frontend
 and canonical-navigation checks remain mandatory. Installed offline,
 provider-failure, focus, citation-click and playback acceptance is explicitly
 pending until an isolated native desktop test is available, following the
@@ -296,12 +296,14 @@ answer scope validation, `library/backup.rs`, and the focused documentation.
 accepts selected IDs; Task 3 resolves their citations. Add owner-specific
 context-sharing settings rather than a new provider credential/configuration.
 
-- [ ] Add tests `unselected_document_not_retrieved`, `foreign_attachment_rejected`, `external_context_requires_enablement`, `replacement_marks_citation_stale`, `backup_v2_document_roundtrip`, and `restore_v1_without_documents`. Assert no provider receives a reference excerpt before the owner enables sharing.
-- [ ] Run failing Rust and frontend helper tests, then add Attach/Preview/Select/Detach/Retry controls and page/paragraph citation previews. Keep errors and actual indexed status visible.
-- [ ] Extend hybrid retrieval to documents after backend attachment-scope validation. Label transcript evidence separately from reference material in prompts and UI.
-- [ ] Add version-2 archive attachment-file metadata and safe relative storage references. Preserve version-1 restore, validate hashes/IDs, restore blocks and originals transactionally, and rebuild derived indexes. Never include model files or credentials.
-- [ ] Verify offline use, mixed meeting/document answers, malicious document text, replacement/detach behavior, and portable restoration on the designated runner. Run Rust checks and frontend typecheck/tests/build.
-- [ ] Update user/architecture/library/backup documentation, run the safety scan, and commit `feat: add reference document context and backup`.
+- [x] Add tests `unselected_document_not_retrieved`, `foreign_attachment_rejected`, `external_context_requires_enablement`, `replacement_marks_citation_stale`, `backup_v2_document_roundtrip`, and `restore_v1_without_documents`. Assert no provider receives a reference excerpt before the owner enables sharing.
+- [x] Run failing Rust and frontend helper tests, then add Attach/Preview/Select/Detach/Retry controls and page/paragraph citation previews. Keep errors and actual indexed status visible.
+- [x] Extend hybrid retrieval to documents after backend attachment-scope validation. Label transcript evidence separately from reference material in prompts and UI.
+- [x] Add version-2 archive attachment-file metadata and safe relative storage references. Preserve version-1 restore, validate hashes/IDs, restore blocks and originals transactionally, and rebuild derived indexes. Never include model files or credentials.
+- [x] Verify offline use, mixed meeting/document answers, malicious document text, replacement/detach behavior, and portable restoration on the designated runner. Run Rust checks and frontend typecheck/tests/build.
+- [x] Update user/architecture/library/backup documentation, run the safety scan, and commit `feat: add reference document context and backup`.
+
+- [ ] Complete installed document controls, actual-provider answers/citations, offline/restore workflows and theme/focus/narrow-layout acceptance before stable promotion. Automated synthetic prompt/privacy/archive checks do not establish installed acceptance.
 
 **Phase 2 gate:** Local extraction, explicitly selected context, real anchors,
 external-sharing controls, and old/new archive restoration all pass before
