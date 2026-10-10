@@ -833,7 +833,7 @@ mod tests {
         }
         let mut query = vec![0.; 384];
         query[0] = 1.;
-        let both = semantic_candidates(&pool, "[\"one\",\"two\"]", "test-space", &query)
+        let both = semantic_candidates(&pool, "[\"one\",\"two\"]", "[]", "test-space", &query)
             .await
             .unwrap();
         assert_eq!(both.iter().filter(|hit| hit.meeting_id == "one").count(), 3);
@@ -841,7 +841,7 @@ mod tests {
             both.iter().any(|hit| hit.meeting_id == "two"),
             "one source cannot starve another indexed source"
         );
-        let sole = semantic_candidates(&pool, "[\"one\"]", "test-space", &query)
+        let sole = semantic_candidates(&pool, "[\"one\"]", "[]", "test-space", &query)
             .await
             .unwrap();
         assert_eq!(
@@ -1035,7 +1035,7 @@ mod tests {
         store::publish(&pool, &job, "test-space").await.unwrap();
         let mut query = vec![0.; 384];
         query[0] = 1.;
-        let candidates = semantic_candidates(&pool, "[\"one\"]", "test-space", &query)
+        let candidates = semantic_candidates(&pool, "[\"one\"]", "[]", "test-space", &query)
             .await
             .unwrap();
         assert_eq!(candidates.len(), 64);
@@ -1323,6 +1323,7 @@ mod tests {
                 let semantic = semantic_candidates(
                     &pool,
                     &allowed,
+                    "[]",
                     &super::super::model::PINS.space().id,
                     &vector,
                 )
