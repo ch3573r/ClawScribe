@@ -160,11 +160,20 @@ fn strip_device_type_suffix(device_name: &str) -> &str {
 }
 
 fn find_input_device(host: &cpal::Host, device_name: &str) -> Result<cpal::Device> {
-    for device in host.input_devices()? {
-        if let Ok(name) = device.name() {
-            if name == device_name {
-                return Ok(device);
-            }
+    let devices = host
+        .input_devices()?
+        .filter_map(|device| device.name().ok().map(|name| (name, device)));
+    select_input_device(devices, device_name, None).map(|(_, device)| device)
+}
+
+fn select_input_device<T>(
+    devices: impl IntoIterator<Item = (String, T)>,
+    device_name: &str,
+    _default_device: Option<(String, T)>,
+) -> Result<(String, T)> {
+    for (name, device) in devices {
+        if name == device_name {
+            return Ok((name, device));
         }
     }
 
@@ -400,5 +409,49 @@ fn format_failure_suffix(failures: &[String]) -> String {
         String::new()
     } else {
         format!(": {}", failures.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_device_names, select_input_device};
+
+    #[test]
+    fn selected_microphone_takes_precedence_over_the_default() {
+        let selected = select_input_device(
+            vec![("USB Microphone".to_string(), 1)],
+            "USB Microphone",
+            Some(("Built-in Microphone".to_string(), 2)),
+        )
+        .unwrap();
+        assert_eq!(selected, ("USB Microphone".to_string(), 1));
+    }
+
+    #[test]
+    fn unavailable_microphone_uses_the_current_default_with_its_actual_name() {
+        let selected = select_input_device(
+            vec![("Microphone (2- USB Headset)".to_string(), 1)],
+            "Microphone (1- USB Headset)",
+            Some(("Microphone (2- USB Headset)".to_string(), 1)),
+        )
+        .expect("A stale endpoint name must not prevent testing the current default");
+        assert_eq!(selected, ("Microphone (2- USB Headset)".to_string(), 1));
+    }
+
+    #[test]
+    fn unavailable_microphone_without_a_default_remains_an_error() {
+        assert!(select_input_device::<u8>(Vec::new(), "USB Microphone", None).is_err());
+    }
+
+    #[test]
+    fn display_suffixes_do_not_change_endpoint_names() {
+        assert_eq!(
+            normalize_device_names(vec![
+                " Microphone (2- USB Headset) (input) ".to_string(),
+                "Microphone (2- USB Headset)".to_string(),
+                "  ".to_string(),
+            ]),
+            vec!["Microphone (2- USB Headset)".to_string()]
+        );
     }
 }
