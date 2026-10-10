@@ -54,11 +54,64 @@ mod stop_tests {
         assert!(duplicate.await.is_none());
         assert!(acquire_stop_owner(&lock).await.is_some());
     }
+    #[tokio::test]
+    async fn shared_start_preparation_binds_fresh_producer_ids_and_owned_failure_cleanup() {
+        use super::*;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _admission = crate::audio::inference::claim_job().unwrap();
+        let runtime = crate::knowledge::KnowledgeState::default();
+        let mut first_manager = RecordingManager::new();
+        let (first_start, first_sink) = prepare_live_recording(&runtime, &mut first_manager, true);
+        let first = first_start.session_id.clone();
+        assert_eq!(first_manager.live_session_id(), Some(first.as_str()));
+        let mut update = TranscriptUpdate {
+            session_id: Some(first.clone()),
+            text: "Ja".into(),
+            timestamp: "12:00:00".into(),
+            source: "Me".into(),
+            sequence_id: 1,
+            chunk_start_time: 6.,
+            is_partial: true,
+            confidence: Some(0.01),
+            audio_start_time: 6.,
+            audio_end_time: 7.,
+            duration: 1.,
+            word_timestamps: None,
+        };
+        first_sink.ingest(&update);
+        assert!(runtime.live.snapshot(&first).unwrap().segments.is_empty());
+        update.is_partial = false;
+        first_sink.ingest(&update);
+        assert_eq!(
+            runtime.live.snapshot(&first).unwrap().segments[0].text,
+            "Ja"
+        );
+        let mut second_manager = RecordingManager::new();
+        let (second_start, second_sink) =
+            prepare_live_recording(&runtime, &mut second_manager, true);
+        let second = second_start.commit();
+        assert_ne!(first, second);
+        assert!(uuid::Uuid::parse_str(&second).is_ok());
+        drop(first_start); // A late failed-start guard must not clear the newer session.
+        first_sink.ingest(&update); // The old producer retains its first ID.
+        assert!(runtime.live.snapshot(&second).unwrap().segments.is_empty());
+        update.session_id = Some(second.clone());
+        second_sink.ingest(&update);
+        assert_eq!(
+            runtime.live.snapshot(&second).unwrap().segments[0].text,
+            "Ja"
+        );
+        assert_eq!(stop_live_assistance(&runtime), Some(second.clone()));
+        assert!(runtime.live.snapshot(&second).is_err());
+    }
 }
 static IS_STOPPING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn is_stopping() -> bool {
     IS_STOPPING.load(Ordering::Acquire)
+}
+pub(crate) fn capture_active() -> bool {
+    IS_RECORDING.load(Ordering::Acquire) || is_stopping()
 }
 
 struct StopState;
@@ -103,8 +156,12 @@ pub(crate) fn bookmark_position() -> Result<(String, f64), String> {
     Ok((folder.to_string_lossy().into_owned(), seconds))
 }
 static TRANSCRIPTION_TASK: Mutex<Option<transcription::TranscriptionTask>> = Mutex::new(None);
-static PENDING_TRANSCRIPT_SEGMENTS: Mutex<Vec<crate::audio::recording_saver::TranscriptSegment>> =
-    Mutex::new(Vec::new());
+static PENDING_TRANSCRIPT_SEGMENTS: Mutex<
+    Vec<(
+        Option<String>,
+        crate::audio::recording_saver::TranscriptSegment,
+    )>,
+> = Mutex::new(Vec::new());
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
@@ -130,14 +187,57 @@ fn transcript_segment_from_update(
 }
 
 fn persist_transcript_update(update: TranscriptUpdate) {
+    let session_id = update.session_id.clone();
     let segment = transcript_segment_from_update(update);
     if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
         if let Some(manager) = manager_guard.as_ref() {
+            if session_id
+                .as_deref()
+                .is_some_and(|id| Some(id) != manager.live_session_id())
+            {
+                return;
+            }
             manager.add_transcript_segment(segment);
         } else if let Ok(mut pending) = PENDING_TRANSCRIPT_SEGMENTS.lock() {
-            pending.push(segment);
+            pending.push((session_id, segment));
         }
     }
+}
+/// Called only after recording admission/validation; both start paths share it.
+fn prepare_live_recording(
+    runtime: &crate::knowledge::KnowledgeState,
+    manager: &mut RecordingManager,
+    transcribes: bool,
+) -> (
+    crate::knowledge::live::LiveStartup,
+    super::recording_manager::LiveTranscriptSink,
+) {
+    let startup = runtime.live.prepare(transcribes);
+    let sink = super::recording_manager::LiveTranscriptSink::new(
+        runtime.live.clone(),
+        startup.session_id.clone(),
+    );
+    manager.bind_live_session(sink.clone());
+    (startup, sink)
+}
+pub(crate) fn live_snapshot() -> Result<crate::knowledge::live::LiveSnapshot, String> {
+    if is_stopping() {
+        return Err("This recording session is stopping".into());
+    }
+    let guard = RECORDING_MANAGER
+        .lock()
+        .map_err(|_| "Recording state unavailable")?;
+    guard
+        .as_ref()
+        .filter(|manager| manager.is_recording())
+        .ok_or("No active recording")?
+        .live_snapshot()
+}
+/// Stop never waits for provider/configuration/index locks or assistance cleanup.
+pub(crate) fn stop_live_assistance(runtime: &crate::knowledge::KnowledgeState) -> Option<String> {
+    let id = runtime.live.current_session_id();
+    runtime.live.stop();
+    id
 }
 
 fn store_recording_manager(manager: RecordingManager) {
@@ -149,10 +249,34 @@ fn store_recording_manager(manager: RecordingManager) {
     if let (Some(manager), Ok(mut pending)) =
         (manager_guard.as_ref(), PENDING_TRANSCRIPT_SEGMENTS.lock())
     {
-        for segment in pending.drain(..) {
+        for (session_id, segment) in pending.drain(..) {
+            if session_id
+                .as_deref()
+                .is_some_and(|id| Some(id) != manager.live_session_id())
+            {
+                continue;
+            }
             manager.add_transcript_segment(segment);
         }
     }
+}
+
+/// Test utility for the actual manager-absent ingestion and Stop restore path.
+#[cfg(test)]
+pub(crate) fn test_queue_and_restore(
+    manager: RecordingManager,
+    updates: Vec<TranscriptUpdate>,
+) -> Vec<crate::audio::recording_saver::TranscriptSegment> {
+    *RECORDING_MANAGER.lock().unwrap() = None;
+    PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
+    for update in updates {
+        persist_transcript_update(update);
+    }
+    store_recording_manager(manager);
+    let manager = RECORDING_MANAGER.lock().unwrap().take().unwrap();
+    let rows = manager.get_transcript_segments();
+    PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
+    rows
 }
 
 // ============================================================================
@@ -399,6 +523,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
+    let (live_startup, live_sink) = prepare_live_recording(
+        &app.state::<crate::knowledge::KnowledgeState>(),
+        &mut manager,
+        mode.transcribes(),
+    );
     let manager_timer = Instant::now();
     let transcription_receiver = manager
         .start_recording(
@@ -408,6 +537,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         )
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
+    let live_session_id = live_startup.commit();
     info!(
         "✅ Recording manager opened streams in {:?}",
         manager_timer.elapsed()
@@ -430,7 +560,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Start optimized parallel transcription task and store handle
     if mode.transcribes() {
         let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver);
+            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
         {
             let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
             *global_task = Some(task_handle);
@@ -457,6 +587,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         "recording-started",
         serde_json::json!({
             "message": "Recording started",
+            "session_id": live_session_id,
             "recording_mode": mode,
             "devices": ["Default Microphone", "Default System Audio"],
             "workers": if mode.transcribes() { 1 } else { 0 }
@@ -614,11 +745,17 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     });
 
     // Start recording with specified devices and auto_save setting
+    let (live_startup, live_sink) = prepare_live_recording(
+        &app.state::<crate::knowledge::KnowledgeState>(),
+        &mut manager,
+        mode.transcribes(),
+    );
     let manager_timer = Instant::now();
     let transcription_receiver = manager
         .start_recording(mic_device, system_device, mode.saves_audio(auto_save))
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
+    let live_session_id = live_startup.commit();
     info!(
         "✅ Recording manager opened streams in {:?}",
         manager_timer.elapsed()
@@ -641,7 +778,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Start optimized parallel transcription task and store handle
     if mode.transcribes() {
         let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver);
+            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
         {
             let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
             *global_task = Some(task_handle);
@@ -668,6 +805,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         "recording-started",
         serde_json::json!({
             "message": "Recording started",
+            "session_id": live_session_id,
             "recording_mode": mode,
             "devices": [
                 mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
@@ -709,6 +847,8 @@ pub async fn stop_recording<R: Runtime>(
         return Ok(false);
     }
     IS_STOPPING.store(true, Ordering::Release);
+    let stopped_live_session_id =
+        stop_live_assistance(&app.state::<crate::knowledge::KnowledgeState>());
     let _stop_state = StopState;
     crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
 
@@ -1113,6 +1253,7 @@ pub async fn stop_recording<R: Runtime>(
                 "Recording stopped - frontend will save after all transcripts received"
             },
             "folder_path": folder_path_str,
+            "session_id": stopped_live_session_id,
             "meeting_name": meeting_name_str,
             "recording_mode": if transcribes { "live" } else { "audio_only" },
             "transcription_incomplete": transcription_incomplete,

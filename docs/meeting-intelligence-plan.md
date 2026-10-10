@@ -10,7 +10,8 @@ live assistance without compromising recording or local data control.
 
 **Delivery split:** The first preview delivers meeting memory only (Phase 1,
 Tasks 1–4). Reference documents (Tasks 5–6) are now implemented in source for
-the next preview. Live assistance (Tasks 7–8) remains planned. Automated frontend
+the next preview. The live assistance backend (Task 7) is implemented in source;
+the manual panel and recording acceptance (Task 8) remain planned. Automated frontend
 and canonical-navigation checks remain mandatory. Installed offline,
 provider-failure, focus, citation-click and playback acceptance is explicitly
 pending until an isolated native desktop test is available, following the
@@ -333,11 +334,11 @@ Assign a new UUID at recording start; clear it at stop. Read finalized segments
 from the backend recording manager, never a UI-submitted transcript. Do not
 embed live text or add a second capture/transcription pipeline.
 
-- [ ] Add tests `partial_segments_excluded`, `context_uses_last_ten_minutes`, `audio_only_has_no_live_context`, `local_builtin_rejected_during_capture`, `old_session_reply_discarded`, `stop_does_not_wait_for_provider`, and `pending_index_cannot_delay_stop`.
-- [ ] Assert a new session UUID on each recording, one request in flight, a 30-second request deadline, and no persisted live history after stop. Fake a never-ending provider to prove stop only signals cancellation and never awaits its completion. Run and observe failures.
-- [ ] Implement snapshot scoping, current-session validation, bounded lexical live retrieval, and optional explicitly selected saved references. Report the latest finalized time and incomplete-transcription status in replies.
-- [ ] Require owner-specific live text-sharing enablement before external provider dispatch. Built-in AI offers a post-recording action rather than bypassing the job gate. Pause document extraction and index/model work when capture starts.
-- [ ] Invalidate session/request tokens on stop and recheck them before delivery. Retain native inference permits until calls finish; never make recording finalization depend on assistance completion.
+- [x] Add tests `partial_segments_excluded`, `context_uses_last_ten_minutes`, `audio_only_has_no_live_context`, `local_builtin_rejected_during_capture`, `old_session_reply_discarded`, `stop_does_not_wait_for_provider`, and `pending_index_cannot_delay_stop`.
+- [x] Assert a new session UUID on each recording, one request in flight, a 30-second request deadline, and no persisted live history after stop. Fake a never-ending provider to prove stop only signals cancellation and never awaits its completion. Run and observe failures.
+- [x] Implement snapshot scoping, current-session validation, bounded lexical live retrieval, and optional explicitly selected saved references. Report the latest finalized time and incomplete-transcription status in replies.
+- [x] Require independent remembered live text-sharing enablement, off by default, before external provider dispatch. Document permission remains separate for each Live owner. Built-in AI offers a post-recording action rather than bypassing the job gate. Pause document extraction and index/model work when capture starts.
+- [x] Invalidate session/request tokens on stop and recheck them before delivery. Retain native inference permits until calls finish; never make recording finalization depend on assistance completion.
 - [ ] Run recording stop/start, job arbitration, provider cancellation/reconciliation, and knowledge tests plus Rust checks and the safety scan; commit `feat: add recording-scoped live assistance`.
 
 ### Task 8 Live panel and recording acceptance

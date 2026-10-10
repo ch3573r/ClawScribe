@@ -34,7 +34,10 @@ impl IndexWorker {
                 if pool.is_closed() {
                     break;
                 }
-                if !runtime.is_enabled() {
+                if !runtime.is_enabled()
+                    || crate::audio::recording_commands::capture_active()
+                    || super::scheduler::foreground_waiting()
+                {
                     continue;
                 }
                 while runtime.notifications.lock().unwrap().next().is_some() {}
