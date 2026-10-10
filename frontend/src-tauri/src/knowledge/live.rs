@@ -469,6 +469,8 @@ impl LiveState {
         if lease.token.is_cancelled() || tokio::time::Instant::now() >= lease.deadline {
             return Err("Live request cancelled or deadline expired".into());
         }
+        #[cfg(test)]
+        tests::before_completion_lock();
         let mut inner = self
             .inner
             .lock()
@@ -821,6 +823,194 @@ pub(crate) async fn save_sharing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    thread_local! {
+        static COMPLETION_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+    pub(super) fn before_completion_lock() {
+        COMPLETION_LOCK_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+    }
+    #[test]
+    fn cancellation_winning_contended_delivery_prevents_success_and_history() {
+        let (state, id) = ready();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let lease = state.claim(&id, &request_id, "openai").unwrap();
+        let ask = request(&id, &request_id);
+        let reply = AssistantReply {
+            request_id: request_id.clone(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            content: "Public synthetic completed output".into(),
+            evidence: vec![],
+            evidence_metadata: vec![],
+            cited_tags: vec![],
+            context_links: vec![],
+            retrieval_mode: SearchMode::Keyword,
+            provider: "openai".into(),
+            model: "synthetic".into(),
+            live_context: None,
+        };
+        let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let complete_state = state.clone();
+        let delivery = std::thread::spawn(move || {
+            COMPLETION_LOCK_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    checked_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }));
+            });
+            complete_state.complete(&lease, &ask, &reply)
+        });
+        checked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Completion has passed its first token check. Hold the actual state
+        // mutex so the real Cancel operation contends before winning delivery.
+        let guard = state.inner.lock().unwrap();
+        let cancel_state = state.clone();
+        let cancellation = std::thread::spawn(move || cancel_state.cancel(&request_id));
+        drop(guard);
+        let cancelled = cancellation.join().unwrap();
+        resume_tx.send(()).unwrap();
+        let result = delivery.join().unwrap();
+        assert!(cancelled);
+        assert!(
+            result.is_err(),
+            "Cancelled completion must not report success"
+        );
+        assert!(state.history(&id).unwrap().is_empty());
+    }
+    fn queued_update(id: &str, sequence: u64, text: &str, partial: bool) -> TranscriptUpdate {
+        let mut row = update(sequence, sequence as f64 + 1., text, partial);
+        row.session_id = Some(id.into());
+        row
+    }
+    #[tokio::test]
+    async fn stale_pending_producer_cannot_enter_restored_recording() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let state = Arc::new(LiveState::default());
+        let old_id = state.start(true);
+        let id = state.start(true);
+        let mut manager = crate::audio::RecordingManager::new();
+        manager.bind_live_session(crate::audio::recording_manager::LiveTranscriptSink::new(
+            state.clone(),
+            id.clone(),
+        ));
+        state.stop(); // Stop clears live memory before restoring the saver.
+        let rows = crate::audio::recording_commands::test_queue_and_restore(
+            manager,
+            vec![
+                queued_update(&old_id, 1, "Old producer must be excluded", false),
+                queued_update(&id, 2, "Current finalized words", false),
+            ],
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            vec!["Current finalized words"]
+        );
+    }
+    #[tokio::test]
+    async fn same_session_pending_partial_and_final_survive_stop_restore() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (state, id) = ready();
+        let mut manager = crate::audio::RecordingManager::new();
+        manager.bind_live_session(crate::audio::recording_manager::LiveTranscriptSink::new(
+            state.clone(),
+            id.clone(),
+        ));
+        state.stop();
+        let rows = crate::audio::recording_commands::test_queue_and_restore(
+            manager,
+            vec![
+                queued_update(&id, 1, "Draft", true),
+                queued_update(&id, 2, "Another partial", true),
+                queued_update(&id, 1, "Ja", false),
+            ],
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.sequence_id, row.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Ja"), (2, "Another partial")]
+        );
+    }
+    #[tokio::test]
+    async fn dispatched_live_budget_cannot_orphan_a_short_reply() {
+        let state = Arc::new(LiveState::default());
+        let id = state.start(true);
+        let pool = enabled_pool(&state).await;
+        let source_question = format!("Is this proposal approved {}?", "x".repeat(1950));
+        assert!(source_question.len() < 2048);
+        state.ingest(&id, &update(1, 10., &source_question, false));
+        state.ingest(&id, &update(2, 11., "Ja", false));
+        state.ingest(
+            &id,
+            &update(3, 12., "Release timing remains undecided.", false),
+        );
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let lease = state.claim(&id, &request_id, "openai").unwrap();
+        let mut ask = request(&id, &request_id);
+        ask.search.query = "Ja".into();
+        let reply = answer(&pool, &state, ask, lease, 2048, |prompt, _| async move {
+            let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+            let rows = envelope["transcript_evidence"].as_array().unwrap();
+            assert!(prompt.len() <= 2048);
+            assert!(rows
+                .iter()
+                .any(|row| row["text"] == "Release timing remains undecided."));
+            assert!(
+                rows.iter().all(|row| row["text"] != "Ja"),
+                "Final dispatch cannot turn a source affirmation into contextless evidence"
+            );
+            Ok(ConfiguredTextReply {
+                text: "Timing remains undecided [K1]".into(),
+                provider: "openai".into(),
+                model: "synthetic".into(),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply.evidence.len(), 1);
+        assert!(
+            matches!(&reply.evidence[0].locator, EvidenceLocator::Live {sequence_ids, ..} if sequence_ids == &[3])
+        );
+    }
+    #[tokio::test]
+    async fn dispatched_live_short_reply_preserves_source_question_metadata() {
+        let state = Arc::new(LiveState::default());
+        let id = state.start(true);
+        let pool = enabled_pool(&state).await;
+        state.ingest(&id, &update(1, 10., "Is the supplier approved?", false));
+        state.ingest(&id, &update(2, 11., "Nein", false));
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let lease = state.claim(&id, &request_id, "openai").unwrap();
+        let mut ask = request(&id, &request_id);
+        ask.search.query = "Nein".into();
+        let reply = answer(&pool, &state, ask, lease, 8192, |prompt, _| async move {
+            let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+            let rows = envelope["transcript_evidence"].as_array().unwrap();
+            assert_eq!(rows[0]["text"], "Is the supplier approved?");
+            assert_eq!(rows[1]["text"], "Nein");
+            assert_eq!(
+                rows[1]["preceding_question_tag"], 1,
+                "The dispatched reply row must point at its selected source question"
+            );
+            Ok(ConfiguredTextReply {
+                text: "The supplier was rejected [K2]".into(),
+                provider: "openai".into(),
+                model: "synthetic".into(),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply.evidence_metadata[1].preceding_question_tag, Some(1));
+        assert_eq!(
+            serde_json::to_value(&reply.context_links).unwrap(),
+            serde_json::json!([{"kind":"preceding_question","cited_tag":2,"context_tag":1}])
+        );
+    }
     fn update(sequence_id: u64, end: f64, text: &str, partial: bool) -> TranscriptUpdate {
         TranscriptUpdate {
             session_id: None,

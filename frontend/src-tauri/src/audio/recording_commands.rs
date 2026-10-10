@@ -251,6 +251,24 @@ fn store_recording_manager(manager: RecordingManager) {
     }
 }
 
+/// Test utility for the actual manager-absent ingestion and Stop restore path.
+#[cfg(test)]
+pub(crate) fn test_queue_and_restore(
+    manager: RecordingManager,
+    updates: Vec<TranscriptUpdate>,
+) -> Vec<crate::audio::recording_saver::TranscriptSegment> {
+    *RECORDING_MANAGER.lock().unwrap() = None;
+    PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
+    for update in updates {
+        persist_transcript_update(update);
+    }
+    store_recording_manager(manager);
+    let manager = RECORDING_MANAGER.lock().unwrap().take().unwrap();
+    let rows = manager.get_transcript_segments();
+    PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
+    rows
+}
+
 // ============================================================================
 // PUBLIC TYPES
 // ============================================================================
