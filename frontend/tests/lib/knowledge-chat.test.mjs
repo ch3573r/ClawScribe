@@ -42,6 +42,19 @@ test('budget-sized evidence maps retain citations after the former 64-row limit'
   assert.match(html,/aria-label="Open source 700"/);
   assert.doesNotMatch(html,/\[K700\]/);
 });
+
+test('live short-reply citation renders the verified preceding question without accepting a foreign session', () => {
+  const answer = reply('Ja. [K2]');
+  answer.evidence = [1, 2].map(sequence => ({ source_id: 'live:public-session', source_revision: 1,
+    chunk_id: `live:public-session:${sequence}`, fingerprint: `public-live-${sequence}`,
+    locator: { kind: 'live', session_id: 'public-session', sequence_ids: [sequence] } }));
+  answer.evidence_metadata[1].preceding_question_tag = 1;
+  answer.cited_tags = [2]; answer.context_links = [{ kind: 'preceding_question', cited_tag: 2, context_tag: 1 }];
+  answer.live_context = { session_id: 'public-session', finalized_through_seconds: 3540, transcription_incomplete: true };
+  assert.match(rendered(answer), /aria-label="Open question for source 2"/);
+  const foreign = { ...answer, evidence: [{ ...answer.evidence[0], locator: { ...answer.evidence[0].locator, session_id: 'foreign-session' } }, answer.evidence[1]] };
+  assert.doesNotMatch(rendered(foreign), /aria-label="Open question for source 2"/);
+});
 const jsx=(type,props)=>({type,props});
 const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
 test('accepted questions clear immediately and failed requests restore the question',async()=>{

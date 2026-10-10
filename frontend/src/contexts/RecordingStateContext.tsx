@@ -120,6 +120,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     let active = true;
     let revision = 0;
     let syncing = false;
+    let backendSessionId: string | null = null;
     let polling: ReturnType<typeof setInterval> | undefined;
     const unsubscribers: (() => void)[] = [];
     const stopPolling = () => {
@@ -178,8 +179,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     };
     // Register all events before the initial snapshot, including after a WebView reload.
     void Promise.all([
-      subscribe(recordingService.onRecordingStarted(mode => {
+      subscribe(recordingService.onRecordingStarted((mode, sessionId) => {
         if (!active) return;
+        backendSessionId = sessionId ?? null;
         revision++;
         setState(prev => ({
           ...prev, sessionMode: mode, isRecording: true, isPaused: false,
@@ -187,8 +189,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         }));
         startPolling();
       })),
-      subscribe(recordingService.onRecordingStopped(() => {
+      subscribe(recordingService.onRecordingStopped(payload => {
         if (!active) return;
+        if (payload?.session_id && backendSessionId && payload.session_id !== backendSessionId) return;
         revision++;
         stopPolling();
         lifecycleListeners.current.forEach(callback => callback(RecordingStatus.STOPPING));

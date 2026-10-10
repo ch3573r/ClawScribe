@@ -93,6 +93,8 @@ export function LiveAssistancePanel() {
       </div>
       {TranscriptSharingControl(live)}
       {state.sharingBusy && <p role="status" className="text-xs text-muted-foreground">Saving live sharing…</p>}
+      {state.sessionId && state.snapshot?.transcription_available && state.snapshot.finalized_through_seconds <= 0 &&
+        <p role="status" className="text-sm text-muted-foreground">Waiting for finalized speech. Ask when transcription has caught up.</p>}
       {state.provider === 'ollama' && <p className="text-xs text-muted-foreground">Ollama runs separately on this PC and can compete with transcription for memory and compute. Cancel assistance if recording falls behind.</p>}
       {audioOnly ? <p role="status" className="text-sm text-muted-foreground">Audio-only mode has no live transcript. Stop, transcribe the saved meeting, then use Chat with this meeting.</p>
         : builtin ? <p role="status" className="text-sm text-muted-foreground">Built-in AI is unavailable during recording. After recording, open the saved meeting and use Chat with this meeting.</p>

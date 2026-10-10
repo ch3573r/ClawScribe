@@ -18,6 +18,7 @@ export interface RecordingState {
 }
 
 export interface RecordingStoppedPayload {
+  session_id?: string | null;
   recording_mode?: 'live' | 'audio_only';
   audio_save_failed?: boolean;
   capture_incomplete?: boolean;
@@ -156,8 +157,8 @@ export class RecordingService {
    * @param callback - Function to call when recording starts
    * @returns Promise that resolves to unlisten function
    */
-  async onRecordingStarted(callback: (mode: 'live' | 'audio_only') => void): Promise<UnlistenFn> {
-    return listen<{recording_mode?: 'live' | 'audio_only'}>('recording-started', event => callback(event.payload.recording_mode ?? 'live'));
+  async onRecordingStarted(callback: (mode: 'live' | 'audio_only', sessionId?: string | null) => void): Promise<UnlistenFn> {
+    return listen<{recording_mode?: 'live' | 'audio_only'; session_id?: string | null}>('recording-started', event => callback(event.payload.recording_mode ?? 'live', event.payload.session_id));
   }
 
   /**
