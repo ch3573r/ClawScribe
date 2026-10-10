@@ -6,7 +6,7 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { PageSection } from "@/components/ui/page-section";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { knowledgeService } from "@/services/knowledgeService";
 import { libraryScope } from "@/lib/knowledge-state";
 import type { IndexStatus, ModelStatus } from "@/types/knowledge";
@@ -20,6 +20,7 @@ const indexReason: Record<string, string> = {
 export function KnowledgeSettings() {
   const [status, setStatus] = useState<IndexStatus | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
+  const [modelDetailsOpen, setModelDetailsOpen] = useState(false);
   const [busy, setBusy] = useState("");
   const [readError, setReadError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -81,9 +82,15 @@ export function KnowledgeSettings() {
     : model?.installed ? "Search files are installed. Enable semantic search or verify the files." : model?.enabled ? "Download the search model to begin." : "Keyword search is available without a download.";
   const cancellationLabel = download?.stage === "verifying" || busy === "Verifying search files" ? "Cancel verification"
     : download?.stage === "checking" ? "Cancel check" : "Cancel download";
-  return <TooltipProvider><div className="space-y-5">
+  return <div className="space-y-5">
     <PageSection title="Semantic search" actions={<div className="flex items-center gap-1">
-      {model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Search model details"><Info /></Button></TooltipTrigger><TooltipContent>{model.model} · ONNX · CPU</TooltipContent></Tooltip>}
+      {model && <Popover open={modelDetailsOpen} onOpenChange={setModelDetailsOpen}>
+        <PopoverTrigger asChild><Button type="button" variant="ghost" size="icon" aria-label="Search model details"><Info /></Button></PopoverTrigger>
+        <PopoverContent align="end" aria-label="Search model details" className="space-y-2 text-sm">
+          <p className="break-words">{model.model} · ONNX · CPU</p>
+          <p className="text-muted-foreground">Use Semantic + keyword under Meetings → Meeting memory → Transcript search.</p>
+        </PopoverContent>
+      </Popover>}
       {model?.installed && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Semantic search actions" disabled={locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end"><DropdownMenuItem disabled={!model?.installed} onSelect={() => void action("Verifying search files", knowledgeService.download)}>Verify installed files</DropdownMenuItem></DropdownMenuContent>
       </DropdownMenu>}
@@ -127,5 +134,5 @@ export function KnowledgeSettings() {
     {busy && !downloading && <p role="status" className="text-sm text-muted-foreground">{busy}…</p>}
     {readError && <p role="alert" className="text-sm text-destructive">{readError}</p>}
     {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
-  </div></TooltipProvider>;
+  </div>;
 }

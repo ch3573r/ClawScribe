@@ -10,6 +10,7 @@ function settings(t,configuration,service={}) {
   const hooks=createHookHarness(); t.after(() => hooks.unmount());
   const {KnowledgeSettings}=loadTsModule('src/components/KnowledgeSettings.tsx',{
     react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'@/components/ui/button':{Button:'button'},
+    '@/components/ui/popover':{Popover:'popover',PopoverTrigger:'popover-trigger',PopoverContent:'popover-content'},
     '@/components/ui/switch':{Switch:'switch'},'@/components/ui/progress':{Progress:'progress'},'@/components/ui/tooltip':{},
     '@/components/ui/dropdown-menu':{DropdownMenu:'menu',DropdownMenuTrigger:'trigger',DropdownMenuContent:'menu-content',DropdownMenuItem:'menu-item'},
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>({keyword_ready:true,semantic_ready:4,pending:0,failed:0}),modelStatus:async()=>configuration,...service}},
@@ -53,4 +54,26 @@ test('status refresh moves the transfer through verification to readiness',async
   await new Promise(resolve=>setTimeout(resolve,1100));await flush();
   assert.match(text(app.render()),/Ready for semantic search/);
   assert(!nodes(app.render()).some(node=>node.type==='button'&&text(node)==='Cancel download'));
+});
+
+test('search model details can open and dismiss without changing semantic search',async(t)=>{
+  const changes=[];
+  const app=settings(t,{enabled:true,ready:true,installed:true,model:'intfloat/multilingual-e5-small',download:idle},{
+    enable:async()=>changes.push('enable'),download:async()=>changes.push('download'),reindex:async()=>changes.push('reindex'),
+  });
+  app.render();await flush();
+  const details=()=>nodes(app.render()).find(node=>node.type==='popover');
+  assert.ok(details(),'the model info button must provide click-open details');
+  assert.equal(details().props.open,false);
+  const trigger=nodes(details()).find(node=>node.type==='popover-trigger');
+  assert.equal(nodes(trigger).find(node=>node.type==='button')?.props['aria-label'],'Search model details');
+  details().props.onOpenChange(true);
+  assert.equal(details().props.open,true);
+  const content=nodes(details()).find(node=>node.type==='popover-content');
+  assert.ok(text(content).includes('intfloat/multilingual-e5-small'));
+  assert.match(text(content),/ONNX/);
+  assert.match(text(content),/CPU/);
+  details().props.onOpenChange(false);
+  assert.equal(details().props.open,false);
+  assert.deepEqual(changes,[]);
 });
