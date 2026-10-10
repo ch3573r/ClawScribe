@@ -56,6 +56,9 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
   let referenceRevision = 0;
   let snapshotRevision = 0;
   let recording = 'idle';
+  let lifecycleRevision = 0;
+  // Only the most recently stopped identity is retained, never a session cache.
+  let stoppedSessionId: string | null = null;
   let connected = false;
   let connectionRevision = 0;
   let reading: Promise<void> | null = null;
@@ -108,6 +111,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     const work = service.liveSnapshot().then(snapshot => {
       if (generation !== version || snapshotRevision !== revision) return;
       if (state.sessionId && snapshot.session_id !== state.sessionId) return;
+      if (!state.sessionId && snapshot.session_id === stoppedSessionId) return;
       if (!state.sessionId) startSession(snapshot.session_id);
       // Text is native evidence only. Retain bounded metadata, never a second UI transcript.
       const { segments: _segments, ...metadata } = snapshot;
@@ -137,13 +141,31 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
       };
       register('recording-started', payload => {
         if (!payload.session_id) return;
-        recording = 'recording';
-        startSession(payload.session_id);
-        void refresh();
+        if (['stopping', 'processing', 'saving', 'completed', 'error'].includes(recording)) return;
+        const version = generation;
+        const phase = lifecycleRevision;
+        // Events can arrive late. Adopt only the backend's current identity,
+        // and never let an asynchronous check cross the caller's first Stop.
+        void service.liveSnapshot().then(snapshot => {
+          if (disposed || generation !== version || lifecycleRevision !== phase) return;
+          if (snapshot.session_id !== payload.session_id || snapshot.session_id === stoppedSessionId) return;
+          recording = 'recording';
+          lifecycleRevision++;
+          snapshotRevision++;
+          reading = null;
+          startSession(snapshot.session_id);
+          const { segments: _segments, ...metadata } = snapshot;
+          update({ snapshot: metadata, snapshotError: null });
+        }).catch(() => {
+          if (!disposed && generation === version && lifecycleRevision === phase)
+            update({ snapshotError: 'Could not verify the current recording. Retry finalized transcript status before asking.' });
+        });
       });
       register('recording-stopped', payload => {
         if (payload.session_id && payload.session_id !== state.sessionId) return;
+        stoppedSessionId = state.sessionId ?? stoppedSessionId;
         recording = 'stopping';
+        lifecycleRevision++;
         clearSession();
       });
       const revision = permissionRevision;
@@ -169,9 +191,13 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
     },
     setRecording(status: string) {
       if (status === recording) return;
+      lifecycleRevision++;
       recording = status;
       if (status === 'recording') void refresh();
-      else if (status !== 'starting') clearSession();
+      else if (status !== 'starting') {
+        stoppedSessionId = state.sessionId ?? stoppedSessionId;
+        clearSession();
+      }
     },
     configureProvider(provider: string, model: string) {
       if (state.provider === provider && state.model === model) return;
@@ -259,7 +285,12 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
         if (reply.request_id !== id || reply.live_context?.session_id !== sessionId) {
           update({ error: 'This assistance reply belongs to a different request or session. Ask again.' }); return;
         }
-        const messages = [...state.messages, { question: text, reply }].slice(-32);
+        const newest = { question: text, reply };
+        if (utf8Bytes(JSON.stringify([newest])) > 65536) {
+          update({ error: 'This answer is too large to display in live assistance. Ask a narrower question or request a shorter answer.' });
+          return;
+        }
+        const messages = [...state.messages, newest].slice(-32);
         while (messages.length && utf8Bytes(JSON.stringify(messages)) > 65536) messages.shift();
         update({ messages });
       }).catch(() => {

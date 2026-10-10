@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { recordingService } from '@/services/recordingService';
+import { knowledgeService } from '@/services/knowledgeService';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type RecordingMode = 'live' | 'audio_only';
@@ -104,6 +105,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   });
 
   const lifecycleListeners = useRef(new Set<(status: RecordingStatus) => void>());
+  const lifecycleStatus = useRef(RecordingStatus.IDLE);
+  const lifecycleRevision = useRef(0);
   const subscribeLifecycle = useCallback((callback: (status: RecordingStatus) => void) => {
     lifecycleListeners.current.add(callback);
     return () => { lifecycleListeners.current.delete(callback); };
@@ -112,6 +115,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   const setStatus = useCallback((status: RecordingStatus, message?: string) => {
     // Ephemeral assistance invalidates at the caller's first Stop, before any
     // React render or backend recording-stopped event can be awaited.
+    lifecycleStatus.current = status;
+    lifecycleRevision.current++;
     lifecycleListeners.current.forEach(callback => callback(status));
     setState(prev => ({ ...prev, status, statusMessage: message }));
   }, []);
@@ -134,15 +139,24 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       if (!active || syncing) return;
       syncing = true;
       const request = revision;
+      const phase = lifecycleRevision.current;
       try {
         const backend = await recordingService.getRecordingState();
         // A stop/pause event is newer than a poll that began before it.
-        if (!active || request !== revision) return;
+        if (!active || request !== revision || phase !== lifecycleRevision.current) return;
+        if (backend.is_recording && backendSessionId === null && lifecycleStatus.current === RecordingStatus.IDLE) {
+          // Bind reload recovery once too; rejected old start events must not
+          // leave the stopped-event filter without the current identity.
+          const snapshot = await knowledgeService.liveSnapshot().catch(() => null);
+          if (!active || request !== revision || phase !== lifecycleRevision.current) return;
+          if (snapshot) backendSessionId = snapshot.session_id;
+        }
         if (backend.is_recording) startPolling();
         else stopPolling();
+        const status = backend.is_recording && lifecycleStatus.current === RecordingStatus.IDLE
+          ? RecordingStatus.RECORDING : lifecycleStatus.current;
+        lifecycleStatus.current = status;
         setState(prev => {
-          const status = backend.is_recording && prev.status === RecordingStatus.IDLE
-            ? RecordingStatus.RECORDING : prev.status;
           if (
             prev.status === status &&
             prev.sessionMode === (backend.recording_mode ?? 'live') &&
@@ -181,18 +195,37 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     void Promise.all([
       subscribe(recordingService.onRecordingStarted((mode, sessionId) => {
         if (!active) return;
-        backendSessionId = sessionId ?? null;
-        revision++;
-        setState(prev => ({
-          ...prev, sessionMode: mode, isRecording: true, isPaused: false,
-          isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined,
-        }));
-        startPolling();
+        if ([RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING,
+          RecordingStatus.COMPLETED, RecordingStatus.ERROR].includes(lifecycleStatus.current)) return;
+        const request = revision;
+        const phase = lifecycleRevision.current;
+        void knowledgeService.liveSnapshot().then(snapshot => {
+          if (!active || request !== revision || phase !== lifecycleRevision.current) return;
+          if (sessionId && snapshot.session_id !== sessionId) return;
+          // Retain only the latest backend identity. A duplicate from its
+          // completed lifecycle cannot be the next STARTING session.
+          if (snapshot.session_id === backendSessionId) return;
+          backendSessionId = snapshot.session_id;
+          revision++;
+          lifecycleRevision.current++;
+          lifecycleStatus.current = RecordingStatus.RECORDING;
+          setState(prev => ({
+            ...prev, sessionMode: mode, isRecording: true, isPaused: false,
+            isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined,
+          }));
+          startPolling();
+        }).catch(() => {
+          if (active && request === revision && phase === lifecycleRevision.current)
+            console.error('Could not verify the current recording session.');
+        });
       })),
       subscribe(recordingService.onRecordingStopped(payload => {
         if (!active) return;
         if (payload?.session_id && backendSessionId && payload.session_id !== backendSessionId) return;
         revision++;
+        lifecycleRevision.current++;
+        if (![RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
+          .includes(lifecycleStatus.current)) lifecycleStatus.current = RecordingStatus.STOPPING;
         stopPolling();
         lifecycleListeners.current.forEach(callback => callback(RecordingStatus.STOPPING));
         setState(prev => {

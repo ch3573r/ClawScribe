@@ -295,7 +295,7 @@ test('byte-budget eviction keeps the newest fitting reply and drops only older e
     for (let i = 0; i < 4; i++) await app.owner.ask(`Question ${i}`);
     const state = app.owner.getSnapshot();
     assert.equal(state.error, null); assert.equal(state.pending, false);
-    assert.deepEqual(state.messages.map(entry => entry.question), ['Question 2', 'Question 3']);
+    assert.deepEqual(Array.from(state.messages, entry => entry.question), ['Question 2', 'Question 3']);
     assert.ok(Buffer.byteLength(JSON.stringify(state.messages), 'utf8') <= 65536);
   } finally { app.disconnect(); }
 });
