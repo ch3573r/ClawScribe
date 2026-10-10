@@ -11,6 +11,9 @@ export function RecordingHealthBanner() {
     let disposed = false;
     const subscriptions = [
       listen<string>('recording-warning', ({ payload }) => { if (!disposed) setWarning(payload); }),
+      listen<string>('recording-warning-cleared', ({ payload }) => {
+        if (!disposed) setWarning(current => current === payload ? null : current);
+      }),
       listen<string>('transcription-warning', () => {
         if (!disposed) setWarning('Live transcription is incomplete. After stopping, check the saved audio and use Retranscribe to recover missing speech.');
       }),

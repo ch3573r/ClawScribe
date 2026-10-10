@@ -27,6 +27,13 @@ pub struct AudioLevelUpdate {
     pub levels: Vec<AudioLevelData>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct MonitoredMicrophone {
+    pub requested_name: String,
+    pub device_name: String,
+    pub used_default: bool,
+}
+
 #[derive(Clone)]
 struct LevelSnapshot {
     rms_level: f32,
@@ -47,7 +54,7 @@ static MONITOR_STATE: LazyLock<Mutex<Option<MonitorState>>> = LazyLock::new(|| M
 pub async fn start_monitoring<R: Runtime>(
     app_handle: AppHandle<R>,
     device_names: Vec<String>,
-) -> Result<()> {
+) -> Result<Vec<MonitoredMicrophone>> {
     info!(
         "Starting audio level monitoring for devices: {:?}",
         device_names
@@ -62,7 +69,7 @@ pub async fn start_monitoring<R: Runtime>(
 
     let levels = Arc::new(Mutex::new(HashMap::<String, LevelSnapshot>::new()));
     let keep_running = Arc::new(AtomicBool::new(true));
-    let (setup_tx, setup_rx) = mpsc::channel::<Result<(), String>>();
+    let (setup_tx, setup_rx) = mpsc::channel::<Result<Vec<MonitoredMicrophone>, String>>();
     let worker_keep_running = keep_running.clone();
     let worker_levels = levels.clone();
     let worker_device_names = normalized_device_names.clone();
@@ -88,16 +95,19 @@ pub async fn start_monitoring<R: Runtime>(
             .map_err(|err| anyhow!("Microphone level monitor setup task failed: {}", err))?
             .map_err(|err| anyhow!("Microphone level monitor setup timed out: {}", err))?;
 
-    if let Err(err) = setup_result {
-        keep_running.store(false, Ordering::SeqCst);
-        if let Err(join_err) = worker.join() {
-            warn!(
-                "Microphone level monitor thread failed after setup error: {:?}",
-                join_err
-            );
+    let monitored_devices = match setup_result {
+        Ok(devices) => devices,
+        Err(err) => {
+            keep_running.store(false, Ordering::SeqCst);
+            if let Err(join_err) = worker.join() {
+                warn!(
+                    "Microphone level monitor thread failed after setup error: {:?}",
+                    join_err
+                );
+            }
+            return Err(anyhow!(err));
         }
-        return Err(anyhow!(err));
-    }
+    };
 
     let mut state = MONITOR_STATE
         .lock()
@@ -109,7 +119,7 @@ pub async fn start_monitoring<R: Runtime>(
         worker,
     });
 
-    Ok(())
+    Ok(monitored_devices)
 }
 
 /// Stop audio level monitoring and release microphone streams.
@@ -159,16 +169,31 @@ fn strip_device_type_suffix(device_name: &str) -> &str {
         .trim()
 }
 
-fn find_input_device(host: &cpal::Host, device_name: &str) -> Result<cpal::Device> {
-    for device in host.input_devices()? {
-        if let Ok(name) = device.name() {
-            if name == device_name {
-                return Ok(device);
-            }
+fn find_input_device(host: &cpal::Host, device_name: &str) -> Result<(String, cpal::Device)> {
+    let devices = host
+        .input_devices()?
+        .filter_map(|device| device.name().ok().map(|name| (name, device)));
+    #[cfg(target_os = "windows")]
+    let default_device = host
+        .default_input_device()
+        .and_then(|device| device.name().ok().map(|name| (name, device)));
+    #[cfg(not(target_os = "windows"))]
+    let default_device = None;
+    select_input_device(devices, device_name, default_device)
+}
+
+fn select_input_device<T>(
+    devices: impl IntoIterator<Item = (String, T)>,
+    device_name: &str,
+    default_device: Option<(String, T)>,
+) -> Result<(String, T)> {
+    for (name, device) in devices {
+        if name == device_name {
+            return Ok((name, device));
         }
     }
 
-    Err(anyhow!("Input device '{}' was not found", device_name))
+    default_device.ok_or_else(|| anyhow!("Input device '{}' was not found", device_name))
 }
 
 fn run_monitor_thread<R: Runtime>(
@@ -176,24 +201,40 @@ fn run_monitor_thread<R: Runtime>(
     monitored_names: Vec<String>,
     levels: Arc<Mutex<HashMap<String, LevelSnapshot>>>,
     keep_running: Arc<AtomicBool>,
-    setup_tx: mpsc::Sender<Result<(), String>>,
+    setup_tx: mpsc::Sender<Result<Vec<MonitoredMicrophone>, String>>,
 ) {
     let host = cpal::default_host();
     let mut streams = Vec::new();
+    let mut monitored_devices = Vec::<MonitoredMicrophone>::new();
     let mut failures = Vec::new();
 
     for device_name in &monitored_names {
         match find_input_device(&host, device_name) {
-            Ok(device) => match create_input_level_stream(&device, device_name, levels.clone()) {
-                Ok(stream) => streams.push(stream),
-                Err(err) => {
-                    warn!(
-                        "Failed to create microphone level stream for '{}': {}",
-                        device_name, err
-                    );
-                    failures.push(format!("{}: {}", device_name, err));
+            Ok((actual_name, device)) => {
+                if monitored_devices
+                    .iter()
+                    .any(|monitored| monitored.device_name == actual_name)
+                {
+                    continue;
                 }
-            },
+                match create_input_level_stream(&device, &actual_name, levels.clone()) {
+                    Ok(stream) => {
+                        streams.push(stream);
+                        monitored_devices.push(MonitoredMicrophone {
+                            requested_name: device_name.clone(),
+                            used_default: actual_name != *device_name,
+                            device_name: actual_name,
+                        });
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to create microphone level stream for '{}': {}",
+                            device_name, err
+                        );
+                        failures.push(format!("{}: {}", device_name, err));
+                    }
+                }
+            }
             Err(err) => {
                 warn!(
                     "Microphone device not found for level test: {}",
@@ -219,11 +260,15 @@ fn run_monitor_thread<R: Runtime>(
         );
     }
 
-    let _ = setup_tx.send(Ok(()));
+    let actual_names: Vec<String> = monitored_devices
+        .iter()
+        .map(|device| device.device_name.clone())
+        .collect();
+    let _ = setup_tx.send(Ok(monitored_devices));
 
     while keep_running.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(100));
-        let level_update = build_level_update(&monitored_names, &levels);
+        let level_update = build_level_update(&actual_names, &levels);
 
         if let Err(err) = app_handle.emit("audio-levels", &level_update) {
             error!("Failed to emit microphone audio levels: {}", err);
@@ -400,5 +445,49 @@ fn format_failure_suffix(failures: &[String]) -> String {
         String::new()
     } else {
         format!(": {}", failures.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_device_names, select_input_device};
+
+    #[test]
+    fn selected_microphone_takes_precedence_over_the_default() {
+        let selected = select_input_device(
+            vec![("USB Microphone".to_string(), 1)],
+            "USB Microphone",
+            Some(("Built-in Microphone".to_string(), 2)),
+        )
+        .unwrap();
+        assert_eq!(selected, ("USB Microphone".to_string(), 1));
+    }
+
+    #[test]
+    fn unavailable_microphone_uses_the_current_default_with_its_actual_name() {
+        let selected = select_input_device(
+            vec![("Microphone (2- USB Headset)".to_string(), 1)],
+            "Microphone (1- USB Headset)",
+            Some(("Microphone (2- USB Headset)".to_string(), 1)),
+        )
+        .expect("A stale endpoint name must not prevent testing the current default");
+        assert_eq!(selected, ("Microphone (2- USB Headset)".to_string(), 1));
+    }
+
+    #[test]
+    fn unavailable_microphone_without_a_default_remains_an_error() {
+        assert!(select_input_device::<u8>(Vec::new(), "USB Microphone", None).is_err());
+    }
+
+    #[test]
+    fn display_suffixes_do_not_change_endpoint_names() {
+        assert_eq!(
+            normalize_device_names(vec![
+                " Microphone (2- USB Headset) (input) ".to_string(),
+                "Microphone (2- USB Headset)".to_string(),
+                "  ".to_string(),
+            ]),
+            vec!["Microphone (2- USB Headset)".to_string()]
+        );
     }
 }

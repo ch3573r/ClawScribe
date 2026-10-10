@@ -30,6 +30,12 @@ export interface AudioLevelUpdate {
   levels: AudioLevelData[];
 }
 
+interface MonitoredMicrophone {
+  requested_name: string;
+  device_name: string;
+  used_default: boolean;
+}
+
 interface DeviceSelectionProps {
   selectedDevices: SelectedDevices;
   onDeviceChange: (devices: SelectedDevices) => void;
@@ -44,12 +50,11 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
   const [audioLevels, setAudioLevels] = useState<Map<string, AudioLevelData>>(new Map());
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [showLevels, setShowLevels] = useState(false);
-  const [monitoredDeviceNames, setMonitoredDeviceNames] = useState<Set<string>>(new Set());
+  const [monitoredInputDevices, setMonitoredInputDevices] = useState<MonitoredMicrophone[]>([]);
 
   // Filter devices by type
   const inputDevices = devices.filter(device => device.device_type === 'Input');
   const outputDevices = devices.filter(device => device.device_type === 'Output');
-  const monitoredInputDevices = inputDevices.filter(device => monitoredDeviceNames.has(device.name));
 
   // Fetch available audio devices
   const fetchDevices = async () => {
@@ -189,14 +194,13 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
       }
 
       setError(null);
-      await invoke('start_audio_level_monitoring', { deviceNames });
+      const monitoredDevices = await invoke<MonitoredMicrophone[]>('start_audio_level_monitoring', { deviceNames });
       setIsMonitoring(true);
       setShowLevels(true);
-      setMonitoredDeviceNames(new Set(deviceNames));
-      console.log('Started audio level monitoring for input devices:', deviceNames);
+      setMonitoredInputDevices(monitoredDevices);
     } catch (err) {
       console.error('Failed to start audio level monitoring:', err);
-      setError(`Failed to start audio level monitoring: ${String(err)}`);
+      setError(String(err));
     }
   };
 
@@ -207,7 +211,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
       setIsMonitoring(false);
       setShowLevels(false);
       setAudioLevels(new Map());
-      setMonitoredDeviceNames(new Set());
+      setMonitoredInputDevices([]);
       setError(null);
       console.log('Stopped audio level monitoring');
     } catch (err) {
@@ -312,12 +316,12 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
                 {monitoredInputDevices.length === 1 ? 'Microphone level:' : 'Microphone levels:'}
               </p>
               {monitoredInputDevices.map((device) => {
-                const levelData = audioLevels.get(device.name);
+                const levelData = audioLevels.get(device.device_name);
                 return (
-                  <div key={`level-${device.name}`} className="space-y-1">
+                  <div key={`level-${device.device_name}`} className="space-y-1">
                     <div className="flex items-center justify-between">
                       <span className="text-xs text-muted-foreground truncate max-w-[200px]">
-                        {device.name}
+                        {device.device_name}
                       </span>
                       {levelData && (
                         <CompactAudioLevelMeter
@@ -332,9 +336,14 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
                         rmsLevel={levelData.rms_level}
                         peakLevel={levelData.peak_level}
                         isActive={levelData.is_active}
-                        deviceName={device.name}
+                        deviceName={device.device_name}
                         size="small"
                       />
+                    )}
+                    {device.used_default && (
+                      <p className="text-xs text-warning-foreground">
+                        The preferred microphone is unavailable. Testing the Windows default microphone shown above.
+                      </p>
                     )}
                   </div>
                 );
