@@ -21,6 +21,19 @@ export interface ModelStatus {enabled:boolean;ready:boolean;installed:boolean;mo
 export interface SearchRequest {scope:KnowledgeScope;query:string;document_ids:string[];mode:SearchMode}
 export interface SearchResponse {passages:Passage[];mode:SearchMode;index_status:IndexStatus}
 export interface AskRequest {request_id:string;owner:ConversationOwner;search:SearchRequest}
+export interface LiveSnapshot {
+  session_id: string; finalized_through_seconds: number;
+  segments: { sequence_id: number; text: string; start_seconds: number | null; end_seconds: number | null }[];
+  transcription_incomplete: boolean; transcription_available: boolean;
+}
+export interface LiveAskRequest {
+  request_id: string; owner: { kind: 'live'; id: string };
+  search: { scope: { kind: 'live'; session_id: string }; query: string; document_ids: string[]; mode: 'keyword' };
+  live_reference_scope?: { all_meetings: false; meeting_ids: string[]; tags: string[]; tag_mode: 'any'; untagged: false; from: null; to: null };
+}
+export interface LiveReply extends AssistantReply {
+  live_context?: { session_id: string; finalized_through_seconds: number; transcription_incomplete: boolean };
+}
 export interface CitationContextLink {kind:'preceding_question';cited_tag:number;context_tag:number}
 export interface AssistantReply {
   request_id:string;message_id:string;content:string;evidence:EvidenceRef[];evidence_metadata:EvidenceDisplay[];

@@ -1,11 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AskRequest, AssistantReply, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
+import type { AskRequest, AssistantReply, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, LiveAskRequest, LiveReply, LiveSnapshot, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
 
 /** The single native boundary for meeting memory. No provider credentials enter the UI request. */
 export const knowledgeService = {
   search: (request:SearchRequest) => invoke<SearchResponse>('knowledge_search',{request}),
-  ask: (request:AskRequest) => invoke<AssistantReply>('knowledge_ask',{request}),
-  cancel: (requestId:string) => invoke<void>('knowledge_cancel_request',{requestId}),
+  ask: (request:AskRequest | LiveAskRequest) => invoke<LiveReply>('knowledge_ask',{request}),
+  cancel: (requestId:string,sessionId?:string) => invoke<void>('knowledge_cancel_request',{requestId,...(sessionId ? {sessionId} : {})}),
+  liveSnapshot: () => invoke<LiveSnapshot>('knowledge_live_snapshot'),
+  liveSharing: () => invoke<boolean>('knowledge_live_sharing'),
+  setLiveSharing: (enabled:boolean) => invoke<void>('knowledge_set_live_sharing',{enabled}),
   history: (owner:ConversationOwner) => invoke<HistoryMessage[]>('knowledge_history',{owner}),
   clear: (owner:ConversationOwner) => invoke<number>('knowledge_clear_history',{owner}),
   createConversation: () => invoke<ConversationOwner>('knowledge_create_library_conversation'),
@@ -26,6 +29,6 @@ export const knowledgeService = {
   detachDocument: (meetingId:string,documentId:string) => invoke<void>('knowledge_remove_attachment',{meetingId,documentId}),
   deleteDocument: (meetingId:string,documentId:string) => invoke<void>('knowledge_delete_document',{meetingId,documentId}),
   retryDocument: (meetingId:string,documentId:string) => invoke<void>('knowledge_retry_document_index',{meetingId,documentId}),
-  documentSharing: (owner:ConversationOwner) => invoke<boolean>('knowledge_document_sharing',{owner}),
-  setDocumentSharing: (owner:ConversationOwner,enabled:boolean) => invoke<void>('knowledge_set_document_sharing',{owner,enabled}),
+  documentSharing: (owner:ConversationOwner | {kind:'live';id:string}) => invoke<boolean>('knowledge_document_sharing',{owner}),
+  setDocumentSharing: (owner:ConversationOwner | {kind:'live';id:string},enabled:boolean) => invoke<void>('knowledge_set_document_sharing',{owner,enabled}),
 };

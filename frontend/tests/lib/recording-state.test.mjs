@@ -94,3 +94,13 @@ test('reload during recording restores the lifecycle and polls without overlappi
   assert.equal(view.intervals.size, 0);
   assert.equal(view.unsubscribed, 4);
 });
+
+test('first stopping status notifies lifecycle consumers synchronously before React rerenders', async () => {
+  const view = createView(); const state = view.render(); const observed = [];
+  try {
+    assert.equal(typeof state.subscribeLifecycle, 'function', 'the recording owner exposes lifecycle invalidation');
+    const cleanup = state.subscribeLifecycle(status => observed.push(status));
+    state.setStatus('stopping'); assert.deepEqual(observed, ['stopping']);
+    cleanup(); state.setStatus('saving'); assert.deepEqual(observed, ['stopping']);
+  } finally { view.unmount(); await flush(); }
+});
