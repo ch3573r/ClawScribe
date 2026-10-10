@@ -18,6 +18,18 @@ Verify both sources in a short saved recording before relying on a long session.
 Teams detection is optional and distinct from audio capture; Webex and other
 applications can be recorded through system audio without a dedicated meeting bot.
 
+The Settings microphone test is independent of recording capture. On Windows,
+an unavailable preferred microphone falls back to the current default, with the
+actual tested device and fallback shown beside its levels. Saved preferences
+remain unchanged.
+
+The system-audio warning checks captured system samples, independently of the
+microphone test. It appears once after 15 seconds without a non-silent system
+sample when an output device is selected. If system sound starts later, its
+warning clears without hiding a newer capture or transcription warning. Silence
+at startup alone does not establish that the selected output cannot be captured;
+confirm microphone and meeting audio in saved playback.
+
 Speak with the microphone at a usable level, avoid clipping, and use the intended
 language/model selection. Playback is the reference when a name, number, short
 answer, or overlapping utterance needs review. A confidence value is not proof

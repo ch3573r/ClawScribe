@@ -23,6 +23,7 @@ use super::vad::ContinuousVadProcessor;
 /// live latency. Default 6s (Parakeet/Whisper).
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
+const SYSTEM_AUDIO_SILENCE_WARNING: &str = "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).";
 
 #[derive(Default)]
 struct QueueWriteFailureTracker {
@@ -52,6 +53,7 @@ impl SystemAudioWarningTracker {
             let peak = samples.iter().fold(0.0f32, |peak, &x| peak.max(x.abs()));
             if peak > 0.001 {
                 self.audio_seen = true;
+                return self.warned;
             }
         }
         false
@@ -1003,7 +1005,11 @@ impl AudioPipeline {
 
                     // Track whether the system-audio stream is actually carrying
                     // sound (for the silence warning below).
-                    system_audio_warning.observe_samples(&chunk.device_type, &chunk.data);
+                    if system_audio_warning.observe_samples(&chunk.device_type, &chunk.data)
+                        && self.state.is_recording()
+                    {
+                        self.state.clear_warning(SYSTEM_AUDIO_SILENCE_WARNING);
+                    }
 
                     // STEP 1: Add raw audio to ring buffer for mixing
                     // Microphone audio is already normalized at capture level (AudioCapture)
@@ -1153,9 +1159,7 @@ impl AudioPipeline {
                 self.state.is_recording(),
                 self.state.get_system_device().is_some(),
             ) {
-                self.state.report_warning(
-                    "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).",
-                );
+                self.state.report_warning(SYSTEM_AUDIO_SILENCE_WARNING);
             }
         }
 
