@@ -445,3 +445,118 @@ test('recording retry failures remain bounded and matching UUID alone never reco
     assert.equal(view.intervals.size, 1);
   } finally { view.unmount(); }
 });
+
+test('Pause after rejected Started verification keeps manual recovery actionable and preserves paused state', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    view.callbacks.Paused();
+    assert.equal(view.render().isPaused, true); assert.equal(view.render().isActive, false);
+    retryVerification(view);
+    assert.equal(checks.length, 2, 'same-producer Pause must not make the offered Retry inert');
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    const recovered = view.render();
+    assert.equal(recovered.status, 'recording'); assert.equal(recovered.isRecording, true);
+    assert.equal(recovered.isPaused, true, 'canonical verification cannot resume a paused native producer');
+    assert.equal(recovered.isActive, false); assert.equal(recovered.verificationError, null);
+    assert.equal(view.intervals.size, 1); assert.equal(checks.length, 2);
+  } finally { view.unmount(); }
+});
+
+test('Resume after rejected Started verification keeps the same current producer retryable', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    view.callbacks.Paused(); view.callbacks.Resumed();
+    assert.equal(view.render().isPaused, false);
+    retryVerification(view);
+    assert.equal(checks.length, 2, 'same-producer Resume must not consume current recovery ownership');
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    const recovered = view.render();
+    assert.equal(recovered.status, 'recording'); assert.equal(recovered.isRecording, true);
+    assert.equal(recovered.isPaused, false); assert.equal(recovered.isActive, true);
+    assert.equal(recovered.verificationError, null); assert.equal(view.intervals.size, 1);
+  } finally { view.unmount(); }
+});
+
+test('Pause during a deferred exact-pair retry cannot discard recovery or resume capture in global state', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    retryVerification(view); assert.equal(checks.length, 2);
+    view.callbacks.Paused();
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    const recovered = view.render();
+    assert.equal(recovered.status, 'recording', 'same-producer Pause does not invalidate canonical identity verification');
+    assert.equal(recovered.isRecording, true); assert.equal(recovered.isPaused, true);
+    assert.equal(recovered.isActive, false); assert.equal(recovered.verificationError, null);
+    assert.equal(view.intervals.size, 1); assert.equal(checks.length, 2, 'the completed exact retry needs no replacement lookup');
+  } finally { view.unmount(); }
+});
+
+test('Resume during a deferred exact-pair retry preserves recovery and the latest active state', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    retryVerification(view); assert.equal(checks.length, 2);
+    view.callbacks.Paused(); view.callbacks.Resumed();
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    const recovered = view.render();
+    assert.equal(recovered.status, 'recording', 'same-producer Resume must not strand the in-flight retry');
+    assert.equal(recovered.isRecording, true); assert.equal(recovered.isPaused, false);
+    assert.equal(recovered.isActive, true); assert.equal(recovered.verificationError, null);
+    assert.equal(view.intervals.size, 1); assert.equal(checks.length, 2);
+  } finally { view.unmount(); }
+});
+
+test('a retry rejected after Pause remains manually retryable across Resume and exact-pair mismatches', async () => {
+  const { view, checks } = await rejectedStartingView();
+  try {
+    retryVerification(view); assert.equal(checks.length, 2);
+    view.callbacks.Paused();
+    checks[1].reject(new Error('Public fixture paused metadata failure')); await flush();
+    assert.equal(checks.length, 2, 'failure during Pause creates no automatic retry');
+    assert.match(view.render().verificationError ?? '', /verify|retry/i);
+    view.callbacks.Resumed(); retryVerification(view);
+    assert.equal(checks.length, 3, 'the current failed candidate remains actionable after both controls');
+    checks[2].resolve(liveSnapshot('session-b', '4')); await flush();
+    assert.equal(view.render().status, 'starting'); assert.equal(view.render().isRecording, false);
+    assert.equal(view.intervals.size, 0, 'same-producer controls cannot bypass canonical generation matching');
+    view.callbacks.Paused(); retryVerification(view); assert.equal(checks.length, 4);
+    checks[3].resolve(liveSnapshot('session-b', '3')); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().isPaused, true);
+    assert.equal(view.render().isActive, false); assert.equal(view.render().verificationError, null);
+    assert.equal(view.intervals.size, 1);
+  } finally { view.unmount(); }
+});
+
+test('current Stop still retires a failed retry after same-producer Pause and Resume', async () => {
+  const { view, checks } = await rejectedStartingView(); const observed = [];
+  try {
+    view.callbacks.Paused(); view.callbacks.Resumed();
+    view.render().subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Stopped({ session_id: 'session-b', recording_generation: '3' });
+    assert.deepEqual(observed, ['stopping'], 'current Stop must synchronously invalidate the retained retry');
+    retryVerification(view); await flush();
+    assert.equal(checks.length, 1); assert.equal(view.render().status, 'stopping');
+    assert.equal(view.render().isRecording, false); assert.equal(view.render().isPaused, false);
+    assert.equal(view.render().verificationError, null); assert.equal(view.intervals.size, 0);
+  } finally { view.unmount(); }
+});
+
+test('newer Started still supersedes a paused retry and cannot inherit the older producer pause state', async () => {
+  const { view, checks } = await rejectedStartingView(); const observed = [];
+  try {
+    retryVerification(view); assert.equal(checks.length, 2);
+    view.callbacks.Paused(); view.callbacks.Started('audio_only', 'session-newest', '4');
+    assert.equal(checks.length, 2, 'newest canonical work remains queued behind the outstanding retry');
+    checks[1].resolve(liveSnapshot('session-b', '3')); await flush();
+    assert.equal(view.render().status, 'starting'); assert.equal(view.render().isRecording, false);
+    assert.equal(checks.length, 3, 'the newer producer gets its own canonical result');
+    checks[2].resolve({ ...liveSnapshot('session-newest', '4'), transcription_available: false }); await flush();
+    assert.equal(view.render().status, 'recording'); assert.equal(view.render().isPaused, false);
+    assert.equal(view.render().isActive, true); assert.equal(view.render().sessionMode, 'audio_only');
+    view.render().subscribeLifecycle(status => observed.push(status));
+    view.callbacks.Stopped({ session_id: 'session-b', recording_generation: '3' });
+    assert.deepEqual(observed, []);
+    view.callbacks.Stopped({ session_id: 'session-newest', recording_generation: '4' });
+    assert.deepEqual(observed, ['stopping']); assert.equal(view.render().isRecording, false);
+    assert.equal(view.intervals.size, 0);
+  } finally { view.unmount(); }
+});
