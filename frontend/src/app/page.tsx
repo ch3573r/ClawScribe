@@ -14,6 +14,7 @@ import { StatusOverlays } from '@/app/_components/StatusOverlays';
 import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
+import { LiveAssistancePanel } from '@/components/LiveAssistancePanel';
 import { HomeDashboard } from '@/components/HomeDashboard';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useModalState } from '@/hooks/useModalState';
@@ -237,6 +238,7 @@ export default function Home() {
               isProcessingStop={isProcessingStop}
               isStopping={isStopping}
               showModal={showModal}
+              assistance={<LiveAssistancePanel />}
             />
 
             {/* Floating pause/stop controls for the active recording. Hidden once

@@ -10,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { knowledgeService } from "@/services/knowledgeService";
 import { libraryScope } from "@/lib/knowledge-state";
 import type { IndexStatus, ModelStatus } from "@/types/knowledge";
+import { LiveSharingSetting } from '@/components/LiveTranscriptSharing';
 const all = libraryScope([], true, { tags: [], mode: "any", untagged: false });
 
 const indexReason: Record<string, string> = {
@@ -82,6 +83,7 @@ export function KnowledgeSettings() {
   const cancellationLabel = download?.stage === "verifying" || busy === "Verifying search files" ? "Cancel verification"
     : download?.stage === "checking" ? "Cancel check" : "Cancel download";
   return <TooltipProvider><div className="space-y-5">
+    <LiveSharingSetting />
     <PageSection title="Semantic search" actions={<div className="flex items-center gap-1">
       {model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Search model details"><Info /></Button></TooltipTrigger><TooltipContent>{model.model} · ONNX · CPU</TooltipContent></Tooltip>}
       {model?.installed && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Semantic search actions" disabled={locked}><MoreHorizontal /></Button></DropdownMenuTrigger>

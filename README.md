@@ -133,12 +133,31 @@ Attach and preview them locally, then explicitly select which references a
 question may use. Citations open the extracted page or paragraph, keeping
 reference material distinct from the recorded discussion. Sending excerpts to
 an external answer provider requires **Allow reference sharing** for that
-  conversation, off by default. Source includes the recording-scoped live assistance
-  backend; the manual panel and recording/performance acceptance remain planned.
-  Installed offline, provider-failure, focus, citation,
+conversation, off by default.
+
+Source also includes a collapsible **Live assistance** panel above the Home
+transcript. Explicitly choose **Ask**, **Summarize so far**, or **List open
+questions** using the configured summary provider; no provider request runs
+automatically. **Share live transcript with the provider** is off by default
+and remembered for future recordings, with the same control in Memory settings.
+Selected saved meetings can supplement the current recording. Document selection
+is explicit, and document sharing is independent and resets for each recording.
+The panel and each answer show finalized-through time and incomplete status;
+recent speech may still be catching up. Context covers the last ten minutes of
+finalized backend speech, so “so far” does not mean a complete meeting summary.
+Cancel abandons assistance without waiting for the provider. Stop immediately
+clears temporary Live messages; navigation preserves the current request without
+starting another listener. Audio-only recordings and Built-in AI offer saved
+meeting/transcription guidance instead of live generation. Ollama may compete
+for this PC's resources; concurrent recording performance remains unmeasured.
+
+Installed offline, provider-failure, focus, citation,
 and playback acceptance remains pending; see the
 [local library guide](docs/local-library.md#meeting-memory) and
 [preview acceptance policy](docs/windows-release.md#required-real-device-acceptance).
+Exact-build dual-source recording and comparable two-hour enabled/disabled
+Live performance acceptance remain pending. This source implementation does
+not establish stable readiness; stable remains **0.5.48**.
 
 - **Local Word export:** save a summary, full transcript, or both as `.docx`,
   including tables, with optional speaker labels and recording-relative timestamps. Works offline without Microsoft

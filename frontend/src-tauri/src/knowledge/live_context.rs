@@ -220,6 +220,7 @@ mod tests {
     fn bounded_live_retrieval_keeps_a_short_reply_with_its_source_question() {
         let snapshot = LiveSnapshot {
             session_id: uuid::Uuid::new_v4().to_string(),
+            recording_generation: serde_json::from_str("\"1\"").unwrap(),
             finalized_through_seconds: 30.,
             transcription_incomplete: false,
             transcription_available: true,
