@@ -506,9 +506,8 @@ spans, independently of that physical projection.
 FTS indexes current speaker labels in their own column. Speaker-only hits return
 real transcript spans with visible speaker metadata; semantic bodies remain
 canonical transcript text. Speaker renames invalidate both lexical and semantic
-generations. The source schema reserves document kind and nullable meeting
-ownership for later migrations, while the current worker accepts meeting sources
-only and all document inputs remain rejected.
+generations. Document sources have separate attachment ownership and canonical
+extracted blocks. The same bounded reader and worker index both source kinds.
 
 One worker starts after the installed database pool is available, across normal,
 fresh and legacy-import initialization. It polls durable jobs even if a bounded
@@ -582,7 +581,9 @@ Library scope requires selected meeting IDs, project/date/untagged constraints,
 or explicit `all_meetings`. Unicode-lowercase tag equality and Any/All/Untagged
 semantics match the library. Scope resolves before ranking and can be frozen and
 rechecked on a caller-owned SQLite transaction. A frozen scope never acquires
-new meetings. Live and document inputs remain rejected at this phase.
+new meetings. Explicit document UUIDs are separately frozen and checked against
+attachments belonging to these meetings before ranking and before delivery.
+Live scopes remain unavailable until the live assistance phase.
 
 `knowledge_search` accepts a scope, query, document IDs and `keyword`/`hybrid`
 mode. It returns actual mode, index status and canonical passages. Questions are
@@ -793,3 +794,36 @@ comparing dated changes, and pair short answers with their question anchors.
 A later incomplete reopening cannot establish suspension or a replacement
 outcome. Actual-provider factual review remains separate from structural
 citation and persistence checks.
+
+## Reference document context and portable archives
+
+Selected documents supplement a saved meeting or frozen library scope; an
+attachment outside the selected meetings is rejected. Keyword candidates share
+the global 64-row budget across transcript and document FTS projections.
+Semantic candidates use the existing 512-row pages, global heap and source
+balancing. Answers additionally reserve bounded matches for selected references
+so transcript matches cannot silently erase document context.
+
+Document evidence carries actual page/paragraph anchors and a canonical block ID
+and UTF-8 byte span. Materialization uses the existing 16 KiB incremental reader;
+its fingerprint includes original metadata, anchors and selected text. Resolution
+works without derived chunks and returns a document preview, never transcript or
+audio navigation. Reference import time is labeled `added_at` in prompts and is
+not treated as the meeting date or a statement in the document.
+
+`knowledge_document_permissions` persists explicit permission per saved
+conversation owner. It defaults off, is excluded from backups, and is required
+for every non-Built-in AI provider, including configurable Ollama endpoints.
+Disabling permission signals active owner requests; dispatch, generation
+monitoring and final persistence also recheck it. Prior turns are eligible only
+while their selected document dependencies and revisions remain inside the new
+frozen scope. Saved history remains readable after deselection.
+
+Archive version 2 adds original-file references and canonical document metadata,
+blocks and attachments. Originals use generated relative names, bounded streaming
+copying and SHA-256 verification before publication. Restore preserves independent
+attachment ownership, safely remaps conflicting identities and leaves restored
+citations historical. Original-file publication is guarded through the actual
+transaction outcome; rollback removes only newly published files. Derived caches,
+models, credentials and sharing permissions are never portable archive content.
+Version 1 archives remain readable.

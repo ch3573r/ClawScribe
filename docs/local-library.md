@@ -66,6 +66,29 @@ native focus/citation clicks, and audio playback still require manual acceptance
 on an isolated profile under the preview policy. They are not established by
 source tests or backend resolver tests.
 
+## Reference documents
+
+Open a saved meeting and use **Attach reference** to choose a PDF, DOCX, TXT or
+Markdown file. Extraction stays on this PC. PDFs need a text layer; scanned or
+encrypted PDFs are unsupported. Limits are 25 MiB per original, 500 PDF pages and
+2 MiB of extracted text, with additional archive/XML and extraction-time limits.
+A file near the text limit may need splitting because anchor metadata also counts
+toward the bounded extraction response.
+
+Preview references locally and select the ones a question may use. Library chat
+lists references attached to the currently selected meetings. Adding an attachment
+does not select it automatically. **Allow reference sharing** is off by default
+and applies to the current saved conversation. Enable it before a non-Built-in AI
+provider receives document excerpts. Disabling it cancels active answers that use
+references. Keyword search and previews work offline without that permission.
+
+Document citation chips open the extracted page or paragraph. They describe
+reference material separately from the recorded discussion; they do not seek in
+meeting audio. Changed or replaced content is stale and requires a new question.
+Detaching a reference preserves an original shared with another meeting. Permanent
+deletion removes it from all attached meetings and invalidates dependent turns.
+Indexing status remains visible; retry a failed index from the reference actions.
+
 ## Word documents
 
 Open a saved meeting and select **Export → Word document (.docx)**. Choose the summary, the full
@@ -141,7 +164,7 @@ until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
 summaries, per-meeting summary context, meeting chat, project tags, bookmarks,
-and supported recording files.
+attached reference originals and extracted blocks, and supported recording files.
 Microsoft export history (`exports.json`) is retained with the recording folder.
 Provider settings, credentials, model downloads, UI preferences, and unfinished
 recording recovery spools are excluded. Missing
@@ -183,7 +206,13 @@ or enter a future answer prompt, even when a destination revision number happens
 to match. New questions establish fresh canonical evidence. Semantic indexes
 and model downloads are excluded; restored sources are queued for indexing.
 
-Version 1 archives have a JSON manifest and explicitly listed recording files.
+Version 2 archives add reference metadata, extracted blocks, attachment relations
+and original files with verified hashes. Reference sharing permissions are not
+included and remain off after restore. Original conflicts are remapped without
+overwriting existing files. The same hash/format with differing extracted content
+requires restoration into a separate library, preserving existing canonical text.
+Version 1 archives with a JSON manifest and explicitly listed recording files
+remain readable.
 Only saved-library database tables and known media/metadata files are included.
 The meetings table is required; missing known child tables are treated as empty
 so adding optional tables does not invalidate older version-1 backups.

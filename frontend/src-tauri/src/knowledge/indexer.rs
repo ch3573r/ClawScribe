@@ -232,7 +232,7 @@ pub async fn knowledge_cancel_index(
         .await
         .map_err(|e| e.to_string())?;
     let ids = serde_json::to_string(&allowed.meeting_ids).map_err(|_| "Invalid scope")?;
-    sqlx::query("UPDATE knowledge_index_jobs SET paused=1 WHERE source_id IN(SELECT id FROM knowledge_sources WHERE meeting_id IN(SELECT value FROM json_each(?)))").bind(ids).execute(pool).await.map_err(|_|"Knowledge storage failed")?;
+    sqlx::query("WITH allowed AS(SELECT value FROM json_each(?)) UPDATE knowledge_index_jobs SET paused=1 WHERE source_id IN(SELECT id FROM knowledge_sources WHERE meeting_id IN(SELECT value FROM allowed) OR id IN(SELECT d.source_id FROM knowledge_documents d JOIN knowledge_document_attachments a ON a.document_id=d.id WHERE a.meeting_id IN(SELECT value FROM allowed)))").bind(ids).execute(pool).await.map_err(|_|"Knowledge storage failed")?;
     runtime.cancellation.cancel();
     Ok(())
 }

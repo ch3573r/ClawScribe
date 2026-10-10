@@ -99,6 +99,8 @@ test("MeetingChat expands into a durable library owner and restores each history
     "MeetingChat",
     { meetingId: "a", provider: "fixture", model: "fixture" },
     async (command, args) => {
+      if (command === "knowledge_list_scope_documents") return [];
+      if (command === "knowledge_document_sharing") return false;
       if (command === "knowledge_list_library_conversations") return [library];
       if (command === "knowledge_create_library_conversation") return library;
       if (command === "knowledge_cancel_request") {
@@ -193,6 +195,8 @@ test("archive selected-to-all transition removes ID restriction for search and a
     "KnowledgeArchive",
     { meetings, projectFilter: project },
     async (command, args) => {
+      if (command === "knowledge_list_scope_documents") return [];
+      if (command === "knowledge_document_sharing") return false;
       if (command === "knowledge_list_library_conversations") return [library];
       if (command === "knowledge_create_library_conversation") return library;
       if (command === "knowledge_history") return [];

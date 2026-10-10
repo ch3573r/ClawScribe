@@ -47,6 +47,61 @@ pub async fn resolve(
     if reference.historical {
         return outcome(EvidenceStatus::Stale);
     }
+    if let EvidenceLocator::Document {
+        document_id,
+        page,
+        paragraph,
+        spans,
+    } = &reference.locator
+    {
+        if reference.source_id != format!("document:{document_id}")
+            || spans.len() != 1
+            || *paragraph == 0
+            || page.is_some_and(|value| value == 0 || value > 500)
+            || spans[0].end_byte <= spans[0].start_byte
+            || spans[0].end_byte - spans[0].start_byte > super::store::READ_BYTES
+        {
+            return outcome(EvidenceStatus::Invalid);
+        }
+        let source = sqlx::query(
+            "SELECT revision,generation FROM knowledge_sources WHERE id=? AND kind='document'",
+        )
+        .bind(&reference.source_id)
+        .fetch_optional(pool)
+        .await?;
+        let Some(source) = source else {
+            return outcome(EvidenceStatus::Missing);
+        };
+        let revision = source.get("revision");
+        if revision != reference.source_revision {
+            return outcome(EvidenceStatus::Stale);
+        }
+        let selected = super::store::SelectedRow {
+            transcript_id: spans[0].transcript_id.clone(),
+            source_id: reference.source_id.clone(),
+            meeting_id: String::new(),
+            revision,
+            generation: source.get("generation"),
+        };
+        let passage =
+            match super::store::materialize(pool, &selected, spans[0].clone(), false).await {
+                Ok(value) => value,
+                Err(KnowledgeError::Superseded) => return outcome(EvidenceStatus::Stale),
+                Err(KnowledgeError::InvalidInput) => return outcome(EvidenceStatus::Invalid),
+                Err(error) => return Err(error),
+            };
+        if passage.evidence.fingerprint != reference.fingerprint {
+            return outcome(EvidenceStatus::Stale);
+        }
+        if &passage.evidence != reference {
+            return outcome(EvidenceStatus::Invalid);
+        }
+        return Ok(ResolvedEvidence {
+            status: EvidenceStatus::Current,
+            passage: Some(passage),
+            navigation: None,
+        });
+    }
     let EvidenceLocator::Transcript {
         meeting_id,
         transcript_ids,

@@ -53,6 +53,51 @@ pub async fn knowledge_list_documents(
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
+pub async fn knowledge_list_scope_documents(
+    state: State<'_, AppState>,
+    scope: KnowledgeScope,
+) -> Result<Vec<super::document_context::ScopedDocument>, String> {
+    super::document_context::scoped_documents(state.db_manager.pool(), &scope)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn knowledge_document_sharing(
+    state: State<'_, AppState>,
+    owner: ConversationOwner,
+) -> Result<bool, String> {
+    super::document_context::sharing(state.db_manager.pool(), &owner).await
+}
+#[tauri::command]
+pub async fn knowledge_set_document_sharing(
+    state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
+    owner: ConversationOwner,
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled {
+        runtime.answers.cancel_owner(&owner)?;
+    }
+    super::document_context::set_sharing(state.db_manager.pool(), &owner, enabled).await
+}
+#[tauri::command]
+pub async fn knowledge_retry_document_index(
+    state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
+    meeting_id: String,
+    document_id: String,
+) -> Result<(), String> {
+    let pool = state.db_manager.pool();
+    super::documents::store::get(pool, &meeting_id, &document_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    super::store::requeue_sources(pool, &[format!("document:{document_id}")])
+        .await
+        .map_err(|e| e.to_string())?;
+    runtime.index_worker.wake();
+    Ok(())
+}
+#[tauri::command]
 pub async fn knowledge_get_document_blocks(
     state: State<'_, AppState>,
     meeting_id: String,

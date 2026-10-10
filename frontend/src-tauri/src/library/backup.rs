@@ -9,6 +9,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 use zip::write::SimpleFileOptions;
+#[path = "backup/documents.rs"]
+mod archive_documents;
 
 const TABLES: &[&str] = &[
     "meetings",
@@ -44,6 +46,8 @@ struct Manifest {
     // Optional in V1; omissions remain visible when this archive is restored.
     #[serde(default)]
     incomplete_audio: BTreeMap<usize, IncompleteAudio>,
+    #[serde(default)]
+    document_files: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -146,11 +150,21 @@ fn allowed_file(name: &str) -> bool {
 }
 
 async fn snapshot(pool: &SqlitePool) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
+    snapshot_impl(pool, false).await
+}
+
+async fn snapshot_impl(
+    pool: &SqlitePool,
+    with_documents: bool,
+) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     super::attach_bookmarks(pool).await.map_err(failure)?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut tables = BTreeMap::new();
     let mut budget = MAX_MANIFEST;
-    for table in TABLES {
+    for table in TABLES
+        .iter()
+        .chain(archive_documents::TABLES.iter().filter(|_| with_documents))
+    {
         let columns = sqlx::query(&format!("PRAGMA table_info({table})"))
             .fetch_all(&mut *tx)
             .await
@@ -207,10 +221,11 @@ async fn snapshot(pool: &SqlitePool) -> Result<(Manifest, Vec<Option<PathBuf>>),
     Ok((
         Manifest {
             format: "ClawScribe meeting archive".into(),
-            version: 1,
+            version: if with_documents { 2 } else { 1 },
             tables,
             files: BTreeMap::new(),
             incomplete_audio: BTreeMap::new(),
+            document_files: BTreeMap::new(),
         },
         folders,
     ))
@@ -218,9 +233,20 @@ async fn snapshot(pool: &SqlitePool) -> Result<(Manifest, Vec<Option<PathBuf>>),
 
 fn write_archive(
     path: &Path,
-    mut manifest: Manifest,
+    manifest: Manifest,
     folders: Vec<Option<PathBuf>>,
 ) -> Result<BackupReport, String> {
+    write_archive_impl(path, manifest, folders, None)
+}
+
+fn write_archive_impl(
+    path: &Path,
+    mut manifest: Manifest,
+    folders: Vec<Option<PathBuf>>,
+    reference_root: Option<&Path>,
+) -> Result<BackupReport, String> {
+    archive_documents::set_file_references(&mut manifest)?;
+    let documents = archive_documents::validate(&manifest)?;
     let mut output =
         tempfile::NamedTempFile::new_in(path.parent().ok_or("Choose a destination folder.")?)
             .map_err(failure)?;
@@ -363,6 +389,14 @@ fn write_archive(
         }
         manifest.files.insert(index, names);
     }
+    archive_documents::write_originals(
+        &mut zip,
+        &documents,
+        reference_root,
+        options,
+        &mut files,
+        &mut total,
+    )?;
     let bytes = serde_json::to_vec(&manifest).map_err(failure)?;
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Meeting metadata exceeds the archive limit.".into());
@@ -399,13 +433,13 @@ fn unpack(
         return Err("Archive metadata is too large.".into());
     }
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(failure)?;
-    if manifest.version != 1
+    if !matches!(manifest.version, 1 | 2)
         || manifest.format != "ClawScribe meeting archive"
         || !manifest.tables.contains_key("meetings")
-        || manifest
-            .tables
-            .keys()
-            .any(|table| !TABLES.contains(&table.as_str()))
+        || manifest.tables.keys().any(|table| {
+            !TABLES.contains(&table.as_str())
+                && !(manifest.version == 2 && archive_documents::TABLES.contains(&table.as_str()))
+        })
     {
         return Err("Unsupported meeting archive format.".into());
     }
@@ -420,6 +454,7 @@ fn unpack(
             return Err("Duplicate meeting identity in archive.".into());
         }
     }
+    let documents = archive_documents::validate(&manifest)?;
     if manifest
         .incomplete_audio
         .keys()
@@ -442,6 +477,11 @@ fn unpack(
             }
         }
     }
+    for document in documents.values() {
+        if !expected.insert(document.relative()) {
+            return Err("Unsafe or duplicate document filename.".into());
+        }
+    }
     if expected.len() != zip.len() {
         return Err("Unexpected or missing files in archive.".into());
     }
@@ -461,6 +501,8 @@ fn unpack(
             return Err("Archive exceeds 100 GiB.".into());
         }
     }
+    // Verify every original before creating any stage or publishing any rows.
+    archive_documents::verify_zip(&mut zip, &documents)?;
     std::fs::create_dir_all(root).map_err(failure)?;
     let stage = tempfile::Builder::new()
         .prefix("restored-")
@@ -487,6 +529,7 @@ fn unpack(
             destination.sync_all().map_err(failure)?;
         }
     }
+    archive_documents::extract_originals(&mut zip, &documents, stage.path())?;
     Ok((manifest, stage))
 }
 
@@ -589,6 +632,7 @@ async fn import_conversations(
     manifest: &Manifest,
     known: &HashSet<String>,
     selected: &HashSet<String>,
+    documents: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     use crate::knowledge::{conversations, types::*};
     let rows = |table: &str| manifest.tables.get(table).map(Vec::as_slice).unwrap_or(&[]);
@@ -669,6 +713,7 @@ async fn import_conversations(
     // request -> (skip due to collision, invalidated, original status, question)
     let mut requests = BTreeMap::<String, (bool, bool, String, String)>::new();
     let mut frozen_by_request = BTreeMap::<String, Vec<String>>::new();
+    let mut documents_by_request = BTreeMap::<String, Vec<String>>::new();
     for row in rows("knowledge_requests") {
         let id = uuid_field(row, "id")?;
         let owner_id = text_field(row, "owner_id")?;
@@ -708,6 +753,13 @@ async fn import_conversations(
             let input: AskRequest =
                 serde_json::from_str(text_field(row, "input_json")?).map_err(failure)?;
             conversations::validate_request(&input)?;
+            let document_ids = &input.search.document_ids;
+            if document_ids.iter().collect::<HashSet<_>>().len() != document_ids.len()
+                || document_ids.iter().any(|id| !documents.contains_key(id))
+            {
+                return Err("Unknown or duplicate saved document selection.".into());
+            }
+            documents_by_request.insert(id.clone(), document_ids.clone());
             let scope: KnowledgeScope =
                 serde_json::from_str(text_field(row, "scope_json")?).map_err(failure)?;
             if input.request_id != id
@@ -747,23 +799,35 @@ async fn import_conversations(
         let id = text_field(row, "request_id")?;
         let request = requests.get_mut(id).ok_or("Unknown source request")?;
         let source = text_field(row, "source_id")?;
-        let meeting = source
-            .strip_prefix("meeting:")
-            .filter(|id| !id.is_empty())
-            .ok_or("Invalid conversation source")?;
         let revision = row
             .get("revision")
             .and_then(Value::as_i64)
             .filter(|n| *n > 0)
             .ok_or("Invalid source revision")?;
-        if !frozen_by_request[id].iter().any(|id| id == meeting)
-            || dependencies
-                .entry(id.into())
-                .or_default()
-                .insert(source.into(), revision)
-                .is_some()
+        if dependencies
+            .entry(id.into())
+            .or_default()
+            .insert(source.into(), revision)
+            .is_some()
         {
             return Err("Invalid or duplicate conversation dependency.".into());
+        }
+        if let Some(document) = source.strip_prefix("document:") {
+            if !documents.contains_key(document)
+                || documents_by_request
+                    .get(id)
+                    .is_none_or(|ids| !ids.iter().any(|id| id == document))
+            {
+                return Err("Invalid conversation document dependency.".into());
+            }
+            continue;
+        }
+        let meeting = source
+            .strip_prefix("meeting:")
+            .filter(|id| !id.is_empty())
+            .ok_or("Invalid conversation source")?;
+        if !frozen_by_request[id].iter().any(|id| id == meeting) {
+            return Err("Invalid conversation meeting dependency.".into());
         }
         let same = if let Some(same) = comparable.get(meeting) {
             *same
@@ -792,6 +856,14 @@ async fn import_conversations(
             if dependencies
                 .get(id)
                 .is_none_or(|sources| !sources.contains_key(&format!("meeting:{meeting}")))
+            {
+                request.1 = true;
+            }
+        }
+        for document in documents_by_request.get(id).into_iter().flatten() {
+            if dependencies
+                .get(id)
+                .is_none_or(|sources| !sources.contains_key(&format!("document:{document}")))
             {
                 request.1 = true;
             }
@@ -826,24 +898,52 @@ async fn import_conversations(
             .entry(id.into())
             .or_default()
             .insert(ordinal, (reference.clone(), display));
-        let EvidenceLocator::Transcript {
-            meeting_id,
-            transcript_ids,
-            spans,
-            start_seconds,
-        } = reference.locator
-        else {
-            return Err("Unsupported archived evidence locator.".into());
-        };
-        if reference.source_id != format!("meeting:{meeting_id}")
-            || transcript_ids.len() != 1
-            || spans.len() != 1
-            || transcript_ids[0] != spans[0].transcript_id
-            || spans[0].end_byte <= spans[0].start_byte
-            || spans[0].end_byte - spans[0].start_byte > crate::knowledge::store::READ_BYTES
-            || start_seconds.is_some_and(|n| !n.is_finite() || n < 0.)
-        {
-            return Err("Invalid archived canonical locator.".into());
+        match &reference.locator {
+            EvidenceLocator::Transcript {
+                meeting_id,
+                transcript_ids,
+                spans,
+                start_seconds,
+            } => {
+                if reference.source_id != format!("meeting:{meeting_id}")
+                    || transcript_ids.len() != 1
+                    || spans.len() != 1
+                    || transcript_ids[0] != spans[0].transcript_id
+                    || spans[0].end_byte <= spans[0].start_byte
+                    || spans[0].end_byte - spans[0].start_byte > crate::knowledge::store::READ_BYTES
+                    || start_seconds.is_some_and(|n| !n.is_finite() || n < 0.)
+                {
+                    return Err("Invalid archived canonical locator.".into());
+                }
+            }
+            EvidenceLocator::Document {
+                document_id,
+                page,
+                paragraph,
+                spans,
+            } => {
+                if reference.source_id != format!("document:{document_id}")
+                    || !documents.contains_key(document_id)
+                    || *paragraph == 0
+                    || page.is_some_and(|n| {
+                        n == 0 || n as usize > crate::knowledge::documents::PAGE_LIMIT
+                    })
+                    || spans.len() > 1
+                    || spans.iter().any(|span| {
+                        let ordinal = span
+                            .transcript_id
+                            .strip_prefix(&format!("{document_id}:"))
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|n| *n > 0);
+                        ordinal.is_none()
+                            || span.end_byte <= span.start_byte
+                            || span.end_byte - span.start_byte > crate::knowledge::store::READ_BYTES
+                    })
+                {
+                    return Err("Invalid archived document locator.".into());
+                }
+            }
+            _ => return Err("Unsupported archived evidence locator.".into()),
         }
     }
     for values in ordinals.values_mut() {
@@ -916,6 +1016,31 @@ async fn import_conversations(
         }
         let mut row = source.clone();
         row.insert("restored".into(), Value::from(1));
+        if !request.1 {
+            let mut input: AskRequest =
+                serde_json::from_str(text_field(source, "input_json")?).map_err(failure)?;
+            let mut remapped = false;
+            for id in &mut input.search.document_ids {
+                let restored = &documents[id.as_str()];
+                remapped |= id.as_str() != restored.as_str();
+                *id = restored.clone();
+            }
+            if remapped {
+                row.insert(
+                    "input_json".into(),
+                    serde_json::to_string(&input).map_err(failure)?.into(),
+                );
+                row.insert(
+                    "input_fingerprint".into(),
+                    conversations::input_fingerprint(
+                        &input,
+                        text_field(source, "provider")?,
+                        text_field(source, "model")?,
+                    )?
+                    .into(),
+                );
+            }
+        }
         if request.1 {
             row.insert("status".into(), Value::from("completed"));
             row.insert("question".into(), Value::from(""));
@@ -947,10 +1072,33 @@ async fn import_conversations(
                 let mut reference: EvidenceRef =
                     serde_json::from_str(text_field(&row, "reference_json")?).map_err(failure)?;
                 reference.historical = true;
+                if let EvidenceLocator::Document {
+                    document_id, spans, ..
+                } = &mut reference.locator
+                {
+                    let restored = &documents[document_id.as_str()];
+                    for span in spans {
+                        let ordinal = span
+                            .transcript_id
+                            .strip_prefix(&format!("{document_id}:"))
+                            .ok_or("Invalid archived document span.")?;
+                        span.transcript_id = format!("{restored}:{ordinal}");
+                    }
+                    *document_id = restored.clone();
+                    reference.source_id = format!("document:{restored}");
+                }
                 row.insert(
                     "reference_json".into(),
                     Value::from(serde_json::to_string(&reference).map_err(failure)?),
                 );
+            }
+            if table == "knowledge_request_sources" {
+                if let Some(document) = text_field(&row, "source_id")?.strip_prefix("document:") {
+                    let restored = documents
+                        .get(document)
+                        .ok_or("Unknown restored document source.")?;
+                    row.insert("source_id".into(), format!("document:{restored}").into());
+                }
             }
             insert_archive_row(connection, table, &row).await?;
         }
@@ -972,6 +1120,16 @@ async fn import_manifest(
     manifest: Manifest,
     stage: tempfile::TempDir,
 ) -> Result<BackupReport, String> {
+    import_manifest_impl(pool, manifest, stage, None).await
+}
+
+async fn import_manifest_impl(
+    pool: &SqlitePool,
+    manifest: Manifest,
+    stage: tempfile::TempDir,
+    reference_root: Option<&Path>,
+) -> Result<BackupReport, String> {
+    let documents = archive_documents::validate(&manifest)?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut selected = HashSet::new();
     let mut known = HashSet::new();
@@ -1101,7 +1259,23 @@ async fn import_manifest(
                 .map_err(failure)?;
         }
     }
-    import_conversations(&mut tx, &manifest, &known, &selected).await?;
+    let document_restore = archive_documents::restore_rows(
+        &mut tx,
+        &manifest,
+        &documents,
+        &selected,
+        stage.path(),
+        reference_root,
+    )
+    .await?;
+    import_conversations(
+        &mut tx,
+        &manifest,
+        &known,
+        &selected,
+        &document_restore.identities,
+    )
+    .await?;
     for (index, incomplete) in &manifest.incomplete_audio {
         if !incomplete.recovery_files_excluded {
             continue;
@@ -1143,7 +1317,6 @@ async fn import_manifest(
     })
     .await
     .map_err(failure)??;
-    tx.commit().await.map_err(failure)?;
     let (files, folders) = manifest
         .files
         .iter()
@@ -1156,16 +1329,67 @@ async fn import_manifest(
         .fold((0, 0), |(files, folders), (_, names)| {
             (files + names.len(), folders + 1)
         });
-    if folders > 0 {
-        stage.keep();
-    }
+    let (originals, stage) = tokio::task::spawn_blocking(move || {
+        let originals = document_restore.publish()?;
+        // Only recording folders survive a successful restore. The originals
+        // have their own app-owned publication guard and need no staging copy.
+        match std::fs::remove_dir_all(stage.path().join("reference-documents")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(failure(error)),
+        }
+        Ok((originals, stage))
+    })
+    .await
+    .map_err(failure)??;
+    let document_files = originals.count();
+    // Once commit starts, a detached task owns both the files and transaction.
+    // Dropping an invoking future cannot remove originals after a successful commit.
+    tokio::spawn(async move {
+        tx.commit().await.map_err(failure)?;
+        originals.keep();
+        if folders > 0 {
+            stage.keep();
+        }
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(failure)??;
     Ok(BackupReport {
         meetings: selected.len(),
         skipped,
-        files,
+        files: files + document_files,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
     })
 }
+
+async fn snapshot_with_documents(
+    pool: &SqlitePool,
+) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
+    snapshot_impl(pool, true).await
+}
+
+fn write_archive_with_documents(
+    path: &Path,
+    manifest: Manifest,
+    folders: Vec<Option<PathBuf>>,
+    reference_root: &Path,
+) -> Result<BackupReport, String> {
+    write_archive_impl(path, manifest, folders, Some(reference_root))
+}
+
+async fn import_manifest_with_documents(
+    pool: &SqlitePool,
+    manifest: Manifest,
+    stage: tempfile::TempDir,
+    reference_root: &Path,
+) -> Result<BackupReport, String> {
+    import_manifest_impl(pool, manifest, stage, Some(reference_root)).await
+}
+
+#[cfg(test)]
+#[path = "backup/document_tests.rs"]
+mod document_tests;
 
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
@@ -1179,10 +1403,18 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
     let _audio = crate::audio::inference::claim_job()?;
-    let (manifest, folders) = snapshot(app.state::<AppState>().db_manager.pool()).await?;
-    tokio::task::spawn_blocking(move || write_archive(Path::new(&path), manifest, folders))
-        .await
+    let reference_root = app
+        .path()
+        .app_data_dir()
         .map_err(failure)?
+        .join("reference-documents");
+    let (manifest, folders) =
+        snapshot_with_documents(app.state::<AppState>().db_manager.pool()).await?;
+    tokio::task::spawn_blocking(move || {
+        write_archive_with_documents(Path::new(&path), manifest, folders, &reference_root)
+    })
+    .await
+    .map_err(failure)?
 }
 
 #[tauri::command]
@@ -1191,6 +1423,11 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
     let _audio = crate::audio::inference::claim_job()?;
+    let reference_root = app
+        .path()
+        .app_data_dir()
+        .map_err(failure)?
+        .join("reference-documents");
     let root = app
         .path()
         .app_data_dir()
@@ -1206,8 +1443,13 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
         tokio::task::spawn_blocking(move || unpack(Path::new(&path), &root, &existing_ids))
             .await
             .map_err(failure)??;
-    let report =
-        import_manifest(app.state::<AppState>().db_manager.pool(), manifest, stage).await?;
+    let report = import_manifest_with_documents(
+        app.state::<AppState>().db_manager.pool(),
+        manifest,
+        stage,
+        &reference_root,
+    )
+    .await?;
     let _ = app.emit("library-changed", ());
     Ok(report)
 }
@@ -1216,7 +1458,8 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
 mod tests {
     use super::*;
 
-    async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest) {
+    pub(super) async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest)
+    {
         conversation_fixture_schema(false).await
     }
 
@@ -1307,7 +1550,7 @@ mod tests {
         (pool, request)
     }
 
-    async fn empty_conversation_destination() -> SqlitePool {
+    pub(super) async fn empty_conversation_destination() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

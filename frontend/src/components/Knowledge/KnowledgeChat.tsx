@@ -10,6 +10,7 @@ import { PageSection } from "@/components/ui/page-section";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { citationParts, contextLinks, scopeReady, MAX_EVIDENCE_ENTRIES } from "@/lib/knowledge-state";
+import { documentAnchor } from "@/lib/knowledge-documents";
 import { knowledgeService } from "@/services/knowledgeService";
 import { openExternal } from "@/lib/openExternal";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
@@ -24,6 +25,7 @@ function friendlyModel(model?: string) {
 }
 function sourceTime(reply: AssistantReply, tag: number) {
   const locator = reply.evidence[tag - 1].locator;
+  if (locator.kind === "document") return documentAnchor(locator);
   if (locator.kind !== "transcript" || locator.start_seconds == null) return "Time unavailable";
   const seconds = Math.max(0, Math.floor(locator.start_seconds));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -31,7 +33,7 @@ function sourceTime(reply: AssistantReply, tag: number) {
 function Citation({ reply, state, tag }: { reply: AssistantReply; state: KnowledgeSearchState; tag: number }) {
   return <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="sm"
     className="mx-0.5 inline-flex h-5 min-w-5 align-super rounded px-1 text-xs text-primary"
-    aria-label={`Open source ${tag}`} onClick={event => { event.preventDefault(); event.stopPropagation(); void state.inspect(reply.evidence[tag - 1], reply.evidence_metadata[tag - 1]); }}>{tag}</Button></TooltipTrigger>
+    aria-label={`Open source ${tag}`} onClick={event => { event.preventDefault(); event.stopPropagation(); void state.inspect(reply.evidence[tag - 1], reply.evidence_metadata[tag - 1]); }}>{reply.evidence[tag - 1].locator.kind === "document" ? sourceTime(reply, tag) : tag}</Button></TooltipTrigger>
     <TooltipContent>{reply.evidence_metadata[tag - 1].title} · {sourceTime(reply, tag)}</TooltipContent></Tooltip>;
 }
 function CitedAnswer({ reply, state }: { reply: AssistantReply; state: KnowledgeSearchState }) {
@@ -91,8 +93,10 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const [settled, setSettled] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   const pending = useRef<{ text: string; scope: string; owner?: string; provider?: string; model?: string; started: boolean; finished: boolean } | null>(null);
-  const scope = JSON.stringify(state.scope);
-  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating;
+  const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
+  const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
+  const needsSharing = externalReferences && !state.sharingEnabled;
+  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
   useEffect(() => { end.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [state.messages, state.sending]);
   useEffect(() => {
     const request = pending.current;
@@ -174,6 +178,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
         <span className="text-xs text-muted-foreground">Shift+Enter for a new line</span>
       </div>
       {!provider || !model ? <p className="text-xs text-muted-foreground">Choose a summary provider and model in Settings.</p> : null}
+      {needsSharing && <p className="text-xs text-muted-foreground">Enable reference sharing above, or deselect references to ask about transcripts only.</p>}
     </form>
   </PageSection>;
 }

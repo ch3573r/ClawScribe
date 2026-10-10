@@ -6,7 +6,7 @@ mod types;
 pub mod worker;
 pub use types::*;
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 #[cfg(test)]
 mod tests;
 
