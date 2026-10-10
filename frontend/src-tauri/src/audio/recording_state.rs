@@ -120,6 +120,7 @@ pub struct RecordingState {
     error_callback: Mutex<Option<Box<dyn Fn(&AudioError) + Send + Sync>>>,
     // Non-fatal warnings surfaced to the UI (e.g. system audio is silent).
     warning_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+    warning_cleared_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
 
     // Statistics
     stats: Mutex<RecordingStats>,
@@ -150,6 +151,7 @@ impl RecordingState {
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
+            warning_cleared_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),
@@ -338,6 +340,20 @@ impl RecordingState {
         *self.warning_callback.lock().unwrap() = Some(Box::new(callback));
     }
 
+    pub fn set_warning_cleared_callback<F>(&self, callback: F)
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        *self.warning_cleared_callback.lock().unwrap() = Some(Box::new(callback));
+    }
+
+    /// Resolve one recoverable warning without clearing unrelated recording failures.
+    pub fn clear_warning(&self, message: &str) {
+        if let Some(callback) = self.warning_cleared_callback.lock().unwrap().as_ref() {
+            callback(message);
+        }
+    }
+
     /// Surface a non-fatal warning to the UI. Does not affect recording state.
     pub fn report_warning(&self, message: &str) {
         log::warn!("Recording warning: {message}");
@@ -521,6 +537,7 @@ impl Default for RecordingState {
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
+            warning_cleared_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),

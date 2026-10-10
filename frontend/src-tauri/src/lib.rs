@@ -365,7 +365,7 @@ async fn save_transcript(file_path: String, content: String) -> Result<(), Strin
 async fn start_audio_level_monitoring<R: Runtime>(
     app: AppHandle<R>,
     device_names: Vec<String>,
-) -> Result<(), String> {
+) -> Result<Vec<audio::simple_level_monitor::MonitoredMicrophone>, String> {
     log_info!(
         "Starting audio level monitoring for devices: {:?}",
         device_names

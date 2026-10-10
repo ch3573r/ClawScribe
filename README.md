@@ -41,6 +41,11 @@ review the live transcript, then stop and allow queued transcription to finish
 before generating notes. Automatic meeting detection is a separate Teams
 feature; general system-audio capture does not require it.
 
+**Test mic** in Recording settings shows the microphone actually tested. If a
+preferred Windows microphone is unavailable, the test identifies its fallback
+to the current default. A system-audio silence warning clears when sound later
+arrives; verify both sources in saved playback before relying on the recording.
+
 Review names, numbers, decisions, owners, and deadlines before sharing notes or
 exporting tasks. Obtain the recording permissions required for your meeting.
 

@@ -23,6 +23,7 @@ use super::vad::ContinuousVadProcessor;
 /// live latency. Default 6s (Parakeet/Whisper).
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
+const SYSTEM_AUDIO_SILENCE_WARNING: &str = "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).";
 
 #[derive(Default)]
 struct QueueWriteFailureTracker {
@@ -37,6 +38,43 @@ impl QueueWriteFailureTracker {
 
     fn record_success(&mut self) {
         self.consecutive = 0;
+    }
+}
+
+#[derive(Default)]
+struct SystemAudioWarningTracker {
+    audio_seen: bool,
+    warned: bool,
+}
+
+impl SystemAudioWarningTracker {
+    fn observe_samples(&mut self, device_type: &DeviceType, samples: &[f32]) -> bool {
+        if !self.audio_seen && *device_type == DeviceType::System {
+            let peak = samples.iter().fold(0.0f32, |peak, &x| peak.max(x.abs()));
+            if peak > 0.001 {
+                self.audio_seen = true;
+                return self.warned;
+            }
+        }
+        false
+    }
+
+    fn should_warn(
+        &mut self,
+        elapsed: std::time::Duration,
+        is_recording: bool,
+        has_system_device: bool,
+    ) -> bool {
+        if !self.warned
+            && !self.audio_seen
+            && elapsed.as_secs() >= 15
+            && is_recording
+            && has_system_device
+        {
+            self.warned = true;
+            return true;
+        }
+        false
     }
 }
 
@@ -903,10 +941,7 @@ impl AudioPipeline {
         // one audio actually plays through (e.g. an idle digital output). Warn
         // once so it isn't a silent failure.
         let run_start = std::time::Instant::now();
-        let mut system_audio_seen = false;
-        let mut silence_warned = false;
-        const SILENCE_GRACE_SECS: u64 = 15;
-        const SILENCE_PEAK_THRESHOLD: f32 = 0.001; // ~-60 dBFS
+        let mut system_audio_warning = SystemAudioWarningTracker::default();
 
         // Speaker attribution ("Me" = mic, "Participants" = system). We compare
         // each source's energy *relative to its own rolling noise floor* (an
@@ -970,11 +1005,10 @@ impl AudioPipeline {
 
                     // Track whether the system-audio stream is actually carrying
                     // sound (for the silence warning below).
-                    if !system_audio_seen && chunk.device_type == DeviceType::System {
-                        let peak = chunk.data.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
-                        if peak > SILENCE_PEAK_THRESHOLD {
-                            system_audio_seen = true;
-                        }
+                    if system_audio_warning.observe_samples(&chunk.device_type, &chunk.data)
+                        && self.state.is_recording()
+                    {
+                        self.state.clear_warning(SYSTEM_AUDIO_SILENCE_WARNING);
                     }
 
                     // STEP 1: Add raw audio to ring buffer for mixing
@@ -1120,16 +1154,12 @@ impl AudioPipeline {
             // audio ever arrives (e.g. an idle/loopback-incapable output like a
             // digital S/PDIF endpoint). Timer-based so it fires even when the
             // system stream delivers no chunks at all.
-            if !silence_warned
-                && !system_audio_seen
-                && run_start.elapsed().as_secs() >= SILENCE_GRACE_SECS
-                && self.state.is_recording()
-                && self.state.get_system_device().is_some()
-            {
-                self.state.report_warning(
-                    "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).",
-                );
-                silence_warned = true;
+            if system_audio_warning.should_warn(
+                run_start.elapsed(),
+                self.state.is_recording(),
+                self.state.get_system_device().is_some(),
+            ) {
+                self.state.report_warning(SYSTEM_AUDIO_SILENCE_WARNING);
             }
         }
 
@@ -1363,6 +1393,47 @@ impl AudioPipelineManager {
 impl Default for AudioPipelineManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod system_audio_warning_tests {
+    use super::{DeviceType, SystemAudioWarningTracker};
+    use std::time::Duration;
+
+    #[test]
+    fn late_system_audio_resolves_the_silence_warning_once() {
+        let mut tracker = SystemAudioWarningTracker::default();
+        assert!(tracker.should_warn(Duration::from_secs(15), true, true));
+        assert!(tracker.observe_samples(&DeviceType::System, &[0.1, -0.2]));
+        assert!(!tracker.observe_samples(&DeviceType::System, &[0.1]));
+        assert!(!tracker.should_warn(Duration::from_secs(30), true, true));
+    }
+
+    #[test]
+    fn microphone_sound_cannot_resolve_system_silence() {
+        let mut tracker = SystemAudioWarningTracker::default();
+        assert!(tracker.should_warn(Duration::from_secs(15), true, true));
+        assert!(!tracker.observe_samples(&DeviceType::Microphone, &[0.5]));
+        assert!(!tracker.observe_samples(&DeviceType::System, &[0.0, 0.0005]));
+        assert!(!tracker.audio_seen);
+    }
+
+    #[test]
+    fn system_warning_requires_a_selected_device_and_the_grace_period() {
+        let mut tracker = SystemAudioWarningTracker::default();
+        assert!(!tracker.should_warn(Duration::from_secs(14), true, true));
+        assert!(!tracker.should_warn(Duration::from_secs(15), true, false));
+        assert!(!tracker.should_warn(Duration::from_secs(15), false, true));
+        assert!(tracker.should_warn(Duration::from_secs(15), true, true));
+        assert!(!tracker.should_warn(Duration::from_secs(16), true, true));
+    }
+
+    #[test]
+    fn early_system_audio_prevents_a_silence_warning() {
+        let mut tracker = SystemAudioWarningTracker::default();
+        assert!(!tracker.observe_samples(&DeviceType::System, &[0.1]));
+        assert!(!tracker.should_warn(Duration::from_secs(15), true, true));
     }
 }
 

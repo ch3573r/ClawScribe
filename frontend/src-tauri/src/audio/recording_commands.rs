@@ -393,6 +393,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     manager.set_warning_callback(move |message| {
         let _ = app_for_warning.emit("recording-warning", message);
     });
+    let app_for_warning_cleared = app.clone();
+    manager.set_warning_cleared_callback(move |message| {
+        let _ = app_for_warning_cleared.emit("recording-warning-cleared", message);
+    });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let manager_timer = Instant::now();
@@ -603,6 +607,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let app_for_warning = app.clone();
     manager.set_warning_callback(move |message| {
         let _ = app_for_warning.emit("recording-warning", message);
+    });
+    let app_for_warning_cleared = app.clone();
+    manager.set_warning_cleared_callback(move |message| {
+        let _ = app_for_warning_cleared.emit("recording-warning-cleared", message);
     });
 
     // Start recording with specified devices and auto_save setting
