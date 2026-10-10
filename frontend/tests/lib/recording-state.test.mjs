@@ -16,7 +16,13 @@ function createView(delaySubscriptions = false, snapshotOverride) {
   const service = { getRecordingState() { const request = deferred(); requests.push(request); return request.promise; } };
   for (const name of ['Started', 'Stopped', 'Paused', 'Resumed']) {
     service[`onRecording${name}`] = callback => {
-      callbacks[name] = callback;
+      callbacks[name] = name === 'Started'
+        ? (mode, sessionId, generation = recordingGeneration(sessionId)) => callback(mode, sessionId, generation)
+        : name === 'Stopped'
+          ? payload => callback(payload ? {
+            ...payload, recording_generation: payload.recording_generation ?? recordingGeneration(payload.session_id),
+          } : payload)
+          : callback;
       const subscription = deferred();
       subscriptions.push(() => subscription.resolve(() => { unsubscribed++; }));
       if (!delaySubscriptions) subscriptions.at(-1)();
@@ -34,7 +40,7 @@ function createView(delaySubscriptions = false, snapshotOverride) {
       'react/jsx-runtime': { jsx: (_type, props) => props },
       '@/services/recordingService': { recordingService: service },
       '@/services/knowledgeService': { knowledgeService: { liveSnapshot: () => snapshotOverride
-        ? snapshotOverride() : Promise.resolve({ session_id: backendSessionId }) } },
+        ? snapshotOverride() : Promise.resolve(liveSnapshot(backendSessionId)) } },
       '@tauri-apps/api/core': { invoke: async () => 'live' },
       '@tauri-apps/api/event': { listen: async () => () => {} },
     }));
@@ -157,7 +163,7 @@ test('a pending authoritative start check cannot apply after synchronous Stop', 
   try {
     view.render().setStatus('starting');
     view.callbacks.Started('live', 'session-current'); view.render().setStatus('stopping');
-    check.resolve({ session_id: 'session-current' }); await flush();
+    check.resolve(liveSnapshot('session-current')); await flush();
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });
@@ -166,7 +172,7 @@ test('a delayed prior Stop cannot invalidate a genuine replacement while its aut
   const replacement = deferred(); let backendId = 'session-a'; const checks = [];
   const view = createView(false, () => {
     checks.push(backendId);
-    return backendId === 'session-b' ? replacement.promise : Promise.resolve({ session_id: backendId });
+    return backendId === 'session-b' ? replacement.promise : Promise.resolve(liveSnapshot(backendId));
   });
   const observed = []; view.render(); await flush();
   try {
@@ -180,7 +186,7 @@ test('a delayed prior Stop cannot invalidate a genuine replacement while its aut
     view.callbacks.Stopped({ session_id: 'session-a' });
     assert.deepEqual(observed, [], 'the already completed recording must not clear the replacement Live owner');
     assert.equal(view.render().status, 'starting');
-    replacement.resolve({ session_id: 'session-b' }); await flush();
+    replacement.resolve(liveSnapshot('session-b')); await flush();
     assert.equal(view.render().status, 'recording'); assert.equal(view.render().isRecording, true);
     view.callbacks.Stopped({ session_id: 'session-a' }); assert.deepEqual(observed, []);
     view.callbacks.Stopped({ session_id: 'session-b' });
@@ -191,7 +197,7 @@ test('a delayed prior Stop cannot invalidate a genuine replacement while its aut
 test('a genuine replacement Stop invalidates its pending start check without accepting the retired identity', async () => {
   const replacement = deferred(); let backendId = 'session-a';
   const view = createView(false, () => backendId === 'session-b'
-    ? replacement.promise : Promise.resolve({ session_id: backendId }));
+    ? replacement.promise : Promise.resolve(liveSnapshot(backendId)));
   const observed = []; view.render(); await flush();
   try {
     view.callbacks.Started('live', 'session-a'); await flush();
@@ -201,14 +207,21 @@ test('a genuine replacement Stop invalidates its pending start check without acc
     view.callbacks.Started('live', 'session-b'); await flush();
     view.callbacks.Stopped({ session_id: 'session-b' });
     assert.deepEqual(observed, ['stopping'], 'current native Stop must reach Live even before start validation completes');
-    replacement.resolve({ session_id: 'session-b' }); await flush();
+    replacement.resolve(liveSnapshot('session-b')); await flush();
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });
 
-function liveSnapshot(sessionId) {
+function recordingGeneration(sessionId) {
   return {
-    session_id: sessionId, finalized_through_seconds: 0, segments: [],
+    'session-prior': '1', 'session-current': '2', 'session-next': '3',
+    'session-c': '1', 'session-a': '2', 'session-b': '3',
+  }[sessionId];
+}
+
+function liveSnapshot(sessionId, generation = recordingGeneration(sessionId)) {
+  return {
+    session_id: sessionId, recording_generation: generation, finalized_through_seconds: 0, segments: [],
     transcription_incomplete: false, transcription_available: true,
   };
 }
@@ -281,5 +294,27 @@ test('an older start arriving first cannot own Stop while the genuine replacemen
     replacement.resolve(liveSnapshot('session-b')); older.resolve(liveSnapshot('session-b')); await flush();
     assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
     assert.equal(view.intervals.size, 0);
+  } finally { view.unmount(); }
+});
+
+test('adjacent native generations beyond JavaScript integer precision still distinguish replacement Stop ownership', async () => {
+  const replacement = deferred();
+  let snapshot = Promise.resolve(liveSnapshot('session-a', '9007199254740992'));
+  const view = createView(false, () => snapshot); const observed = [];
+  view.render(); await flush();
+  try {
+    view.callbacks.Started('live', 'session-a', '9007199254740992'); await flush();
+    view.render().setStatus('stopping');
+    view.callbacks.Stopped({ session_id: 'session-a', recording_generation: '9007199254740992' });
+    view.render().setStatus('starting');
+    view.render().subscribeLifecycle(status => observed.push(status));
+    snapshot = replacement.promise;
+    view.callbacks.Started('live', 'session-b', '9007199254740993');
+    view.callbacks.Stopped({ session_id: 'session-a', recording_generation: '9007199254740992' });
+    assert.deepEqual(observed, [], 'the lower generation remains retired without numeric rounding');
+    view.callbacks.Stopped({ session_id: 'session-b', recording_generation: '9007199254740993' });
+    assert.deepEqual(observed, ['stopping'], 'the adjacent greater generation owns the genuine Stop');
+    replacement.resolve(liveSnapshot('session-b', '9007199254740993')); await flush();
+    assert.equal(view.render().status, 'stopping'); assert.equal(view.render().isRecording, false);
   } finally { view.unmount(); }
 });

@@ -104,6 +104,138 @@ mod stop_tests {
         assert_eq!(stop_live_assistance(&runtime), Some(second.clone()));
         assert!(runtime.live.snapshot(&second).is_err());
     }
+
+    fn generation(wire: &serde_json::Value) -> u64 {
+        let decimal = wire["recording_generation"]
+            .as_str()
+            .expect("producer metadata must carry a decimal generation string");
+        let value = decimal.parse::<u64>().expect("generation must fit u64");
+        assert!(value > 0, "zero is not an admitted recording generation");
+        assert_eq!(decimal, value.to_string(), "generation must be canonical");
+        value
+    }
+
+    #[tokio::test]
+    async fn shared_preparation_pairs_ordered_generations_with_each_live_or_audio_only_producer() {
+        use super::*;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _admission = crate::audio::inference::claim_job().unwrap();
+        let runtime = crate::knowledge::KnowledgeState::default();
+        let mut previous = 0;
+        for transcribes in [true, false, true] {
+            let mut manager = RecordingManager::new();
+            let (startup, _sink) = prepare_live_recording(&runtime, &mut manager, transcribes);
+            let id = startup.commit();
+            let canonical = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
+            let producer = serde_json::to_value(manager.live_snapshot().unwrap()).unwrap();
+            assert_eq!(canonical["session_id"], id);
+            assert_eq!(producer["session_id"], id);
+            assert_eq!(producer["transcription_available"], transcribes);
+            let current = generation(&canonical);
+            assert!(
+                current > previous,
+                "native generations must order distinct recordings"
+            );
+            assert_eq!(
+                generation(&producer),
+                current,
+                "the manager must retain its producer's generation"
+            );
+            previous = current;
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_stop_identity_retains_its_producer_generation_after_a_new_recording_starts() {
+        use super::*;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _admission = crate::audio::inference::claim_job().unwrap();
+        let runtime = crate::knowledge::KnowledgeState::default();
+        let mut first_manager = RecordingManager::new();
+        let (first_start, _first_sink) = prepare_live_recording(&runtime, &mut first_manager, true);
+        let first = first_start.commit();
+        let first_wire = serde_json::to_value(runtime.live.snapshot(&first).unwrap()).unwrap();
+        let stopped = stop_live_assistance(&runtime);
+        assert!(runtime.live.snapshot(&first).is_err());
+        let mut next_manager = RecordingManager::new();
+        let (next_start, _next_sink) = prepare_live_recording(&runtime, &mut next_manager, false);
+        let next = next_start.commit();
+        let next_wire = serde_json::to_value(runtime.live.snapshot(&next).unwrap()).unwrap();
+        // Serialize the captured shutdown result only after the replacement
+        // starts, exactly when a delayed stopped event could be emitted.
+        let stopped_wire = serde_json::to_value(stopped).unwrap();
+        assert_eq!(
+            stopped_wire["session_id"], first,
+            "Stop must retain the old producer UUID"
+        );
+        assert_eq!(generation(&stopped_wire), generation(&first_wire));
+        assert!(generation(&next_wire) > generation(&stopped_wire));
+        assert_eq!(runtime.live.current_session_id(), Some(next));
+    }
+
+    #[tokio::test]
+    async fn late_failed_start_cannot_retire_the_newer_producers_generation() {
+        use super::*;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _admission = crate::audio::inference::claim_job().unwrap();
+        let runtime = crate::knowledge::KnowledgeState::default();
+        let mut failed_manager = RecordingManager::new();
+        let (failed_start, _failed_sink) =
+            prepare_live_recording(&runtime, &mut failed_manager, true);
+        let failed = failed_start.session_id.clone();
+        let failed_wire = serde_json::to_value(runtime.live.snapshot(&failed).unwrap()).unwrap();
+        let mut current_manager = RecordingManager::new();
+        let (current_start, _current_sink) =
+            prepare_live_recording(&runtime, &mut current_manager, true);
+        let current = current_start.commit();
+        let before = serde_json::to_value(runtime.live.snapshot(&current).unwrap()).unwrap();
+        drop(failed_start);
+        let after = serde_json::to_value(runtime.live.snapshot(&current).unwrap()).unwrap();
+        assert_eq!(after["session_id"], current);
+        assert_eq!(
+            generation(&after),
+            generation(&before),
+            "failed startup cleanup is producer-owned"
+        );
+        assert!(generation(&after) > generation(&failed_wire));
+        assert_eq!(runtime.live.current_session_id(), Some(current));
+    }
+
+    #[tokio::test]
+    async fn canonical_reload_metadata_reports_the_same_bound_producer_identity_and_generation() {
+        use super::*;
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _admission = crate::audio::inference::claim_job().unwrap();
+        // Restore all process globals even when an expected RED assertion panics.
+        struct Restore {
+            manager: Option<RecordingManager>,
+            recording: bool,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                *RECORDING_MANAGER.lock().unwrap() = self.manager.take();
+                IS_RECORDING.store(self.recording, Ordering::SeqCst);
+            }
+        }
+        let restore = Restore {
+            manager: RECORDING_MANAGER.lock().unwrap().take(),
+            recording: IS_RECORDING.swap(true, Ordering::SeqCst),
+        };
+        let runtime = crate::knowledge::KnowledgeState::default();
+        let mut manager = RecordingManager::new();
+        let (startup, _sink) = prepare_live_recording(&runtime, &mut manager, true);
+        let id = startup.commit();
+        let snapshot = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
+        *RECORDING_MANAGER.lock().unwrap() = Some(manager);
+        let metadata = get_recording_state().await;
+        assert_eq!(
+            metadata["session_id"], id,
+            "reload must bind the actual recording UUID"
+        );
+        assert_eq!(generation(&metadata), generation(&snapshot));
+        assert_eq!(metadata["is_recording"], true);
+        drop(restore);
+    }
 }
 static IS_STOPPING: AtomicBool = AtomicBool::new(false);
 

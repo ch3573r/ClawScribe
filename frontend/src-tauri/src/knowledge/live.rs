@@ -838,6 +838,51 @@ pub(crate) async fn save_sharing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_wire(generation: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": "00000000-0000-4000-8000-000000000001",
+            "recording_generation": generation,
+            "finalized_through_seconds": 0.0,
+            "segments": [],
+            "transcription_incomplete": false,
+            "transcription_available": true
+        })
+    }
+
+    #[test]
+    fn recording_generation_wire_roundtrips_exactly_beyond_javascript_integer_precision() {
+        for decimal in ["9007199254740993", "18446744073709551615"] {
+            let snapshot: LiveSnapshot =
+                serde_json::from_value(snapshot_wire(serde_json::json!(decimal))).unwrap();
+            let wire = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(
+                wire["recording_generation"], decimal,
+                "generation must never pass through a JSON number"
+            );
+        }
+    }
+
+    #[test]
+    fn recording_generation_wire_rejects_overflow_zero_and_noncanonical_values() {
+        for invalid in [
+            serde_json::json!("18446744073709551616"),
+            serde_json::json!("0"),
+            serde_json::json!("01"),
+            serde_json::json!("-1"),
+            serde_json::json!("+1"),
+            serde_json::json!("1.0"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let result = serde_json::from_value::<LiveSnapshot>(snapshot_wire(invalid.clone()));
+            assert!(
+                result.is_err(),
+                "invalid generation must fail closed: {invalid}"
+            );
+        }
+    }
+
     thread_local! {
         static COMPLETION_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             std::cell::RefCell::new(None);
