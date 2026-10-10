@@ -237,7 +237,15 @@ export function contextLinks(reply: AssistantReply): CitationContextLink[] {
     if (
       x.source_id !== y.source_id ||
       x.source_revision !== y.source_revision ||
-      !!x.historical !== !!y.historical ||
+      !!x.historical !== !!y.historical
+    ) return false;
+    if (xl.kind === 'live' && yl.kind === 'live') {
+      const cited = xl.sequence_ids[0], question = yl.sequence_ids[0];
+      return xl.session_id === yl.session_id && x.source_id === `live:${xl.session_id}` &&
+        xl.sequence_ids.length === 1 && yl.sequence_ids.length === 1 &&
+        Number.isSafeInteger(cited) && Number.isSafeInteger(question) && question >= 0 && cited > question;
+    }
+    if (
       xl.kind !== "transcript" ||
       yl.kind !== "transcript" ||
       xl.meeting_id !== yl.meeting_id ||

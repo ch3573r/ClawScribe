@@ -26,11 +26,20 @@ pub enum StreamManagerType {
 #[derive(Clone)]
 pub struct LiveTranscriptSink {
     pub session_id: String,
+    pub recording_generation: crate::knowledge::live::RecordingGeneration,
     state: Arc<crate::knowledge::live::LiveState>,
 }
 impl LiveTranscriptSink {
-    pub(crate) fn new(state: Arc<crate::knowledge::live::LiveState>, session_id: String) -> Self {
-        Self { state, session_id }
+    pub(crate) fn new(
+        state: Arc<crate::knowledge::live::LiveState>,
+        session_id: String,
+        recording_generation: crate::knowledge::live::RecordingGeneration,
+    ) -> Self {
+        Self {
+            state,
+            session_id,
+            recording_generation,
+        }
     }
     pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) {
         self.state.ingest(&self.session_id, update);
@@ -85,6 +94,11 @@ impl RecordingManager {
     }
     pub(crate) fn live_session_id(&self) -> Option<&str> {
         self.live.as_ref().map(|sink| sink.session_id.as_str())
+    }
+    pub(crate) fn live_recording_generation(
+        &self,
+    ) -> Option<crate::knowledge::live::RecordingGeneration> {
+        self.live.as_ref().map(|sink| sink.recording_generation)
     }
     pub(crate) fn live_snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
         let mut snapshot = self

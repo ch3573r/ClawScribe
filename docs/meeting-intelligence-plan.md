@@ -10,8 +10,9 @@ live assistance without compromising recording or local data control.
 
 **Delivery split:** The first preview delivers meeting memory only (Phase 1,
 Tasks 1–4). Reference documents (Tasks 5–6) are now implemented in source for
-the next preview. The live assistance backend (Task 7) is implemented in source;
-the manual panel and recording acceptance (Task 8) remain planned. Automated frontend
+the next preview. The live assistance backend and manual panel (Tasks 7–8) are
+implemented in source; installed and comparable two-hour enabled/disabled
+recording acceptance remain pending. Automated frontend
 and canonical-navigation checks remain mandatory. Installed offline,
 provider-failure, focus, citation-click and playback acceptance is explicitly
 pending until an isolated native desktop test is available, following the
@@ -339,7 +340,7 @@ embed live text or add a second capture/transcription pipeline.
 - [x] Implement snapshot scoping, current-session validation, bounded lexical live retrieval, and optional explicitly selected saved references. Report the latest finalized time and incomplete-transcription status in replies.
 - [x] Require independent remembered live text-sharing enablement, off by default, before external provider dispatch. Document permission remains separate for each Live owner. Built-in AI offers a post-recording action rather than bypassing the job gate. Pause document extraction and index/model work when capture starts.
 - [x] Invalidate session/request tokens on stop and recheck them before delivery. Retain native inference permits until calls finish; never make recording finalization depend on assistance completion.
-- [ ] Run recording stop/start, job arbitration, provider cancellation/reconciliation, and knowledge tests plus Rust checks and the safety scan; commit `feat: add recording-scoped live assistance`.
+- [x] Run recording stop/start, job arbitration, provider cancellation/reconciliation, and knowledge tests plus Rust checks and the safety scan; commit `feat: add recording-scoped live assistance`. Designated-runner validation passed 895 native library tests and 172 knowledge tests; this does not establish physical recording/performance acceptance.
 
 ### Task 8 Live panel and recording acceptance
 
@@ -352,12 +353,12 @@ integration only where needed.
 changes. Use Task 7 session IDs and snapshot/reply DTOs; reuse existing
 recording/transcript context state and cleanup patterns.
 
-- [ ] Add tests `route_change_does_not_duplicate_listener`, `stop_clears_live_messages`, `second_session_cannot_receive_first_reply`, `repeated_action_sends_once`, and `backlog_timestamp_stays_visible`. Run the new tests and confirm failure before implementation.
-- [ ] Add a collapsible panel with Ask, Summarize so far, List open questions, Cancel, selected references, provider, and finalized-transcript time. Make live sharing opt-in and distinguish provider/resource errors from recording health.
-- [ ] Add unavailable states for audio-only mode and Built-in AI while recording. Keep focus, keyboard, dark/light/accent, and narrow-layout behavior consistent with existing recording controls.
-- [ ] Run frontend typecheck/tests/build and relevant Rust tests on the designated runner. Exercise provider failure, cancellation, navigation, repeated Stop, and a second recording.
+- [x] Add tests `route_change_does_not_duplicate_listener`, `stop_clears_live_messages`, `second_session_cannot_receive_first_reply`, `repeated_action_sends_once`, and `backlog_timestamp_stays_visible`. Run the new tests and confirm failure before implementation. The designated runner observed fifteen owner-contract failures before implementation, then five panel/provider/first-Stop failures before UI wiring; existing tests passed.
+- [x] Add a collapsible panel with Ask, Summarize so far, List open questions, Cancel, selected references, provider, and finalized-transcript time. Make live sharing opt-in and distinguish provider/resource errors from recording health.
+- [x] Add unavailable states for audio-only mode and Built-in AI while recording. Keep focus, keyboard, dark/light/accent, and narrow-layout behavior consistent with existing recording controls. Installed visual and keyboard acceptance remains pending.
+- [x] Run frontend typecheck/tests/build and relevant Rust tests on the designated runner. Automated regressions exercise provider failure, cancellation, navigation, repeated Stop and a second recording; installed acceptance remains pending.
 - [ ] Perform a release-like two-hour dual-source smoke with features enabled and a comparable disabled baseline. Record engine/model/language/backend, memory trend, transcription elapsed time/backlog, search/answer times, stop timing, saved audio playback, and second-start behavior. Accept only if assistance creates no capture gaps/unbounded memory and Stop never waits on its backlog.
-- [ ] Update `README.md`, architecture/meeting-quality documentation and the acceptance checklist with delivered behavior and measured limitations. Run the safety scan; commit `feat: add manual live assistance panel`.
+- [x] Update `README.md`, architecture/meeting-quality documentation and the acceptance checklist with delivered behavior and disclosed limitations. Run the safety scan; commit `feat: add manual live assistance panel`. No measured two-hour performance result is claimed.
 
 ## Implementation and release boundaries
 

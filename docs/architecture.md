@@ -675,8 +675,15 @@ metadata is explicitly marked incomplete.
 
 ### Recording-scoped live assistance backend
 
-Both recording start paths allocate a fresh UUID after admission and validation.
-The manager and transcription producer capture that UUID before emission.
+Both recording start paths allocate a fresh UUID and increasing native recording
+generation within the app process after admission and validation. The manager
+and transcription producer capture the same pair before emission. Generation
+metadata uses a
+canonical positive decimal u64 string so JavaScript never rounds its ordering;
+checked exhaustion rejects startup without retiring an existing producer.
+Start/Stop events, recording-state reload metadata and live snapshots carry the
+pair. Stop captures its own pair before cancellation and drain, rather than
+reading a later producer when the stopped event is emitted.
 Producer ingestion preserves partial/final status: only non-empty finalized
 segments enter live context, including short, low-confidence responses. A failed
 start clears only its own session. The snapshot comes from the backend manager,
@@ -713,9 +720,50 @@ on Stop; no Live owners, requests, messages or evidence associations are written
 to the database. Background indexing pauses during capture, and the existing
 recording admission gate preempts document extraction and blocks local inference.
 
-This is the backend boundary for the planned manual panel. Installed provider,
-navigation, dual-source recording and two-hour performance acceptance with live
-assistance remain pending; backend regression checks do not establish them.
+`LiveAssistanceProvider` is mounted once in the root layout, inside shared
+recording/configuration providers and outside route lifetimes. Its production
+`createLiveAssistanceStore` owns the two recording event listeners, one metadata
+poll lane, explicit requests, reference selection and consent. Route/panel
+subscribers use `useSyncExternalStore`; they add no transcript listener. The
+store reads `knowledge_live_snapshot`, retains only finalized-through and
+availability/incomplete metadata, and submits native session/scope identifiers,
+never frontend transcript bodies. Snapshot, reference and consent operations
+have separate guarded revisions; late session/request replies are rejected.
+
+The recording context exposes a synchronous lifecycle subscription. Calling
+`setStatus(STOPPING)` clears the Live owner before a React render or the eventual
+`recording-stopped` event. It abandons pending UI work and sends cancellation
+without awaiting it. Unmount releases listeners, including registrations that
+finish after cleanup. UI history is capped at 32 answers and 64 KiB serialized;
+it is cleared at Stop and never written to durable history.
+
+The recording context and live store share exact decimal generation validation
+and order native producers before handling Stop. Delayed events and captured
+older snapshots cannot replace the current owner while canonical validation is
+pending. Promotion requires a matching snapshot UUID and generation. Each owner
+retains bounded current/validated identities, one stopped generation and one
+coalesced newer candidate; it does not accumulate retired UUIDs or pending checks.
+The live store shares one snapshot invocation lane across event checks, polls
+and reloads. Current native Stop clears its pending adoption synchronously even
+before the recording context's callback. The context's first Stop subscription
+also clears assistance immediately. Duplicate starts preserve the current pause
+state, and later canonical reloads can recover a fresh producer.
+
+The collapsible Home panel sits within the existing transcript scroll view,
+preserving recording controls and the global recording health banner. Ask,
+Summarize so far and List open questions are manual actions with one flight and
+Cancel. Current metadata stays visible while collapsed; each answer retains its
+own finalized-through/incomplete snapshot and actual provider. Saved meetings
+and documents require explicit selection. The remembered live-transcript switch
+is shared with Memory settings; document sharing is scoped to the active session.
+Built-in AI and audio-only states explain how to continue in the saved meeting.
+Sources resolve through the existing canonical evidence API and expire with
+their live context. No new capture path, embedding lane or automatic request is
+introduced.
+
+Installed provider, navigation, visual/keyboard, dual-source recording and
+comparable two-hour enabled/disabled performance acceptance with Live assistance
+remain pending. Helper/native regressions do not establish those physical checks.
 
 Each request owns its ordered `[K1]` evidence map. Generated answers are asked to
 use independent tags, such as `[K1][K3]`. The backend also recognizes comma

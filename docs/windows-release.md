@@ -378,6 +378,19 @@ version, audio devices, and result without publishing private meeting content.
    playback at the verified offset. These installed checks remain pending when
    only helper and native resolver evidence is available; they do not block a
    clearly labeled preview under the policy above or establish stable readiness.
+6. For the Live assistance preview, verify off-default remembered transcript
+   sharing and independent document consent/selection, audio-only and Built-in
+   AI guidance, finalized timestamps and incomplete status, provider failure,
+   Cancel, navigation, repeated Stop and a second recording. Confirm temporary
+   replies disappear at first Stop and cannot enter the next session. Compare
+   a release-like two-hour microphone/system-audio recording with assistance
+   enabled to a comparable disabled baseline, recording engine/model/language/
+   backend, memory trend, transcription elapsed time/backlog, search/answer
+   times, Stop timing, saved playback and second start. Accept only with no
+   assistance-induced capture gaps or unbounded memory and no Stop wait on
+   assistance backlog. Exact-build installed and two-hour checks remain pending
+   when only fixture/helper/native tests exist. Preview notes must disclose
+   those missing checks; stable remains 0.5.48 until real-device acceptance.
 
 Optional hosted-provider verification is documented in
 [hosted-transcription-smoke.md](hosted-transcription-smoke.md). OpenClaw handoff

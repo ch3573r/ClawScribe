@@ -9,7 +9,7 @@ import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateCon
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 
 /**
  * TranscriptPanel Component
@@ -23,12 +23,14 @@ interface TranscriptPanelProps {
   isProcessingStop: boolean;
   isStopping: boolean;
   showModal: (name: ModalType, message?: string) => void;
+  assistance?: ReactNode;
 }
 
 export function TranscriptPanel({
   isProcessingStop,
   isStopping,
-  showModal
+  showModal,
+  assistance,
 }: TranscriptPanelProps) {
   // Contexts
   const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
@@ -107,6 +109,7 @@ export function TranscriptPanel({
       <div className="pb-20">
         <div className="flex justify-center">
           <div className="w-2/3 max-w-[750px]">
+            {assistance}
             {isRecording && sessionMode === 'audio_only' ? <div role="status" className="py-12 text-center">
               <h2 className="font-semibold">Recording audio</h2>
               <p className="mt-2 text-sm text-muted-foreground">Live transcription is off. Your audio is being saved; transcribe it from the saved meeting when ready.</p>

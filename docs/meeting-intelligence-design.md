@@ -4,8 +4,9 @@ Status: Phase 1 meeting memory and Phase 2 reference documents are implemented
 in source. Reference controls, selected context and portable document archives
 are included for the next preview. Installed offline, actual-provider,
 citation/playback and document UI acceptance remains pending under the Windows
-preview policy. Phase 3 recording-scoped backend requests are implemented;
-the manual panel and installed/performance acceptance remain planned.
+preview policy. Phase 3 recording-scoped backend requests and the manual Home
+panel are implemented in source. Installed and comparable two-hour
+enabled/disabled performance acceptance remain pending.
 
 ClawScribe should help users find decisions across saved meetings, bring their
 own reference documents into meeting questions, and ask for assistance during a
@@ -342,9 +343,43 @@ session. Keep live conversation state in memory initially, and clear it on
 stop rather than introducing an implicit new retention policy. Navigation and
 panel visibility changes cannot create duplicate transcript subscriptions.
 
+Recording lifecycle metadata also pairs the UUID with an increasing native
+generation, encoded as a decimal string. Started/Stopped events and canonical
+reload/snapshot metadata use the same producer pair. The frontend compares its
+order without relying on delivery order; canonical validation still gates
+recording and live-store promotion. Both owners use the same decimal validation
+and reject captured older snapshots. Keep identity retention and validation
+work bounded: one canonical lookup and one newest coalesced candidate per owner;
+the live store uses the same lookup lane for polls and reloads. Native current
+Stop must clear pending live adoption synchronously without relying on context
+callback order. Capture Stop metadata before clearing or draining that producer.
+
+Preview limitation: the recording context retains separate reload and Started
+validation lanes, bounded to two overlapping metadata lookups. Both retain
+producer/revision guards; the live store retains one lane. Unifying the context
+lanes remains follow-up work and does not add provider requests or audio work.
+
+If initial canonical recording verification fails, show the failure in the Live
+panel and retain only the current candidate for manual Retry status. Retry checks
+both recording and Live metadata, promotes only the exact current producer pair,
+and resumes recording-state polling after success. Repeated clicks share the
+outstanding verification; rejection does not start automatic retries or provider
+requests. Stop and newer producers invalidate retained and outstanding retries.
+
 Transcript backlog and incomplete-capture state remain visible beside live
 assistance. Answers identify the latest finalized transcript time; they must
 not imply that delayed transcription describes the current moment.
+
+The root Live provider owns the production request store across navigation;
+opening or collapsing the panel does not install new transcript listeners.
+The Home panel shares the transcript view's scrollbar and leaves recording
+controls and health visible. Memory settings and the panel share one remembered
+text-sharing switch. Saved references require explicit meeting/document
+selection, with independent session document consent. First Stop clears UI
+session/messages and abandons async replies through the recording context's
+synchronous lifecycle subscription, before recording-stopped arrives. Current
+finalized status stays visible while collapsed; answers retain their individual
+snapshot time and actual provider. UI history is bounded and memory-only.
 
 ## Validation and rollout
 
