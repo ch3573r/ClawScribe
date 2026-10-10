@@ -126,6 +126,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     let revision = 0;
     let syncing = false;
     let backendSessionId: string | null = null;
+    let stoppedSessionId: string | null = null;
+    let pendingStart: { id: string; phase: number } | null = null;
     let polling: ReturnType<typeof setInterval> | undefined;
     const unsubscribers: (() => void)[] = [];
     const stopPolling = () => {
@@ -197,8 +199,14 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         if (!active) return;
         if ([RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING,
           RecordingStatus.COMPLETED, RecordingStatus.ERROR].includes(lifecycleStatus.current)) return;
+        if (sessionId && (sessionId === backendSessionId || sessionId === stoppedSessionId)) return;
         const request = revision;
         const phase = lifecycleRevision.current;
+        // A replacement is not active until the snapshot validates it, but its
+        // pending identity distinguishes its Stop from the completed session's.
+        const candidate = sessionId && [RecordingStatus.STARTING, RecordingStatus.IDLE].includes(lifecycleStatus.current)
+          ? { id: sessionId, phase } : null;
+        if (candidate) pendingStart = candidate;
         void knowledgeService.liveSnapshot().then(snapshot => {
           if (!active || request !== revision || phase !== lifecycleRevision.current) return;
           if (sessionId && snapshot.session_id !== sessionId) return;
@@ -217,11 +225,16 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         }).catch(() => {
           if (active && request === revision && phase === lifecycleRevision.current)
             console.error('Could not verify the current recording session.');
+        }).finally(() => {
+          if (candidate && pendingStart === candidate) pendingStart = null;
         });
       })),
       subscribe(recordingService.onRecordingStopped(payload => {
         if (!active) return;
-        if (payload?.session_id && backendSessionId && payload.session_id !== backendSessionId) return;
+        const expectedSessionId = pendingStart?.phase === lifecycleRevision.current ? pendingStart.id : backendSessionId;
+        if (payload?.session_id && expectedSessionId && payload.session_id !== expectedSessionId) return;
+        stoppedSessionId = payload?.session_id ?? expectedSessionId;
+        pendingStart = null;
         revision++;
         lifecycleRevision.current++;
         if (![RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
