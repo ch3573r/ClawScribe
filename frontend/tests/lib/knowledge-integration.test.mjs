@@ -9,7 +9,7 @@ const nodes = (node) =>
     ? []
     : Array.isArray(node)
       ? node.flatMap(nodes)
-      : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions)];
+      : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions), ...nodes(node.props?.secondary)];
 const text = (node) =>
   typeof node === "string" || typeof node === "number"
     ? String(node)
@@ -130,6 +130,7 @@ test("MeetingChat expands into a durable library owner and restores each history
   try {
     app.render();
     await flush();
+    app.button("Question scope").props.onClick();
     await app.state().ask("Original meeting question", "keyword");
     assert.deepEqual(requests[0].owner, { kind: "meeting", id: "a" });
     app.check("Include other saved meetings", true);

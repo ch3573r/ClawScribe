@@ -1,5 +1,5 @@
 "use client";
-import { Children, useEffect, useRef, useState, type ReactNode } from "react";
+import { Children, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Info, MoreHorizontal } from "lucide-react";
@@ -82,8 +82,8 @@ function conversationName(messages: HistoryMessage[]) {
   const label = first.content.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary }: {
-  state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode;
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions }: {
+  state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
 }) {
   const [question, setQuestion] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -98,6 +98,11 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
   const needsSharing = externalReferences && !state.sharingEnabled;
   const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
+  // Draft keystrokes must not rebuild the Markdown/citation tree for the entire history.
+  const messages = useMemo(() => state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
+    <p className="mb-1 text-xs font-medium text-muted-foreground">{message.role === "user" ? "You" : "Assistant"}{message.status !== "completed" ? ` · ${message.status === "failed" ? "Failed" : message.status === "cancelled" ? "Cancelled" : "Pending"}` : ""}</p>
+    {message.reply ? <CitedAnswer reply={message.reply} state={{inspect:state.inspect}} /> : <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>}
+  </article>), [state.messages, state.inspect]);
   useEffect(() => { end.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [state.messages, state.sending]);
   useEffect(() => {
     const request = pending.current;
@@ -137,8 +142,8 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
     });
   };
   return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
-    <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-3">
-      <h2 className="min-w-0 flex-1 font-semibold">{title}</h2>
+    <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
+      <h2 className={`min-w-0 flex-1 font-semibold ${compact ? "text-sm" : ""}`}>{title}</h2>
       <span className="rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">{friendlyModel(model)}</span>
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Conversations" disabled={state.sending || state.creating || state.historyLoading}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="max-w-sm">
@@ -153,26 +158,24 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
           </>}
         </DropdownMenuContent>
       </DropdownMenu>
+      {headerActions}
     </header>
     <ScrollArea className="min-h-0 flex-1">
-      <div className="space-y-4 p-5" aria-live="polite">
+      <div className={`space-y-4 ${compact ? "p-3" : "p-5"}`} aria-live="polite">
         {secondary}
         {state.historyLoading && <p role="status" className="text-sm text-muted-foreground">Loading conversation…</p>}
         {state.creating && !state.sending && <p role="status" className="text-sm text-muted-foreground">Creating conversation…</p>}
         {!state.messages.length && !state.historyLoading && <p className="text-sm text-muted-foreground">Ask about decisions, action items, or what was said.</p>}
-        {state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
-          <p className="mb-1 text-xs font-medium text-muted-foreground">{message.role === "user" ? "You" : "Assistant"}{message.status !== "completed" ? ` · ${message.status === "failed" ? "Failed" : message.status === "cancelled" ? "Cancelled" : "Pending"}` : ""}</p>
-          {message.reply ? <CitedAnswer reply={message.reply} state={state} /> : <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>}
-        </article>)}
+        {messages}
         {state.sending && <p role="status" className="text-sm text-muted-foreground">Finding sources and answering…</p>}
         {state.error && <p role="alert" className="text-sm text-destructive">{state.error}</p>}
         {state.eventError && <p role="status" className="text-xs text-muted-foreground">{state.eventError}</p>}
         <div ref={end} />
       </div>
     </ScrollArea>
-    <form className="sticky bottom-0 shrink-0 space-y-3 border-t border-border bg-card p-5" onSubmit={event => { event.preventDefault(); submit(); }}>
+    <form className={`sticky bottom-0 shrink-0 border-t border-border bg-card ${compact ? "space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
       <label className="block text-xs font-medium" htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
-      <Textarea id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={2} placeholder="What did we decide?" className="min-h-16 resize-none"
+      <Textarea id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={compact ? 1 : 2} placeholder={compact ? "Ask about this meeting…" : "What did we decide?"} className={`${compact ? "min-h-10" : "min-h-16"} resize-none`}
         onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />
       <div className="flex items-center gap-2"><Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button>
         {state.sending && <Button type="button" variant="outline" onClick={state.cancel}>Cancel answer</Button>}

@@ -68,8 +68,13 @@ source tests or backend resolver tests.
 
 ## Reference documents
 
-Open a saved meeting and use **Attach reference** to choose a PDF, DOCX, TXT or
-Markdown file. Extraction stays on this PC. PDFs need a text layer; scanned or
+Use **Meetings → Meeting memory → Attach file** to choose a PDF, DOCX, TXT or
+Markdown file. A single selected meeting is used automatically; otherwise pick
+the destination meeting in the searchable dialog. The destination respects the
+current project/date filters and joins the selected sources after attachment.
+With no meetings available, save a meeting or adjust those filters first.
+You can also open a saved meeting's compact corner chat and use **Attach file**
+under **Reference documents**. Extraction stays on this PC. PDFs need a text layer; scanned or
 encrypted PDFs are unsupported. Limits are 25 MiB per original, 500 PDF pages and
 2 MiB of extracted text, with additional archive/XML and extraction-time limits.
 A file near the text limit may need splitting because anchor metadata also counts
@@ -77,7 +82,7 @@ toward the bounded extraction response.
 
 Preview references locally and select the ones a question may use. Library chat
 lists references attached to the currently selected meetings. Adding an attachment
-does not select it automatically. **Allow reference sharing** is off by default
+does not select it automatically. **Use selected references for answers** is off by default
 and applies to the current saved conversation. Enable it before a non-Built-in AI
 provider receives document excerpts. Disabling it cancels active answers that use
 references. Keyword search and previews work offline without that permission.
