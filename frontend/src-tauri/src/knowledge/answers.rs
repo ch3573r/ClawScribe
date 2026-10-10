@@ -181,6 +181,11 @@ pub(crate) async fn ask<F>(
 where
     F: FnOnce(&llm_client::LLMProvider) -> Result<TextEnvironment, String>,
 {
+    if matches!(request.owner, ConversationOwner::Live(_))
+        || matches!(request.search.scope, KnowledgeScope::Live { .. })
+    {
+        return super::live::ask(pool, runtime, request, environment).await;
+    }
     let started = tokio::time::Instant::now();
     let setup_deadline = started + Duration::from_secs(1);
     conversations::validate_request(&request)?;
@@ -709,6 +714,7 @@ mod tests {
             .bind(&document).execute(&pool).await.unwrap();
         let owner = conversations::create_library(&pool).await.unwrap();
         let request = AskRequest {
+            live_reference_scope: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             owner,
             search: SearchRequest {
@@ -1045,6 +1051,7 @@ mod tests {
                 conversations::create_library(&pool).await.unwrap()
             };
             let request = AskRequest {
+                live_reference_scope: None,
                 request_id: uuid::Uuid::new_v4().to_string(),
                 owner: owner.clone(),
                 search: SearchRequest {
@@ -1222,6 +1229,7 @@ mod tests {
         }
         let owner = conversations::create_library(&pool).await.unwrap();
         let request = AskRequest {
+            live_reference_scope: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             owner,
             search: SearchRequest {

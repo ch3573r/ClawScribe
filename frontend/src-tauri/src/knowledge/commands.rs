@@ -64,8 +64,12 @@ pub async fn knowledge_list_scope_documents(
 #[tauri::command]
 pub async fn knowledge_document_sharing(
     state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
     owner: ConversationOwner,
 ) -> Result<bool, String> {
+    if let ConversationOwner::Live(id) = &owner {
+        return runtime.live.document_sharing(id);
+    }
     super::document_context::sharing(state.db_manager.pool(), &owner).await
 }
 #[tauri::command]
@@ -75,6 +79,9 @@ pub async fn knowledge_set_document_sharing(
     owner: ConversationOwner,
     enabled: bool,
 ) -> Result<(), String> {
+    if let ConversationOwner::Live(id) = &owner {
+        return runtime.live.set_document_sharing(id, enabled);
+    }
     if !enabled {
         runtime.answers.cancel_owner(&owner)?;
     }
@@ -152,7 +159,13 @@ pub async fn knowledge_cancel_request(
     state: State<'_, AppState>,
     runtime: State<'_, KnowledgeState>,
     request_id: String,
+    session_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(id) = session_id {
+        runtime.live.snapshot(&id)?;
+        runtime.live.cancel(&request_id);
+        return Ok(());
+    }
     cancel_request(state.db_manager.pool(), &runtime, &request_id).await
 }
 /// Shared actual cancellation boundary, independently testable without a window.
@@ -161,6 +174,9 @@ pub(crate) async fn cancel_request(
     runtime: &KnowledgeState,
     request_id: &str,
 ) -> Result<(), String> {
+    if runtime.live.cancel(request_id) {
+        return Ok(());
+    }
     let deadline = runtime.answers.cancel_with_deadline(request_id);
     tokio::time::timeout_at(deadline, conversations::cancel(pool, request_id))
         .await
@@ -172,15 +188,23 @@ pub(crate) async fn cancel_request(
 #[tauri::command]
 pub async fn knowledge_history(
     state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
     owner: ConversationOwner,
 ) -> Result<Vec<HistoryMessage>, String> {
+    if let ConversationOwner::Live(id) = &owner {
+        return runtime.live.history(id);
+    }
     conversations::history(state.db_manager.pool(), &owner).await
 }
 #[tauri::command]
 pub async fn knowledge_resolve_evidence(
     state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
     reference: EvidenceRef,
 ) -> Result<evidence::ResolvedEvidence, String> {
+    if matches!(reference.locator, EvidenceLocator::Live { .. }) {
+        return runtime.live.resolve(&reference);
+    }
     evidence::resolve(state.db_manager.pool(), &reference)
         .await
         .map_err(|error| error.to_string())
@@ -203,6 +227,28 @@ pub async fn knowledge_clear_history(
     runtime: State<'_, KnowledgeState>,
     owner: ConversationOwner,
 ) -> Result<u64, String> {
+    if let ConversationOwner::Live(id) = &owner {
+        return runtime.live.clear_history(id);
+    }
     runtime.answers.cancel_owner(&owner)?;
     conversations::clear(state.db_manager.pool(), &owner).await
+}
+#[tauri::command]
+pub fn knowledge_live_snapshot() -> Result<super::live::LiveSnapshot, String> {
+    crate::audio::recording_commands::live_snapshot()
+}
+#[tauri::command]
+pub async fn knowledge_live_sharing(
+    state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
+) -> Result<bool, String> {
+    super::live::load_sharing(state.db_manager.pool(), &runtime.live).await
+}
+#[tauri::command]
+pub async fn knowledge_set_live_sharing(
+    state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
+    enabled: bool,
+) -> Result<(), String> {
+    super::live::save_sharing(state.db_manager.pool(), &runtime.live, enabled).await
 }

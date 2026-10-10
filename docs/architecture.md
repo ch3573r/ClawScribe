@@ -583,7 +583,8 @@ semantics match the library. Scope resolves before ranking and can be frozen and
 rechecked on a caller-owned SQLite transaction. A frozen scope never acquires
 new meetings. Explicit document UUIDs are separately frozen and checked against
 attachments belonging to these meetings before ranking and before delivery.
-Live scopes remain unavailable until the live assistance phase.
+Live scopes use recording-owned finalized segments through a separate ephemeral
+answer branch; archive search does not accept Live scopes.
 
 `knowledge_search` accepts a scope, query, document IDs and `keyword`/`hybrid`
 mode. It returns actual mode, index status and canonical passages. Questions are
@@ -663,13 +664,58 @@ Cancelled or invalidated requests cannot accept late output. Startup marks
 interrupted requests without automatically resubmitting them.
 
 Prompts contain bounded JSON sections for the question, eligible prior turns,
-and transcript evidence. Document and live inputs remain rejected. Small
+transcript evidence, and explicitly selected reference documents. Live answers
+use their recording-scoped branch described below. Small
 selections can use complete canonical rows to retain short replies and dated
 contradictions: at most eight meetings, fewer than 32 rows per meeting, 64 rows
 overall, and 2,048 bytes per complete row. Larger selections retain bounded
 search results. Context limits can still omit whole rows; answers must qualify
 incomplete evidence. Source text and metadata are untrusted data. Clipped
 metadata is explicitly marked incomplete.
+
+### Recording-scoped live assistance backend
+
+Both recording start paths allocate a fresh UUID after admission and validation.
+The manager and transcription producer capture that UUID before emission.
+Producer ingestion preserves partial/final status: only non-empty finalized
+segments enter live context, including short, low-confidence responses. A failed
+start clears only its own session. The snapshot comes from the backend manager,
+with finalized-through recording time, transcript availability, and capture or
+transcription backlog/incompleteness. Context covers the latest ten minutes of
+finalized text, capped at 1,024 segments and 256 KiB; segment bodies are at most
+2,048 UTF-8 bytes. Capacity truncation is disclosed.
+
+`knowledge_ask` accepts matching Live owner/scope IDs and one request UUID. It
+permits one request per recording in flight, limits setup through delivery to
+30 seconds, and uses the configured text-provider adapter. Built-in AI is
+unavailable during capture and suggests asking after recording. Live retrieval
+is lexical: it loads no local embedding or answer model. Optional
+`live_reference_scope` must name saved meeting IDs explicitly; document IDs use
+the existing canonical attachment and evidence checks. Selected evidence is
+rechecked before dispatch and delivery. Replies include `live_context` with
+the snapshot's session ID, finalized-through time and incomplete status; prompts
+must not describe delayed finalized text as the current moment.
+
+Live text sharing is a remembered setting, off by default, exposed by
+`knowledge_live_sharing` and `knowledge_set_live_sharing`. Serialized persistence
+and consent revisions prevent stale reads from reversing revocation. A failed
+write remains visible and disables sharing for the current app session. Document
+sharing stays separate and in memory for each Live owner. These permissions are
+not part of portable archives. Every dispatch and delivery rechecks consent.
+
+The first Stop transition invalidates the live session and signals request
+cancellation synchronously. Stop never awaits provider cleanup, knowledge
+configuration, index work, or live history persistence. The existing provider
+supervisor retains resources until actual cleanup completes. Producer IDs and
+request validation discard old results after Stop or another recording starts.
+Live requests and bounded conversation history are held in memory and cleared
+on Stop; no Live owners, requests, messages or evidence associations are written
+to the database. Background indexing pauses during capture, and the existing
+recording admission gate preempts document extraction and blocks local inference.
+
+This is the backend boundary for the planned manual panel. Installed provider,
+navigation, dual-source recording and two-hour performance acceptance with live
+assistance remain pending; backend regression checks do not establish them.
 
 Each request owns its ordered `[K1]` evidence map. Generated answers are asked to
 use independent tags, such as `[K1][K3]`. The backend also recognizes comma

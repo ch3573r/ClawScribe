@@ -133,7 +133,9 @@ Attach and preview them locally, then explicitly select which references a
 question may use. Citations open the extracted page or paragraph, keeping
 reference material distinct from the recorded discussion. Sending excerpts to
 an external answer provider requires **Allow reference sharing** for that
-conversation, off by default. Live assistance is the next planned phase. Installed offline, provider-failure, focus, citation,
+  conversation, off by default. Source includes the recording-scoped live assistance
+  backend; the manual panel and recording/performance acceptance remain planned.
+  Installed offline, provider-failure, focus, citation,
 and playback acceptance remains pending; see the
 [local library guide](docs/local-library.md#meeting-memory) and
 [preview acceptance policy](docs/windows-release.md#required-real-device-acceptance).

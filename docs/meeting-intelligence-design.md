@@ -4,7 +4,8 @@ Status: Phase 1 meeting memory and Phase 2 reference documents are implemented
 in source. Reference controls, selected context and portable document archives
 are included for the next preview. Installed offline, actual-provider,
 citation/playback and document UI acceptance remains pending under the Windows
-preview policy. Phase 3 manual live assistance remains planned.
+preview policy. Phase 3 recording-scoped backend requests are implemented;
+the manual panel and installed/performance acceptance remain planned.
 
 ClawScribe should help users find decisions across saved meetings, bring their
 own reference documents into meeting questions, and ask for assistance during a
@@ -318,12 +319,18 @@ bounded to 32 entries and coalesces by source ID.
 During recording, pause model loading, embedding, document extraction, and
 local knowledge-answer generation. Search can use lexical evidence. External
 answers use the configured provider only after the user enables live text
-sharing. Ollama is treated as a separately running provider, with visible
+sharing. This independent opt-in is remembered and off by default. Reference
+document sharing remains a separate permission for each live session. Revocation
+cancels active requests; failed persistence keeps the current session disabled.
+Ollama is treated as a separately running provider, with visible
 resource guidance; enabling it does not certify concurrent notebook performance.
 
 The live panel uses a backend snapshot of finalized transcript segments.
 Default context is the last 10 minutes; selected saved references may supplement
-it. Audio-only mode explains that no live transcript is available. Provide
+it. Backend context is capped at 1,024 finalized segments and 256 KiB, with
+2,048-byte segment bodies and disclosed capacity truncation. Saved references
+require explicit meeting IDs and canonical document membership. Audio-only mode
+explains that no live transcript is available. Provide
 Ask, Summarize so far, and List open questions actions. Each action requires a
 user submission, allows one request in flight, and offers Cancel. The request
 deadline is 30 seconds.
