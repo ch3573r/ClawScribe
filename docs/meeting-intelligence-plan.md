@@ -356,9 +356,9 @@ recording/transcript context state and cleanup patterns.
 - [x] Add tests `route_change_does_not_duplicate_listener`, `stop_clears_live_messages`, `second_session_cannot_receive_first_reply`, `repeated_action_sends_once`, and `backlog_timestamp_stays_visible`. Run the new tests and confirm failure before implementation. The designated runner observed fifteen owner-contract failures before implementation, then five panel/provider/first-Stop failures before UI wiring; existing tests passed.
 - [x] Add a collapsible panel with Ask, Summarize so far, List open questions, Cancel, selected references, provider, and finalized-transcript time. Make live sharing opt-in and distinguish provider/resource errors from recording health.
 - [x] Add unavailable states for audio-only mode and Built-in AI while recording. Keep focus, keyboard, dark/light/accent, and narrow-layout behavior consistent with existing recording controls. Installed visual and keyboard acceptance remains pending.
-- [ ] Run frontend typecheck/tests/build and relevant Rust tests on the designated runner. Exercise provider failure, cancellation, navigation, repeated Stop, and a second recording.
+- [x] Run frontend typecheck/tests/build and relevant Rust tests on the designated runner. Automated regressions exercise provider failure, cancellation, navigation, repeated Stop and a second recording; installed acceptance remains pending.
 - [ ] Perform a release-like two-hour dual-source smoke with features enabled and a comparable disabled baseline. Record engine/model/language/backend, memory trend, transcription elapsed time/backlog, search/answer times, stop timing, saved audio playback, and second-start behavior. Accept only if assistance creates no capture gaps/unbounded memory and Stop never waits on its backlog.
-- [ ] Update `README.md`, architecture/meeting-quality documentation and the acceptance checklist with delivered behavior and measured limitations. Run the safety scan; commit `feat: add manual live assistance panel`.
+- [x] Update `README.md`, architecture/meeting-quality documentation and the acceptance checklist with delivered behavior and disclosed limitations. Run the safety scan; commit `feat: add manual live assistance panel`. No measured two-hour performance result is claimed.
 
 ## Implementation and release boundaries
 

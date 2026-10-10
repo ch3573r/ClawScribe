@@ -134,7 +134,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     let backendSession: RecordingIdentity | null = null;
     let lifecycleOwner: RecordingIdentity | null = null;
     let stoppedGeneration: string | null = null;
-    type StartCheck = { identity: RecordingIdentity; mode: RecordingMode; request: number; phase: number };
+    type StartCheck = { identity: RecordingIdentity; mode: RecordingMode; phase: number };
     let queuedStart: StartCheck | null = null;
     let retryStart: StartCheck | null = null;
     let checkingStart = false;
@@ -210,7 +210,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         if (active) console.error('Could not subscribe to recording state changes.');
       }
     };
-    const currentStart = (candidate: StartCheck) => active && candidate.request === revision &&
+    // Pause/Resume invalidates earlier state polls, but canonical identity work
+    // still belongs to the same producer until its pair or lifecycle changes.
+    const currentStart = (candidate: StartCheck) => active &&
       candidate.phase === lifecycleRevision.current && sameIdentity(lifecycleOwner, candidate.identity);
     const failedStart = (candidate: StartCheck) => {
       if (!currentStart(candidate)) return;
@@ -235,8 +237,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         lifecycleRevision.current++;
         lifecycleStatus.current = RecordingStatus.RECORDING;
         setState(prev => ({
-          ...prev, sessionMode: candidate.mode, isRecording: true, isPaused: false,
-          isActive: true, status: RecordingStatus.RECORDING, statusMessage: undefined, verificationError: null,
+          ...prev, sessionMode: candidate.mode, isRecording: true,
+          isActive: !prev.isPaused, status: RecordingStatus.RECORDING, statusMessage: undefined, verificationError: null,
         }));
         startPolling();
       }).catch(() => failedStart(candidate)).finally(() => {
@@ -267,11 +269,14 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         }
         // Native generations order admitted producers independently of delivery
         // order. Only a canonical snapshot may promote the matching producer.
+        const newProducer = !sameIdentity(lifecycleOwner, identity);
         lifecycleOwner = identity;
         revision++;
         retryStart = null;
-        setState(prev => prev.verificationError === null ? prev : { ...prev, verificationError: null });
-        queuedStart = { identity, mode, request: revision, phase: lifecycleRevision.current };
+        setState(prev => prev.verificationError === null && !newProducer ? prev : {
+          ...prev, verificationError: null, isPaused: newProducer ? false : prev.isPaused,
+        });
+        queuedStart = { identity, mode, phase: lifecycleRevision.current };
         verifyStart();
       })),
       subscribe(recordingService.onRecordingStopped(payload => {
