@@ -45,7 +45,8 @@ test('budget-sized evidence maps retain citations after the former 64-row limit'
 
 test('live short-reply citation renders the verified preceding question without accepting a foreign session', () => {
   const answer = reply('Ja. [K2]');
-  answer.evidence = [1, 2].map(sequence => ({ source_id: 'live:public-session', source_revision: 1,
+  // The native producer starts its sequence counter at zero.
+  answer.evidence = [0, 1].map(sequence => ({ source_id: 'live:public-session', source_revision: 1,
     chunk_id: `live:public-session:${sequence}`, fingerprint: `public-live-${sequence}`,
     locator: { kind: 'live', session_id: 'public-session', sequence_ids: [sequence] } }));
   answer.evidence_metadata[1].preceding_question_tag = 1;

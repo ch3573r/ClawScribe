@@ -26,6 +26,7 @@ function friendlyModel(model?: string) {
 function sourceTime(reply: AssistantReply, tag: number) {
   const locator = reply.evidence[tag - 1].locator;
   if (locator.kind === "document") return documentAnchor(locator);
+  if (locator.kind === "live") return "Current recording";
   if (locator.kind !== "transcript" || locator.start_seconds == null) return "Time unavailable";
   const seconds = Math.max(0, Math.floor(locator.start_seconds));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
