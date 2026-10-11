@@ -1,4 +1,5 @@
 //! Canonical local reference documents and bounded extraction.
+pub(crate) mod cleanup;
 pub mod extract;
 pub mod import;
 pub mod store;
@@ -12,7 +13,7 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Imports {
     state: Arc<Mutex<ImportState>>,
 }
@@ -27,6 +28,13 @@ pub struct ImportLease {
     pub cancel: CancellationToken,
 }
 impl Imports {
+    pub(crate) fn is_active(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.active.is_some())
+            .unwrap_or(true)
+    }
+
     pub fn begin(&self, id: &str) -> Result<ImportLease, DocumentError> {
         if uuid::Uuid::parse_str(id).is_err() {
             return Err(DocumentError::Malformed);
@@ -87,6 +95,17 @@ pub fn original_path(
         return Err(DocumentError::NotFound);
     }
     Ok(root.join(name))
+}
+
+pub(crate) async fn remove_original(root: &std::path::Path, name: &str) -> Result<(), String> {
+    let path = original_path(root, name).map_err(|_| {
+        "The document was deleted, but its original storage name is invalid.".to_string()
+    })?;
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("The document was deleted, but its original file could not be removed. Check storage permissions.".into()),
+    }
 }
 
 #[cfg(test)]

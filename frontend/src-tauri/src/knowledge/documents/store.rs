@@ -146,13 +146,47 @@ pub async fn get(
 ) -> Result<DocumentAttachment, DocumentError> {
     read_attachment(&mut *pool.acquire().await?, meeting, id).await
 }
-pub async fn detach(pool: &SqlitePool, meeting: &str, id: &str) -> Result<(), DocumentError> {
-    sqlx::query("DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?")
-        .bind(meeting)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
+pub async fn detach(
+    pool: &SqlitePool,
+    meeting: &str,
+    id: &str,
+) -> Result<Option<String>, DocumentError> {
+    let mut tx = pool.begin().await?;
+    let removed = sqlx::query(
+        "DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?",
+    )
+    .bind(meeting)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    let storage = if removed.rows_affected() > 0 {
+        delete_unattached(&mut tx, id).await?
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(storage)
+}
+
+pub(crate) async fn delete_unattached(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let storage = sqlx::query_scalar::<_, String>(
+        "SELECT storage_name FROM knowledge_documents WHERE id=?
+         AND NOT EXISTS (SELECT 1 FROM knowledge_document_attachments WHERE document_id=?)",
+    )
+    .bind(id)
+    .bind(id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if storage.is_some() {
+        sqlx::query("DELETE FROM knowledge_sources WHERE id=? AND kind='document'")
+            .bind(format!("document:{id}"))
+            .execute(connection)
+            .await?;
+    }
+    Ok(storage)
 }
 pub async fn delete(pool: &SqlitePool, meeting: &str, id: &str) -> Result<String, DocumentError> {
     let mut tx = pool.begin().await?;
@@ -255,7 +289,10 @@ mod tests {
         assert_eq!(first.attachment.id, second.attachment.id);
         assert!(first.original_kept);
         assert!(!second.original_kept);
-        detach(&pool, "aster", &first.attachment.id).await.unwrap();
+        assert_eq!(
+            detach(&pool, "aster", &first.attachment.id).await.unwrap(),
+            None
+        );
         assert!(list(&pool, "aster").await.unwrap().is_empty());
         assert_eq!(
             blocks(&pool, "birch", &first.attachment.id)
@@ -305,12 +342,69 @@ mod tests {
     }
     #[tokio::test]
     async fn explicit_delete_removes_all_relations_and_fts() {
+        assert_deleted("explicit").await;
+    }
+    #[tokio::test]
+    async fn last_detach_deletes_and_redacts_dependent_turns() {
+        assert_deleted("detach").await;
+    }
+    #[tokio::test]
+    async fn meeting_delete_reports_original_and_redacts_dependent_turns() {
+        assert_deleted("meeting").await;
+    }
+    #[tokio::test]
+    async fn shared_document_survives_meeting_delete() {
+        let pool = pool().await;
+        let first = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
+        attach(&pool, "birch", "00000000-0000-4000-8000-000000000002").await;
+        let (deleted, originals) = crate::database::repositories::meeting::MeetingsRepository::delete_meeting_with_documents(&pool, "aster").await.unwrap();
+        assert!(deleted);
+        assert!(originals.is_empty());
+        assert_eq!(
+            list(&pool, "birch").await.unwrap()[0].id,
+            first.attachment.id
+        );
+        assert_eq!(
+            blocks(&pool, "birch", &first.attachment.id)
+                .await
+                .unwrap()
+                .len(),
+            1537
+        );
+        assert_eq!(
+            detach(&pool, "aster", &first.attachment.id).await.unwrap(),
+            None
+        );
+    }
+    #[tokio::test]
+    async fn failed_meeting_delete_rolls_back_document_deletion() {
+        let pool = pool().await;
+        let first = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
+        sqlx::query("CREATE TRIGGER reject_meeting_delete BEFORE DELETE ON meetings BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
+            .execute(&pool).await.unwrap();
+        assert!(crate::database::repositories::meeting::MeetingsRepository::delete_meeting_with_documents(&pool, "aster").await.is_err());
+        assert_eq!(
+            list(&pool, "aster").await.unwrap()[0].id,
+            first.attachment.id
+        );
+        assert_eq!(
+            blocks(&pool, "aster", &first.attachment.id)
+                .await
+                .unwrap()
+                .len(),
+            1537
+        );
+    }
+    async fn assert_deleted(path: &str) {
         let pool = pool().await;
         let attached = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
-        attach(&pool, "birch", "00000000-0000-4000-8000-000000000002").await;
-        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) VALUES ('meeting:aster','meeting','aster')")
+        if path == "explicit" {
+            attach(&pool, "birch", "00000000-0000-4000-8000-000000000002").await;
+        }
+        // The dependent conversation must survive deletion of the owning meeting.
+        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) VALUES ('meeting:birch','meeting','birch')")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,question,scope_json,frozen_ids_json,status,provider,model) VALUES ('reference-turn','meeting:aster','synthetic','What is the reference?','{}','[]','completed','synthetic','synthetic')")
+        sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,question,scope_json,frozen_ids_json,status,provider,model) VALUES ('reference-turn','meeting:birch','synthetic','What is the reference?','{}','[]','completed','synthetic','synthetic')")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO knowledge_messages(id,request_id,role,content) VALUES ('reference-answer','reference-turn','assistant','Public reference content [K700]')")
             .execute(&pool).await.unwrap();
@@ -318,9 +412,35 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO knowledge_request_sources(request_id,source_id,revision) VALUES ('reference-turn',?,1)")
             .bind(format!("document:{}",attached.attachment.id)).execute(&pool).await.unwrap();
-        delete(&pool, "aster", &attached.attachment.id)
-            .await
-            .unwrap();
+        let storage = format!("{}.docx", attached.attachment.id);
+        match path {
+            "explicit" => assert_eq!(
+                delete(&pool, "aster", &attached.attachment.id)
+                    .await
+                    .unwrap(),
+                storage
+            ),
+            "detach" => assert_eq!(
+                detach(&pool, "aster", &attached.attachment.id)
+                    .await
+                    .unwrap(),
+                Some(storage)
+            ),
+            "meeting" => {
+                let (deleted, originals) = crate::database::repositories::meeting::MeetingsRepository::delete_meeting_with_documents(&pool, "aster").await.unwrap();
+                assert!(deleted);
+                assert_eq!(originals, vec![storage]);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM knowledge_sources WHERE id=?")
+                .bind(format!("document:{}", attached.attachment.id))
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
         for table in [
             "knowledge_documents",
             "knowledge_document_blocks",

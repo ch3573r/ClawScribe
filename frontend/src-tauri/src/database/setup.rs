@@ -38,6 +38,35 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
         {
             log::warn!("Could not clean abandoned recording bookmarks");
         }
+        // Run once per startup in the background; busy foreground work skips it.
+        let cleanup_pool = pool.clone();
+        let originals = app
+            .path()
+            .app_data_dir()
+            .map(|data| data.join("reference-documents"));
+        let imports = app
+            .state::<crate::knowledge::KnowledgeState>()
+            .documents
+            .clone();
+        tauri::async_runtime::spawn(async move {
+            match originals {
+                Ok(root) => match crate::knowledge::documents::cleanup::sweep(
+                    &cleanup_pool,
+                    &root,
+                    &imports,
+                )
+                .await
+                {
+                    Ok(warnings) => {
+                        for warning in warnings {
+                            log::warn!("{}", warning);
+                        }
+                    }
+                    Err(warning) => log::warn!("{}", warning),
+                },
+                Err(_) => log::warn!("Reference document storage is unavailable for cleanup"),
+            }
+        });
         tauri::async_runtime::spawn(async move {
             crate::summary::codex_provider::cleanup_orphaned_runs(&pool).await;
         });
