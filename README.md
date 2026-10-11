@@ -7,11 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.54**. This Windows GPU preview adds manual live assistance
-using finalized transcript context, explicit saved references and an independent
-live transcript-sharing opt-in. It includes the reference documents, citations,
-portable backups and audio-status fixes from 0.5.53. See the
-[0.5.54 preview notes](docs/releases/0.5.54.md) and the
+Source version: **0.5.55**. This Windows GPU preview adds Attach file directly to
+Meeting memory and restores compact corner chat with less rendering work while
+typing. It includes manual live assistance from 0.5.54 and the reference documents,
+citations, portable backups and audio-status fixes from 0.5.53. See the
+[0.5.55 preview notes](docs/releases/0.5.55.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
 previews; drafts are excluded from updates. Installed acceptance remains
@@ -262,22 +262,20 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What changed in 0.5.54 preview
+## What changed in 0.5.55 preview
 
-- Expand Live assistance during recording to ask a question, summarize so far
-  or list open questions using the latest ten minutes of finalized speech.
-- Enable remembered live transcript sharing explicitly; it starts off.
-  Sharing selected reference documents is separate for each recording.
-- See the provider, latest finalized time, transcription lag and cited answers.
-  Cancel or first Stop clears active assistance without waiting on the provider.
-- Recover failed status verification through Retry status, including after
-  Pause/Resume. Recording and assistance reject earlier-session events/replies.
-- Keep live messages ephemeral and show unavailable states for audio-only and
-  Built-in AI during capture. Installed provider, light/dark, recording, update
-  and comparable two-hour performance acceptance remain pending before stable promotion.
+- Use Attach file beside Meeting memory's Sources controls. One explicitly
+  selected meeting is the destination; otherwise use the searchable picker.
+- Chat in a compact corner popup with optional scope controls collapsed and a
+  fixed question composer. Draft typing reuses unchanged answer/citation content.
+- Use selected references for answers with your configured provider. Local
+  extraction and preview stay available without enabling reference sharing.
+- Check light/dark/accent themes, focus, attachment cancellation, citation dialogs
+  and typing feel. These installed checks and inherited recording/live-assistance
+  acceptance remain pending before stable promotion.
 
-See the [preview notes](docs/releases/0.5.54.md), the
-[previous reference-document preview](docs/releases/0.5.53.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.55.md), the
+[previous live-assistance preview](docs/releases/0.5.54.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 

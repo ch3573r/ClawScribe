@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.55
+
+- Add Attach file directly beside the Sources controls in Meeting memory. Use one explicitly selected eligible meeting as the destination; otherwise show a searchable meeting picker that respects project/date filters. Include the destination in the source selection after attachment without automatically selecting document excerpts or enabling sharing.
+- Restore compact, non-modal meeting chat in the corner with collapsed question-scope controls, a fixed composer and one history scrollbar. Reuse unchanged Markdown/citation history while typing instead of rebuilding it on each keystroke; installed typing latency remains unmeasured.
+- Clarify reference consent as Use selected references for answers and identify the configured provider separately. Files are extracted locally; reference sharing remains off by default per conversation and is available with the selected answer provider, not only Codex.
+- Advance installer/runtime/updater version to 0.5.55 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
+- Installed light/dark/accent, focus/portal/citation, attachment cancellation and typing checks remain pending, along with exact-build recording, upgrade/update and two-hour live-assistance acceptance. Existing live-assistance limitations remain; see `docs/releases/0.5.55.md`.
+
 ## 0.5.54
 
 - Add manual live assistance during recording: ask a question, summarize so far or list open questions using the latest ten minutes of finalized speech and explicitly selected saved references. Show the configured provider, latest finalized time, transcription lag and cited evidence.
