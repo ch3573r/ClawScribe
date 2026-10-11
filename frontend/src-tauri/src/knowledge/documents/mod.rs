@@ -1,5 +1,4 @@
 //! Canonical local reference documents and bounded extraction.
-pub(crate) mod cleanup;
 pub mod extract;
 pub mod import;
 pub mod store;

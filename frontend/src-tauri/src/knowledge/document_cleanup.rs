@@ -1,5 +1,5 @@
 //! Startup-only recovery of abandoned reference originals.
-use super::{original_path, remove_original, store, Imports};
+use super::documents::{original_path, remove_original, store, Imports};
 use sqlx::{Connection, SqlitePool};
 use std::{
     path::Path,
@@ -216,7 +216,7 @@ mod tests {
                 .set_times(std::fs::FileTimes::new().set_modified(old_time))
                 .unwrap();
         }
-        let imports = super::super::Imports::default();
+        let imports = crate::knowledge::documents::Imports::default();
         assert!(sweep(&pool, root.path(), &imports)
             .await
             .unwrap()
@@ -257,7 +257,7 @@ mod tests {
     async fn sweep_skips_recording_admission_and_active_import() {
         let _lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, root, orphan, _) = fixture().await;
-        let imports = super::super::Imports::default();
+        let imports = crate::knowledge::documents::Imports::default();
         let recording = crate::audio::inference::claim_job().unwrap();
         assert!(sweep(&pool, root.path(), &imports)
             .await
@@ -283,15 +283,21 @@ mod tests {
     async fn original_removal_reports_failures_and_accepts_missing_files() {
         let root = tempfile::tempdir().unwrap();
         let name = "00000000-0000-4000-8000-000000000071.txt";
-        assert!(super::super::remove_original(root.path(), name)
-            .await
-            .is_ok());
+        assert!(
+            crate::knowledge::documents::remove_original(root.path(), name)
+                .await
+                .is_ok()
+        );
         std::fs::create_dir(root.path().join(name)).unwrap();
-        assert!(super::super::remove_original(root.path(), name)
-            .await
-            .is_err());
-        assert!(super::super::remove_original(root.path(), "../outside.txt")
-            .await
-            .is_err());
+        assert!(
+            crate::knowledge::documents::remove_original(root.path(), name)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::knowledge::documents::remove_original(root.path(), "../outside.txt")
+                .await
+                .is_err()
+        );
     }
 }

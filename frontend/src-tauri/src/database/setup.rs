@@ -50,20 +50,18 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
             .clone();
         tauri::async_runtime::spawn(async move {
             match originals {
-                Ok(root) => match crate::knowledge::documents::cleanup::sweep(
-                    &cleanup_pool,
-                    &root,
-                    &imports,
-                )
-                .await
-                {
-                    Ok(warnings) => {
-                        for warning in warnings {
-                            log::warn!("{}", warning);
+                Ok(root) => {
+                    match crate::knowledge::document_cleanup::sweep(&cleanup_pool, &root, &imports)
+                        .await
+                    {
+                        Ok(warnings) => {
+                            for warning in warnings {
+                                log::warn!("{}", warning);
+                            }
                         }
+                        Err(warning) => log::warn!("{}", warning),
                     }
-                    Err(warning) => log::warn!("{}", warning),
-                },
+                }
                 Err(_) => log::warn!("Reference document storage is unavailable for cleanup"),
             }
         });
