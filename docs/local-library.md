@@ -21,8 +21,9 @@ show the executed provider/model and retrieval mode. Cancel and scope changes
 invalidate pending work; retries reuse the pending request identity. Clear
 removes the selected conversation's history. Existing saved meeting chat,
 including legacy messages, remains readable. In a meeting, chat defaults to
-only that meeting; **Include other saved meetings** is an explicit expansion
-with independent meeting and project controls. Expanded questions use a separate
+only that meeting. Open **Context** and choose **Other saved meetings** to expand
+the scope with a searchable meeting picker and project filters. **Search mode**
+is in the chat's **More options** menu. Expanded questions use a separate
 saved library conversation: create or choose one in the chat. Turning off the
 expansion restores this meeting's own history. The library conversation remains
 available when expanding again or through the saved conversation selector.
@@ -73,8 +74,10 @@ Markdown file. A single selected meeting is used automatically; otherwise pick
 the destination meeting in the searchable dialog. The destination respects the
 current project/date filters and joins the selected sources after attachment.
 With no meetings available, save a meeting or adjust those filters first.
-You can also open a saved meeting's compact corner chat and use **Attach file**
-under **Reference documents**. Extraction stays on this PC. PDFs need a text layer; scanned or
+You can also use the paperclip beside the compact chat's question field, or
+**Context → Add file**. Selected references appear above the question field;
+remove a chip to exclude that file from the question. Suggested questions fill
+the field without sending. Extraction stays on this PC. PDFs need a text layer; scanned or
 encrypted PDFs are unsupported. Limits are 25 MiB per original, 500 PDF pages and
 2 MiB of extracted text, with additional archive/XML and extraction-time limits.
 A file near the text limit may need splitting because anchor metadata also counts

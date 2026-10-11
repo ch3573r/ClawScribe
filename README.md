@@ -131,8 +131,10 @@ back restores the meeting's history.
 Saved meetings also accept PDF, DOCX, TXT and Markdown reference documents.
 Use **Attach file** directly in **Meetings → Meeting memory**; a single selected
 meeting is the destination, otherwise choose a saved meeting there. The compact
-corner chat on a meeting's details also has **Attach file** under **Reference
-documents**. Attach and preview files locally, then explicitly select which references a
+corner chat on a meeting's details has a paperclip beside the question field.
+Its **Context** control holds the meeting picker, project filters, and reference
+files; selected files appear as removable chips above the question. **Search mode**
+is in **More options**. Attach and preview files locally, then explicitly select which references a
 question may use. Citations open the extracted page or paragraph, keeping
 reference material distinct from the recorded discussion. Sending excerpts to
 an external answer provider requires **Use selected references for answers** for that
