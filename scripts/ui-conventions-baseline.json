@@ -152,11 +152,6 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/MeetingDetails/MeetingChat.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/MeetingDetails/MeetingExportButtons.tsx": {
       "paletteColors": 0,
       "hexColors": 0,

@@ -70,6 +70,33 @@ for(const change of ['scope','provider','selection']) {
   });
 }
 
+test('non-resetting document refresh drops a pending answer when a selected file disappears',async()=>{
+  const answer=deferred(),cancelled=[],requests=[];let documents=[scoped('selected')],historyReads=0;
+  const app=view({scopeDocuments:async()=>documents,cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
+  try {
+    await ready(app);select(app.render(),'selected');await ready(app);
+    const work=app.render().ask('Question with a reference?','keyword');
+    assert.deepEqual([...requests[0].search.document_ids],['selected']);
+    documents=[];app.render().refreshDocuments();await ready(app);
+    assert.deepEqual([...app.render().selectedDocumentIds],[]);
+    assert.deepEqual(cancelled,[requests[0].request_id]);assert.equal(app.render().sending,false);
+    const historyBefore=historyReads;answer.resolve({});await work;
+    assert.equal(historyReads,historyBefore,'a changed selection must reject the late answer before history reconciliation');
+    assert.equal(app.render().messages.length,0);
+  } finally {app.unmount();}
+});
+
+test('non-resetting document refresh preserves an answer error when selected evidence is unchanged',async()=>{
+  let documentReads=0;
+  const app=view({scopeDocuments:async()=>{documentReads++;return [scoped('selected')];},ask:async()=>{throw 'Provider unavailable; retry';}});
+  try {
+    await ready(app);await app.render().ask('Question?','keyword');
+    assert.match(app.render().error,/Provider unavailable/);
+    const readsBefore=documentReads;app.render().refreshDocuments();await ready(app);
+    assert.equal(documentReads,readsBefore+1);assert.match(app.render().error,/Provider unavailable/);
+  } finally {app.unmount();}
+});
+
 test('scope changes discard late document lists before they can be selected',async()=>{
   const old=deferred();let calls=0;
   const app=view({scopeDocuments:()=>++calls===1?old.promise:Promise.resolve([scoped('new',['two'])])});
@@ -109,8 +136,57 @@ test('failed library sharing remains visible after its newly created owner is ad
 });
 
 const jsx=(type,props)=>({type,props});
-const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
+const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.type?.name==='ReferenceFileList'?node.type(node.props):node.props?.children)]:[];
 const text=node=>typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(text).join(''):node?text(node.props?.children):'';
+
+test('compact references expose files without collapsibles and gate sharing on selected external context',()=>{
+  const hooks=createHookHarness();let selected=[],provider='codex',added=0,reloads=0;
+  const state={scope:meeting('one'),owner:{kind:'meeting',id:'one'},documents:[scoped('selected')],selectedDocumentIds:[],documentsLoading:false,sharingEnabled:false,sharingLoading:false,reloadDocuments:()=>reloads++,refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled]),setDocumentSharing(){}};
+  const {ReferenceDocuments}=loadTsModule('src/components/MeetingDetails/ReferenceDocuments.tsx',{
+    react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},
+    '@/components/ui/dialog':{},'@/components/ui/dropdown-menu':{DropdownMenu:'menu',DropdownMenuTrigger:'trigger',DropdownMenuContent:'menu-content',DropdownMenuItem:'menu-item'},
+    '@/services/knowledgeService':{knowledgeService:{}},'./AttachReferenceButton':{AttachReferenceButton:'attach'},
+  });
+  const render=()=>hooks.render(()=>ReferenceDocuments({state,provider,attachMeetingId:'one',compact:true,onAddFile:()=>added++}));
+  try {
+    let tree=render();assert.ok(nodes(tree).some(node=>node.type==='li'));
+    assert.equal(nodes(tree).some(node=>node.props?.['aria-expanded']!==undefined),false);
+    assert.equal(nodes(tree).some(node=>node.type==='button'&&text(node)==='Reload references'),false);
+    assert.equal(nodes(tree).some(node=>node.type==='switch'),false,'unselected files must not show the consent switch');
+    nodes(tree).find(node=>node.type==='button'&&text(node)==='Add file').props.onClick();assert.equal(added,1);
+    nodes(tree).find(node=>node.type==='checkbox').props.onCheckedChange(true);assert.deepEqual(selected,[['selected',true]]);
+    state.selectedDocumentIds=['selected'];assert.ok(nodes(render()).some(node=>node.type==='switch'));
+    provider='builtin-ai';assert.equal(nodes(render()).some(node=>node.type==='switch'),false);
+    provider=undefined;assert.equal(nodes(render()).some(node=>node.type==='switch'),false,'an unconfigured provider is not external');
+    state.documents[0].attachment.indexing_status='failed';tree=render();
+    assert.equal(nodes(tree).some(node=>node.type==='button'&&text(node)==='Retry indexing'),false);
+    assert.ok(nodes(tree).some(node=>node.type==='menu-item'&&text(node)==='Retry indexing'));
+    nodes(tree).find(node=>node.type==='menu-item'&&text(node)==='Reload references').props.onSelect();assert.equal(reloads,1);
+    state.documentsLoading=true;state.documentsError='Could not load references';tree=render();
+    assert.match(text(tree),/Loading references/);assert.match(text(tree),/Could not load references/);
+    assert.equal(nodes(tree).find(node=>node.type==='checkbox').props.disabled,true);
+    state.documentsLoading=false;state.documents=[];assert.match(text(render()),/No references attached/);
+  } finally {hooks.unmount();}
+});
+
+test('compact reference actions release busy state and refresh documents even after Context unmounts',async()=>{
+  const hooks=createHookHarness(),work=deferred(),busy=[],changes=[];
+  const state={scope:meeting('one'),documents:[scoped('failed')],selectedDocumentIds:[],reloadDocuments(){},refreshDocuments(){},selectDocument(){}};
+  state.documents[0].attachment.indexing_status='failed';
+  const {ReferenceDocuments}=loadTsModule('src/components/MeetingDetails/ReferenceDocuments.tsx',{
+    react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{},
+    '@/components/ui/dialog':{},'@/components/ui/dropdown-menu':{DropdownMenuItem:'menu-item'},
+    '@/services/knowledgeService':{knowledgeService:{retryDocument:()=>work.promise}},'./AttachReferenceButton':{},
+  });
+  const render=()=>hooks.render(()=>ReferenceDocuments({state,compact:true,onAddFile(){},onBusyChange:value=>busy.push(value),onDocumentsChanged:(id,action)=>changes.push([id,action])}));
+  const retry=nodes(render()).find(node=>node.type==='menu-item'&&text(node)==='Retry indexing');
+  retry.props.onSelect();assert.equal(busy.at(-1),true,'busy must propagate as soon as the action starts');
+  hooks.unmount();work.resolve();await flush();
+  assert.equal(busy.at(-1),false,'closing Context must not leave the composer attachment disabled');
+  assert.deepEqual(changes,[['failed','retry']],'native success must still notify the mounted state owner');
+});
 
 for(const [provider,selectedDocumentIds] of [['codex',[]],['builtin-ai',['selected']]]) {
   test(`${provider} questions without external reference context stay available during permission reads`,()=>{
