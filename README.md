@@ -7,11 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.55**. This Windows GPU preview adds Attach file directly to
-Meeting memory and restores compact corner chat with less rendering work while
-typing. It includes manual live assistance from 0.5.54 and the reference documents,
-citations, portable backups and audio-status fixes from 0.5.53. See the
-[0.5.55 preview notes](docs/releases/0.5.55.md) and the
+Source version: **0.5.56**. This Windows GPU preview keeps the meeting chat
+conversation first, with scope and reference files behind a Context control and a
+paperclip beside the question field, and removes reference documents that no
+meeting uses any more. It includes the Attach file and compact chat work from 0.5.55
+and the manual live assistance from 0.5.54. See the
+[0.5.56 preview notes](docs/releases/0.5.56.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
 previews; drafts are excluded from updates. Installed acceptance remains
@@ -264,20 +265,22 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What changed in 0.5.55 preview
+## What changed in 0.5.56 preview
 
-- Use Attach file beside Meeting memory's Sources controls. One explicitly
-  selected meeting is the destination; otherwise use the searchable picker.
-- Chat in a compact corner popup with optional scope controls collapsed and a
-  fixed question composer. Draft typing reuses unchanged answer/citation content.
-- Use selected references for answers with your configured provider. Local
-  extraction and preview stay available without enabling reference sharing.
-- Check light/dark/accent themes, focus, attachment cancellation, citation dialogs
-  and typing feel. These installed checks and inherited recording/live-assistance
-  acceptance remain pending before stable promotion.
+- Open Context in the meeting chat to choose This meeting only or other saved
+  meetings, filter by project and manage reference files. Use the paperclip beside
+  the question field to attach a file; selected files appear as removable chips.
+- Search mode is in the chat's More options menu. Suggested questions fill the
+  field and never send.
+- Deleting a meeting or detaching its last reference now removes the reference
+  and its original file. Startup cleans up leftovers from earlier previews, and
+  portable backups include only attached references.
+- Check the chat in light, dark and accent themes, focus and keyboard use. These
+  installed checks and inherited recording/live-assistance acceptance remain
+  pending before stable promotion.
 
-See the [preview notes](docs/releases/0.5.55.md), the
-[previous live-assistance preview](docs/releases/0.5.54.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.56.md), the
+[previous attachment preview](docs/releases/0.5.55.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 

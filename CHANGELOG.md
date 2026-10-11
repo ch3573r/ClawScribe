@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.5.56
 
+- Keep the compact meeting chat conversation first. A slim Context control opens the meeting scope (a searchable, height-limited picker with project filters behind Filters) and the reference files with Add file; a paperclip beside the question field attaches a file with the existing local extraction, and selected files show as removable chips above it. Search mode moved to More options, and the empty chat offers three suggested questions that only fill the field. The Meeting memory page is unchanged.
+- Stop a reference action that finishes after a scope change from cancelling an unrelated answer.
 - Delete reference documents, including extracted text and original files, when their last meeting is deleted or detached, and keep unattached references out of portable backups. Startup removes orphaned references left by 0.5.53-0.5.55 when recording and imports are idle.
 - Give each live transcript sharing switch its own label association when Home and Settings are open together.
+- Advance installer/runtime/updater version to 0.5.56 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
+- Installed chat popup, light/dark/accent, focus and portal checks remain pending, along with exact-build recording, upgrade/update and two-hour live-assistance acceptance. See `docs/releases/0.5.56.md`.
 
 ## 0.5.55
 
