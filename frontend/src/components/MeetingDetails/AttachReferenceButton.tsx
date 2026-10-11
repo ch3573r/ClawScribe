@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type Ref } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Paperclip } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -11,10 +11,11 @@ import { referenceError } from '@/lib/knowledge-documents';
 
 export interface AttachmentMeeting { id: string; title: string }
 
-export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disabled = false, onAttached, onBusyChange }: {
+export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disabled = false, onAttached, onBusyChange, variant = 'label', buttonRef }: {
   meetingId?: string; meetings?: AttachmentMeeting[]; scopeKey?: string; disabled?: boolean;
   onAttached: (meetingId: string) => void;
   onBusyChange?: (busy: boolean) => void;
+  variant?: 'label' | 'icon'; buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -56,7 +57,8 @@ export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disa
     } finally {
       if (activeImport.current === request) activeImport.current = null;
       pending.current = false; cancelPending.current = false;
-      if (mounted.current) { setBusy(false); onBusyChange?.(false); setExtracting(false); setCancelling(false); }
+      onBusyChange?.(false);
+      if (mounted.current) { setBusy(false); setExtracting(false); setCancelling(false); }
     }
   }
   function choose() {
@@ -77,16 +79,17 @@ export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disa
   }
   const available = !!meetingId || meetings.length > 0;
   const matching = meetings.filter(meeting => meeting.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  return <div className="space-y-2">
-    <div className="flex flex-wrap items-center gap-2">
-      <Button type="button" variant="outline" size="sm" disabled={disabled || busy || !available} onClick={choose}>
-        <Paperclip />{busy ? extracting ? 'Attaching…' : 'Choosing file…' : 'Attach file'}
+  return <div className={variant === 'icon' ? 'contents' : 'space-y-2'}>
+    <div className={variant === 'icon' ? 'contents' : 'flex flex-wrap items-center gap-2'}>
+      <Button ref={buttonRef} type="button" variant={variant === 'icon' ? 'ghost' : 'outline'} size={variant === 'icon' ? 'icon' : 'sm'} aria-label={variant === 'icon' ? 'Attach file to this meeting' : undefined} aria-busy={variant === 'icon' ? busy : undefined} disabled={disabled || busy || !available} onClick={choose}>
+        <Paperclip />{variant === 'icon' ? null : busy ? extracting ? 'Attaching…' : 'Choosing file…' : 'Attach file'}
       </Button>
-      {extracting && <><p role="status" className="text-xs text-muted-foreground">{cancelling ? 'Cancelling extraction…' : 'Extracting locally…'}</p>
-        <Button type="button" variant="ghost" size="sm" disabled={cancelling} onClick={() => void cancel()}>Cancel extraction</Button></>}
+      {variant === 'icon' && busy && !extracting && <p role="status" className="order-last w-full text-xs text-muted-foreground">Choosing file…</p>}
+      {extracting && <><p role="status" className={variant === 'icon' ? 'order-last w-full text-xs text-muted-foreground' : 'text-xs text-muted-foreground'}>{cancelling ? 'Cancelling extraction…' : 'Extracting locally…'}</p>
+        <Button type="button" variant="ghost" size="sm" className={variant === 'icon' ? 'order-last' : undefined} disabled={cancelling} onClick={() => void cancel()}>Cancel extraction</Button></>}
     </div>
     {!available && <p className="text-xs text-muted-foreground">Save a meeting or adjust your filters before attaching a file.</p>}
-    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    {error && <p role="alert" className={variant === 'icon' ? 'order-last w-full text-sm text-destructive' : 'text-sm text-destructive'}>{error}</p>}
     <Dialog open={pickerOpen} onOpenChange={setPickerOpen}><DialogContent><DialogHeader>
       <DialogTitle>Attach file</DialogTitle><DialogDescription>Choose the saved meeting to attach this reference to. Its files will be available in Meeting memory.</DialogDescription>
     </DialogHeader>

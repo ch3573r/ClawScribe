@@ -58,6 +58,63 @@ test('live short-reply citation renders the verified preceding question without 
 });
 const jsx=(type,props)=>({type,props});
 const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
+const text=node=>Array.isArray(node)?node.map(text).join(''):typeof node==='string'?node:node?text(node.props?.children):'';
+
+function chatSurface(extra={}) {
+  const hooks=createHookHarness();
+  const state=stateFor();
+  const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
+    ...mocks,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},
+    '@/components/ui/scroll-area':{ScrollArea:'scroll-area'},
+  });
+  return {...hooks,state,render:()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider:'codex',model:'fixture',...extra}))};
+}
+
+test('compact layout isolates configuration from the single conversation scroll area',()=>{
+  const context=jsx('context',{}),secondary=jsx('configuration',{}),start=jsx('paperclip',{}),attachments=jsx('chips',{}),menu=jsx('search-mode',{});
+  const app=chatSurface({compact:true,contextBar:context,secondary,composerStart:start,attachments,headerMenuExtra:menu});
+  try {
+    const tree=app.render(),scroll=nodes(tree).filter(node=>node.type==='scroll-area');
+    assert.equal(scroll.length,1);
+    assert.match(scroll[0].props.className,/min-h-0.*flex-1/);
+    assert.equal(nodes(scroll[0]).some(node=>['configuration','context'].includes(node.type)),false);
+    assert.ok(nodes(tree).includes(context));assert.equal(nodes(tree).includes(secondary),false);
+    const form=nodes(tree).find(node=>node.type==='form');
+    assert.ok(nodes(form).includes(start));assert.ok(nodes(form).includes(attachments));
+    assert.ok(nodes(nodes(tree).find(node=>node.type==='header')).includes(menu));
+    assert.ok(nodes(tree).some(node=>node.props?.['aria-label']==='More options'));
+    assert.match(nodes(form).find(node=>node.type==='label').props.className,/sr-only/);
+  } finally {app.unmount();}
+  const full=chatSurface({secondary});
+  assert.ok(nodes(nodes(full.render()).find(node=>node.type==='scroll-area')).includes(secondary),'full-page secondary stays in its original position');
+  full.unmount();
+});
+
+test('compact suggestions fill and focus the draft without submitting or granting sharing',()=>{
+  const suggestions=['What did we decide?','List the action items','Summarize the key points'];
+  const app=chatSurface({compact:true,suggestions});let asks=0,shares=0,focuses=0;
+  app.state.ask=async()=>asks++;app.state.setDocumentSharing=()=>shares++;
+  try {
+    nodes(app.render()).find(node=>node.type==='textarea').props.ref.current={focus:()=>focuses++};
+    for(const suggestion of suggestions) {
+      const button=nodes(app.render()).find(node=>node.type==='button'&&text(node)===suggestion);
+      assert.ok(button);assert.equal(button.props.type,'button');button.props.onClick();
+      assert.equal(nodes(app.render()).find(node=>node.type==='textarea').props.value,suggestion);
+    }
+    assert.equal(focuses,3);assert.equal(asks,0);assert.equal(shares,0);
+    app.state.messages=[{id:'answer',role:'assistant',content:'Answered',status:'completed'}];
+    assert.equal(nodes(app.render()).some(node=>node.type==='button'&&suggestions.includes(text(node))),false);
+  } finally {app.unmount();}
+});
+
+test('compact external reference notice points to Context and keeps Ask gated',()=>{
+  const app=chatSurface({compact:true});app.state.selectedDocumentIds=['reference'];app.state.sharingEnabled=false;
+  const input=nodes(app.render()).find(node=>node.type==='textarea');input.props.onChange({target:{value:'Question'}});
+  assert.match(text(app.render()),/reference sharing in Context/);
+  assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,true);
+  app.unmount();
+});
 test('accepted questions clear immediately and failed requests restore the question',async()=>{
   const hooks=createHookHarness();
   const state=stateFor();

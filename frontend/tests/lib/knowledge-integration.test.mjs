@@ -9,7 +9,7 @@ const nodes = (node) =>
     ? []
     : Array.isArray(node)
       ? node.flatMap(nodes)
-      : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions), ...nodes(node.props?.secondary)];
+      : [node, ...nodes(node.props?.children), ...nodes(node.props?.actions), ...nodes(node.props?.secondary), ...nodes(node.props?.contextBar), ...nodes(node.props?.composerStart), ...nodes(node.props?.attachments), ...nodes(node.props?.headerMenuExtra)];
 const text = (node) =>
   typeof node === "string" || typeof node === "number"
     ? String(node)
@@ -130,10 +130,9 @@ test("MeetingChat expands into a durable library owner and restores each history
   try {
     app.render();
     await flush();
-    app.button("Question scope").props.onClick();
     await app.state().ask("Original meeting question", "keyword");
     assert.deepEqual(requests[0].owner, { kind: "meeting", id: "a" });
-    app.check("Include other saved meetings", true);
+    app.button("Other saved meetings").props.onClick();
     app.render();
     await flush();
     await app.state().newConversation();
@@ -153,7 +152,7 @@ test("MeetingChat expands into a durable library owner and restores each history
     assert.equal(app.state().messages[0].id, "saved-library");
     deferAnswer = true;
     const late = app.state().ask("Pending library question", "keyword");
-    app.check("Include other saved meetings", false);
+    app.button("This meeting only").props.onClick();
     assert.equal(
       app.state().messages.length,
       0,
@@ -177,7 +176,7 @@ test("MeetingChat expands into a durable library owner and restores each history
       kind: "meeting",
       meeting_id: "a",
     });
-    app.check("Include other saved meetings", true);
+    app.button("Other saved meetings").props.onClick();
     app.render();
     await flush();
     assert.equal(app.state().owner.id, "saved-library");

@@ -82,8 +82,9 @@ function conversationName(messages: HistoryMessage[]) {
   const label = first.content.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions }: {
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra }: {
   state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
+  contextBar?: ReactNode; composerStart?: ReactNode; attachments?: ReactNode; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
 }) {
   const [question, setQuestion] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -93,6 +94,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const [namesRetry, setNamesRetry] = useState(0);
   const [settled, setSettled] = useState(0);
   const end = useRef<HTMLDivElement>(null);
+  const questionRef = useRef<HTMLTextAreaElement>(null);
   const pending = useRef<{ text: string; scope: string; owner?: string; provider?: string; model?: string; started: boolean; finished: boolean } | null>(null);
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
   const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
@@ -141,12 +143,15 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       request.finished = true; if (pending.current === request) setSettled(current => current + 1);
     });
   };
+  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={compact ? 1 : 2} placeholder={compact ? "Ask about this meeting…" : "What did we decide?"} className={`${compact ? "min-h-10" : "min-h-16"} resize-none`}
+    onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />;
   return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
       <h2 className={`min-w-0 flex-1 font-semibold ${compact ? "text-sm" : ""}`}>{title}</h2>
       <span className="rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">{friendlyModel(model)}</span>
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Conversations" disabled={state.sending || state.creating || state.historyLoading}><MoreHorizontal /></Button></DropdownMenuTrigger>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={compact ? "More options" : "Conversations"} disabled={state.sending || state.creating || state.historyLoading}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="max-w-sm">
+          {compact && headerMenuExtra}
           <DropdownMenuLabel>Conversations</DropdownMenuLabel>
           {state.scope.kind === "library" && <DropdownMenuItem onSelect={() => void state.newConversation()}>New conversation</DropdownMenuItem>}
           <DropdownMenuItem disabled={!state.messages.length || !state.owner} onSelect={() => { if (state.owner) setNames(current => { const next = { ...current }; delete next[state.owner!.id]; return next; }); void state.clear(); }}>Clear conversation</DropdownMenuItem>
@@ -160,12 +165,15 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       </DropdownMenu>
       {headerActions}
     </header>
+    {compact && contextBar && <div className="shrink-0 border-b border-border px-3 py-1">{contextBar}</div>}
     <ScrollArea className="min-h-0 flex-1">
       <div className={`space-y-4 ${compact ? "p-3" : "p-5"}`} aria-live="polite">
-        {secondary}
+        {!compact && secondary}
         {state.historyLoading && <p role="status" className="text-sm text-muted-foreground">Loading conversation…</p>}
         {state.creating && !state.sending && <p role="status" className="text-sm text-muted-foreground">Creating conversation…</p>}
-        {!state.messages.length && !state.historyLoading && <p className="text-sm text-muted-foreground">Ask about decisions, action items, or what was said.</p>}
+        {!state.messages.length && !state.historyLoading && (compact && suggestions?.length ? <div className="flex flex-col items-start gap-2" aria-label="Suggested questions">
+          {suggestions.slice(0, 3).map(suggestion => <Button key={suggestion} type="button" variant="outline" size="sm" onClick={() => { setQuestion(suggestion); questionRef.current?.focus(); }}>{suggestion}</Button>)}
+        </div> : <p className="text-sm text-muted-foreground">Ask about decisions, action items, or what was said.</p>)}
         {messages}
         {state.sending && <p role="status" className="text-sm text-muted-foreground">Finding sources and answering…</p>}
         {state.error && <p role="alert" className="text-sm text-destructive">{state.error}</p>}
@@ -174,15 +182,15 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       </div>
     </ScrollArea>
     <form className={`sticky bottom-0 shrink-0 border-t border-border bg-card ${compact ? "space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
-      <label className="block text-xs font-medium" htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
-      <Textarea id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={compact ? 1 : 2} placeholder={compact ? "Ask about this meeting…" : "What did we decide?"} className={`${compact ? "min-h-10" : "min-h-16"} resize-none`}
-        onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />
+      <label className={compact ? "sr-only" : "block text-xs font-medium"} htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
+      {compact && attachments}
+      {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : questionInput}
       <div className="flex items-center gap-2"><Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button>
         {state.sending && <Button type="button" variant="outline" onClick={state.cancel}>Cancel answer</Button>}
         <span className="text-xs text-muted-foreground">Shift+Enter for a new line</span>
       </div>
       {!provider || !model ? <p className="text-xs text-muted-foreground">Choose a summary provider and model in Settings.</p> : null}
-      {needsSharing && <p className="text-xs text-muted-foreground">Enable reference sharing above, or deselect references to ask about transcripts only.</p>}
+      {needsSharing && <p className="text-xs text-muted-foreground">{compact ? "Enable reference sharing in Context, or remove files to ask about transcripts only." : "Enable reference sharing above, or deselect references to ask about transcripts only."}</p>}
     </form>
   </PageSection>;
 }
