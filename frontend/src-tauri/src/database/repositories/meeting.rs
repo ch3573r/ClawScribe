@@ -16,6 +16,16 @@ impl MeetingsRepository {
     }
 
     pub async fn delete_meeting(pool: &SqlitePool, meeting_id: &str) -> Result<bool, SqlxError> {
+        Self::delete_meeting_with_documents(pool, meeting_id)
+            .await
+            .map(|(deleted, _)| deleted)
+    }
+
+    /// Return original storage names only after the database deletion commits.
+    pub async fn delete_meeting_with_documents(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<(bool, Vec<String>), SqlxError> {
         if meeting_id.trim().is_empty() {
             return Err(SqlxError::Protocol(
                 "meeting_id cannot be empty".to_string(),
@@ -26,17 +36,17 @@ impl MeetingsRepository {
         let mut transaction = conn.begin().await?;
 
         match delete_meeting_with_transaction(&mut transaction, meeting_id).await {
-            Ok(success) => {
+            Ok((success, originals)) => {
                 if success {
                     transaction.commit().await?;
                     info!(
                         "Successfully deleted meeting {} and all associated data",
                         meeting_id
                     );
-                    Ok(true)
+                    Ok((true, originals))
                 } else {
                     transaction.rollback().await?;
-                    Ok(false)
+                    Ok((false, Vec::new()))
                 }
             }
             Err(e) => {
@@ -270,7 +280,7 @@ fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
 async fn delete_meeting_with_transaction(
     transaction: &mut SqliteConnection,
     meeting_id: &str,
-) -> Result<bool, SqlxError> {
+) -> Result<(bool, Vec<String>), SqlxError> {
     // Check if meeting exists
     let meeting_exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM meetings WHERE id = ?")
         .bind(meeting_id)
@@ -279,7 +289,27 @@ async fn delete_meeting_with_transaction(
 
     if meeting_exists.is_none() {
         error!("Meeting {} not found for deletion", meeting_id);
-        return Ok(false);
+        return Ok((false, Vec::new()));
+    }
+
+    // Delete through sources before attachments cascade, preserving the same
+    // invalidation/redaction behavior as explicit reference deletion.
+    let documents: Vec<(String, String)> = sqlx::query_as(
+        "SELECT d.id,d.storage_name FROM knowledge_documents d
+         WHERE EXISTS (SELECT 1 FROM knowledge_document_attachments a
+                       WHERE a.document_id=d.id AND a.meeting_id=?)
+           AND NOT EXISTS (SELECT 1 FROM knowledge_document_attachments a
+                           WHERE a.document_id=d.id AND a.meeting_id<>?)",
+    )
+    .bind(meeting_id)
+    .bind(meeting_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for (id, _) in &documents {
+        sqlx::query("DELETE FROM knowledge_sources WHERE id=? AND kind='document'")
+            .bind(format!("document:{id}"))
+            .execute(&mut *transaction)
+            .await?;
     }
 
     // Live bookmarks may not have been associated by the library view yet.
@@ -311,7 +341,10 @@ async fn delete_meeting_with_transaction(
         .execute(&mut *transaction)
         .await?;
 
-    Ok(result.rows_affected() > 0)
+    Ok((
+        result.rows_affected() > 0,
+        documents.into_iter().map(|(_, name)| name).collect(),
+    ))
 }
 
 #[cfg(test)]
