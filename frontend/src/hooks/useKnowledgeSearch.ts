@@ -479,6 +479,7 @@ export function useKnowledgeSearch(
     sharingError,
     setDocumentSharing,
     reloadDocuments: () => { reset(); setDocumentRevision(value => value + 1); },
+    refreshDocuments: () => setDocumentRevision(value => value + 1),
     selectDocument: (id: string, enabled: boolean) => {
       if (!documents.some(row => row.attachment.id === id)) return;
       reset();

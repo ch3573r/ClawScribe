@@ -133,7 +133,7 @@ test('Meeting memory exposes attachment beside Sources and includes the destinat
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
     'lucide-react':{ChevronDown:'down',X:'x'},
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'ollama',model:'fixture'}})},
-    '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({scope,documents:[],messages:[],selectedDocumentIds:[],reloadDocuments:()=>reloads++})},
+    '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({scope,documents:[],messages:[],selectedDocumentIds:[],reloadDocuments:()=>reloads++,refreshDocuments(){}})},
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>({})}},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
@@ -154,13 +154,17 @@ test('Meeting memory exposes attachment beside Sources and includes the destinat
   } finally { hooks.unmount(); }
 });
 
-function cornerChat() {
+function cornerChat(service) {
   const hooks=createHookHarness();
-  const selected=[],state={scope:{kind:'meeting',meeting_id:'one'},messages:[],documents:[{attachment:{id:'file',display_name:'Plan.pdf'},meeting_ids:['one']}],selectedDocumentIds:[],cancel(){},reloadHistory(){},reloadDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled])};
+  const selected=[],state={scope:{kind:'meeting',meeting_id:'one'},messages:[],documents:[{attachment:{id:'file',display_name:'Plan.pdf'},meeting_ids:['one']}],selectedDocumentIds:[],cancel(){},reloadHistory(){},reloadDocuments(){},refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled])};
+  const {useKnowledgeSearch}=service?loadTsModule('src/hooks/useKnowledgeSearch.ts',{
+    react:hooks.react,'@tauri-apps/api/event':{listen:async()=>()=>{}},
+    '@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],cancel:async()=>{},history:async()=>[],scopeDocuments:async()=>[],documentSharing:async()=>false,...service}},
+  }):{useKnowledgeSearch:scope=>({...state,scope})};
   const {MeetingChat}=loadTsModule('src/components/MeetingDetails/MeetingChat.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
     'lucide-react':{MessageSquare:'chat-icon',X:'close',ChevronDown:'down'},
-    '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({...state,scope})},
+    '@/hooks/useKnowledgeSearch':{useKnowledgeSearch},
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsError:null,projectTagsLoading:false})},
     '@/components/ui/popover':{Popover:'popover',PopoverTrigger:'trigger',PopoverContent:'popup'},
     '@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},'@/components/ui/select':{},'@/components/ui/multi-select':{},
@@ -271,6 +275,76 @@ test('reference completion refreshes the current state owner after Context close
     assert.equal(nodes(app.chat().props.contextBar).find(node=>node.type==='references').props.actionError,'Could not update reference');
   } finally {app.unmount();}
 });
+
+const referenceFile={attachment:{id:'file',display_name:'Plan.pdf',format:'pdf',file_size:1024,sha256:'fixture',extraction_status:'ready',indexing_status:'failed'},meeting_ids:['one']};
+const references=app=>nodes(app.chat().props.contextBar).find(node=>node.type==='references');
+async function readyChat(app) { app.chat();await flush();app.chat();await flush();return app.chat().props.state; }
+async function libraryChat(app) {
+  nodes(app.chat().props.contextBar).find(node=>node.type==='button'&&text(node)==='Other saved meetings').props.onClick();
+  await readyChat(app);
+  app.chat().props.state.selectConversation({kind:'library',id:'saved-thread'});
+  return readyChat(app);
+}
+
+test('old-scope retry completion preserves a new library conversation transcripts-only answer',async()=>{
+  const answer=deferred(),cancelled=[],requests=[];let documentReads=0,answered=false;
+  const app=cornerChat({scopeDocuments:async()=>{documentReads++;return [referenceFile];},cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>answered?[{id:'saved-answer',role:'assistant',content:'Canonical answer',status:'completed',reply:null}]:[]});
+  try {
+    await readyChat(app);const complete=references(app).props.onDocumentsChanged;
+    await libraryChat(app);
+    const work=app.chat().props.state.ask('What did we decide?','keyword');
+    assert.equal(requests[0].owner.id,'saved-thread');assert.deepEqual([...requests[0].search.document_ids],[]);
+    assert.equal(app.chat().props.state.sending,true);
+    nodes(app.chat().props.contextBar).find(node=>node.type==='popover').props.onOpenChange(false);app.chat();
+    const readsBefore=documentReads;complete('file','retry');await readyChat(app);
+    assert.equal(documentReads,readsBefore+1,'late completion must refetch the active document list');
+    assert.deepEqual(cancelled,[]);assert.equal(app.chat().props.state.sending,true);
+    assert.equal(app.chat().props.state.controller.pendingRequest(),requests[0].request_id);
+    answered=true;answer.resolve({});await work;
+    assert.equal(app.chat().props.state.messages[0].id,'saved-answer');
+    assert.equal(app.chat().props.state.sending,false);
+  } finally {app.unmount();}
+});
+
+for(const scenario of [{action:'delete',otherScope:true},{action:'detach',otherScope:false}]) {
+  test(`${scenario.otherScope?'other-scope delete':'same-scope detach'} completion deselects the active file and cancels its answer`,async()=>{
+    const answer=deferred(),cancelled=[],requests=[];let documentReads=0,historyReads=0;
+    const app=cornerChat({scopeDocuments:async()=>{documentReads++;return [referenceFile];},cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
+    try {
+      await readyChat(app);const complete=references(app).props.onDocumentsChanged;
+      if(scenario.otherScope)await libraryChat(app);
+      app.chat().props.state.selectDocument('file',true);await readyChat(app);
+      const work=app.chat().props.state.ask('Question with a reference?','keyword');
+      assert.deepEqual([...requests[0].search.document_ids],['file']);
+      const readsBefore=documentReads;complete('file',scenario.action);await readyChat(app);
+      assert.deepEqual([...app.chat().props.state.selectedDocumentIds],[]);
+      assert.deepEqual(cancelled,[requests[0].request_id]);assert.equal(app.chat().props.state.sending,false);
+      assert.equal(documentReads,readsBefore+1,'evidence removal must still reload documents');
+      const historyBefore=historyReads;answer.resolve({});await work;
+      assert.equal(historyReads,historyBefore,'cancelled completion must not reconcile stale history');
+    } finally {app.unmount();}
+  });
+}
+
+for(const scenario of [
+  {action:'retry',otherScope:false,selected:true,present:true,refreshes:1},
+  {action:'detach',otherScope:true,selected:true,present:true,refreshes:1},
+  {action:'delete',otherScope:true,selected:false,present:true,refreshes:1},
+  ...['retry','detach','delete'].map(action=>({action,otherScope:true,selected:false,present:false,refreshes:0})),
+]) {
+  test(`${scenario.otherScope?'other':'same'}-scope ${scenario.action} completion with a ${scenario.present?(scenario.selected?'selected':'unselected'):'missing'} file uses the non-resetting path`,()=>{
+    const app=cornerChat();let refreshes=0,reloads=0;
+    app.state.refreshDocuments=()=>refreshes++;app.state.reloadDocuments=()=>reloads++;
+    try {
+      const complete=references(app).props.onDocumentsChanged;
+      if(scenario.otherScope)nodes(app.chat().props.contextBar).find(node=>node.type==='button'&&text(node)==='Other saved meetings').props.onClick();
+      app.state.selectedDocumentIds=scenario.selected?['file']:[];
+      if(!scenario.present)app.state.documents=[];
+      app.chat();complete('file',scenario.action);
+      assert.equal(refreshes,scenario.refreshes);assert.equal(reloads,0);assert.deepEqual(app.selected,[]);
+    } finally {app.unmount();}
+  });
+}
 
 test('icon attachment uses the same busy, cancel and safe error flow',async()=>{
   const work=deferred(),cancelled=[],attached=[],busy=[];

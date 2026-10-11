@@ -70,6 +70,33 @@ for(const change of ['scope','provider','selection']) {
   });
 }
 
+test('non-resetting document refresh drops a pending answer when a selected file disappears',async()=>{
+  const answer=deferred(),cancelled=[],requests=[];let documents=[scoped('selected')],historyReads=0;
+  const app=view({scopeDocuments:async()=>documents,cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
+  try {
+    await ready(app);select(app.render(),'selected');await ready(app);
+    const work=app.render().ask('Question with a reference?','keyword');
+    assert.deepEqual([...requests[0].search.document_ids],['selected']);
+    documents=[];app.render().refreshDocuments();await ready(app);
+    assert.deepEqual([...app.render().selectedDocumentIds],[]);
+    assert.deepEqual(cancelled,[requests[0].request_id]);assert.equal(app.render().sending,false);
+    const historyBefore=historyReads;answer.resolve({});await work;
+    assert.equal(historyReads,historyBefore,'a changed selection must reject the late answer before history reconciliation');
+    assert.equal(app.render().messages.length,0);
+  } finally {app.unmount();}
+});
+
+test('non-resetting document refresh preserves an answer error when selected evidence is unchanged',async()=>{
+  let documentReads=0;
+  const app=view({scopeDocuments:async()=>{documentReads++;return [scoped('selected')];},ask:async()=>{throw 'Provider unavailable; retry';}});
+  try {
+    await ready(app);await app.render().ask('Question?','keyword');
+    assert.match(app.render().error,/Provider unavailable/);
+    const readsBefore=documentReads;app.render().refreshDocuments();await ready(app);
+    assert.equal(documentReads,readsBefore+1);assert.match(app.render().error,/Provider unavailable/);
+  } finally {app.unmount();}
+});
+
 test('scope changes discard late document lists before they can be selected',async()=>{
   const old=deferred();let calls=0;
   const app=view({scopeDocuments:()=>++calls===1?old.promise:Promise.resolve([scoped('new',['two'])])});
@@ -114,7 +141,7 @@ const text=node=>typeof node==='string'||typeof node==='number'?String(node):Arr
 
 test('compact references expose files without collapsibles and gate sharing on selected external context',()=>{
   const hooks=createHookHarness();let selected=[],provider='codex',added=0,reloads=0;
-  const state={scope:meeting('one'),owner:{kind:'meeting',id:'one'},documents:[scoped('selected')],selectedDocumentIds:[],documentsLoading:false,sharingEnabled:false,sharingLoading:false,reloadDocuments:()=>reloads++,selectDocument:(id,enabled)=>selected.push([id,enabled]),setDocumentSharing(){}};
+  const state={scope:meeting('one'),owner:{kind:'meeting',id:'one'},documents:[scoped('selected')],selectedDocumentIds:[],documentsLoading:false,sharingEnabled:false,sharingLoading:false,reloadDocuments:()=>reloads++,refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled]),setDocumentSharing(){}};
   const {ReferenceDocuments}=loadTsModule('src/components/MeetingDetails/ReferenceDocuments.tsx',{
     react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},
     '@/components/ui/button':{Button:'button'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},
@@ -145,7 +172,7 @@ test('compact references expose files without collapsibles and gate sharing on s
 
 test('compact reference actions release busy state and refresh documents even after Context unmounts',async()=>{
   const hooks=createHookHarness(),work=deferred(),busy=[],changes=[];
-  const state={scope:meeting('one'),documents:[scoped('failed')],selectedDocumentIds:[],reloadDocuments(){},selectDocument(){}};
+  const state={scope:meeting('one'),documents:[scoped('failed')],selectedDocumentIds:[],reloadDocuments(){},refreshDocuments(){},selectDocument(){}};
   state.documents[0].attachment.indexing_status='failed';
   const {ReferenceDocuments}=loadTsModule('src/components/MeetingDetails/ReferenceDocuments.tsx',{
     react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},

@@ -125,8 +125,10 @@ export function MeetingChat({
           const current = currentState.current;
           const sameScope = JSON.stringify(current.scope) === scopeKey;
           if (!sameScope && !current.documents.some(row => row.attachment.id === id)) return;
-          if (action === 'delete' || (action === 'detach' && sameScope)) current.selectDocument(id, false);
-          current.reloadDocuments();
+          if (action !== 'retry' && (sameScope || (action === 'delete' && current.selectedDocumentIds.includes(id)))) {
+            current.selectDocument(id, false);
+            current.reloadDocuments();
+          } else current.refreshDocuments();
         }} />
     </PopoverContent>
   </Popover>;
