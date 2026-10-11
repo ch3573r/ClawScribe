@@ -3,9 +3,12 @@ pub mod answers;
 pub mod chunking;
 pub mod commands;
 pub mod conversations;
+pub mod document_cleanup;
 pub mod document_context;
 #[cfg(test)]
 mod document_contract_tests;
+#[cfg(test)]
+mod document_lifecycle_tests;
 pub mod documents;
 pub mod embedding;
 pub mod evidence;

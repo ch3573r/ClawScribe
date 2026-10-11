@@ -92,7 +92,7 @@ export function LiveAssistancePanel() {
       <div className="flex flex-wrap items-center gap-2 text-sm"><span>Provider: {knowledgeProviderLabel(state.provider)}</span>
         {state.model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm">Selected model</Button></TooltipTrigger><TooltipContent>{state.model}</TooltipContent></Tooltip>}
       </div>
-      {TranscriptSharingControl(live)}
+      <TranscriptSharingControl {...live} />
       {state.sharingBusy && <p role="status" className="text-xs text-muted-foreground">Saving live sharing…</p>}
       {state.sessionId && state.snapshot?.transcription_available && state.snapshot.finalized_through_seconds <= 0 &&
         <p role="status" className="text-sm text-muted-foreground">Waiting for finalized speech. Ask when transcription has caught up.</p>}

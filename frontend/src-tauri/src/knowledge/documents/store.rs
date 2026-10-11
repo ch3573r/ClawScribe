@@ -146,13 +146,47 @@ pub async fn get(
 ) -> Result<DocumentAttachment, DocumentError> {
     read_attachment(&mut *pool.acquire().await?, meeting, id).await
 }
-pub async fn detach(pool: &SqlitePool, meeting: &str, id: &str) -> Result<(), DocumentError> {
-    sqlx::query("DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?")
-        .bind(meeting)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
+pub async fn detach(
+    pool: &SqlitePool,
+    meeting: &str,
+    id: &str,
+) -> Result<Option<String>, DocumentError> {
+    let mut tx = pool.begin().await?;
+    let removed = sqlx::query(
+        "DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?",
+    )
+    .bind(meeting)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    let storage = if removed.rows_affected() > 0 {
+        delete_unattached(&mut tx, id).await?
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(storage)
+}
+
+pub(crate) async fn delete_unattached(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let storage = sqlx::query_scalar::<_, String>(
+        "SELECT storage_name FROM knowledge_documents WHERE id=?
+         AND NOT EXISTS (SELECT 1 FROM knowledge_document_attachments WHERE document_id=?)",
+    )
+    .bind(id)
+    .bind(id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if storage.is_some() {
+        sqlx::query("DELETE FROM knowledge_sources WHERE id=? AND kind='document'")
+            .bind(format!("document:{id}"))
+            .execute(connection)
+            .await?;
+    }
+    Ok(storage)
 }
 pub async fn delete(pool: &SqlitePool, meeting: &str, id: &str) -> Result<String, DocumentError> {
     let mut tx = pool.begin().await?;
@@ -211,9 +245,9 @@ impl From<sqlx::Error> for DocumentError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    async fn pool() -> SqlitePool {
+    pub(crate) async fn pool() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -233,7 +267,7 @@ mod tests {
         )
         .unwrap()
     }
-    async fn attach(pool: &SqlitePool, meeting: &str, id: &str) -> Publication {
+    pub(crate) async fn attach(pool: &SqlitePool, meeting: &str, id: &str) -> Publication {
         publish(
             pool,
             meeting,
@@ -255,7 +289,10 @@ mod tests {
         assert_eq!(first.attachment.id, second.attachment.id);
         assert!(first.original_kept);
         assert!(!second.original_kept);
-        detach(&pool, "aster", &first.attachment.id).await.unwrap();
+        assert_eq!(
+            detach(&pool, "aster", &first.attachment.id).await.unwrap(),
+            None
+        );
         assert!(list(&pool, "aster").await.unwrap().is_empty());
         assert_eq!(
             blocks(&pool, "birch", &first.attachment.id)
@@ -305,22 +342,60 @@ mod tests {
     }
     #[tokio::test]
     async fn explicit_delete_removes_all_relations_and_fts() {
+        assert_deleted("explicit").await;
+    }
+    #[tokio::test]
+    async fn last_detach_deletes_and_redacts_dependent_turns() {
+        assert_deleted("detach").await;
+    }
+    async fn assert_deleted(path: &str) {
         let pool = pool().await;
         let attached = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
-        attach(&pool, "birch", "00000000-0000-4000-8000-000000000002").await;
-        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) VALUES ('meeting:aster','meeting','aster')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,question,scope_json,frozen_ids_json,status,provider,model) VALUES ('reference-turn','meeting:aster','synthetic','What is the reference?','{}','[]','completed','synthetic','synthetic')")
-            .execute(&pool).await.unwrap();
+        if path == "explicit" {
+            attach(&pool, "birch", "00000000-0000-4000-8000-000000000002").await;
+        }
+        seed_dependent_turn(&pool, &attached.attachment.id).await;
+        let storage = format!("{}.docx", attached.attachment.id);
+        match path {
+            "explicit" => assert_eq!(
+                delete(&pool, "aster", &attached.attachment.id)
+                    .await
+                    .unwrap(),
+                storage
+            ),
+            "detach" => assert_eq!(
+                detach(&pool, "aster", &attached.attachment.id)
+                    .await
+                    .unwrap(),
+                Some(storage)
+            ),
+            _ => unreachable!(),
+        }
+        assert_deleted_state(&pool, &attached.attachment.id).await;
+    }
+    /// A conversation owned by another meeting must survive its reference being deleted.
+    pub(crate) async fn seed_dependent_turn(pool: &SqlitePool, document: &str) {
+        // The dependent conversation must survive deletion of the owning meeting.
+        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) VALUES ('meeting:birch','meeting','birch')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_requests(id,owner_id,input_fingerprint,question,scope_json,frozen_ids_json,status,provider,model) VALUES ('reference-turn','meeting:birch','synthetic','What is the reference?','{}','[]','completed','synthetic','synthetic')")
+            .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO knowledge_messages(id,request_id,role,content) VALUES ('reference-answer','reference-turn','assistant','Public reference content [K700]')")
-            .execute(&pool).await.unwrap();
+            .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO knowledge_request_evidence(request_id,ordinal,reference_json,display_json) VALUES ('reference-turn',700,'{}','{}')")
-            .execute(&pool).await.unwrap();
+            .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO knowledge_request_sources(request_id,source_id,revision) VALUES ('reference-turn',?,1)")
-            .bind(format!("document:{}",attached.attachment.id)).execute(&pool).await.unwrap();
-        delete(&pool, "aster", &attached.attachment.id)
-            .await
-            .unwrap();
+            .bind(format!("document:{}",document)).execute(pool).await.unwrap();
+    }
+    pub(crate) async fn assert_deleted_state(pool: &SqlitePool, document: &str) {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM knowledge_sources WHERE id=?")
+                .bind(format!("document:{}", document))
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
         for table in [
             "knowledge_documents",
             "knowledge_document_blocks",
@@ -328,33 +403,33 @@ mod tests {
             "knowledge_document_fts",
         ] {
             let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&pool)
+                .fetch_one(pool)
                 .await
                 .unwrap();
             assert_eq!(rows, 0);
         }
         assert!(sqlx::query("PRAGMA foreign_key_check")
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
             .unwrap()
             .is_empty());
         let status: String =
             sqlx::query_scalar("SELECT status FROM knowledge_requests WHERE id='reference-turn'")
-                .fetch_one(&pool)
+                .fetch_one(pool)
                 .await
                 .unwrap();
         assert_eq!(status, "invalidated");
         let content: String = sqlx::query_scalar(
             "SELECT content FROM knowledge_messages WHERE id='reference-answer'",
         )
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .unwrap();
         assert!(content.is_empty());
         let maps: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM knowledge_request_evidence WHERE request_id='reference-turn'",
         )
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .unwrap();
         assert_eq!(maps, 0);

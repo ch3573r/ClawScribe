@@ -116,13 +116,19 @@ pub async fn knowledge_get_document_blocks(
 }
 #[tauri::command]
 pub async fn knowledge_remove_attachment(
+    app: AppHandle,
     state: State<'_, AppState>,
     meeting_id: String,
     document_id: String,
 ) -> Result<(), String> {
-    super::documents::store::detach(state.db_manager.pool(), &meeting_id, &document_id)
+    let root = document_root(&app)?;
+    let name = super::documents::store::detach(state.db_manager.pool(), &meeting_id, &document_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Some(name) = name {
+        super::documents::remove_original(&root, &name).await?;
+    }
+    Ok(())
 }
 #[tauri::command]
 pub async fn knowledge_delete_document(
@@ -135,11 +141,7 @@ pub async fn knowledge_delete_document(
     let name = super::documents::store::delete(state.db_manager.pool(), &meeting_id, &document_id)
         .await
         .map_err(|e| e.to_string())?;
-    let path = super::documents::original_path(&root, &name).map_err(|e| e.to_string())?;
-    match tokio::fs::remove_file(path).await {
-        Ok(())=>Ok(()), Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(()),
-        Err(_)=>Err("The document was deleted, but its original file could not be removed. Check storage permissions.".into()),
-    }
+    super::documents::remove_original(&root, &name).await
 }
 
 #[tauri::command]

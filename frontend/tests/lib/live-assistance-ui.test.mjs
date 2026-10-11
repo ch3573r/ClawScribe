@@ -100,7 +100,10 @@ test('sharing remains an explicit separate control and unavailable modes offer s
   const app = await panel({ sharing: false });
   try {
     app.expand(); const controls = nodes(app.render()).filter(node => node.type === 'switch');
-    assert.equal(controls.length, 2); assert.equal(controls[0].props.checked, false); assert.equal(controls[1].props.checked, false);
+    const transcriptControl = nodes(app.render()).find(node => node.type?.name === 'TranscriptSharingControl');
+    assert.ok(transcriptControl, 'the live transcript control renders as a child component');
+    assert.equal(transcriptControl.props.state.transcriptSharing, false);
+    assert.equal(controls.length, 1); assert.equal(controls[0].props.checked, false);
     assert.equal(app.button('Summarize so far').props.disabled, true); assert.equal(app.requests.length, 0);
   } finally { app.dispose(); }
   for (const configuration of [{ available: false }, { provider: 'builtin-ai' }]) {

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Delete reference documents, including extracted text and original files, when their last meeting is deleted or detached, and keep unattached references out of portable backups. Startup removes orphaned references left by 0.5.53-0.5.55 when recording and imports are idle.
+- Give each live transcript sharing switch its own label association when Home and Settings are open together.
+
 ## 0.5.55
 
 - Add Attach file directly beside the Sources controls in Meeting memory. Use one explicitly selected eligible meeting as the destination; otherwise show a searchable meeting picker that respects project/date filters. Include the destination in the source selection after attachment without automatically selecting document excerpts or enabling sharing.

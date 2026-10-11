@@ -1060,11 +1060,19 @@ pub async fn api_delete_meeting<R: Runtime>(
         roots.push(data.join("restored-recordings"));
     }
 
-    match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
-        Ok(true) => {
+    match MeetingsRepository::delete_meeting_with_documents(pool, &meeting_id).await {
+        Ok((true, originals)) => {
             let mut warnings = Vec::new();
             match app.path().app_data_dir() {
                 Ok(data) => {
+                    let root = data.join("reference-documents");
+                    for name in originals {
+                        if let Err(warning) =
+                            crate::knowledge::documents::remove_original(&root, &name).await
+                        {
+                            warnings.push(warning);
+                        }
+                    }
                     if let Some(warning) =
                         crate::summary::codex_provider::remove_meeting_outputs(&data, &meeting_id)
                             .await
@@ -1072,7 +1080,12 @@ pub async fn api_delete_meeting<R: Runtime>(
                         warnings.push(warning);
                     }
                 }
-                Err(_) => warnings.push("Could not locate generated meeting outputs".into()),
+                Err(_) => {
+                    if !originals.is_empty() {
+                        warnings.push("Could not locate reference document originals".into());
+                    }
+                    warnings.push("Could not locate generated meeting outputs".into());
+                }
             }
             if let Some(warning) =
                 crate::summary::codex_provider::remove_meeting_runs(&meeting_id).await
@@ -1132,7 +1145,7 @@ pub async fn api_delete_meeting<R: Runtime>(
                 "warnings": warnings
             }))
         }
-        Ok(false) => {
+        Ok((false, _)) => {
             log_warn!("Meeting not found or already deleted");
             Err(format!(
                 "Meeting not found or could not be deleted: {}",

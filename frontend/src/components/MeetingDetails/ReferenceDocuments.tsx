@@ -86,7 +86,7 @@ export function ReferenceDocuments({state,provider,attachMeetingId,reveal=0}: {
     </div>
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {expanded && <div id={panelId} className="space-y-3">
-      <p className="text-xs text-muted-foreground">Choose references to include in searches and questions. Files are extracted locally. PDF, DOCX, TXT or Markdown · up to 25 MiB.</p>
+      <p className="text-xs text-muted-foreground">Choose references to include in searches and questions. Files are extracted locally. PDF, DOCX, TXT or Markdown · up to 25 MiB. Detaching deletes the original unless another meeting uses it.</p>
       {state.documentsLoading && <p role="status" className="text-sm text-muted-foreground">Loading references…</p>}
       {state.documentsError && <p role="alert" className="text-sm text-destructive">{state.documentsError}</p>}
       {!state.documentsLoading && !state.documents.length && <p className="text-xs text-muted-foreground">{attachMeetingId?'No references attached.':'No references in this scope. Use Attach file above to add one.'}</p>}

@@ -287,6 +287,65 @@ fn unpack_error(path: &Path, destination: &Path) -> String {
 }
 
 #[tokio::test]
+async fn backup_v2_excludes_orphans_and_restores_attached_documents() {
+    let (source, _, originals) = document_fixture().await;
+    let orphan = "00000000-0000-4000-8000-000000000065";
+    seed_document(
+        &source,
+        originals.path(),
+        orphan,
+        documents::DocumentFormat::Text,
+        "Public orphan.txt",
+        b"Synthetic orphan reference",
+    )
+    .await;
+    // Reproduce the orphan left by older installs without invoking the fixed detach.
+    sqlx::query("DELETE FROM knowledge_document_attachments WHERE document_id=?")
+        .bind(orphan)
+        .execute(&source)
+        .await
+        .unwrap();
+    let (mut manifest, folders) = snapshot_with_documents(&source).await.unwrap();
+    assert_eq!(manifest.tables["knowledge_documents"].len(), 4);
+    assert!(manifest.tables["knowledge_documents"]
+        .iter()
+        .all(|row| row["id"] != orphan));
+    for table in [
+        "knowledge_document_blocks",
+        "knowledge_document_attachments",
+    ] {
+        assert!(manifest.tables[table]
+            .iter()
+            .all(|row| row["document_id"] != orphan));
+    }
+    archive_documents::set_file_references(&mut manifest).unwrap();
+    archive_documents::validate(&manifest).unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let archive = target.path().join("references.zip");
+    write_archive_with_documents(&archive, manifest, folders, originals.path()).unwrap();
+    let mut zip = zip::ZipArchive::new(File::open(&archive).unwrap()).unwrap();
+    assert!(zip
+        .by_name(&format!("reference-documents/{orphan}.txt"))
+        .is_err());
+    drop(zip);
+    let (manifest, stage) =
+        unpack(&archive, &target.path().join("recordings"), &HashSet::new()).unwrap();
+    archive_documents::validate(&manifest).unwrap();
+    let destination = super::tests::empty_conversation_destination().await;
+    let restored = target.path().join("reference-documents");
+    import_manifest_with_documents(&destination, manifest, stage, &restored)
+        .await
+        .unwrap();
+    assert_eq!(rows(&destination, "knowledge_documents").await.len(), 4);
+    assert!(!restored.join(format!("{orphan}.txt")).exists());
+    assert!(sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&destination)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn backup_v2_document_roundtrip() {
     let (source, request, originals) = document_fixture().await;
     let expected_documents = rows(&source, "knowledge_documents").await;

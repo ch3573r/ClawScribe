@@ -178,10 +178,21 @@ async fn snapshot_impl(
             .collect::<Vec<_>>()
             .join(",");
         let mut rows = Vec::new();
+        // Only references owned by meetings in this snapshot may leave the PC.
+        let ownership = "SELECT a.document_id FROM knowledge_document_attachments a
+                         JOIN meetings m ON m.id=a.meeting_id";
+        let filter = match *table {
+            "knowledge_documents" => format!(" WHERE id IN ({ownership})"),
+            "knowledge_document_blocks" => format!(" WHERE document_id IN ({ownership})"),
+            "knowledge_document_attachments" => {
+                " WHERE meeting_id IN (SELECT id FROM meetings)".into()
+            }
+            _ => String::new(),
+        };
         // Page the snapshot so the SQLite result itself is bounded.
         loop {
             let page: Vec<String> = sqlx::query_scalar(&format!(
-                "SELECT json_object({args}) FROM {table} LIMIT 500 OFFSET ?"
+                "SELECT json_object({args}) FROM {table}{filter} LIMIT 500 OFFSET ?"
             ))
             .bind(rows.len() as i64)
             .fetch_all(&mut *tx)

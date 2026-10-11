@@ -90,8 +90,10 @@ references. Keyword search and previews work offline without that permission.
 Document citation chips open the extracted page or paragraph. They describe
 reference material separately from the recorded discussion; they do not seek in
 meeting audio. Changed or replaced content is stale and requires a new question.
-Detaching a reference preserves an original shared with another meeting. Permanent
-deletion removes it from all attached meetings and invalidates dependent turns.
+Detaching a reference removes its extracted text and original file when no other
+meeting uses it, and invalidates dependent answers. References shared with another
+meeting are kept. Permanent deletion removes the reference from all attached
+meetings and invalidates dependent answers.
 Indexing status remains visible; retry a failed index from the reference actions.
 
 ## Word documents
@@ -236,6 +238,13 @@ Deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
 history, Codex scratch runs, outputs under app data, and cached transcript recovery
 copies are also removed where possible; cleanup failures are reported separately.
+References used only by this meeting are deleted, including extracted text and
+original files, even when recording files are kept. References shared with another
+meeting remain available there. Answers that depended on a deleted reference are
+invalidated and their saved content is cleared. File cleanup failures appear in the
+deletion warnings. Startup also cleans abandoned references from earlier installs
+when recording and imports are idle; unknown reference files are kept for at least
+24 hours before cleanup. Portable backups include only attached references.
 
 **Also delete the recording files** is on by default. It removes the whole
 recording folder, including audio, transcript copies, metadata, recovery originals,
