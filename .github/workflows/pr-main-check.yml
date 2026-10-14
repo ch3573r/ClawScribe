@@ -82,6 +82,9 @@ jobs:
       - name: Verify local build and storage policy
         run: node --test scripts/verify-workflow-policy.test.mjs
 
+      - name: Test the release asset verifier
+        run: node --test scripts/verify-release-assets.test.mjs
+
       - name: Install frontend dependencies and clear stale route types
         working-directory: frontend
         run: |
