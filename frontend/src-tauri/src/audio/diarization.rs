@@ -26,6 +26,10 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "diarization_eval.rs"]
+mod eval;
+
 const FLOAT_TIE_EPSILON: f64 = 1e-9;
 const MIN_SPLIT_SPEAKER_OVERLAP_SECONDS: f64 = 0.2;
 const MIN_SPLIT_PART_SECONDS: f64 = 1.25;
