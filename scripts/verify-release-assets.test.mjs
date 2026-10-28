@@ -30,11 +30,12 @@ function sign(body, { privateKey, keyId }, algo = 'ED', trusted = 'timestamp:1 f
   return Buffer.from(['untrusted comment: signature from test key', Buffer.concat([Buffer.from(algo), keyId, signature]).toString('base64'), `trusted comment: ${trusted}`, global.toString('base64'), ''].join('\n')).toString('base64');
 }
 
-function stage(t) {
+function stage(t, sourceVersion = version, runtimeVersion = sourceVersion) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-release-assets-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dir = path.join(root, 'assets');
   fs.mkdirSync(dir);
+  const names = releaseAssetNames(sourceVersion);
   const key = newKey();
   const files = { [names.setup]: crypto.randomBytes(4096), [names.msi]: crypto.randomBytes(4096) };
   const setupSig = sign(files[names.setup], key);
@@ -43,12 +44,12 @@ function stage(t) {
   write(names.setupSig, setupSig);
   write(names.msiSig, sign(files[names.msi], key));
   write('SHA256SUMS.txt', `${sha256(files[names.setup])}  nsis/${names.setup}\n${sha256(files[names.msi])}  msi/${names.msi}\n`);
-  write('BUILD-METADATA.txt', `product=ClawScribe\nversion=${version}\ninstaller_product_version=${version}\nbuild_commit=${commit}\nbuild_commit_short=${commit.slice(0, 7)}\nbuild_date_utc=2026-01-01T00:00:00Z\n`);
+  write('BUILD-METADATA.txt', `product=ClawScribe\nversion=${sourceVersion}\ninstaller_product_version=${runtimeVersion}\nbuild_commit=${commit}\nbuild_commit_short=${commit.slice(0, 7)}\nbuild_date_utc=2026-01-01T00:00:00Z\n`);
   write('BUILD-METRICS.json', '{}\n');
-  write('latest.json', JSON.stringify({ version, platforms: { 'windows-x86_64': { url: `https://github.com/${repo}/releases/download/v${version}/${names.setup}`, signature: setupSig } } }));
+  write('latest.json', JSON.stringify({ version: runtimeVersion, platforms: { 'windows-x86_64': { url: `https://github.com/${repo}/releases/download/v${sourceVersion}/${names.setup}`, signature: setupSig } } }));
   const tauriConf = path.join(root, 'tauri.conf.json');
   fs.writeFileSync(tauriConf, JSON.stringify({ plugins: { updater: { pubkey: key.publicKeyBase64 } } }));
-  const options = { dir, version, expectedCommit: commit, tauriConf, repo, minInstallerBytes: 1024 };
+  const options = { dir, version: sourceVersion, expectedCommit: commit, tauriConf, repo, minInstallerBytes: 1024 };
   return { root, dir, key, options, write, read: name => fs.readFileSync(path.join(dir, name)) };
 }
 
@@ -88,6 +89,49 @@ test('a complete release passes every check', t => {
   assert.equal(outcome.signatureResults[names.setup].algo, 'ED');
 });
 
+test('detached signatures reject malformed trusted-comment lines', () => {
+  const key = newKey();
+  const publicKey = parsePublicKey(key.publicKeyBase64);
+  const body = Buffer.from('synthetic installer');
+  const signed = Buffer.from(sign(body, key), 'base64').toString('utf8');
+  for (const replacement of ['', 'trusted comment:', '\ntrusted comment: ']) {
+    const malformed = Buffer.from(signed.replace(/^trusted comment: /m, replacement)).toString('base64');
+    assert.throws(() => verifyDetached(body, malformed, publicKey), /trusted comment/, JSON.stringify(replacement));
+  }
+});
+
+test('release verification rejects a malformed signature even when the manifest matches it', t => {
+  const staged = stage(t);
+  const malformed = Buffer.from(staged.read(names.setupSig).toString(), 'base64').toString('utf8').replace(/^trusted comment: /m, '');
+  const signature = Buffer.from(malformed).toString('base64');
+  staged.write(names.setupSig, signature);
+  const latest = JSON.parse(staged.read('latest.json'));
+  latest.platforms['windows-x86_64'].signature = signature;
+  staged.write('latest.json', JSON.stringify(latest));
+  const outcome = verifyAssets(staged.options);
+  assert.equal(outcome.ok, false);
+  assert.ok(outcome.failures.some(entry => /signature/.test(entry.name) && /trusted comment/.test(entry.detail)));
+});
+
+test('source prereleases retain asset identity while metadata and updater use the numeric runtime version', t => {
+  const staged = stage(t, '1.2.4-beta.1', '1.2.4');
+  const outcome = verifyAssets(staged.options);
+  assert.deepEqual(failedNames(outcome), []);
+  assert.equal(outcome.ok, true);
+
+  const latest = JSON.parse(staged.read('latest.json'));
+  for (const invalidVersion of ['1.2.4-beta.1', '1.2.3']) {
+    staged.write('latest.json', JSON.stringify({ ...latest, version: invalidVersion }));
+    assert.ok(failedNames(verifyAssets(staged.options)).includes('latest.json version'));
+  }
+  staged.write('latest.json', JSON.stringify(latest));
+  const metadata = staged.read('BUILD-METADATA.txt').toString();
+  for (const invalidVersion of ['1.2.4-beta.1', '1.2.3']) {
+    staged.write('BUILD-METADATA.txt', metadata.replace('installer_product_version=1.2.4\n', `installer_product_version=${invalidVersion}\n`));
+    assert.ok(failedNames(verifyAssets(staged.options)).includes('metadata installer_product_version'));
+  }
+});
+
 test('a tampered installer fails its checksum and signature checks', t => {
   const staged = stage(t);
   const bytes = staged.read(names.setup);
@@ -124,7 +168,7 @@ test('identity, manifest and asset-set mismatches are reported', t => {
 test('GitHub digests and sizes must match the local files', t => {
   const staged = stage(t);
   const assets = fs.readdirSync(staged.dir).map(name => ({ name, state: 'uploaded', size: staged.read(name).length, digest: `sha256:${sha256(staged.read(name))}` }));
-  const release = { draft: true, prerelease: false, assets };
+  const release = { tag_name: 'v1.2.3', draft: true, prerelease: false, assets };
   assert.deepEqual(failedNames(verifyAssets({ ...staged.options, release })), []);
 
   const wrongDigest = assets.map(asset => (asset.name === names.msi ? { ...asset, digest: `sha256:${'0'.repeat(64)}` } : asset));
@@ -135,6 +179,24 @@ test('GitHub digests and sizes must match the local files', t => {
 
   const unknown = [...assets, { name: 'surprise.zip', state: 'uploaded', size: 1, digest: 'sha256:00' }];
   assert.ok(failedNames(verifyAssets({ ...staged.options, release: { ...release, assets: unknown } })).includes('GitHub asset surprise.zip has a local copy'));
+});
+
+test('GitHub release tags must match the source version used in the download URL', t => {
+  for (const [sourceVersion, runtimeVersion, expectedTag, wrongTag] of [
+    ['1.2.3', '1.2.3', 'v1.2.3', 'v9.9.9'],
+    ['1.2.4-beta.1', '1.2.4', 'v1.2.4-beta.1', 'v1.2.4'],
+  ]) {
+    const staged = stage(t, sourceVersion, runtimeVersion);
+    const assets = fs.readdirSync(staged.dir).map(name => ({ name, state: 'uploaded', size: staged.read(name).length, digest: `sha256:${sha256(staged.read(name))}` }));
+    const release = { tag_name: expectedTag, draft: true, prerelease: false, assets };
+    assert.equal(verifyAssets({ ...staged.options, release }).ok, true);
+
+    for (const tag_name of [wrongTag, sourceVersion, undefined]) {
+      const outcome = verifyAssets({ ...staged.options, release: { ...release, tag_name } });
+      assert.equal(outcome.ok, false);
+      assert.ok(failedNames(outcome).includes('GitHub release tag matches the source version'));
+    }
+  }
 });
 
 test('the command line exits 0 for a valid release, 1 for a failing one and 2 for bad input', t => {

@@ -43,8 +43,9 @@ export function parsePublicKey(base64) {
 // A minisign signature file is base64 of four lines: the untrusted comment, algorithm + key id +
 // signature, the trusted comment, and a signature over (signature + trusted comment).
 export function verifyDetached(fileBytes, signatureBase64, publicKey) {
-  const lines = Buffer.from(signatureBase64.trim(), 'base64').toString('utf8').split(/\r?\n/).filter(Boolean);
+  const lines = Buffer.from(signatureBase64.trim(), 'base64').toString('utf8').split(/\r?\n/);
   if (lines.length < 4) throw new Error('signature file has too few lines');
+  if (!lines[2].startsWith('trusted comment: ')) throw new Error('signature trusted comment must start with "trusted comment: "');
   const raw = Buffer.from(lines[1], 'base64');
   if (raw.length !== 74) throw new Error(`unexpected signature length ${raw.length}`);
   const algo = raw.subarray(0, 2).toString();
@@ -54,7 +55,7 @@ export function verifyDetached(fileBytes, signatureBase64, publicKey) {
   if (!keyId.equals(publicKey.keyId)) return { ok: false, why: 'key id differs from the pinned updater key' };
   const message = algo === 'ED' ? crypto.createHash('blake2b512').update(fileBytes).digest() : fileBytes;
   const fileOk = crypto.verify(null, message, publicKey.key, signature);
-  const trustedComment = lines[2].replace(/^trusted comment: ?/, '');
+  const trustedComment = lines[2].slice('trusted comment: '.length);
   const globalOk = crypto.verify(null, Buffer.concat([signature, Buffer.from(trustedComment)]), publicKey.key, Buffer.from(lines[3], 'base64'));
   return { ok: fileOk && globalOk, fileOk, globalOk, algo, trustedComment };
 }
@@ -69,6 +70,9 @@ export function verifyAssets({ dir, version, expectedCommit, tauriConf, repo, re
   const checks = [];
   const check = (name, ok, detail = '') => { checks.push({ name, ok: Boolean(ok), detail }); };
   const names = releaseAssetNames(version);
+  // Match the release workflow: asset names and tags retain the source suffix,
+  // while Windows installer metadata and the updater use the numeric version.
+  const runtimeVersion = version.replace(/-.*$/, '');
   const required = ['BUILD-METADATA.txt', 'BUILD-METRICS.json', 'SHA256SUMS.txt', 'latest.json', ...Object.values(names)];
   const present = fs.readdirSync(dir);
   for (const name of required) check(`asset present: ${name}`, present.includes(name));
@@ -94,6 +98,7 @@ export function verifyAssets({ dir, version, expectedCommit, tauriConf, repo, re
   check('SHA256SUMS lists exactly the two installers', sums.length === 2);
 
   if (release) {
+    check('GitHub release tag matches the source version', release.tag_name === `v${version}`, release.tag_name);
     const uploaded = new Map(release.assets.map(asset => [asset.name, asset]));
     for (const asset of release.assets) {
       if (!digests[asset.name]) { check(`GitHub asset ${asset.name} has a local copy`, false); continue; }
@@ -106,14 +111,14 @@ export function verifyAssets({ dir, version, expectedCommit, tauriConf, repo, re
   const meta = parseKeyValueFile(fs.readFileSync(path.join(dir, 'BUILD-METADATA.txt'), 'utf8'));
   check('metadata product is ClawScribe', meta.product === 'ClawScribe');
   check('metadata version', meta.version === version, meta.version);
-  check('metadata installer_product_version', meta.installer_product_version === version, meta.installer_product_version);
+  check('metadata installer_product_version', meta.installer_product_version === runtimeVersion, meta.installer_product_version);
   check('metadata build_commit equals expected commit', meta.build_commit === expectedCommit, meta.build_commit);
   check('metadata build_commit_short', meta.build_commit_short === expectedCommit.slice(0, 7), meta.build_commit_short);
   try { JSON.parse(fs.readFileSync(path.join(dir, 'BUILD-METRICS.json'), 'utf8')); check('BUILD-METRICS.json parses', true); } catch (error) { check('BUILD-METRICS.json parses', false, error.message); }
 
   const latest = JSON.parse(fs.readFileSync(path.join(dir, 'latest.json'), 'utf8'));
   const platform = latest.platforms?.['windows-x86_64'];
-  check('latest.json version', latest.version === version, latest.version);
+  check('latest.json version', latest.version === runtimeVersion, latest.version);
   check('latest.json has exactly windows-x86_64', Object.keys(latest.platforms || {}).join() === 'windows-x86_64');
   check('latest.json installer URL names this version and installer', platform?.url === `https://github.com/${repo}/releases/download/v${version}/${names.setup}`, platform?.url);
   check('latest.json signature equals the setup .sig file', platform?.signature?.trim() === fs.readFileSync(path.join(dir, names.setupSig), 'utf8').trim());

@@ -310,6 +310,13 @@ every check and exits nonzero if any fails. Omit `--release-id` to verify the
 local files only. Passing the verifier does not replace the acceptance checks
 below.
 
+Use the full source version for `--version`, including any prerelease suffix.
+Asset filenames, the release tag and download URL retain that suffix; the
+verifier derives the numeric installer/runtime version for build metadata and
+`latest.json`, matching the release workflow. The supplied GitHub release must
+use the corresponding `v<source-version>` tag. Signature verification also
+requires the Minisign trusted-comment prefix accepted by installed updaters.
+
 Authenticode and updater signing are separate. `DIGICERT_KEYPAIR_ALIAS` enables
 the optional DigiCert signing script. Without it, installers are not
 Authenticode-signed and Windows may display an unknown-publisher/SmartScreen
