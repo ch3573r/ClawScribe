@@ -293,6 +293,30 @@ Get-Content .\SHA256SUMS.txt | ForEach-Object {
 }
 ```
 
+To check a staged draft end to end, download its assets into one directory and
+run the release verifier from the repository root. Find the draft's numeric
+release id with `gh api repos/<owner>/<repo>/releases`; the tag endpoint hides
+drafts.
+
+```powershell
+node scripts/verify-release-assets.mjs --dir <assets> --version <x.y.z> --commit <full commit sha> --repo <owner>/<repo> --release-id <id>
+```
+
+It confirms that the expected assets are present, that `SHA256SUMS.txt` and the
+digests GitHub reports match the files, that `BUILD-METADATA.txt` and
+`latest.json` name the version and commit, and that both installer signatures
+verify against the updater public key pinned in `tauri.conf.json`. It prints
+every check and exits nonzero if any fails. Omit `--release-id` to verify the
+local files only. Passing the verifier does not replace the acceptance checks
+below.
+
+Use the full source version for `--version`, including any prerelease suffix.
+Asset filenames, the release tag and download URL retain that suffix; the
+verifier derives the numeric installer/runtime version for build metadata and
+`latest.json`, matching the release workflow. The supplied GitHub release must
+use the corresponding `v<source-version>` tag. Signature verification also
+requires the Minisign trusted-comment prefix accepted by installed updaters.
+
 Authenticode and updater signing are separate. `DIGICERT_KEYPAIR_ALIAS` enables
 the optional DigiCert signing script. Without it, installers are not
 Authenticode-signed and Windows may display an unknown-publisher/SmartScreen
