@@ -20,6 +20,7 @@
 pub mod commands;
 pub mod model;
 pub mod parakeet_engine;
+pub mod worker;
 
 pub use commands::*;
 pub use model::{ParakeetError, ParakeetModel, TimestampedResult};
