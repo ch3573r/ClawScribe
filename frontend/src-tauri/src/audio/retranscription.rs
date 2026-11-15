@@ -619,7 +619,9 @@ async fn save_retranscription_transcripts<R: Runtime>(
 
     // Create transcript segments with proper timestamps from VAD, then stitch
     // obvious VAD fragments so the saved transcript reads like prose.
-    let segments = create_readable_transcript_segments_with_words(all_transcripts);
+    let mut segments = create_readable_transcript_segments_with_words(all_transcripts);
+    let vocabulary = super::vocabulary_settings::load_vocabulary(app);
+    super::vocabulary_settings::correct_segments(&vocabulary, &mut segments);
     validate_replacement_transcripts(&segments)?;
 
     // Save to database
