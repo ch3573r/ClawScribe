@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.21.0'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: x86_64-pc-windows-msvc
       - name: Public repository safety check
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.21.0'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: x86_64-pc-windows-msvc
       - name: Public repository safety check

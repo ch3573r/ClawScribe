@@ -178,7 +178,7 @@ jobs:
               Write-Host "Release dependency $($_.Name): $($_.Length) bytes, modified $($_.LastWriteTimeUtc.ToString('o'))"
             }
           }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         if: ${{ !inputs.knowledge && !inputs['inspect-runner-storage'] && !inputs['answer-acceptance'] }}
         with:
           targets: x86_64-pc-windows-msvc

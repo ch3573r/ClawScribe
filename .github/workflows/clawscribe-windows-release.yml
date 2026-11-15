@@ -257,7 +257,7 @@ jobs:
           Write-Host "Tag v$version already points at $headSha; republishing the same commit is allowed."
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: x86_64-pc-windows-msvc
 

@@ -1,0 +1,5 @@
+# Cargo 1.100 changed the layout of the build directory, which the
+# ort-sys 2.0.0-rc.10 build script depends on. Stay on 1.99 until that
+# dependency is updated.
+[toolchain]
+channel = "1.99.0"
