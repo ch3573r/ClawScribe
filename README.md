@@ -50,6 +50,19 @@ arrives; verify both sources in saved playback before relying on the recording.
 Review names, numbers, decisions, owners, and deadlines before sharing notes or
 exporting tasks. Obtain the recording permissions required for your meeting.
 
+## Command-line control
+
+While ClawScribe is running, launch it again with a flag to control the running
+instance from a Stream Deck, AutoHotkey, or a script:
+
+- `--toggle-recording` starts recording, or stops it if one is running.
+- `--start-recording` starts recording unless one is already running.
+- `--stop-recording` stops the current recording if there is one.
+
+Example: `"C:\Path\To\ClawScribe.exe" --toggle-recording`. The flags only work
+on an instance that is already running; launching the app with a flag does not
+start a recording.
+
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
