@@ -24,6 +24,7 @@ function timeline(props = {}) {
   const { SpeakerLaneTimeline } = loadTsModule(source('components/MeetingDetails/SpeakerLaneTimeline'), {
     react: { ...hooks.react, memo: fn => fn },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
     'lucide-react': { Activity: 'Activity', Pause: 'Pause', Play: 'Play' },
   });
   const sought = [], played = [];
@@ -49,27 +50,100 @@ for (const props of [
     const seek = view.nodes.find(node => node.props['aria-label'] === 'Seek recording');
     assert.ok(seek);
     assert.equal(seek.props.disabled, false);
+    assert.equal(seek.props.role, 'slider');
     assert.equal(view.nodes.filter(node => node.props['aria-label']?.endsWith(' timeline')).length, 0);
     assert.equal(view.nodes.filter(node => node.props.title?.startsWith('Me ')).length, 0);
-    seek.props.onClick({ clientX: 110, currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 400 }) } });
+    seek.props.onClick({ detail: 1, clientX: 110, currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 400 }) } });
     assert.deepEqual(view.sought, [150]);
+    seek.props.onKeyDown({ key: 'End', preventDefault() {} });
+    assert.deepEqual(view.sought, [150, 600]);
     assert.ok(view.nodes.some(node => node.props.style?.left === '25%'));
     assert.match(text(view.tree), /10:00/);
   });
 }
 
-test('speaker lanes cover all 250 timed rows and display the total count', () => {
+test('speaker lanes cover all 250 timed rows alongside the playback strip', () => {
   const view = timeline({ segments: longSegments, totalCount: 250, showSpeakerAttribution: true });
   const lane = view.nodes.find(node => node.props['aria-label'] === 'Seek Me timeline');
   assert.ok(lane);
+  assert.equal(lane.props.role, 'slider');
+  assert.match(text(view.tree), /Me/);
+  assert.ok(view.nodes.some(node => node.props['aria-label'] === 'Seek recording'));
   assert.equal(view.nodes.filter(node => node.props.title?.startsWith('Me ')).length, 250);
+  assert.equal(view.nodes.filter(node => node.props['data-timeline-segment']).length, 250);
   const lastBar = view.nodes.find(node => node.props.title === 'Me 08:18-08:19');
   assert.equal(lastBar.props.style.left, '83%');
-  assert.match(text(view.tree), /250 segments/);
+  assert.doesNotMatch(text(view.tree), /250 segments/);
   assert.doesNotMatch(text(view.tree), /100\/250/);
-  lane.props.onClick({ clientX: 410, currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 400 }) } });
+  lane.props.onClick({ detail: 1, clientX: 410, currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 400 }) } });
   assert.deepEqual(view.sought, [600]);
 });
+
+test('speaker lanes visibly name and separately group each speaker', () => {
+  const segments = [
+    { id: 'me', timestamp: 0, endTime: 3, text: 'Synthetic speech.', speaker: ' Me ' },
+    { id: 'participants', timestamp: 4, endTime: 8, text: 'Synthetic speech.', speaker: 'Participants' },
+    { id: 'unlabeled', timestamp: 9, endTime: 10, text: 'Synthetic speech.', speaker: ' ' },
+  ];
+  const view = timeline({ segments, showSpeakerAttribution: true });
+  for (const speaker of ['Me', 'Participants', 'Unlabeled']) {
+    const lane = view.nodes.find(node => node.props['aria-label'] === `Seek ${speaker} timeline`);
+    assert.ok(lane, `${speaker} lane is available`);
+    assert.match(text(view.tree), new RegExp(speaker));
+    assert.equal(nodes(lane).filter(node => node.props.title?.startsWith(`${speaker} `)).length, 1);
+  }
+});
+
+for (const label of ['Seek recording', 'Seek Me timeline']) {
+  test(`${label} ignores keyboard clicks and supports slider navigation`, () => {
+    const view = timeline({ segments: longSegments });
+    const seek = view.nodes.find(node => node.props['aria-label'] === label);
+    assert.ok(seek);
+    seek.props.onClick({ detail: 0, clientX: 0, currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 400 }) } });
+    assert.deepEqual(view.sought, []);
+    let prevented = 0;
+    for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'Home', 'End']) {
+      seek.props.onKeyDown({ key, preventDefault() { prevented++; } });
+    }
+    assert.deepEqual(view.sought, [145, 155, 145, 155, 0, 600]);
+    assert.equal(prevented, 6);
+    for (const key of ['Enter', ' ', 'Tab']) seek.props.onKeyDown({ key, preventDefault() { prevented++; } });
+    assert.equal(prevented, 6);
+    assert.equal(view.sought.length, 6);
+    seek.props.onClick({ detail: 1, clientX: 0, currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 0 }) } });
+    assert.equal(view.sought.length, 6);
+  });
+}
+
+test('keyboard seeks clamp to recording bounds', () => {
+  for (const [currentTime, key, expected] of [[1, 'ArrowLeft', 0], [599, 'ArrowRight', 600]]) {
+    const view = timeline({ currentTime });
+    view.nodes.find(node => node.props['aria-label'] === 'Seek recording').props.onKeyDown({ key, preventDefault() {} });
+    assert.deepEqual(view.sought, [expected]);
+  }
+});
+
+for (const showSpeakerAttribution of [true, false]) {
+  test(`invalid timing does not remove valid bars with attribution=${showSpeakerAttribution}`, () => {
+    const view = timeline({ durationSeconds: 0, showSpeakerAttribution, segments: [
+      { id: 'valid', timestamp: 10, endTime: 20, text: 'Synthetic speech.', speaker: 'Me' },
+      { id: 'untimed', timestamp: 0, text: 'Synthetic speech.', speaker: 'Me' },
+      { id: 'negative', timestamp: -1, endTime: 2, text: 'Synthetic speech.', speaker: 'Me' },
+      { id: 'empty', timestamp: 4, endTime: 4, text: 'Synthetic speech.', speaker: 'Me' },
+      { id: 'reversed', timestamp: 5, endTime: 2, text: 'Synthetic speech.', speaker: 'Me' },
+      { id: 'invalid-start', timestamp: NaN, endTime: 5, text: 'Synthetic speech.', speaker: 'Me' },
+      { id: 'invalid-end', timestamp: 0, endTime: Infinity, text: 'Synthetic speech.', speaker: 'Me' },
+    ] });
+    const bars = view.nodes.filter(node => node.props['data-timeline-segment']);
+    assert.equal(bars.length, 1);
+    assert.equal(bars[0].props['data-timeline-segment'], 'valid');
+    assert.equal(bars[0].props.style.left, '50%');
+    const seek = view.nodes.find(node => node.props['aria-label'] === 'Seek recording');
+    assert.equal(seek.props.disabled, false);
+    assert.equal(seek.props['aria-valuemax'], 20);
+    assert.equal(view.nodes.some(node => node.props['aria-label'] === 'Seek Me timeline'), showSpeakerAttribution);
+  });
+}
 
 test('playing audio shows Pause; unavailable audio renders no player', () => {
   assert.ok(timeline({ isPlaying: true }).nodes.some(node => node.props['aria-label'] === 'Pause recording playback'));
@@ -98,7 +172,7 @@ async function page(attribution, segments) {
     '@/hooks/meeting-details/useMeetingOperations': { useMeetingOperations: () => ({}) },
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
-    '@/components/MeetingDetails/MeetingChat': { MeetingChat: 'MeetingChat' },
+    '@/components/MeetingDetails/MeetingHeader': { MeetingHeader: 'MeetingHeader' },
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
   });
@@ -111,6 +185,7 @@ async function page(attribution, segments) {
     return {
       timeline: nodes(tree).find(node => node.type === 'SpeakerLaneTimeline'),
       transcript: nodes(tree).find(node => node.type === 'TranscriptPanel'),
+      header: nodes(tree).find(node => node.type === 'MeetingHeader'),
     };
   } finally {
     hooks.unmount();
@@ -128,5 +203,26 @@ for (const [attribution, segments] of [[true, []], [false, longSegments], [true,
     assert.equal(result.timeline.props.totalCount, segments.length);
     assert.equal(result.timeline.props.isAudioReady, true);
     assert.equal(result.transcript.props.segments.length, Math.min(100, segments.length));
+    assert.equal(result.header.props.segmentCount, segments.length);
   });
 }
+
+test('meeting header metadata displays the total segment count', () => {
+  const hooks = createHookHarness();
+  const { MeetingHeader } = loadTsModule(source('components/MeetingDetails/MeetingHeader'), {
+    react: hooks.react,
+    'lucide-react': { MoreHorizontal: 'more' },
+    '@/components/EditableTitle': { EditableTitle: 'title' },
+    './ActionIcon': { ActionIcon: 'icon-button' },
+    './ProjectTags': { ProjectTags: 'tags' },
+    './MeetingExportButtons': { MeetingExportButtons: 'exports' },
+    '@/components/ui/dropdown-menu': {},
+  });
+  try {
+    const tree = hooks.render(() => MeetingHeader({ meeting: { id: 'synthetic-meeting', created_at: '2026-01-01T12:00:00Z' }, title: 'Synthetic meeting', segmentCount: 250 }));
+    assert.match(text(tree), /250 segments/);
+    assert.doesNotMatch(text(tree), /100\/250/);
+  } finally {
+    hooks.unmount();
+  }
+});

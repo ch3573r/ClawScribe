@@ -1,5 +1,7 @@
 "use client";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
+import { createPortal } from 'react-dom';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { ChevronDown, MessageSquare, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -23,13 +25,71 @@ import type { KnowledgeScope, SearchMode } from "@/types/knowledge";
 export function MeetingChat({
   meetingId,
   provider,
-  model,
+  model, dockTarget, onDockOpenChange,
 }: {
   meetingId: string;
   provider?: string;
   model?: string;
+  dockTarget?: HTMLDivElement | null;
+  onDockOpenChange?: (open: boolean) => void;
 }) {
+  const [wide, setWide] = useState(false);
   const [open, setOpen] = useState(false);
+  const docked = Boolean(wide && dockTarget);
+  useEffect(() => { onDockOpenChange?.(docked && open); return () => onDockOpenChange?.(false); }, [docked, open, onDockOpenChange]);
+  // Move a stable portal host between the two surfaces. Resizing must not
+  // remount the composer and discard an unsent question or an attachment picker.
+  const [contentHost] = useState(() => typeof document === 'undefined' ? null : document.createElement('div'));
+  const [popoverTarget, setPopoverTarget] = useState<HTMLDivElement | null>(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
+  const focusOnAttach = useRef(false);
+  const latestPlacement = useRef({ docked, open });
+  latestPlacement.current = { docked, open };
+  const focusedComposer = useRef<{ element: HTMLTextAreaElement; start: number | null; end: number | null; direction: 'forward' | 'backward' | 'none' | null } | null>(null);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(min-width: 1280px)');
+    const update = () => {
+      // Capture before React unmounts the old popover; the browser can blur
+      // its textarea before passive effect cleanup sees the detached host.
+      const composer = contentHost?.querySelector<HTMLTextAreaElement>('textarea[id^="knowledge-question-"]');
+      if (composer && contentHost?.ownerDocument.activeElement === composer) {
+        focusedComposer.current = { element: composer, start: composer.selectionStart, end: composer.selectionEnd, direction: composer.selectionDirection };
+      }
+      setWide(media.matches);
+    };
+    update(); media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, [contentHost]);
+  useEffect(() => {
+    const parent = docked ? dockTarget : popoverTarget;
+    if (!open || !parent || !contentHost) return;
+    contentHost.className = 'flex h-full min-h-0 flex-1 flex-col';
+    parent.appendChild(contentHost);
+    const restore = focusedComposer.current;
+    const focus = () => {
+      if (!latestPlacement.current.open) return;
+      const composer = contentHost.querySelector<HTMLTextAreaElement>('textarea[id^="knowledge-question-"]');
+      const target = restore?.element ?? (focusOnAttach.current ? composer : null);
+      if (target && contentHost.contains(target)) {
+        target.focus({ preventScroll: true });
+        if (restore && restore.start !== null && restore.end !== null) target.setSelectionRange(restore.start, restore.end, restore.direction ?? undefined);
+      }
+      focusedComposer.current = null;
+      focusOnAttach.current = false;
+    };
+    // The parent must first make the dock visible after onDockOpenChange.
+    const frame = typeof window.requestAnimationFrame === 'function' ? window.requestAnimationFrame(focus) : undefined;
+    if (frame === undefined) focus();
+    return () => {
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      const composer = contentHost.querySelector<HTMLTextAreaElement>('textarea[id^="knowledge-question-"]');
+      if (composer && contentHost.ownerDocument.activeElement === composer) {
+        focusedComposer.current = { element: composer, start: composer.selectionStart, end: composer.selectionEnd, direction: composer.selectionDirection };
+      }
+      contentHost.remove();
+    };
+  }, [open, docked, dockTarget, popoverTarget, contentHost]);
   const [contextOpen, setContextOpen] = useState(false);
   const [meetingQuery, setMeetingQuery] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -132,37 +192,20 @@ export function MeetingChat({
         }} />
     </PopoverContent>
   </Popover>;
-  return (
-    <>
-      <Popover
-        modal={false}
-        open={open}
-        onOpenChange={(value) => {
-          setOpen(value);
-          if (!value) { setContextOpen(false); state.cancel(); }
-          else void state.reloadHistory();
-        }}
-      >
-        <PopoverTrigger asChild>
-          <Button variant="ghost"
-            aria-label="Chat with this meeting"
-            className="gap-0 p-0 [&_svg]:size-5 fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <MessageSquare className="h-5 w-5" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent side="top" align="end" sideOffset={12} collisionPadding={24} aria-label="Chat with this meeting"
-          onInteractOutside={event => event.preventDefault()}
-          onEscapeKeyDown={event => { if (contextOpen) event.preventDefault(); }}
-          className="flex h-[min(36rem,calc(100vh-6rem))] max-h-[calc(100vh-6rem)] w-[26rem] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
-          <KnowledgeChat state={state} mode={mode} provider={provider} model={model} title="Chat with this meeting" compact
-            headerActions={<Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Close meeting chat" onClick={() => {setOpen(false);setContextOpen(false);state.cancel();}}><X className="h-4 w-4" /></Button>}
+  const closeChat = () => {
+    focusOnAttach.current = false;
+    focusedComposer.current = null;
+    setOpen(false); setContextOpen(false); state.cancel();
+    launcherRef.current?.focus({ preventScroll: true });
+  };
+  const chatContent = (          <KnowledgeChat state={state} mode={mode} provider={provider} model={model} title="Chat with this meeting" compact
+            headerActions={<Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Close meeting chat" onClick={closeChat}><X className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Close meeting chat</TooltipContent></Tooltip>}
             contextBar={contextBar}
             composerStart={<AttachReferenceButton variant="icon" buttonRef={attachmentButton} meetingId={meetingId} scopeKey={JSON.stringify(scope)} disabled={referenceBusy || attachmentBusy} onBusyChange={setAttachmentBusy} onAttached={() => state.reloadDocuments()} />}
             attachments={selectedFiles.length > 0 && <div className="flex flex-wrap gap-1" aria-label="Selected reference files">
               {selectedFiles.slice(0, 2).map(row => <span key={row.attachment.id} className="inline-flex max-w-full items-center gap-1 rounded-full bg-muted pl-2 text-xs">
                 <span className="truncate">{row.attachment.display_name}</span>
-                <Button type="button" variant="ghost" size="icon" className="h-6 w-6 shrink-0 rounded-full" aria-label={`Remove ${row.attachment.display_name} from this question`} onClick={() => state.selectDocument(row.attachment.id, false)}><X className="h-3 w-3" /></Button>
+                <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="icon" className="h-6 w-6 shrink-0 rounded-full" aria-label={`Remove ${row.attachment.display_name} from this question`} onClick={() => state.selectDocument(row.attachment.id, false)}><X className="h-3 w-3" /></Button></TooltipTrigger><TooltipContent>Remove from this question</TooltipContent></Tooltip>
               </span>)}
               {selectedFiles.length > 2 && <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" aria-label={`Manage ${selectedFiles.length - 2} more reference ${selectedFiles.length === 3 ? 'file' : 'files'} in Context`} onClick={() => setContextOpen(true)}>+{selectedFiles.length - 2} {selectedFiles.length === 3 ? 'file' : 'files'}</Button>}
             </div>}
@@ -176,8 +219,42 @@ export function MeetingChat({
               <DropdownMenuSeparator />
             </>}
           />
-        </PopoverContent>
+  );
+  const chatSurface = <div className="flex h-full min-h-0 flex-1 flex-col" onKeyDown={event => {
+    if (docked && event.key === 'Escape' && !event.defaultPrevented && !event.nativeEvent?.isComposing && !contextOpen) {
+      event.preventDefault(); event.stopPropagation(); closeChat();
+    }
+  }}>{chatContent}</div>;
+  return (
+    <>
+      <Popover
+        modal={false}
+        open={open}
+        onOpenChange={(value) => {
+          if (!value) closeChat();
+          else { focusOnAttach.current = true; setOpen(true); void state.reloadHistory(); }
+        }}
+      >
+        <PopoverTrigger asChild>
+          <Button ref={launcherRef} variant="ghost"
+            aria-label="Chat with this meeting"
+            aria-expanded={open}
+            className="shrink-0 gap-2 text-xs"
+          >
+            <MessageSquare className="h-4 w-4" />Chat with this meeting
+          </Button>
+        </PopoverTrigger>
+        {!docked && <PopoverContent side="top" align="end" sideOffset={12} collisionPadding={24} aria-label="Chat with this meeting"
+          onOpenAutoFocus={event => event.preventDefault()}
+          onCloseAutoFocus={event => { if (latestPlacement.current.docked && latestPlacement.current.open) event.preventDefault(); }}
+          onInteractOutside={event => event.preventDefault()}
+          onEscapeKeyDown={event => { if (contextOpen) event.preventDefault(); }}
+          className="flex h-[min(36rem,calc(100vh-6rem))] max-h-[calc(100vh-6rem)] w-[26rem] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
+          {contentHost ? <div ref={setPopoverTarget} className="flex min-h-0 flex-1 flex-col" /> : chatSurface}
+        </PopoverContent>}
       </Popover>
+      {contentHost && open ? createPortal(chatSurface, contentHost)
+        : docked && open && dockTarget && createPortal(chatSurface, dockTarget)}
       <EvidencePreview
         state={state}
         onNavigate={() => {

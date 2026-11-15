@@ -17,6 +17,7 @@ test('tag picker adds suggestions and pasted tags, removes chips and saves an em
       projectTagsLoading: false, projectTagsError: null, refreshProjectTags: async () => {},
     }) },
     '@/components/ui/button': names('Button'),
+    '@/components/ui/tooltip': names('Tooltip TooltipTrigger TooltipContent'),
     '@/components/ui/dialog': names('Dialog DialogContent DialogHeader DialogTitle DialogDescription DialogFooter'),
     '@/components/ui/popover': names('Popover PopoverTrigger PopoverContent'),
     '@/components/ui/command': names('Command CommandInput CommandList CommandItem CommandEmpty'),

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 interface ConfirmationModalProps {
   onConfirm: () => void;
@@ -10,29 +11,37 @@ interface ConfirmationModalProps {
 }
 
 export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children }: ConfirmationModalProps) {
-  if (!isOpen) return null;
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   return (
-    <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
-      <div className="bg-card rounded-lg p-6 max-w-md w-full mx-4">
-        <h2 className="text-xl font-semibold mb-4">Confirm delete</h2>
-        <p className="text-muted-foreground mb-6">{text}</p>
+    <Dialog open={isOpen} onOpenChange={open => { if (!open) onCancel(); }}>
+      <DialogContent className="max-w-md"
+        onOpenAutoFocus={event => {
+          event.preventDefault();
+          if (typeof document !== 'undefined') returnFocusRef.current = document.activeElement as HTMLElement | null;
+          cancelRef.current?.focus();
+        }}
+        onCloseAutoFocus={event => { event.preventDefault(); if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus(); }}
+      >
+        <DialogHeader>
+          <DialogTitle>Confirm delete</DialogTitle>
+          <DialogDescription>{text}</DialogDescription>
+        </DialogHeader>
         {children}
-        <div className="flex justify-end space-x-4">
-          <Button variant="ghost"
+        <DialogFooter>
+          <Button ref={cancelRef} variant="outline"
             onClick={onCancel}
-            className="px-4 py-2 text-muted-foreground hover:bg-muted rounded-md transition-colors h-auto text-base font-normal hover:text-muted-foreground"
           >
             Cancel
           </Button>
-          <Button variant="ghost"
+          <Button variant="destructive"
             onClick={onConfirm}
-            className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md transition-colors h-auto text-base font-normal hover:text-destructive-foreground"
           >
             Delete
           </Button>
-        </div>
-      </div>
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

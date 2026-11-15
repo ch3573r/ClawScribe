@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { BookmarkPlus } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
@@ -22,7 +23,7 @@ export function LiveBookmarkButton({ disabled, className }: { disabled?: boolean
   }}>{busy ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <BookmarkPlus size={16} />}</Button>;
 }
 
-export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId: string; currentTime?: number; onSeek?: (time: number) => void }) {
+export function MeetingBookmarks({ meetingId, currentTime, onSeek, addOpen = false, onAddOpenChange }: { addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; meetingId: string; currentTime?: number; onSeek?: (time: number) => void }) {
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
   const [label, setLabel] = useState('Review this');
   const [seconds, setSeconds] = useState('0');
@@ -52,19 +53,21 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId
   const change = async (command: string, args: Record<string, unknown>) => {
     if (pending.current) return;
     pending.current = true; setBusy(true);
-    try { await invoke(command, args); setEditing(null); await refreshWithoutEvents.current?.(); }
+    try { await invoke(command, args); if (command === 'add_meeting_bookmark') onAddOpenChange?.(false); setEditing(null); await refreshWithoutEvents.current?.(); }
     catch (error) { toast.error('Could not update bookmark', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
   };
-  return <Accordion type="single" collapsible className="border-b border-border px-3 py-2 text-sm"><AccordionItem value="bookmarks" className="group/details border-0">
-    <AccordionTrigger className="cursor-pointer rounded-none py-0 font-medium hover:no-underline">Bookmarks ({bookmarks.length})</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden">
-    {error && <p role="alert" className="mt-2 text-destructive">{error} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-sm font-normal underline hover:bg-transparent hover:text-current" onClick={() => setRevision(r => r + 1)}>Retry</Button></p>}
-    <div className="mt-2 flex flex-wrap gap-2">
+  const addForm = (<div className="mt-2 flex flex-wrap gap-2">
       <label className="grid min-w-0 flex-1 gap-1">Label<Input className="h-auto shadow-none text-sm md:text-sm w-full rounded border border-input bg-background p-1" maxLength={160} value={label} onChange={e => setLabel(e.target.value)} /></label>
       <label className="grid gap-1">Seconds<Input className="h-auto shadow-none text-sm md:text-sm w-24 rounded border border-input bg-background p-1" type="number" min={0} max={604800} step="0.1" value={seconds} onChange={e => setSeconds(e.target.value)} /></label>
       {currentTime !== undefined && <Button size="sm" variant="outline" onClick={() => setSeconds(currentTime.toFixed(1))}>Use playback time</Button>}
       <Button size="sm" disabled={busy || !label.trim() || !seconds.trim() || !Number.isFinite(Number(seconds)) || Number(seconds) < 0} onClick={() => change('add_meeting_bookmark', { meetingId, seconds: Number(seconds), label })}>Add bookmark</Button>
-    </div>
+    </div>);
+  return <>
+    <Dialog open={addOpen} onOpenChange={onAddOpenChange}><DialogContent><DialogHeader><DialogTitle>Add bookmark</DialogTitle><DialogDescription>Save a moment to return to in this recording.</DialogDescription></DialogHeader>{addForm}</DialogContent></Dialog>
+    {error && <p role="alert" className="mt-2 text-destructive">{error} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-sm font-normal underline hover:bg-transparent hover:text-current" onClick={() => setRevision(r => r + 1)}>Retry</Button></p>}
+    {bookmarks.length > 0 && <Accordion type="single" collapsible className="border-b border-border px-3 py-2 text-sm"><AccordionItem value="bookmarks" className="group/details border-0">
+    <AccordionTrigger className="cursor-pointer rounded-none py-0 font-medium hover:no-underline">Bookmarks ({bookmarks.length})</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden">
     <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto">{bookmarks.map(mark => <li key={mark.id} className="flex flex-wrap items-center gap-1">
       {editing === mark.id ? <>
         <Input aria-label="Bookmark label" maxLength={160} className="h-auto shadow-none text-sm md:text-sm min-w-0 flex-1 rounded border border-input bg-background p-1" value={editLabel} onChange={e => setEditLabel(e.target.value)} />
@@ -77,5 +80,6 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek }: { meetingId
       </>}
     </li>)}</ul>
     {!onSeek && <p className="mt-2 text-xs text-muted-foreground">Audio playback is unavailable for this meeting.</p>}
-  </AccordionContent></AccordionItem></Accordion>;
+  </AccordionContent></AccordionItem></Accordion>}
+  </>;
 }

@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -250,9 +251,7 @@ function DetectionSummary({ status }: { status: TeamsDetectionStatus | null }) {
   );
 }
 
-function MicrosoftSignInPanel() {
-  const ms = useMicrosoftExport();
-
+function MicrosoftSignInPanel({ ms }: { ms: ReturnType<typeof useMicrosoftExport> }) {
   const panelState: AddonState = useMemo(() => {
     if (ms.connection.state === "connected") return "connected";
     if (ms.connection.state === "connecting" || ms.signingIn)
@@ -262,7 +261,7 @@ function MicrosoftSignInPanel() {
 
   const detail = useMemo(() => {
     if (ms.connection.state === "connected") {
-      return `Signed in as ${ms.connection.userDisplayName ?? ms.connection.userEmail ?? "Microsoft user"}. OneNote, OneDrive, Planner, and To Do exports are available.`;
+      return "Exports to OneNote, OneDrive, Planner and To Do, and calendar events.";
     }
     if (ms.connection.state === "connecting" || ms.signingIn) {
       return "Waiting for Microsoft sign-in to complete…";
@@ -270,30 +269,47 @@ function MicrosoftSignInPanel() {
     if (ms.connection.state === "expired") {
       return "Microsoft session expired. Sign in again to re-enable exports.";
     }
-    return "Sign in with your Microsoft account to enable OneNote, OneDrive, Planner, and To Do exports.";
+    return "Exports and calendar events through your Microsoft account.";
   }, [ms.connection, ms.signingIn]);
 
   return (
     <AddonPanel
       icon={Microsoft365Icon}
-      title="Microsoft account"
+      title="Microsoft 365"
       state={panelState}
       detail={detail}
+      showBadge={false}
     >
       <div className="space-y-3">
+        {ms.connection.state !== "connected" && (
+          <div className="space-y-3 border-t border-border pt-4">
+            <p className="text-sm text-muted-foreground">Available after you sign in</p>
+            <ul className="flex flex-wrap gap-x-5 gap-y-3 text-sm text-muted-foreground">
+              {[
+                { name: "OneNote", Icon: OneNoteIcon },
+                { name: "OneDrive", Icon: OneDriveIcon },
+                { name: "Planner", Icon: PlannerIcon },
+                { name: "To Do", Icon: ToDoIcon },
+                { name: "Calendar", Icon: OutlookCalendarIcon },
+              ].map(({ name, Icon }) => (
+                <li key={name} className="flex items-center gap-2">
+                  <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
+                  {name}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {ms.connection.state === "connected" && (
           <>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <CheckCircle2 className="h-4 w-4 text-success-foreground" />
-                <span>
-                  {ms.connection.userDisplayName}
+            <div className="flex items-center justify-between gap-4 border-t border-border pt-4">
+              <div className="min-w-0 text-sm">
+                <p className="break-words text-foreground">
+                  Signed in as {ms.connection.userDisplayName ?? ms.connection.userEmail ?? "Microsoft user"}
+                </p>
                   {ms.connection.userEmail && (
-                    <span className="ml-1 text-xs opacity-70">
-                      ({ms.connection.userEmail})
-                    </span>
+                    <p className="mt-1 break-words text-muted-foreground">{ms.connection.userEmail}</p>
                   )}
-                </span>
               </div>
               <Button
                 type="button"
@@ -425,19 +441,17 @@ function OneNotePanel() {
   }, [selectedNotebook, ms.notebooks]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
-  const detail = isConnected
-    ? "Pick the notebook where exports create a fresh dated section for each meeting."
-    : "Sign in with Microsoft above to enable OneNote export.";
+  const detail = "Pick the notebook where exports create a fresh dated section for each meeting.";
   const selectedNotebookMissing =
     !!selectedNotebook && !ms.notebooks.some((nb) => nb.id === selectedNotebook);
 
   return (
     <AddonPanel
       icon={OneNoteIcon}
-      title="OneNote export"
+      title="OneNote"
       state={panelState}
       detail={detail}
-      showBadge={!isConnected}
+      showBadge={false}
     >
       {isConnected && (
         <div className="space-y-3">
@@ -571,14 +585,6 @@ function OneNotePanel() {
               Reload.
             </p>
           )}
-          {selectedNotebook && (
-            <div className="flex items-center gap-2 text-sm text-success-foreground">
-              <CheckCircle2 className="h-4 w-4" />
-              <span>
-                OneNote notebook ready. Each export creates a new dated section.
-              </span>
-            </div>
-          )}
         </div>
       )}
     </AddonPanel>
@@ -642,17 +648,15 @@ function PlannerPanel() {
   }, [selectedBucket, selectedPlan, ms.plans, ms.buckets]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
-  const detail = isConnected
-    ? "Pick a plan and a default bucket. You can review tasks and re-route each one per export."
-    : "Sign in with Microsoft above to enable Planner export.";
+  const detail = "Pick a plan and a default bucket. You can review tasks and re-route each one per export.";
 
   return (
     <AddonPanel
       icon={PlannerIcon}
-      title="Planner task export"
+      title="Planner"
       state={panelState}
       detail={detail}
-      showBadge={!isConnected}
+      showBadge={false}
     >
       {isConnected && (
         <div className="space-y-3">
@@ -825,15 +829,6 @@ function PlannerPanel() {
               group.)
             </p>
           )}
-          {selectedBucket && (
-            <div className="flex items-center gap-2 text-sm text-success-foreground">
-              <CheckCircle2 className="h-4 w-4" />
-              <span>
-                Planner destination ready. Export from a meeting&apos;s summary
-                panel.
-              </span>
-            </div>
-          )}
         </div>
       )}
     </AddonPanel>
@@ -885,19 +880,17 @@ function ToDoPanel() {
   }, [selectedList, ms.todoLists]);
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
-  const detail = isConnected
-    ? "Pick the personal To Do list for reviewed meeting action items."
-    : "Sign in with Microsoft above to enable To Do export.";
+  const detail = "Pick the personal To Do list for reviewed meeting action items.";
   const selectedListMissing =
     !!selectedList && !ms.todoLists.some((l) => l.id === selectedList);
 
   return (
     <AddonPanel
       icon={ToDoIcon}
-      title="Microsoft To Do export"
+      title="To Do"
       state={panelState}
       detail={detail}
-      showBadge={!isConnected}
+      showBadge={false}
     >
       {isConnected && (
         <div className="space-y-3">
@@ -1023,12 +1016,6 @@ function ToDoPanel() {
               one here, or use Reload after creating one elsewhere.
             </p>
           )}
-          {selectedList && (
-            <div className="flex items-center gap-2 text-sm text-success-foreground">
-              <CheckCircle2 className="h-4 w-4" />
-              <span>To Do destination ready. Export reviewed action items from a meeting summary.</span>
-            </div>
-          )}
         </div>
       )}
     </AddonPanel>
@@ -1052,6 +1039,7 @@ function OneDrivePanel() {
     saved.oneDriveCreateOrganizationLink ?? false,
   );
   const [localError, setLocalError] = useState<string | null>(null);
+  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const isConnected = ms.connection.state === "connected";
   const activeDestination = selectedDestination ?? rootDestination;
 
@@ -1078,10 +1066,8 @@ function OneDrivePanel() {
   }, [isConnected]);
 
   useEffect(() => {
-    if (isConnected && !rootDestination && !loadingRoot) {
-      void loadRoot();
-    }
-  }, [isConnected, loadRoot, loadingRoot, rootDestination]);
+    if (isConnected) void loadRoot();
+  }, [isConnected, loadRoot]);
 
   useEffect(() => {
     setExportDestinations({
@@ -1134,94 +1120,87 @@ function OneDrivePanel() {
   };
 
   const panelState: AddonState = isConnected ? "connected" : "signin";
-  const detail = isConnected
-    ? "Export full meeting notes as DOCX and PDF files to OneDrive or SharePoint."
-    : "Sign in with Microsoft above to enable OneDrive file export.";
+  const detail = "Export full meeting notes as DOCX and PDF files to OneDrive or SharePoint.";
 
   return (
     <AddonPanel
       icon={OneDriveIcon}
-      title="OneDrive file export"
+      title="OneDrive"
       state={panelState}
       detail={detail}
-      showBadge={!isConnected}
+      showBadge={false}
     >
       {isConnected && (
         <div className="space-y-3">
-          <div className="rounded-lg border border-border bg-muted p-3">
-            <div className="flex items-start justify-between gap-3">
+          <Dialog open={folderDialogOpen} onOpenChange={setFolderDialogOpen}>
+            <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-xs font-medium text-muted-foreground">Destination folder</p>
-                <p className="mt-1 truncate text-sm font-medium text-foreground">
-                  {activeDestination?.name ?? "Loading OneDrive root..."}
+                <p className="mt-1 break-words text-sm text-foreground">
+                  {activeDestination?.name ?? (loadingRoot ? "Loading destination…" : "No folder selected")}
                 </p>
-                {activeDestination?.webUrl && (
-                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {activeDestination.webUrl}
-                  </p>
-                )}
               </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => void useRoot()}
-                disabled={loadingRoot}
-              >
-                {loadingRoot ? <Loader2 className="h-4 w-4 animate-spin" /> : "Use root"}
-              </Button>
+              <DialogTrigger asChild><Button type="button" size="sm" variant="outline">Change folder</Button></DialogTrigger>
             </div>
-          </div>
+            <DialogContent className="max-h-[85vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Change destination folder</DialogTitle>
+                <DialogDescription>Choose a OneDrive or SharePoint folder. Changes are saved when you choose or create a folder.</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Current destination</p>
+                  <p className="break-words text-sm">{activeDestination?.name ?? (loadingRoot ? "Loading destination…" : "No folder selected")}</p>
+                  {activeDestination?.webUrl && (
+                    <p className="break-all text-sm text-muted-foreground">{activeDestination.webUrl}</p>
+                  )}
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={useRoot} disabled={loadingRoot || resolvingUrl || creatingFolder}>
+                  {loadingRoot && <Loader2 className="h-4 w-4 animate-spin" />}Use the top-level folder
+                </Button>
+                <div className="space-y-2">
+                  <label htmlFor="onedrive-folder-link" className="text-sm font-medium">Folder link</label>
+                  <Input
+                    id="onedrive-folder-link"
+                    type="url"
+                    value={sharingUrl}
+                    onChange={event => setSharingUrl(event.target.value)}
+                    onKeyDown={event => {
+                      if (event.key === "Enter" && !resolvingUrl && !creatingFolder && !loadingRoot) void resolveSharingUrl();
+                    }}
+                    placeholder="Paste OneDrive or SharePoint folder link"
+                    disabled={resolvingUrl || creatingFolder || loadingRoot}
+                  />
+                  <Button type="button" variant="outline" onClick={resolveSharingUrl} disabled={resolvingUrl || creatingFolder || loadingRoot || !sharingUrl.trim()}>
+                    {resolvingUrl && <Loader2 className="h-4 w-4 animate-spin" />}Resolve folder
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="onedrive-subfolder-name" className="text-sm font-medium">New subfolder</label>
+                  <Input
+                    id="onedrive-subfolder-name"
+                    type="text"
+                    value={newFolderName}
+                    onChange={event => setNewFolderName(sanitizeOneDriveFolderName(event.target.value))}
+                    onKeyDown={event => {
+                      if (event.key === "Enter" && !creatingFolder && !resolvingUrl && !loadingRoot) void createFolder();
+                    }}
+                    placeholder="Create subfolder, e.g. ClawScribe"
+                    maxLength={120}
+                    disabled={creatingFolder || resolvingUrl || loadingRoot}
+                  />
+                  <Button type="button" variant="outline" onClick={createFolder} disabled={creatingFolder || resolvingUrl || loadingRoot || !newFolderName.trim()}>
+                    {creatingFolder && <Loader2 className="h-4 w-4 animate-spin" />}Create folder
+                  </Button>
+                </div>
+                {(localError || ms.error) && <p role="alert" className="text-sm text-destructive">{localError ?? ms.error}</p>}
+              </div>
+              <DialogFooter><Button type="button" variant="outline" onClick={() => setFolderDialogOpen(false)}>Done</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
 
-          <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-            <Input
-              type="url"
-              value={sharingUrl}
-              onChange={(e) => setSharingUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void resolveSharingUrl();
-              }}
-              placeholder="Paste OneDrive or SharePoint folder link"
-              className="h-auto shadow-none min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
-              disabled={resolvingUrl}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void resolveSharingUrl()}
-              disabled={resolvingUrl || !sharingUrl.trim()}
-            >
-              {resolvingUrl ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              Resolve folder
-            </Button>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-            <Input
-              type="text"
-              value={newFolderName}
-              onChange={(e) => setNewFolderName(sanitizeOneDriveFolderName(e.target.value))}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void createFolder();
-              }}
-              placeholder="Create subfolder, e.g. ClawScribe"
-              maxLength={120}
-              className="h-auto shadow-none min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-sm"
-              disabled={creatingFolder}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void createFolder()}
-              disabled={creatingFolder || !newFolderName.trim()}
-            >
-              {creatingFolder ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              Create folder
-            </Button>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
+          <div className="space-y-3">
+            <label className="flex cursor-pointer items-start justify-between gap-4 border-t border-border pt-3">
               <span>
                 <span className="block text-sm font-medium text-foreground">Include PDF</span>
                 <span className="mt-0.5 block text-xs text-muted-foreground">
@@ -1236,17 +1215,17 @@ function OneDrivePanel() {
               />
             </label>
 
-            <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-muted p-3">
+            <label className="flex cursor-pointer items-start justify-between gap-4 border-t border-border pt-3">
               <span>
-                <span className="block text-sm font-medium text-foreground">Create org links</span>
+                <span className="block text-sm font-medium text-foreground">Organization-only links</span>
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Ask Graph for view links scoped to your organization.
+                  Links open only for people in your organization
                 </span>
               </span>
               <Switch
                 checked={createOrgLink}
                 onCheckedChange={() => setCreateOrgLink((value) => !value)}
-                aria-label="Create org links"
+                aria-label="Organization-only links"
                 className="relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full border-0 shadow-none transition-colors data-[state=checked]:bg-primary data-[state=unchecked]:bg-border [&>span]:h-5 [&>span]:w-5 [&>span]:shadow [&>span]:data-[state=checked]:translate-x-5 [&>span]:data-[state=unchecked]:translate-x-0.5"
               />
             </label>
@@ -1259,14 +1238,6 @@ function OneDrivePanel() {
             </div>
           )}
 
-          {activeDestination && (
-            <div className="flex items-center gap-2 text-sm text-success-foreground">
-              <CheckCircle2 className="h-4 w-4" />
-              <span>
-                File destination ready. Exports upload a DOCX{includePdf ? " and PDF" : ""}.
-              </span>
-            </div>
-          )}
         </div>
       )}
     </AddonPanel>
@@ -1289,7 +1260,12 @@ function ConfluencePanel() {
   const httpOptionRevision = useRef(0);
   const [patInput, setPatInput] = useState("");
   const [status, setStatus] = useState<ConfluenceConnectionStatus | null>(null);
+  const [connectionTestSucceeded, setConnectionTestSucceeded] = useState(false);
   const [busy, setBusy] = useState<"save" | "clear" | "test" | null>(null);
+  const invalidateConnectionTest = () => {
+    httpOptionRevision.current += 1;
+    setConnectionTestSucceeded(false);
+  };
   const trimmedUrl = createUrl.trim();
   const trimmedBaseUrl = baseUrl.trim();
   useEffect(() => {
@@ -1336,6 +1312,7 @@ function ConfluencePanel() {
 
   const testConnection = useCallback(async () => {
     const revision = ++httpOptionRevision.current;
+    setConnectionTestSucceeded(false);
     if (!trimmedBaseUrl) {
       setStatus({
         tokenConfigured: false,
@@ -1353,6 +1330,7 @@ function ConfluencePanel() {
       if (revision === httpOptionRevision.current) {
         setStatus(value);
         setAllowUnencrypted(value.allowUnencrypted);
+        setConnectionTestSucceeded(value.reachable);
       }
     } catch (e) {
       setStatus({
@@ -1369,6 +1347,7 @@ function ConfluencePanel() {
 
   const savePat = useCallback(async () => {
     const revision = ++httpOptionRevision.current;
+    setConnectionTestSucceeded(false);
     const pat = patInput.trim();
     if (!pat) {
       setStatus({
@@ -1415,6 +1394,7 @@ function ConfluencePanel() {
 
   const clearPat = useCallback(async () => {
     httpOptionRevision.current += 1;
+    setConnectionTestSucceeded(false);
     setBusy("clear");
     try {
       await confluenceExportService.clearPat();
@@ -1442,32 +1422,12 @@ function ConfluencePanel() {
 
   const restDestinationConfigured = !!trimmedBaseUrl && !!trimmedSpaceKey;
   const restReady = restDestinationConfigured && !!status?.reachable;
-  const badgeLabel =
-    mode === "draft"
-      ? trimmedUrl
-        ? "Draft ready"
-        : "Copy only"
-      : restReady
-        ? "Ready"
-        : status?.tokenConfigured
-          ? "PAT saved"
-          : "Needs setup";
-  const badgeClasses =
-    mode === "draft"
-      ? trimmedUrl
-        ? "border-transparent bg-success text-success-foreground"
-        : "border-border bg-muted text-foreground"
-      : restReady
-        ? "border-transparent bg-success text-success-foreground"
-        : "border-transparent bg-warning text-warning-foreground";
-
   return (
     <AddonPanel
       icon={ConfluenceIcon}
-      title="Confluence export"
+      title="Confluence"
       state={mode === "draft" ? "prompt" : restReady ? "ready" : "advanced"}
-      badgeLabel={badgeLabel}
-      badgeClasses={badgeClasses}
+      showBadge={false}
       detail="Export meeting notes, transcripts, or both as a browser draft, or create pages directly on self-hosted Confluence with a PAT."
     >
       <div className="space-y-3">
@@ -1475,7 +1435,7 @@ function ConfluencePanel() {
           <Button
             variant="ghost"
             type="button"
-            onClick={() => setMode("draft")}
+            onClick={() => { invalidateConnectionTest(); setMode("draft"); }}
             className={`block h-auto whitespace-normal rounded-md border p-3 text-left transition-colors ${
               mode === "draft"
                 ? "border-primary bg-primary/10"
@@ -1493,7 +1453,7 @@ function ConfluencePanel() {
           <Button
             variant="ghost"
             type="button"
-            onClick={() => setMode("rest")}
+            onClick={() => { invalidateConnectionTest(); setMode("rest"); }}
             className={`block h-auto whitespace-normal rounded-md border p-3 text-left transition-colors ${
               mode === "rest"
                 ? "border-primary bg-primary/10"
@@ -1569,13 +1529,13 @@ function ConfluencePanel() {
                 <Input
                   type="url"
                   value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
+                  onChange={(e) => { invalidateConnectionTest(); setBaseUrl(e.target.value); }}
                   placeholder="https://confluence.example.com/confluence"
                   className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
               </div>
               <UnencryptedHttpOptIn destinationProblem={status?.destinationProblem} urls={[baseUrl]} checked={allowUnencrypted} onChange={value => {
-                httpOptionRevision.current += 1;
+                invalidateConnectionTest();
                 setAllowUnencrypted(value);
               }} />
               <div>
@@ -1584,7 +1544,7 @@ function ConfluencePanel() {
                 </label>
                 <Input
                   value={spaceKey}
-                  onChange={(e) => setSpaceKey(e.target.value)}
+                  onChange={(e) => { invalidateConnectionTest(); setSpaceKey(e.target.value); }}
                   placeholder="TEAM"
                   className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
@@ -1595,7 +1555,7 @@ function ConfluencePanel() {
                 </label>
                 <Input
                   value={parentId}
-                  onChange={(e) => setParentId(e.target.value)}
+                  onChange={(e) => { invalidateConnectionTest(); setParentId(e.target.value); }}
                   placeholder="123456789"
                   className="h-auto shadow-none w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
@@ -1610,7 +1570,7 @@ function ConfluencePanel() {
                 <Input
                   type="password"
                   value={patInput}
-                  onChange={(e) => setPatInput(e.target.value)}
+                  onChange={(e) => { invalidateConnectionTest(); setPatInput(e.target.value); }}
                   placeholder="Paste PAT to save in OS credentials"
                   className="h-auto shadow-none w-auto min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 />
@@ -1660,19 +1620,12 @@ function ConfluencePanel() {
               </p>
             </div>
 
-            {status && (
-              <div
-                className={`flex items-start gap-2 rounded-md border p-3 text-sm ${
-                  status.reachable
-                    ? "border-success-border/30 bg-success text-success-foreground"
-                    : "border-border bg-muted text-muted-foreground"
-                }`}
-              >
-                {status.reachable ? (
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-                ) : (
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                )}
+            {connectionTestSucceeded && (
+              <p role="status" className="text-sm text-muted-foreground">Connection works</p>
+            )}
+            {status && !status.reachable && (
+              <div className="flex items-start gap-2 rounded-md border border-border bg-muted p-3 text-sm text-muted-foreground">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>{status.message}</span>
               </div>
             )}
@@ -1863,25 +1816,12 @@ function TeamsAutoStartPanel() {
     setMode(next);
     setTeamsDetectionMode(next);
   };
-  const modeBadge =
-    mode === "off"
-      ? { label: "Off", classes: "border-border bg-muted text-foreground" }
-      : mode === "prompt"
-        ? {
-            label: "Prompt",
-            classes: "border-transparent bg-primary text-primary-foreground",
-          }
-        : {
-            label: "Auto-record",
-            classes: "border-transparent bg-success text-success-foreground",
-          };
   return (
     <AddonPanel
       icon={TeamsIcon}
       title="Teams auto-record"
       state={mode === "off" ? "planned" : "ready"}
-      badgeLabel={modeBadge.label}
-      badgeClasses={modeBadge.classes}
+      showBadge={false}
       detail="Windows detector for Teams desktop and browser meetings, in several UI languages."
     >
       <div className="space-y-2">
@@ -2152,7 +2092,7 @@ function CalendarPanel() {
     ? calendarAvailable
       ? "Your current/next meeting and upcoming events, with invited attendees."
       : "Calendar permission is unavailable. Request missing permissions in Microsoft settings above."
-    : "Sign in with Microsoft above to see your calendar.";
+    : "Your current/next meeting and upcoming events, with invited attendees.";
   const current = ms.currentMeeting;
 
   // The "Set for your next recording" confirmation belongs to the event shown;
@@ -2176,7 +2116,7 @@ function CalendarPanel() {
       title="Calendar"
       state={panelState}
       detail={detail}
-      showBadge={!isConnected}
+      showBadge={false}
     >
       {calendarAvailable && (
         <div className="space-y-3">
@@ -2836,22 +2776,22 @@ function GroupHeader({ icon, title, desc }: { icon: ReactNode; title: string; de
 }
 
 export function IntegrationsSettings() {
+  const ms = useMicrosoftExport();
   return (
     <div className="space-y-8">
       {/* Microsoft 365 — sign-in is the gateway, exports depend on it. */}
       <section className="space-y-4">
-        <GroupHeader
-          icon={<Microsoft365Icon />}
-          title="Microsoft 365"
-          desc="Sign in with your work account to export meetings to OneNote, OneDrive, Planner, and To Do, and pull in calendar events."
-        />
         <div className="space-y-4">
-          <MicrosoftSignInPanel />
-          <OneNotePanel />
-          <OneDrivePanel />
-          <PlannerPanel />
-          <ToDoPanel />
-          <CalendarPanel />
+          <MicrosoftSignInPanel ms={ms} />
+          {ms.connection.state === "connected" && (
+            <>
+              <OneNotePanel />
+              <OneDrivePanel />
+              <PlannerPanel />
+              <ToDoPanel />
+              <CalendarPanel />
+            </>
+          )}
         </div>
       </section>
 

@@ -8,6 +8,7 @@ import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import { offerSpeakerDetectionCancellation } from '@/lib/speakerDetectionCancellation';
 import { getPendingCalendar, beginRecordingCalendar } from '@/lib/meetingCalendar';
+import { toast } from 'sonner';
 
 interface UseRecordingStartReturn {
   handleRecordingStart: () => Promise<void>;
@@ -143,7 +144,7 @@ export function useRecordingStart(
             console.error('Failed to auto-start recording:', error);
             setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to auto-start recording');
             if (!isTranscriptionReadinessError(error)) {
-              alert('Failed to start recording. Check console for details.');
+              toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
             }
             Analytics.trackButtonClick('start_recording_error', 'sidebar_auto');
           } finally {
@@ -180,7 +181,7 @@ export function useRecordingStart(
         console.error('Failed to start recording from sidebar:', error);
         setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording from sidebar');
         if (!isTranscriptionReadinessError(error)) {
-          alert('Failed to start recording. Check console for details.');
+          toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
         }
         Analytics.trackButtonClick('start_recording_error', 'sidebar_direct');
       } finally {

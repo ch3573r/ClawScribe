@@ -100,8 +100,9 @@ test('a background detection can be cancelled from the meeting toolbar after nav
   const { TranscriptButtonGroup } = loadTsModule(fileURLToPath(new URL('../../src/components/MeetingDetails/TranscriptButtonGroup.tsx', import.meta.url)), {
     react: hooks.react,
     '@/components/ui/button': { Button: 'Button' },
-    '@/components/ui/button-group': { ButtonGroup: 'ButtonGroup' },
+    './ActionIcon': { ActionIcon: 'icon-button' },
     '@/components/ui/dropdown-menu': names(['DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuLabel', 'DropdownMenuSeparator', 'DropdownMenuTrigger']),
+    '@/components/ui/tooltip': names(['Tooltip', 'TooltipTrigger', 'TooltipContent']),
     'lucide-react': {},
     '@tauri-apps/api/core': { invoke: async (command, args) => { calls.push([command, args]); return command === 'active_speaker_diarization_command' ? 'synthetic-meeting' : undefined; } },
     '@tauri-apps/api/event': { listen: async () => () => {} },
@@ -116,11 +117,11 @@ test('a background detection can be cancelled from the meeting toolbar after nav
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)];
   const tree = nodes(render());
   assert.equal(tree.find(node => node.type === 'SpeakerDiarizationDialog').props.open, false);
-  const button = tree.find(node => node.type === 'Button' && node.props.children === 'Cancel speaker detection');
+  const button = tree.find(node => node.type === 'DropdownMenuItem' && node.props.children === 'Cancel speaker detection');
   assert.ok(button);
-  button.props.onClick();
+  button.props.onSelect();
   await flush();
   assert.equal(calls.filter(([command]) => command === 'cancel_speaker_diarization_command').length, 1);
-  assert.equal(nodes(render()).find(node => node.type === 'Button' && node.props.children === 'Cancelling…').props.disabled, true);
+  assert.equal(nodes(render()).find(node => node.type === 'DropdownMenuItem' && node.props.children === 'Cancelling…').props.disabled, true);
   hooks.unmount();
 });

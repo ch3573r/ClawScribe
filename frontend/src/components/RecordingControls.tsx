@@ -17,6 +17,7 @@ import Analytics from '@/lib/analytics';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -110,7 +111,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         const result = await invoke('is_recording');
       } catch (error) {
         console.error("Tauri initialization error:");
-        alert('Failed to initialize recording. Please check the console for details.');
+        toast.error('Could not initialize recording. Reopen ClawScribe, then try again.');
       }
     };
     checkTauri();
@@ -253,7 +254,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       // isPaused state now managed by RecordingStateContext via events
     } catch (error) {
       console.error("Failed to pause recording:");
-      alert('Failed to pause recording. Please check the console for details.');
+      toast.error('Could not pause recording. Try pausing again or stop the recording.');
     } finally {
       setIsPausing(false);
     }
@@ -269,7 +270,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       // isPaused state now managed by RecordingStateContext via events
     } catch (error) {
       console.error("Failed to resume recording:");
-      alert('Failed to resume recording. Please check the console for details.');
+      toast.error('Could not resume recording. Try resuming again or stop the recording.');
     } finally {
       setIsResuming(false);
     }
@@ -430,6 +431,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               {showPlayback ? (
                 <>
                   <Button variant="ghost" size="icon"
+                    aria-label="Start recording"
                     onClick={handleStartRecording}
                     className="w-10 h-10 p-0 flex items-center justify-center bg-destructive rounded-full text-destructive-foreground hover:bg-destructive/90 transition-colors hover:text-destructive-foreground"
                   >
@@ -454,6 +456,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   </div>
 
                   <Button variant="ghost" size="icon"
+                    aria-label="Play recording"
                     className="w-10 h-10 p-0 flex items-center justify-center bg-secondary rounded-full text-foreground cursor-not-allowed hover:text-foreground"
                     disabled
                   >
@@ -467,6 +470,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button variant="ghost" size="icon"
+                          aria-label={isStartPending ? 'Starting recording' : 'Start recording'}
                           onClick={() => {
                             Analytics.trackButtonClick(
                               'start_recording',
@@ -509,6 +513,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button variant="ghost" size="icon"
+                            aria-label={isPaused ? 'Resume recording' : 'Pause recording'}
                             onClick={() => {
                               if (isPaused) {
                                 Analytics.trackButtonClick(

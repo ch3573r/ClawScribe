@@ -8,6 +8,7 @@ import { AISummary } from './index';
 import { Block, BlockNoteEditor } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
+import { createSummaryPresentationExtension } from './summary-surface';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import "@blocknote/shadcn/style.css";
 import { planSummaryReplacement, ReplaceOptions, ReplacePreview } from "@/lib/summary-text-replace";
@@ -98,7 +99,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Create BlockNote editor for markdown parsing
   const editor = useCreateBlockNote({
-    initialContent: undefined
+    initialContent: undefined,
+    extensions: [createSummaryPresentationExtension]
   });
 
   // Ignore late parses and reset dirty state only when a new saved summary loads.
@@ -273,6 +275,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
           <Editor
             key={meeting?.id}
             initialContent={data.summary_json}
+            summaryPresentation
             onEditorReady={onEditorReady}
             onChange={(blocks) => {
               console.log('📝 Editor blocks changed:', blocks.length);

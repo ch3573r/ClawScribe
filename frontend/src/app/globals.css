@@ -76,6 +76,24 @@
   animation-delay: 150ms;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Keep progress indicators readable while decorative motion settles. */
+  .animate-spin {
+    animation-duration: 1s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
 @layer base {
   :root {
     --kontron-primary: 203 100% 26%;
@@ -96,6 +114,31 @@
        accent picker drives --primary separately so users keep their choice. */
     --brand-cyan: 188 88% 52%;
     --brand-blue: 214 90% 56%;
+    /* Product marks retain their own colors in every theme and accent. */
+    --brand-ms-red: 14 89% 54%;
+    --brand-ms-green: 79 100% 36%;
+    --brand-ms-blue: 199 100% 47%;
+    --brand-ms-yellow: 44 100% 50%;
+    --brand-icon-white: 0 0% 100%;
+    --brand-word: 216 77% 42%;
+    --brand-word-light: 211 66% 50%;
+    --brand-onenote: 279 74% 38%;
+    --brand-onenote-light: 283 62% 56%;
+    --brand-onedrive-dark: 208 97% 37%;
+    --brand-onedrive: 206 100% 42%;
+    --brand-onedrive-mid: 204 84% 48%;
+    --brand-onedrive-light: 200 82% 54%;
+    --brand-planner-dark: 118 43% 32%;
+    --brand-planner: 135 57% 40%;
+    --brand-planner-light: 98 50% 62%;
+    --brand-todo: 218 70% 48%;
+    --brand-todo-light: 213 80% 62%;
+    --brand-teams: 236 52% 55%;
+    --brand-teams-light: 236 74% 70%;
+    --brand-outlook: 206 100% 42%;
+    --brand-outlook-dark: 208 97% 37%;
+    --brand-confluence: 214 100% 57%;
+    --brand-confluence-dark: 216 100% 40%;
     --brand-gradient: linear-gradient(145deg, hsl(var(--brand-cyan)), hsl(var(--brand-blue)));
     --brand-gradient-v: linear-gradient(to bottom, hsl(var(--brand-cyan)), hsl(var(--brand-blue)));
     --font-app-sans: var(--font-source-sans-3), ui-sans-serif, system-ui, sans-serif;
@@ -127,11 +170,13 @@
     --muted-foreground: 214 13% 42%;
     --accent: 193 90% 46%;
     --accent-foreground: 205 45% 9%;
-    --destructive: 353 78% 52%;
+    --destructive: 353 78% 46%;
+    --destructive-text: 353 72% 40%;
     --destructive-foreground: 0 0% 100%;
     --border: 214 24% 88%;
     --input: 214 24% 88%;
     --ring: 193 90% 46%;
+    --focus-ring: hsl(var(--ring));
     --radius: 0.25rem;
     --chart-1: var(--kontron-primary);
     --chart-2: var(--kontron-accent);
@@ -171,6 +216,14 @@
     --theme-error-fg: 353 72% 38%;
   }
 
+  @supports (color: color-mix(in srgb, red, blue)) {
+    :root {
+      /* The picker writes --ring inline. Mix it with the current foreground so
+         even bright accents keep a visible focus boundary in both themes. */
+      --focus-ring: color-mix(in srgb, hsl(var(--ring)), hsl(var(--foreground)) 50%);
+    }
+  }
+
   .dark {
     /* Dark shell keeps a cool blue-charcoal tint without washing every panel navy. */
     --app-surface: 217 18% 11%;
@@ -190,6 +243,7 @@
     --accent: 193 90% 50%;
     --accent-foreground: 205 50% 8%;
     --destructive: 0 62.8% 30.6%;
+    --destructive-text: 353 88% 78%;
     --destructive-foreground: 0 0% 98%;
     --border: 217 13% 22%;
     --input: 217 13% 22%;
@@ -514,3 +568,63 @@
 [data-sonner-toast][data-styled='true'] [data-button]:not([data-cancel]):hover {
   background: hsl(var(--primary) / 0.9);
 }
+
+/* meeting details: summary surface */
+.meeting-summary-surface {
+  /* BlockNote's shadcn scope redefines --card, --foreground, --primary and
+     --popover on .bn-container, so resolve the app's values here, outside
+     that scope, and hand them down under names it does not override. */
+  --summary-text: hsl(var(--foreground));
+  --summary-link: hsl(var(--primary));
+  --summary-ring: hsl(var(--ring));
+  --summary-menu: hsl(var(--popover));
+  --summary-menu-text: hsl(var(--popover-foreground));
+  color: var(--summary-text);
+  font-size: 15px;
+  line-height: 1.6;
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  /* The accent alone is too light for text on light surfaces. */
+  .meeting-summary-surface { --summary-link: color-mix(in oklab, hsl(var(--primary)), hsl(var(--foreground)) 35%); }
+}
+.meeting-summary-surface .bn-container {
+  --bn-colors-editor-background: transparent;
+  --bn-colors-editor-text: var(--summary-text);
+  --bn-colors-menu-background: var(--summary-menu);
+  --bn-colors-menu-text: var(--summary-menu-text);
+  --bn-colors-tooltip-background: var(--summary-menu);
+  --bn-colors-tooltip-text: var(--summary-menu-text);
+  --bn-font-family: var(--font-app-sans);
+}
+.meeting-summary-surface .bn-editor {
+  background: transparent !important;
+  color: var(--summary-text) !important;
+  padding-block: 0;
+  /* Match BlockNote's 54px inline gutter for the floating add/drag controls. */
+  padding-inline-start: 54px;
+  padding-inline-end: 0;
+  border-radius: 0;
+}
+.meeting-summary-surface :is(h1, h2, h3, h4, h5, h6) {
+  display: block;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.5;
+  margin: 1.25rem 0 .5rem;
+}
+.meeting-summary-surface .meeting-summary-section { padding-block-start: 1.25rem; }
+.meeting-summary-surface .meeting-summary-label { font-size: 17px; font-weight: 600; line-height: 1.5; }
+/* Break once before the body, even when the bold label spans several marks. */
+.meeting-summary-surface .meeting-summary-body-start::before { content: ""; display: block; height: .5rem; }
+.meeting-summary-surface .bn-block-outer:first-child > .bn-block > .meeting-summary-section { padding-block-start: 0; }
+.meeting-summary-surface .bn-block-outer:first-child :is(h1, h2, h3) { margin-top: 0; }
+.meeting-summary-surface a,
+.meeting-summary-surface a:visited {
+  color: var(--summary-link) !important;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.meeting-summary-surface a:hover { color: var(--summary-text) !important; }
+.meeting-summary-surface a:focus-visible { outline: 2px solid var(--summary-ring); outline-offset: 2px; }
+.meeting-summary-surface [data-summary-timestamp] { font-family: var(--font-plex-mono), ui-monospace, monospace !important; font-size: .875em; }
+/* end meeting details: summary surface */

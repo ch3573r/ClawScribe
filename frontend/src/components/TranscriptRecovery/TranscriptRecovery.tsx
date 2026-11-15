@@ -5,7 +5,8 @@
  * Displays recoverable meetings, allows preview, and enables recovery or deletion.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { toast } from 'sonner';
 import { formatDistanceToNow } from 'date-fns';
 import { AlertCircle, CheckCircle2, Clock, FileText, Trash2, XCircle } from 'lucide-react';
 import {
@@ -26,7 +27,7 @@ interface TranscriptRecoveryProps {
   isOpen: boolean;
   onClose: () => void;
   recoverableMeetings: MeetingMetadata[];
-  onRecover: (meetingId: string) => Promise<any>;
+  onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
 }
@@ -44,9 +45,13 @@ export function TranscriptRecovery({
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
+  const deleteButtonRef = useRef<HTMLButtonElement>(null);
 
   // Reset selection when dialog opens
   useEffect(() => {
+    setDeleteTargetId(null);
     if (isOpen) {
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
@@ -81,32 +86,28 @@ export function TranscriptRecovery({
 
     setIsRecovering(true);
     try {
-      const result = await onRecover(selectedMeetingId);
-      console.log('Recovery successful:', result);
+      await onRecover(selectedMeetingId);
       onClose();
     } catch (error) {
-      console.error('Recovery failed:', error);
-      alert('Failed to recover meeting. Please try again.');
+      console.error('Meeting recovery failed:', error);
+      toast.error('Could not recover the meeting. Your recovery data is still available. Try again.');
     } finally {
       setIsRecovering(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!selectedMeetingId) return;
-
-    if (!confirm('Are you sure you want to delete this meeting? This cannot be undone.')) {
-      return;
-    }
+    if (!deleteTargetId || isDeleting || isRecovering) return;
 
     setIsDeleting(true);
     try {
-      await onDelete(selectedMeetingId);
+      await onDelete(deleteTargetId);
+      setDeleteTargetId(null);
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
     } catch (error) {
-      console.error('Delete failed:', error);
-      alert('Failed to delete meeting. Please try again.');
+      console.error('Meeting recovery deletion failed:', error);
+      toast.error('Could not delete the meeting. Try again.');
     } finally {
       setIsDeleting(false);
     }
@@ -115,7 +116,7 @@ export function TranscriptRecovery({
   const selectedMeeting = recoverableMeetings.find(m => m.meetingId === selectedMeetingId);
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
+    <Dialog open={isOpen} onOpenChange={open => { if (!open && !isRecovering && !isDeleting) onClose(); }}>
       <DialogContent className="max-w-4xl h-[80vh] flex flex-col p-0">
         <DialogHeader className="px-6 pt-6">
           <DialogTitle className="text-2xl">Recover interrupted meetings</DialogTitle>
@@ -133,6 +134,7 @@ export function TranscriptRecovery({
                 {recoverableMeetings.map((meeting) => (
                   <Button variant="ghost"
                     key={meeting.meetingId}
+                    disabled={isRecovering || isDeleting}
                     onClick={() => handleMeetingSelect(meeting.meetingId)}
                     className={cn(
                       'block h-auto font-normal text-base whitespace-normal hover:text-foreground w-full text-left p-3 rounded-lg border transition-colors',
@@ -273,8 +275,10 @@ export function TranscriptRecovery({
             Cancel
           </Button>
           <Button
-            variant="destructive"
-            onClick={handleDelete}
+            ref={deleteButtonRef}
+            variant="outline"
+            className="text-destructive"
+            onClick={() => setDeleteTargetId(selectedMeetingId)}
             disabled={!selectedMeetingId || isRecovering || isDeleting}
           >
             {isDeleting ? (
@@ -306,6 +310,21 @@ export function TranscriptRecovery({
             )}
           </Button>
         </DialogFooter>
+        <Dialog open={deleteTargetId !== null} onOpenChange={open => { if (!open && !isDeleting) setDeleteTargetId(null); }}>
+          <DialogContent
+            onOpenAutoFocus={event => { event.preventDefault(); cancelDeleteRef.current?.focus(); }}
+            onCloseAutoFocus={event => { event.preventDefault(); deleteButtonRef.current?.focus(); }}
+          >
+            <DialogHeader>
+              <DialogTitle>Delete interrupted meeting?</DialogTitle>
+              <DialogDescription>This deletes the selected meeting&apos;s recovery data. This cannot be undone.</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button ref={cancelDeleteRef} variant="outline" onClick={() => setDeleteTargetId(null)} disabled={isDeleting}>Cancel</Button>
+              <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>{isDeleting ? "Deleting…" : "Delete meeting"}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </DialogContent>
     </Dialog>
   );

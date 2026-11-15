@@ -1,10 +1,9 @@
 "use client";
 
-import { Textarea } from '@/components/ui/textarea';
 import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, type ComponentProps } from 'react';
 import { TranscriptCorrections } from './TranscriptCorrections';
 import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
@@ -12,9 +11,6 @@ import { Button } from '@/components/ui/button';
 interface TranscriptPanelProps {
   focusedSource?: { id: string; request: number };
   transcripts: Transcript[];
-  customPrompt: string;
-  contextLoading?: boolean;
-  onPromptChange: (value: string) => void;
   onCopyTranscript: () => void;
   onOpenMeetingFolder: () => Promise<void>;
   isRecording: boolean;
@@ -44,9 +40,6 @@ interface TranscriptPanelProps {
 export function TranscriptPanel({
   focusedSource,
   transcripts,
-  customPrompt,
-  contextLoading = false,
-  onPromptChange,
   onCopyTranscript,
   onOpenMeetingFolder,
   isRecording,
@@ -68,6 +61,7 @@ export function TranscriptPanel({
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
 }: TranscriptPanelProps) {
+  const [bookmarkOpen, setBookmarkOpen] = useState(false);
   const [editing, setEditing] = useState<TranscriptSegmentData | null>(null);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [transcribeOpen, setTranscribeOpen] = useState(false);
@@ -111,36 +105,24 @@ export function TranscriptPanel({
     </div>
   ) : undefined;
 
+  const renderToolbar = (actions?: ComponentProps<typeof TranscriptButtonGroup>['correctionActions']) => (
+    <div className="flex shrink-0 items-center justify-between gap-1 border-b border-border px-3 py-2">
+        <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
+        <TranscriptButtonGroup transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
+          onCopyTranscript={onCopyTranscript} onOpenMeetingFolder={onOpenMeetingFolder} meetingId={meetingId} meetingFolderPath={meetingFolderPath}
+          showSpeakerAttribution={showSpeakerAttribution} onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? () => setReplaceOpen(true) : undefined}
+          onAddBookmark={meetingId ? () => setBookmarkOpen(true) : undefined} correctionActions={actions} />
+      </div>
+  );
+
   return (
     <div data-transcript-panel tabIndex={0} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') { event.preventDefault(); event.stopPropagation(); setReplaceOpen(true); }
-    }} className="flex h-[26rem] min-h-[18rem] min-w-0 md:h-auto shrink-0 flex-col border-r border-border bg-card md:w-[32%] xl:w-[30rem] 2xl:w-[32rem]">
-      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} currentTime={activeTime} onSeek={onSeekToTime} />}
-      {/* Title area */}
-      <div className="border-b border-border px-3 py-2">
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-          <div className="min-w-0 flex items-baseline gap-2">
-            <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
-            <span className="text-xs text-muted-foreground">
-              {transcriptCount} segments
-            </span>
-          </div>
-          <TranscriptButtonGroup
-            transcriptCount={transcriptCount}
-            transcribeOpen={transcribeOpen}
-            onTranscribeOpenChange={setTranscribeOpen}
-            onCopyTranscript={onCopyTranscript}
-            onOpenMeetingFolder={onOpenMeetingFolder}
-            meetingId={meetingId}
-            meetingFolderPath={meetingFolderPath}
-            showSpeakerAttribution={showSpeakerAttribution}
-            onRefetchTranscripts={onRefetchTranscripts}
-          />
-        </div>
-      </div>
-
-      {meetingId && <TranscriptCorrections key={meetingId} meetingId={meetingId} editing={editing} onClose={() => setEditing(null)}
-        onChanged={onRefetchTranscripts} replaceOpen={replaceOpen} onReplaceOpenChange={setReplaceOpen} />}
+    }} className="flex h-[26rem] min-h-[18rem] min-w-0 md:h-auto shrink-0 flex-col border-r border-border bg-card md:w-[38%] md:min-w-[18rem] md:max-w-[30rem] xl:w-[clamp(420px,36%,560px)] xl:min-w-[420px] xl:max-w-[560px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+      {meetingId ? <TranscriptCorrections key={meetingId} meetingId={meetingId} editing={editing} onClose={() => setEditing(null)}
+        onChanged={onRefetchTranscripts} replaceOpen={replaceOpen} onReplaceOpenChange={setReplaceOpen}
+        renderActions={renderToolbar} /> : renderToolbar()}
+      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} />}
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView
@@ -167,20 +149,6 @@ export function TranscriptPanel({
           onApplySpeakerToMatching={showSpeakerAttribution ? onApplySpeakerToMatching : undefined}
         />
       </div>
-
-      {/* Custom prompt input at bottom of transcript section */}
-      {!isRecording && convertedSegments.length > 0 && (
-        <div className="border-t border-border p-2">
-          <Textarea
-            placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
-            className="min-h-[80px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm md:text-sm shadow-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
-            disabled={contextLoading}
-            aria-busy={contextLoading}
-            value={customPrompt}
-            onChange={(e) => onPromptChange(e.target.value)}
-          />
-        </div>
-      )}
     </div>
   );
 }

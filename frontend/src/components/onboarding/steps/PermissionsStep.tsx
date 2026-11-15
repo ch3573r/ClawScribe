@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Mic, Volume2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { PermissionRow } from '../shared';
 import { useOnboarding } from '@/contexts/OnboardingContext';
@@ -32,7 +33,7 @@ export function PermissionsStep() {
       try {
         await invoke('open_system_settings');
       } catch {
-        alert('Please enable microphone access in System Preferences > Security & Privacy > Microphone');
+        toast.error('Could not open system settings. Open your microphone privacy settings, allow ClawScribe access, then try again.');
       }
       return;
     }
@@ -64,7 +65,7 @@ export function PermissionsStep() {
       try {
         await invoke('open_system_settings');
       } catch {
-        alert('Please enable Audio Capture in System Settings → Privacy & Security → Audio Capture');
+        toast.error('Could not open system settings. Check your audio and privacy settings for ClawScribe, then try again.');
       }
       return;
     }
@@ -137,7 +138,7 @@ export function PermissionsStep() {
           <PermissionRow
             icon={<Volume2 className="w-5 h-5" />}
             title="System audio"
-            description="Click Enable to grant Audio Capture permission"
+            description="Enable access to the audio playing on this computer"
             status={permissions.systemAudio}
             isPending={isPending}
             onAction={handleSystemAudioAction}
