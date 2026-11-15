@@ -142,6 +142,66 @@ fn legacy_downsample(samples: &[f32], input_rate: u32) -> Vec<f32> {
     resampled
 }
 
+/// A forced cut may move back this far from the cap to land in a pause.
+const FORCED_CUT_SEARCH_MS: usize = 2_000;
+/// At most this share of the cap is searched, so a short cap keeps most of
+/// its length.
+const FORCED_CUT_SEARCH_DIVISOR: usize = 3;
+/// Length of the window whose level decides whether it is a pause.
+const FORCED_CUT_WINDOW_MS: usize = 100;
+const FORCED_CUT_STEP_MS: usize = 10;
+/// A window is a pause only when its level is below this share of the level
+/// of the searched audio. Steady speech or noise has no such dip.
+const FORCED_CUT_PAUSE_RATIO: f32 = 0.5;
+
+fn rms_level(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
+/// Where to end a segment that has to be cut because uninterrupted speech
+/// reached the cap. `speech` is the audio up to the cap; the result is how
+/// much of it the segment keeps.
+///
+/// A cut at the cap usually lands inside a word, and both halves of that word
+/// are then transcribed wrongly. So the cut moves back to the quietest moment
+/// in the last stretch before the cap, when that moment is a real dip in
+/// level. The rest stays in the VAD as the start of the next segment. Without
+/// a dip the segment keeps its full length.
+fn forced_cut_len(speech: &[f32]) -> usize {
+    let cap = speech.len();
+    let window = ms_to_samples(FORCED_CUT_WINDOW_MS);
+    let step = ms_to_samples(FORCED_CUT_STEP_MS);
+    let search = ms_to_samples(FORCED_CUT_SEARCH_MS).min(cap / FORCED_CUT_SEARCH_DIVISOR);
+    if search < 2 * window {
+        return cap;
+    }
+
+    let searched = &speech[cap - search..];
+    // Latest window first: of equally quiet windows the latest wins, which
+    // keeps the segment as long as possible.
+    let mut quietest = (0usize, f32::MAX);
+    let mut start = searched.len() - window;
+    loop {
+        let level = rms_level(&searched[start..start + window]);
+        if level < quietest.1 {
+            quietest = (start, level);
+        }
+        if start < step {
+            break;
+        }
+        start -= step;
+    }
+
+    if quietest.1 < rms_level(searched) * FORCED_CUT_PAUSE_RATIO {
+        cap - search + quietest.0 + window / 2
+    } else {
+        cap
+    }
+}
+
 /// Represents a complete speech segment detected by VAD
 #[derive(Debug, Clone)]
 pub struct SpeechSegment {
@@ -456,7 +516,8 @@ impl ContinuousVadProcessor {
             }
 
             let start_offset = self.emitted_active_speech_samples;
-            let end_offset = start_offset + max_segment_samples;
+            let capped = &active_speech[start_offset..start_offset + max_segment_samples];
+            let end_offset = start_offset + forced_cut_len(capped);
             let samples = active_speech[start_offset..end_offset].to_vec();
             let segment = self.build_active_speech_segment(start_offset, samples, 0.85);
 
@@ -758,6 +819,149 @@ mod tests {
         assert_eq!(segment.start_timestamp_ms, 1500.0);
         assert_eq!(segment.end_timestamp_ms, 1750.0);
         assert_eq!(segment.confidence, 0.85);
+    }
+
+    /// Six seconds of tone with silence from `gap_start_ms` for `gap_ms`.
+    fn tone_with_gap(gap_start_ms: usize, gap_ms: usize) -> Vec<f32> {
+        let mut speech = sine(220.0, 16_000, 6 * 16_000);
+        let gap = ms_to_samples(gap_start_ms)..ms_to_samples(gap_start_ms + gap_ms);
+        speech[gap].fill(0.0);
+        speech
+    }
+
+    #[test]
+    fn forced_cut_moves_back_into_a_pause_near_the_cap() {
+        let cut = forced_cut_len(&tone_with_gap(5_000, 200));
+        assert!(
+            (ms_to_samples(5_000)..=ms_to_samples(5_200)).contains(&cut),
+            "cut at {:.0} ms is outside the pause",
+            samples_to_ms(cut)
+        );
+    }
+
+    #[test]
+    fn forced_cut_prefers_the_latest_of_equal_pauses() {
+        let mut speech = tone_with_gap(4_400, 200);
+        speech[ms_to_samples(5_300)..ms_to_samples(5_500)].fill(0.0);
+        let cut = forced_cut_len(&speech);
+        assert!(
+            (ms_to_samples(5_300)..=ms_to_samples(5_500)).contains(&cut),
+            "cut at {:.0} ms is not in the later pause",
+            samples_to_ms(cut)
+        );
+    }
+
+    #[test]
+    fn forced_cut_keeps_the_cap_without_a_usable_pause() {
+        // Steady level: nothing to prefer.
+        let steady = sine(220.0, 16_000, 6 * 16_000);
+        assert_eq!(forced_cut_len(&steady), steady.len());
+        // A pause more than two seconds before the cap is out of reach.
+        let early = tone_with_gap(2_000, 300);
+        assert_eq!(forced_cut_len(&early), early.len());
+        // A dip that only halves the amplitude for 30 ms is not a pause.
+        let mut shallow = sine(220.0, 16_000, 6 * 16_000);
+        for sample in &mut shallow[ms_to_samples(5_000)..ms_to_samples(5_030)] {
+            *sample *= 0.5;
+        }
+        assert_eq!(forced_cut_len(&shallow), shallow.len());
+        // A cap too short to search keeps its length even over silence.
+        let short = vec![0.0; ms_to_samples(500)];
+        assert_eq!(forced_cut_len(&short), short.len());
+    }
+
+    #[test]
+    fn forced_cut_never_keeps_less_than_two_thirds_of_a_short_cap() {
+        // Three-second cap (Nemotron): only the last second is searched.
+        let mut speech = sine(220.0, 16_000, 3 * 16_000);
+        speech[ms_to_samples(1_500)..ms_to_samples(1_800)].fill(0.0);
+        assert_eq!(forced_cut_len(&speech), speech.len());
+        speech[ms_to_samples(2_300)..ms_to_samples(2_500)].fill(0.0);
+        let cut = forced_cut_len(&speech);
+        assert!((ms_to_samples(2_300)..=ms_to_samples(2_500)).contains(&cut));
+    }
+
+    #[test]
+    fn forced_segments_cut_in_pauses_stay_contiguous_and_within_the_cap() {
+        // Speech-like bursts with a 150 ms gap every 1.3 s: shorter than the
+        // redemption time, so the VAD keeps the speech open and the cap cuts.
+        let mut audio = vec![0.0; 16_000];
+        audio.extend(generate_test_audio_with_speech(5.0, 16_000));
+        let speech_start = 16_000;
+        let mut gaps = Vec::new();
+        let mut gap_start = speech_start + ms_to_samples(1_300);
+        while gap_start + ms_to_samples(150) < audio.len() {
+            let gap = gap_start..gap_start + ms_to_samples(150);
+            audio[gap.clone()].fill(0.0);
+            gaps.push(gap);
+            gap_start += ms_to_samples(1_300);
+        }
+
+        let cap = ms_to_samples(2_000);
+        let mut processor =
+            ContinuousVadProcessor::new_with_max_segment_duration(16_000, 2000, Some(2_000))
+                .unwrap();
+        let mut segments = processor.process_audio(&audio).unwrap();
+        segments.extend(processor.flush().unwrap());
+        assert!(segments.len() >= 2, "fixture must force at least one cut");
+
+        let mut last_end = 0;
+        let mut cuts_in_a_gap = 0;
+        for segment in &segments {
+            let start = (segment.start_timestamp_ms * 16.0).round() as usize;
+            let end = (segment.end_timestamp_ms * 16.0).round() as usize;
+            assert!(start >= last_end, "segments must not duplicate audio");
+            if last_end > 0 {
+                assert_eq!(start, last_end, "forced segments must not drop audio");
+            }
+            assert!(segment.samples.len() <= cap, "segment exceeds the cap");
+            assert_eq!(end - start, segment.samples.len());
+            assert_eq!(segment.samples.as_slice(), &audio[start..end]);
+            if gaps.iter().any(|gap| gap.contains(&end)) {
+                cuts_in_a_gap += 1;
+            }
+            last_end = end;
+        }
+        assert!(cuts_in_a_gap >= 1, "no forced cut landed in a pause");
+    }
+
+    #[test]
+    fn speech_that_ends_after_a_pause_cut_keeps_every_sample_once() {
+        // Same bursts, followed by silence longer than the redemption time, so
+        // the last segment comes from the VAD ending the speech, not from flush.
+        let mut audio = vec![0.0; 16_000];
+        audio.extend(generate_test_audio_with_speech(5.0, 16_000));
+        let mut gap_start = 16_000 + ms_to_samples(1_300);
+        while gap_start + ms_to_samples(150) < audio.len() {
+            audio[gap_start..gap_start + ms_to_samples(150)].fill(0.0);
+            gap_start += ms_to_samples(1_300);
+        }
+        audio.extend(vec![0.0; 3 * 16_000]);
+
+        let mut processor =
+            ContinuousVadProcessor::new_with_max_segment_duration(16_000, 2000, Some(2_000))
+                .unwrap();
+        let segments = processor.process_audio(&audio).unwrap();
+        assert!(!processor.in_speech, "fixture must end the speech before flush");
+        assert!(segments.len() >= 2, "fixture must force at least one cut");
+        assert!(
+            segments.iter().any(|s| s.samples.len() < ms_to_samples(2_000)
+                && s.samples.len() > ms_to_samples(1_300)),
+            "fixture must shorten at least one forced cut"
+        );
+
+        let mut last_end = 0;
+        for segment in &segments {
+            let start = (segment.start_timestamp_ms * 16.0).round() as usize;
+            let end = start + segment.samples.len();
+            if last_end > 0 {
+                assert_eq!(start, last_end, "segments must neither drop nor repeat audio");
+            }
+            assert!(end <= audio.len());
+            assert_eq!(segment.samples.as_slice(), &audio[start..end]);
+            last_end = end;
+        }
+        assert!(processor.flush().unwrap().is_empty());
     }
 
     #[test]

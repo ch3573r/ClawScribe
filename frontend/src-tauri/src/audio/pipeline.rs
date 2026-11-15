@@ -81,16 +81,29 @@ impl SystemAudioWarningTracker {
 /// Choose the live VAD segment cap for the active transcription provider.
 /// Nemotron transcribes each VAD segment offline at only ~2.5x realtime, so a 6s
 /// cap can leave continuous speech several seconds behind; cap its live segments
-/// shorter (3s) to cut perceived latency. Other providers keep the 6s default.
+/// shorter (3s) to cut perceived latency. Whisper and cloud providers keep 6s.
 /// Import/retranscription is unaffected — it uses silence-aware splitting, not
 /// this cap.
+///
+/// Parakeet gets a longer cap (12s). It decodes far faster than realtime, and
+/// it is unreliable on short pieces of a sentence: in `live_cut_bench` some
+/// segments under 6s decoded to no text at all, while none of 8s or more did.
+/// The price is that uninterrupted speech can appear up to 12s late.
 pub fn set_live_max_segment_ms_for_provider(provider: &str) {
-    let ms = if provider.eq_ignore_ascii_case("nemotron") {
+    LIVE_MAX_SEGMENT_MS.store(
+        live_max_segment_ms_for_provider(provider),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn live_max_segment_ms_for_provider(provider: &str) -> u32 {
+    if provider.eq_ignore_ascii_case("nemotron") {
         3_000
+    } else if provider.eq_ignore_ascii_case("parakeet") {
+        12_000
     } else {
         6_000
-    };
-    LIVE_MAX_SEGMENT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct AudioMixerRingBuffer {
@@ -1393,6 +1406,20 @@ impl AudioPipelineManager {
 impl Default for AudioPipelineManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod live_segment_cap_tests {
+    use super::live_max_segment_ms_for_provider;
+
+    #[test]
+    fn each_provider_gets_its_live_segment_cap() {
+        assert_eq!(live_max_segment_ms_for_provider("parakeet"), 12_000);
+        assert_eq!(live_max_segment_ms_for_provider("Parakeet"), 12_000);
+        assert_eq!(live_max_segment_ms_for_provider("nemotron"), 3_000);
+        assert_eq!(live_max_segment_ms_for_provider("localWhisper"), 6_000);
+        assert_eq!(live_max_segment_ms_for_provider(""), 6_000);
     }
 }
 
