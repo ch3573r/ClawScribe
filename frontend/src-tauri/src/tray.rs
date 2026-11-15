@@ -52,16 +52,32 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
     }
 }
 pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
+    recording_intent_handler(app, None);
+}
+
+/// Starts or stops recording. `want_recording` of `None` toggles; `Some`
+/// does nothing when the recording state already matches. The state is read
+/// once, in the same task that acts on it, so a start request can never stop
+/// a recording that began in the meantime, nor the reverse.
+pub(crate) fn recording_intent_handler<R: Runtime>(
+    app: &AppHandle<R>,
+    want_recording: Option<bool>,
+) {
     if crate::audio::recording_commands::is_stopping() {
         return;
     }
-    focus_main_window(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if crate::audio::recording_commands::is_stopping() {
             return;
         }
-        if crate::is_recording().await {
+        let recording = crate::is_recording().await;
+        if want_recording == Some(recording) {
+            log::info!("Recording request ignored: state already matches");
+            return;
+        }
+        focus_main_window(&app_clone);
+        if recording {
             // Immediately show stopping state
             set_tray_state(&app_clone, RecordingState::Stopping);
 
