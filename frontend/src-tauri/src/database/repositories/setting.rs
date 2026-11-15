@@ -125,7 +125,7 @@ impl SettingsRepository {
             let config = Self::get_custom_openai_config(pool).await?;
             return Ok(config.and_then(|c| c.api_key));
         }
-        if provider == "openclaw" || provider == "codex" {
+        if provider == "openclaw" || provider == "codex" || provider == "claude-code" {
             return Ok(None);
         }
 

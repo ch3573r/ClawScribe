@@ -45,6 +45,7 @@ pub struct CustomOpenAIConfig {
 
 pub mod chat_commands;
 mod chunking;
+pub mod claude_code_provider;
 pub mod codex_provider;
 pub mod commands;
 pub mod edit_exit;

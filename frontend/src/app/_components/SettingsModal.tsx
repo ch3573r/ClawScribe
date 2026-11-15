@@ -14,7 +14,7 @@ import { useRecordingState } from "@/contexts/RecordingStateContext";
 
 const EMPTY_MODEL_OPTION = "__empty_model__";
 const PROVIDER_OPTIONS: ModelConfig["provider"][] = [
-  "custom-openai", "openclaw", "codex", "builtin-ai", "ollama", "openrouter", "claude", "groq",
+  "custom-openai", "openclaw", "codex", "claude-code", "builtin-ai", "ollama", "openrouter", "claude", "groq",
 ];
 
 type modalType = "modelSettings" | "deviceSettings" | "languageSettings" | "modelSelector" | "errorAlert" | "chunkDropWarning";
@@ -132,6 +132,7 @@ export function SettingsModals({
                         <SelectItem value="custom-openai">OpenAI / OpenAI-compatible API</SelectItem>
                         <SelectItem value="openclaw">OpenClaw</SelectItem>
                         <SelectItem value="codex">Advanced: Codex app-server</SelectItem>
+                        <SelectItem value="claude-code">Claude Code</SelectItem>
                         <SelectItem value="builtin-ai">Built-in AI</SelectItem>
                         <SelectItem value="ollama">Ollama</SelectItem>
                         <SelectItem value="openrouter">OpenRouter</SelectItem>

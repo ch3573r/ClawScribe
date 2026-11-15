@@ -33,9 +33,10 @@ import {
 } from '@/components/ui/command';
 import { cn, isOllamaNotInstalledError } from '@/lib/utils';
 import { toast } from 'sonner';
+import { ClaudeCodeProviderCard, CLAUDE_CODE_MODELS, useClaudeCodeSettings } from './ClaudeCodeProviderCard';
 
 export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
+  provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
   model: string;
   whisperModel: string;
   apiKey?: string | null;
@@ -228,6 +229,7 @@ export function ModelSettingsModal({
   const configContext = useConfig();
   const modelConfig = configContext?.modelConfig || propsModelConfig;
   const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+  const claudeCode = useClaudeCodeSettings(modelConfig.provider === 'claude-code');
   const providerApiKeys = configContext?.providerApiKeys;
   const updateProviderApiKey = configContext?.updateProviderApiKey;
 
@@ -390,6 +392,7 @@ export function ModelSettingsModal({
     'custom-openai': [customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL],
     openclaw: ['openclaw-managed'],
     codex: codexPickerModels.map((model) => model.id),
+    'claude-code': CLAUDE_CODE_MODELS,
   };
 
   const requiresApiKey =
@@ -417,6 +420,7 @@ export function ModelSettingsModal({
   );
 
   const isDoneDisabled =
+    (modelConfig.provider === 'claude-code' && claudeCode.busy) ||
     (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
     isCustomOpenAIInvalid ||
@@ -436,7 +440,7 @@ export function ModelSettingsModal({
           setModelConfig(data);
 
           // Fetch API key if not included in response and provider requires it
-          if (data.provider !== 'ollama' && data.provider !== 'openclaw' && !data.apiKey) {
+          if (['claude', 'groq', 'openai', 'openrouter'].includes(data.provider) && !data.apiKey) {
             try {
               const apiKeyData = await invoke('api_get_api_key', {
                 provider: data.provider
@@ -995,6 +999,10 @@ export function ModelSettingsModal({
   }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, codexModels, modelConfig.provider]);
 
   const handleSave = async () => {
+    if (modelConfig.provider === 'claude-code') {
+      try { await claudeCode.save(); }
+      catch { toast.error('Could not save Claude Code settings'); return; }
+    }
     // For custom-openai provider, save the custom config first
     if (modelConfig.provider === 'custom-openai') {
       try {
@@ -1021,7 +1029,7 @@ export function ModelSettingsModal({
 
     let updatedConfig = {
       ...modelConfig,
-      apiKey: typeof apiKey === 'string' ? apiKey.trim() || null : null,
+      apiKey: requiresApiKey && typeof apiKey === 'string' ? apiKey.trim() || null : null,
       ollamaEndpoint: modelConfig.provider === 'ollama'
         ? (ollamaEndpoint.trim() || null)
         : (modelConfig.ollamaEndpoint || null),
@@ -1389,11 +1397,12 @@ export function ModelSettingsModal({
                 <SelectGroup>
                   <SelectLabel className="normal-case">Advanced</SelectLabel>
                   <SelectItem value="codex">Codex app-server</SelectItem>
+                  <SelectItem value="claude-code">Claude Code</SelectItem>
                 </SelectGroup>
               </SelectContent>
             </Select>
 
-            {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && modelConfig.provider !== 'openclaw' && modelConfig.provider !== 'codex' && (
+            {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && modelConfig.provider !== 'openclaw' && modelConfig.provider !== 'codex' && modelConfig.provider !== 'claude-code' && (
               <Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen} modal={true}>
                 <PopoverTrigger asChild>
                   <Button
@@ -1637,6 +1646,18 @@ export function ModelSettingsModal({
               </Button>
             </div>
           </div>
+        )}
+
+        {modelConfig.provider === 'claude-code' && (
+          <ClaudeCodeProviderCard
+            status={claudeCode.status}
+            busy={claudeCode.busy}
+            programPath={claudeCode.programPath}
+            model={modelConfig.model}
+            onProgramPathChange={claudeCode.setProgramPath}
+            onModelChange={model => setModelConfig(prev => ({ ...prev, model }))}
+            onCheck={claudeCode.check}
+          />
         )}
 
         {modelConfig.provider === 'codex' && (

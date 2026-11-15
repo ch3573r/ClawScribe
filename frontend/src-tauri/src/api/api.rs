@@ -581,6 +581,7 @@ pub async fn api_save_model_config<R: Runtime>(
             && provider != "custom-openai"
             && provider != "openclaw"
             && provider != "codex"
+            && provider != "claude-code"
         {
             log_info!("🔑 API key provided, saving...");
             if let Err(e) = SettingsRepository::save_api_key(pool, &provider, &key).await {

@@ -101,6 +101,7 @@ pub struct ClaudeRequest {
 pub enum LLMProvider {
     OpenAI,
     Claude,
+    ClaudeCode,
     Groq,
     Ollama,
     OpenRouter,
@@ -117,6 +118,7 @@ impl LLMProvider {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAI),
             "claude" => Ok(Self::Claude),
+            "claude-code" => Ok(Self::ClaudeCode),
             "groq" => Ok(Self::Groq),
             "ollama" => Ok(Self::Ollama),
             "openrouter" => Ok(Self::OpenRouter),
@@ -189,7 +191,16 @@ pub async fn generate_summary(
         .map_err(|e| e.to_string());
     }
 
+    if provider == &LLMProvider::ClaudeCode {
+        let data = app_data_dir.ok_or("App data directory unavailable")?;
+        let token = cancellation_token.cloned().unwrap_or_default();
+        return super::claude_code_provider::provider_from_data(data)?
+            .generate(model_name, system_prompt, user_prompt, &token)
+            .await;
+    }
+
     let (api_url, mut headers) = match provider {
+        LLMProvider::ClaudeCode => unreachable!("Claude Code is handled before HTTP setup"),
         LLMProvider::OpenAI => (
             "https://api.openai.com/v1/chat/completions".to_string(),
             header::HeaderMap::new(),
@@ -476,6 +487,7 @@ fn provider_name(provider: &LLMProvider) -> &str {
     match provider {
         LLMProvider::OpenAI => "OpenAI",
         LLMProvider::Claude => "Claude",
+        LLMProvider::ClaudeCode => "Claude Code",
         LLMProvider::Groq => "Groq",
         LLMProvider::Ollama => "Ollama",
         LLMProvider::BuiltInAI => "Built-in AI",
@@ -536,6 +548,7 @@ pub(crate) struct ResolvedText {
     execution: TextExecution,
 }
 enum TextExecution {
+    ClaudeCode(super::claude_code_provider::ClaudeCodeProvider),
     Compatible(super::openai_provider::OpenAICompatibleProcessingProvider),
     Codex(super::codex_provider::CodexAppServerProvider),
     Generic {
@@ -550,6 +563,7 @@ pub(crate) fn canonical_provider(provider: &LLMProvider) -> &'static str {
     match provider {
         LLMProvider::OpenAI => "openai",
         LLMProvider::Claude => "claude",
+        LLMProvider::ClaudeCode => "claude-code",
         LLMProvider::Groq => "groq",
         LLMProvider::Ollama => "ollama",
         LLMProvider::OpenRouter => "openrouter",
@@ -584,7 +598,12 @@ pub(crate) async fn resolve_configured_text(
         let mut duration = REQUEST_TIMEOUT_DURATION;
         let mut context = None;
         let mut output = None;
-        let execution = if provider == LLMProvider::Codex {
+        let execution = if provider == LLMProvider::ClaudeCode {
+            model = super::claude_code_provider::normalize_model(&model)?.to_string();
+            TextExecution::ClaudeCode(super::claude_code_provider::provider_from_data(
+                &environment.app_data_dir,
+            )?)
+        } else if provider == LLMProvider::Codex {
             let codex = environment
                 .codex
                 .ok_or("Bundled Codex configuration unavailable")?;
@@ -695,6 +714,7 @@ pub(crate) async fn dispatch_resolved_text(
     let deadline = resolved.deadline;
     supervise(token,deadline,Duration::from_secs(5),move |token|async move {
         let text=match resolved.execution {
+            TextExecution::ClaudeCode(provider)=>provider.generate(&resolved.model,&system,&user,&token).await?,
             TextExecution::Compatible(provider)=>{
                 tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=provider.send_text_prompt_cancellable(&system,&user,&token)=>result?}
             },
