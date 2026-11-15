@@ -19,6 +19,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
+import { CustomVocabularySettings } from "@/components/CustomVocabularySettings";
 import { RecordingSettings } from "@/components/RecordingSettings";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { SummaryModelSettings } from "@/components/SummaryModelSettings";
@@ -131,10 +132,13 @@ export default function SettingsPage() {
         return <KeyboardShortcutsSettings />;
       case "transcription":
         return (
-          <TranscriptSettings
-            transcriptModelConfig={transcriptModelConfig}
-            setTranscriptModelConfig={setTranscriptModelConfig}
-          />
+          <div className="space-y-6">
+            <TranscriptSettings
+              transcriptModelConfig={transcriptModelConfig}
+              setTranscriptModelConfig={setTranscriptModelConfig}
+            />
+            <CustomVocabularySettings />
+          </div>
         );
       case "summary":
         return <div className="space-y-6"><SummaryModelSettings /><SummaryTemplateSettings /></div>;

@@ -97,6 +97,13 @@ them through phrase matching. Nemotron's **Auto** language follows the system
 locale; select the spoken language explicitly when it differs. Parakeet's Auto
 selection does not label an unknown language as English.
 
+**Settings → Transcription → Custom vocabulary** stores up to 500 names or
+terms (64 characters each) and corrects similar spellings in new recordings,
+imports, and retranscription. A recording uses the list loaded when its live
+transcription starts. Matching supports Unicode names and terms, including
+German umlauts and ß. Short terms require an exact match apart from case and
+punctuation; single-letter keys such as C# and C++ are left unchanged.
+
 Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
 when the opt-in is off. Settings explain which local engine and model live
 recordings use. Cloud APIs apply to Import and Enhance (whole-file), while live

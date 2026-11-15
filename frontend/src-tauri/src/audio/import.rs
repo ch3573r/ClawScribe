@@ -849,7 +849,9 @@ async fn save_import_transcripts<R: Runtime>(
 
     // Create transcript segments, then stitch obvious VAD fragments so imported
     // transcripts do not save one-word rows for natural sentence continuations.
-    let segments = create_readable_transcript_segments_with_words(all_transcripts);
+    let mut segments = create_readable_transcript_segments_with_words(all_transcripts);
+    let vocabulary = super::vocabulary_settings::load_vocabulary(app);
+    super::vocabulary_settings::correct_segments(&vocabulary, &mut segments);
 
     // Save to database
     let app_state = app
