@@ -134,6 +134,13 @@ impl Vocabulary {
             if let Some((n, replacement, _, plural)) = best_match {
                 let (prefix, _) = extract_punctuation(words[i]);
                 let (_, last_stem, suffix) = split_token(words[i + n - 1]);
+                // An entry that is itself a possessive ("McDonald's") already
+                // carries the ending the transcript word had.
+                let suffix = if ends_with_possessive(replacement) {
+                    strip_leading_possessive(suffix)
+                } else {
+                    suffix
+                };
                 let plural_suffix = if plural {
                     &last_stem[last_stem.len() - last_stem.chars().last().unwrap().len_utf8()..]
                 } else {
@@ -192,6 +199,21 @@ fn split_token(word: &str) -> (&str, &str, &str) {
         .or_else(|| core.strip_suffix("’S"))
         .unwrap_or(core);
     (prefix, stem, &word[prefix.len() + stem.len()..])
+}
+
+const POSSESSIVES: [&str; 4] = ["'s", "’s", "'S", "’S"];
+
+fn ends_with_possessive(word: &str) -> bool {
+    let (_, trailing) = extract_punctuation(word);
+    let core = &word[..word.len() - trailing.len()];
+    POSSESSIVES.iter().any(|p| core.ends_with(p))
+}
+
+fn strip_leading_possessive(suffix: &str) -> &str {
+    POSSESSIVES
+        .iter()
+        .find_map(|p| suffix.strip_prefix(p))
+        .unwrap_or(suffix)
 }
 
 fn build_match_key(word: &str) -> String {
@@ -438,6 +460,25 @@ mod tests {
             assert!(edits.is_empty());
         }
         assert_eq!(correct("Robert", &["Roberts", "Robert"]), "Robert");
+    }
+
+    #[test]
+    fn possessive_entries_do_not_double_their_ending() {
+        let words = vec!["McDonald's".to_string(), "Denny’s".to_string()];
+        for text in [
+            "We met at McDonald's yesterday.",
+            "We met at mcdonald's, then left.",
+            "Lunch at Denny’s was fine.",
+            "Lunch at Denny's was fine.",
+        ] {
+            let corrected = apply_custom_words(text, &words, DEFAULT_THRESHOLD);
+            assert!(!corrected.contains("s's") && !corrected.contains("s’s"), "{corrected}");
+            assert!(!corrected.contains("’s's") && !corrected.contains("'s’s"), "{corrected}");
+        }
+        assert_eq!(
+            apply_custom_words("at mcdonald's today", &words, DEFAULT_THRESHOLD),
+            "at McDonald's today"
+        );
     }
 
     #[test]
