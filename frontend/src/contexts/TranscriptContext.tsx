@@ -321,7 +321,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
         });
       } catch (error) {
         console.error("❌ Failed to setup MAIN transcript listener:");
-        alert('Failed to setup transcript listener. Check console for details.');
+        toast.error('Could not display live transcripts. Save your recording, then reopen ClawScribe to try again.');
       }
     };
 

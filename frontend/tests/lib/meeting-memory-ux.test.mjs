@@ -6,15 +6,18 @@ const jsx=(type,props)=>({type,props});
 const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
 const text=node=>Array.isArray(node)?node.map(text).join(''):typeof node==='string'||typeof node==='number'?String(node):node?text(node.props?.children):'';
 const meetings=[{id:'a',title:'Launch review'},{id:'b',title:'Budget planning'}];
-function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic_ready:0}) {
+function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic_ready:0},sidebar={}) {
   const hooks=createHookHarness();const exports=loadTsModule(file,{
     react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'next/navigation':{useRouter:()=>({push(){}})},
-    '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null})},
+    'next/link':'link',
+    '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null,...sidebar})},
+    '@/contexts/ImportDialogContext':{useImportDialog:()=>({openImportDialog:sidebar.openImportDialog})},
+    '@/contexts/RecordingStateContext':{useRecordingState:()=>({})},
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
-    '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
     '@/components/ui/textarea':{Textarea:'textarea'},'@/components/ui/scroll-area':{ScrollArea:'scroll-area'},'@/components/ui/tooltip':{},
     '@/components/ui/input':{Input:'input'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},
     '@/components/ui/tabs':{Tabs:'tabs',TabsList:'tablist',TabsTrigger:'tab',TabsContent:'tab-panel'},
@@ -58,6 +61,45 @@ test('configured library chat enables the first question before a conversation e
   const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture'});
   nodes(app.render()).find(node=>node.type==='textarea').props.onChange({target:{value:'Decision?'}});
   assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);app.unmount();
+});
+
+test('archive empty state starts recording and imports through the shared flows',()=>{
+  const calls=[];
+  const app=surface('src/app/meetings/page.tsx','default',{},undefined,{meetings:[],handleRecordingToggle:()=>calls.push('record'),openImportDialog:()=>calls.push('import')});
+  const tree=app.render();
+  assert.match(text(tree),/No meetings yet/);
+  assert(!nodes(tree).some(node=>node.type==='title-filter'));
+  nodes(tree).find(node=>node.type==='button'&&text(node)==='Start recording').props.onClick();
+  nodes(tree).find(node=>node.type==='button'&&text(node)==='Import audio or video').props.onClick();
+  assert.deepEqual(calls,['record','import']);app.unmount();
+});
+
+test('archive filtering keeps controls and clear filters restores the full linked archive',()=>{
+  const app=surface('src/app/meetings/page.tsx','default');
+  let tree=app.render();assert.match(text(tree),/2 meetings/);
+  assert.equal(nodes(tree).filter(node=>node.type==='link'&&node.props.href.startsWith('/meeting-details')).length,2);
+  nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'missing'}});
+  tree=app.render();assert.match(text(tree),/0 of 2 meetings/);assert.match(text(tree),/No meetings match/);
+  nodes(tree).find(node=>node.type==='button'&&text(node)==='Clear filters').props.onClick();
+  tree=app.render();assert.match(text(tree),/2 meetings/);
+  assert.equal(nodes(tree).filter(node=>node.type==='link').length,2);app.unmount();
+});
+
+test('memory empty-state action opens the existing chooser without expanding the scope',()=>{
+  const app=surface('src/components/Knowledge/KnowledgeArchive.tsx','KnowledgeArchive',{meetings,projectFilter:{tags:[],untagged:false,mode:'any'}});
+  let tree=app.render();const chat=nodes(tree).find(node=>node.type==='chat');
+  assert.equal(chat.props.inputDisabled,true);
+  assert.match(text(chat.props.emptyState),/Choose meetings to ask about/);
+  nodes(chat.props.emptyState).find(node=>node.type==='button').props.onClick();
+  tree=app.render();assert.equal(nodes(tree).find(node=>node.type==='popover').props.open,true);
+  assert.equal(nodes(tree).find(node=>node.type==='chat').props.state.scope.filter.all_meetings,false);app.unmount();
+});
+
+test('memory question input stays visible and disabled until sources are chosen',()=>{
+  const state={scope:{kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:[],tag_mode:'any',untagged:false,from:null,to:null}},owner:null,messages:[],threads:[]};
+  const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture',inputDisabled:true,emptyState:jsx('p',{children:'Choose meetings'})});
+  const tree=app.render();assert.equal(nodes(tree).find(node=>node.type==='textarea').props.disabled,true);
+  assert.equal(nodes(tree).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,true);app.unmount();
 });
 
 test('transcript results omit empty panels and explain fallback without internal status codes',()=>{

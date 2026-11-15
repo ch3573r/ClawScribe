@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { Globe, Pin } from 'lucide-react';
+import { Globe, Pin, Plus, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
@@ -19,7 +20,7 @@ export function SummaryLanguageSettings() {
     <div className="bg-card rounded-lg border border-border p-6 shadow-sm relative">
       <div className="flex items-center gap-2 mb-2">
         <Globe size={18} className="text-muted-foreground" />
-        <h3 className="text-lg font-semibold text-foreground">Summary Language</h3>
+        <h3 className="text-lg font-semibold text-foreground">Summary language</h3>
       </div>
       <p className="text-sm text-muted-foreground mb-4">
         Pin one language as the default for new meetings. Unpinned languages remain as
@@ -38,13 +39,13 @@ export function SummaryLanguageSettings() {
                   : 'bg-muted border-border text-foreground'
               }`}
             >
-              <button
+              <Button variant="ghost"
                 type="button"
                 aria-label={isPinned ? `Unpin ${labelForCode(code)} as default` : `Pin ${labelForCode(code)} as default`}
                 aria-pressed={isPinned}
                 title={isPinned ? 'Click to unset as default' : 'Click to set as default'}
                 onClick={() => togglePin(code)}
-                className={`flex items-center gap-1.5 pl-3 pr-2 py-1 hover:brightness-95 active:brightness-90 ${
+                className={`h-auto rounded-none gap-1.5 pl-3 pr-2 py-1 hover:bg-muted hover:brightness-95 active:brightness-90 ${
                   isPinned ? 'text-primary' : 'text-foreground'
                 }`}
               >
@@ -54,28 +55,28 @@ export function SummaryLanguageSettings() {
                   fill={isPinned ? 'currentColor' : 'none'}
                 />
                 {labelForCode(code)}
-              </button>
-              <button
+              </Button>
+              <Button variant="ghost" size="icon"
                 type="button"
                 aria-label={`Remove ${labelForCode(code)}`}
                 onClick={() => removeRecent(code)}
-                className={`pr-2.5 pl-0.5 py-1 leading-none ${isPinned ? 'text-primary hover:text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+                className={`h-auto w-auto rounded-none pr-2.5 pl-0.5 py-1 leading-none [&_svg]:size-3.5 ${isPinned ? 'text-primary hover:text-primary' : 'text-muted-foreground hover:text-foreground'}`}
               >
-                ×
-              </button>
+                <X aria-hidden="true" />
+              </Button>
             </span>
           );
         })}
 
         <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
           <PopoverTrigger asChild>
-            <button
+            <Button variant="outline"
               type="button"
               disabled={recents.length >= 5}
-              className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-3 py-1 text-sm text-muted-foreground hover:border-border hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-auto gap-1 rounded-full border-dashed border-border px-3 py-1 text-sm text-muted-foreground"
             >
-              ＋ Add language
-            </button>
+              <Plus aria-hidden="true" /> Add language
+            </Button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-auto p-0 border-0 shadow-none bg-transparent">
             <LanguagePickerPopover

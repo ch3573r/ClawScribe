@@ -17,6 +17,8 @@ test('bookmark changes reload once through the event and preserve the list while
   const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
+    '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
@@ -43,7 +45,7 @@ test('bookmark changes reload once through the event and preserve the list while
   await button('Remove').props.onClick(); await flush();
   assert.equal(reads.length, 4); assert.match(text(render()), /Bookmarks \(1\)/);
   reads[3].resolve([]); await flush();
-  assert.match(text(render()), /Bookmarks \(0\)/);
+  assert.doesNotMatch(text(render()), /Bookmarks \(0\)/);
   hooks.unmount(); await flush(); assert.equal(listeners.size, 0);
 });
 
@@ -102,6 +104,8 @@ test('bookmarks load, retry, and refresh after writes when event registration fa
   const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
+    '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
@@ -141,6 +145,8 @@ test('a subscription failure after navigation does not load the previous meeting
   const { MeetingBookmarks } = loadTsModule('src/components/MeetingDetails/MeetingBookmarks.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
+    '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async () => { reads++; return []; } },

@@ -1,13 +1,9 @@
 "use client";
 
-import { Button } from '@/components/ui/button';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Copy, Save, Loader2, FolderOpen, MoreHorizontal, Search } from 'lucide-react';
+import { Copy, Save, FolderOpen, Search } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 
 interface SummaryUpdaterButtonGroupProps {
@@ -18,11 +14,12 @@ interface SummaryUpdaterButtonGroupProps {
   onFind?: () => void;
   onOpenFolder: () => Promise<void>;
   hasSummary: boolean;
+  onReplace?: () => void;
+  onRestore?: () => void;
+  disabled?: boolean;
 }
 
-// Save stays a first-class button (highlighted when there are unsaved edits);
-// the secondary actions (copy, open folder) live behind a ⋯ menu so the meeting
-// toolbar isn't a wall of buttons.
+// Secondary summary actions share the toolbar overflow menu.
 export function SummaryUpdaterButtonGroup({
   isSaving,
   isDirty,
@@ -30,63 +27,14 @@ export function SummaryUpdaterButtonGroup({
   onCopy,
   onFind,
   onOpenFolder,
-  hasSummary,
+  hasSummary, onReplace, onRestore, disabled,
 }: SummaryUpdaterButtonGroupProps) {
-  return (
-    <div className="flex items-center gap-2">
-      <Button
-        variant="outline"
-        size="sm"
-        className={isDirty ? 'border-primary/40 text-primary' : ''}
-        title={isSaving ? 'Saving…' : isDirty ? 'Save changes' : 'All changes saved'}
-        onClick={() => {
-          Analytics.trackButtonClick('save_changes', 'meeting_details');
-          onSave();
-        }}
-        disabled={isSaving}
-      >
-        {isSaving ? <Loader2 className="animate-spin" /> : <Save />}
-        <span className="hidden 2xl:inline">{isSaving ? 'Saving…' : 'Save'}</span>
-      </Button>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="outline" size="sm" disabled={!hasSummary} title="More actions">
-            <MoreHorizontal />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
-          <DropdownMenuItem
-            onClick={() => {
-              Analytics.trackButtonClick('copy_summary', 'meeting_details');
-              onCopy();
-            }}
-          >
-            <Copy className="mr-2 h-4 w-4" />
-            Copy summary
-          </DropdownMenuItem>
-          {onFind && (
-            <DropdownMenuItem
-              onClick={() => {
-                Analytics.trackButtonClick('find_summary', 'meeting_details');
-                onFind();
-              }}
-            >
-              <Search className="mr-2 h-4 w-4" />
-              Find in summary
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem
-            onClick={() => {
-              Analytics.trackButtonClick('open_folder', 'meeting_details');
-              onOpenFolder();
-            }}
-          >
-            <FolderOpen className="mr-2 h-4 w-4" />
-            Open meeting folder
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-  );
+  return <>
+    <DropdownMenuItem disabled={isSaving || disabled || !isDirty} onSelect={() => { Analytics.trackButtonClick('save_changes', 'meeting_details'); void onSave(); }}><Save className="mr-2 h-4 w-4" />{isSaving ? 'Saving…' : 'Save'}</DropdownMenuItem>
+    <DropdownMenuItem disabled={!hasSummary || disabled} onSelect={() => { Analytics.trackButtonClick('copy_summary', 'meeting_details'); void onCopy(); }}><Copy className="mr-2 h-4 w-4" />Copy summary</DropdownMenuItem>
+    {onFind && <DropdownMenuItem disabled={!hasSummary || disabled} onSelect={onFind}><Search className="mr-2 h-4 w-4" />Find in summary</DropdownMenuItem>}
+    {onReplace && <DropdownMenuItem disabled={!hasSummary || disabled} onSelect={onReplace}>Replace text</DropdownMenuItem>}
+    {onRestore && <DropdownMenuItem disabled={isSaving || disabled} onSelect={onRestore}>Restore previous summary</DropdownMenuItem>}
+    <DropdownMenuItem onSelect={() => void onOpenFolder()}><FolderOpen className="mr-2 h-4 w-4" />Open meeting folder</DropdownMenuItem>
+  </>;
 }

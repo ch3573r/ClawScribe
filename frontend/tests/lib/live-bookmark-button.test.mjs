@@ -15,6 +15,8 @@ function setup(props = {}) {
     'lucide-react': { BookmarkPlus: 'BookmarkPlus' },
     sonner: { toast: { success() {}, error() {} } },
     '@/components/ui/button': { Button: 'button' },
+    './ActionIcon': { ActionIcon: 'icon-button' },
+    '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' },
   });

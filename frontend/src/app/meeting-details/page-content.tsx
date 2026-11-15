@@ -2,14 +2,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getMeetingContext, setMeetingContext } from '@/lib/meetingContext';
 import { motion } from 'framer-motion';
-import { Summary, SummaryResponse, TranscriptSegmentData } from '@/types';
+import { Summary, TranscriptSegmentData } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
-import { MeetingChat } from '@/components/MeetingDetails/MeetingChat';
+import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
 import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
 import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
 import { ModelConfig } from '@/components/ModelSettingsModal';
@@ -95,7 +95,6 @@ export default function PageContent({
     });
   }, [meeting.id]);
   const [isRecording] = useState(false);
-  const [summaryResponse] = useState<SummaryResponse | null>(null);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const evidenceFocusRequest = useRef(0);
   const [audioPath, setAudioPath] = useState<string | null>(null);
@@ -297,6 +296,11 @@ export default function PageContent({
       className="flex h-full flex-col bg-background"
     >
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
+      <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
+        onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
+        duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
+        disabled={['processing', 'summarizing', 'regenerating'].includes(summaryGeneration.summaryStatus)}
+        getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           segments={timelineSegments ?? []}
@@ -314,9 +318,6 @@ export default function PageContent({
         <TranscriptPanel
           focusedSource={focusedSource}
           transcripts={meetingData.transcripts}
-          customPrompt={customPrompt}
-          onPromptChange={handlePromptChange}
-          contextLoading={contextLoading}
           onCopyTranscript={copyOperations.handleCopyTranscript}
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
@@ -349,10 +350,6 @@ export default function PageContent({
           onPlaySource={isAudioReady ? async seconds => { await audioPlayer.seek(seconds); if (!audioPlayer.isPlaying) await audioPlayer.play(); } : undefined}
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
-          onTitleChange={meetingData.handleTitleChange}
-          isEditingTitle={meetingData.isEditingTitle}
-          onStartEditTitle={() => meetingData.setIsEditingTitle(true)}
-          onFinishEditTitle={() => meetingData.setIsEditingTitle(false)}
           isTitleDirty={meetingData.isTitleDirty}
           summaryRef={meetingData.blockNoteSummaryRef}
           isSaving={meetingData.isSaving}
@@ -367,8 +364,9 @@ export default function PageContent({
           onSaveModelConfig={handleSaveModelConfig}
           onGenerateSummary={summaryGeneration.handleGenerateSummary}
           onStopGeneration={summaryGeneration.handleStopGeneration}
+          onPromptChange={handlePromptChange}
+          contextLoading={contextLoading}
           customPrompt={customPrompt}
-          summaryResponse={summaryResponse}
           onSaveSummary={meetingData.handleSaveSummary}
           onSummaryChange={meetingData.handleSummaryChange}
           onDirtyChange={meetingData.setIsSummaryDirty}
@@ -387,11 +385,7 @@ export default function PageContent({
           onOpenModelSettings={handleRegisterModalOpen}
         />
       </div>
-      <MeetingChat
-        meetingId={meeting.id}
-        provider={modelConfig?.provider}
-        model={modelConfig?.model}
-      />
+
     </motion.div>
   );
 }

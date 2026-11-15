@@ -9,7 +9,7 @@ const stubs = names => Object.fromEntries(names.map(name => [name, name]));
 function nodes(node) {
   if (Array.isArray(node)) return node.flatMap(nodes);
   if (!node || typeof node !== 'object') return [];
-  return [node, ...nodes(node.props?.children)];
+  return [node, ...nodes(node.props?.children), ...nodes(node.props?.renderActions?.({ busy: false, canUndo: false, canRestore: false }))];
 }
 function text(node) {
   if (Array.isArray(node)) return node.map(text).join('');
@@ -138,8 +138,10 @@ test('toolbar opens and closes the controlled transcription dialog', () => {
     '@/components/ui/textarea': { Textarea: 'textarea' },
     '@/components/ui/button-group': stubs(['ButtonGroup']),
     '@/components/ui/dropdown-menu': {},
+    '@/components/ui/tooltip': stubs(['Tooltip', 'TooltipTrigger', 'TooltipContent']),
     './RetranscribeDialog': stubs(['RetranscribeDialog']),
     './SpeakerDiarizationDialog': stubs(['SpeakerDiarizationDialog']),
+    './ActionIcon': { ActionIcon: 'icon-button' },
   });
   const props = {
     transcriptCount: 0, meetingId: 'synthetic-meeting', meetingFolderPath: 'synthetic-recording',

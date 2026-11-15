@@ -1,34 +1,22 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { memo, useMemo } from "react";
-import { Activity, Pause, Play } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { memo, useMemo, type KeyboardEvent, type MouseEvent } from "react";
+import { Pause, Play } from "lucide-react";
 import { TranscriptSegmentData } from "@/types";
 
 interface SpeakerLaneTimelineProps {
-  segments: TranscriptSegmentData[];
-  totalCount?: number;
-  showSpeakerAttribution?: boolean;
-  currentTime?: number;
-  durationSeconds?: number;
-  isPlaying?: boolean;
-  isAudioReady?: boolean;
-  onPlayPause?: () => void;
-  onSeek?: (seconds: number) => void;
+  segments: TranscriptSegmentData[]; totalCount?: number; showSpeakerAttribution?: boolean;
+  currentTime?: number; durationSeconds?: number; isPlaying?: boolean; isAudioReady?: boolean;
+  onPlayPause?: () => void; onSeek?: (seconds: number) => void;
 }
 
-interface TimelineSegment {
-  id: string;
-  speaker: string;
-  start: number;
-  end: number;
-  opacity: number;
-}
-
+type TimedSegment = TranscriptSegmentData & { endTime: number };
 interface TimelineLane {
   speaker: string;
   color: string;
-  items: TimelineSegment[];
+  segments: TimedSegment[];
 }
 
 const LANE_COLORS = [
@@ -38,198 +26,112 @@ const LANE_COLORS = [
   "hsl(var(--theme-error-fg))",
   "hsl(var(--chart-4))",
   "hsl(var(--theme-success-fg))",
-  "hsl(var(--chart-3))",
-  "hsl(var(--chart-5))",
 ];
-
 const MAX_VISIBLE_LANES = 6;
 
 function normalizeSpeaker(speaker: string | undefined): string {
-  const label = speaker?.trim().replace(/\s+/g, " ");
-  return label || "Unlabeled";
-}
-
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "00:00";
-  const total = Math.floor(seconds);
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  }
-
-  return `${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  return speaker?.trim().replace(/\s+/g, " ") || "Unlabeled";
 }
 
 function buildTimeline(segments: TranscriptSegmentData[]) {
-  const items = segments
-    .map((segment) => {
-      const start = segment.timestamp;
-      const end = segment.endTime ?? segment.timestamp;
-      const wordCount = Math.max(1, segment.text.trim().split(/\s+/).filter(Boolean).length);
-      return {
-        id: segment.id,
-        speaker: normalizeSpeaker(segment.speaker),
-        start,
-        end,
-        opacity: Math.min(0.95, 0.48 + wordCount / 80),
-      };
-    })
-    .filter((segment): segment is TimelineSegment =>
-      Number.isFinite(segment.start) &&
-      Number.isFinite(segment.end) &&
-      segment.end > segment.start
-    )
-    .sort((left, right) => left.start - right.start);
-
-  const speakers: string[] = [];
-  const seen = new Set<string>();
-  for (const item of items) {
-    if (!seen.has(item.speaker)) {
-      seen.add(item.speaker);
-      speakers.push(item.speaker);
+  const timedSegments = segments.filter((segment): segment is TimedSegment =>
+    Number.isFinite(segment.timestamp) && segment.timestamp >= 0 &&
+    Number.isFinite(segment.endTime) && segment.endTime! > segment.timestamp
+  ).sort((left, right) => left.timestamp - right.timestamp);
+  const lanes = new Map<string, TimelineLane>();
+  let duration = 0;
+  for (const segment of timedSegments) {
+    duration = Math.max(duration, segment.endTime);
+    const speaker = normalizeSpeaker(segment.speaker);
+    let lane = lanes.get(speaker);
+    if (!lane && lanes.size < MAX_VISIBLE_LANES) {
+      lane = { speaker, color: LANE_COLORS[lanes.size], segments: [] };
+      lanes.set(speaker, lane);
     }
+    lane?.segments.push(segment);
   }
-
-  const duration = items.reduce((max, item) => Math.max(max, item.end), 0);
-
-  const lanes: TimelineLane[] = speakers.slice(0, MAX_VISIBLE_LANES).map((speaker, index) => ({
-    speaker,
-    color: LANE_COLORS[index % LANE_COLORS.length],
-    items: items.filter((item) => item.speaker === speaker),
-  }));
-
-  return { itemCount: items.length, lanes, duration };
+  return { timedSegments, lanes: Array.from(lanes.values()), duration };
 }
 
-// The per-segment bars are by far the heaviest DOM in this component (one
-// node per transcript row per lane). Memoized so playhead ticks reconcile
-// only the thin playhead spans, not thousands of bars.
-const LaneBars = memo(function LaneBars({
-  lane,
-  timelineDuration,
-}: {
-  lane: TimelineLane;
-  timelineDuration: number;
-}) {
-  return (
-    <>
-      {lane.items.map((item) => {
-        const left = Math.max(0, Math.min(100, (item.start / timelineDuration) * 100));
-        const width = Math.max(0.3, Math.min(100 - left, ((item.end - item.start) / timelineDuration) * 100));
-
-        return (
-          <div
-            key={item.id}
-            className="absolute top-1/2 h-3 -translate-y-1/2 overflow-hidden rounded-[2px]"
-            style={{
-              left: `${left}%`,
-              width: `${width}%`,
-              color: lane.color,
-              backgroundColor: lane.color,
-              opacity: item.opacity,
-            }}
-            title={`${lane.speaker} ${formatDuration(item.start)}-${formatDuration(item.end)}`}
-          >
-            <div
-              className="h-full w-full opacity-55"
-              style={{
-                backgroundImage:
-                  "repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 6px)",
-              }}
-            />
-          </div>
-        );
-      })}
-    </>
-  );
+function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  return total >= 3600
+    ? Math.floor(total / 3600) + ':' + String(Math.floor(total / 60) % 60).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0')
+    : String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+}
+const SegmentBars = memo(function SegmentBars({ segments, duration, played = false }: { segments: TimedSegment[]; duration: number; played?: boolean }) {
+  return <>{segments.map(segment => {
+    const left = Math.max(0, Math.min(100, segment.timestamp / duration * 100));
+    const width = Math.max(0, Math.min(100 - left, ((segment.endTime! - segment.timestamp) / duration) * 100));
+    return <span key={segment.id} data-timeline-segment={played ? undefined : segment.id} className={`absolute inset-y-2 rounded-sm border-x border-card ${played ? "bg-brand-gradient" : "bg-muted-foreground/40"}`}
+      style={{ left: left + '%', width: width + '%' }}
+      title={played ? undefined : formatDuration(segment.timestamp) + '-' + formatDuration(segment.endTime)} />;
+  })}</>;
 });
 
-export function SpeakerLaneTimeline({
-  segments,
-  totalCount,
-  showSpeakerAttribution = true,
-  currentTime = 0,
-  durationSeconds,
-  isPlaying = false,
-  isAudioReady = false,
-  onPlayPause,
-  onSeek,
-}: SpeakerLaneTimelineProps) {
-  const { itemCount, lanes, duration } = useMemo(() => buildTimeline(segments), [segments]);
+// Keep the heavier segment DOM independent of playback clock updates.
+const LaneBars = memo(function LaneBars({ lane, duration }: { lane: TimelineLane; duration: number }) {
+  return <>{lane.segments.map(segment => {
+    const left = Math.max(0, Math.min(100, segment.timestamp / duration * 100));
+    const width = Math.min(100 - left, Math.max(0.3, (segment.endTime - segment.timestamp) / duration * 100));
+    const wordCount = Math.max(1, segment.text.trim().split(/\s+/).filter(Boolean).length);
+    return <span key={segment.id} className="absolute top-1/2 h-3 -translate-y-1/2 overflow-hidden rounded-sm"
+      style={{ left: left + '%', width: width + '%', color: lane.color, backgroundColor: lane.color, opacity: Math.min(0.95, 0.48 + wordCount / 80) }}
+      title={lane.speaker + ' ' + formatDuration(segment.timestamp) + '-' + formatDuration(segment.endTime)}>
+      <span className="block h-full w-full opacity-55" style={{ backgroundImage: 'repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 6px)' }} />
+    </span>;
+  })}</>;
+});
 
-  if (!isAudioReady) {
-    return null;
-  }
-
-  const timelineDuration = Math.max(duration, durationSeconds ?? 0);
-  const canSeek = Boolean(onSeek && timelineDuration > 0);
-  const playheadLeft = Math.max(0, Math.min(100, (currentTime / timelineDuration) * 100));
-  const showLanes = showSpeakerAttribution && itemCount > 0 && lanes.length > 0;
-  const visibleLanes = showLanes ? lanes : [null];
-  const countLabel = totalCount ?? segments.length;
-
-  return (
-    <section className="border-b border-border bg-card/70 px-4 py-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <Activity className="h-4 w-4 shrink-0 text-accent" aria-hidden="true" />
-          <h2 className="truncate text-sm font-semibold text-foreground">{showLanes ? 'Speaker timeline' : 'Recording playback'}</h2>
-        </div>
-        <div className="flex shrink-0 items-center gap-3">
-          {isAudioReady && onPlayPause && (
-            <Button variant="ghost"
-              type="button"
-              onClick={onPlayPause}
-              className="gap-0 p-0 whitespace-normal [&_svg]:size-3.5 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-border bg-background text-foreground hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring"
-              aria-label={isPlaying ? "Pause recording playback" : "Play recording"}
-            >
-              {isPlaying ? (
-                <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-              ) : (
-                <Play className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-            </Button>
-          )}
-          <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
-            <span>{formatDuration(timelineDuration)}</span>
-            <span>{countLabel} segments</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="space-y-1.5">
-        {visibleLanes.map((lane) => (
-          <div key={lane?.speaker ?? 'audio'} className={lane ? 'grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3' : ''}>
-            {lane && <div className="min-w-0 truncate font-mono text-[11px] font-medium tracking-normal text-muted-foreground">
-              {lane.speaker}
-            </div>}
-            <Button variant="ghost"
-              type="button"
-              disabled={!canSeek}
-              className={`gap-0 p-0 whitespace-normal hover:bg-muted/45 disabled:pointer-events-auto disabled:opacity-100 relative h-5 w-full overflow-hidden rounded-[3px] bg-muted/45 text-left focus:outline-none focus:ring-2 focus:ring-ring ${canSeek ? "cursor-pointer hover:bg-muted/70" : "cursor-default"}`}
-              onClick={(event) => {
-                if (!onSeek) return;
-                const rect = event.currentTarget.getBoundingClientRect();
-                const ratio = (event.clientX - rect.left) / rect.width;
-                onSeek(Math.max(0, Math.min(timelineDuration, ratio * timelineDuration)));
-              }}
-              aria-label={lane ? `Seek ${lane.speaker} timeline` : 'Seek recording'}
-            >
-              {lane && <LaneBars lane={lane} timelineDuration={timelineDuration} />}
-              {canSeek && (
-                <span
-                  className="pointer-events-none absolute top-0 h-full w-px bg-foreground/80 shadow-[0_0_0_1px_hsl(var(--background)/0.22)]"
-                  style={{ left: `${playheadLeft}%` }}
-                  aria-hidden="true"
-                />
-              )}
-            </Button>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
+export function SpeakerLaneTimeline({ segments, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek }: SpeakerLaneTimelineProps) {
+  const { timedSegments, lanes, duration: segmentDuration } = useMemo(() => buildTimeline(segments), [segments]);
+  if (!isAudioReady) return null;
+  const duration = Math.max(segmentDuration, Number.isFinite(durationSeconds) ? durationSeconds : 0);
+  const timed = timedSegments.length > 0;
+  const canSeek = Boolean(onSeek && duration > 0);
+  const played = duration > 0 ? Math.max(0, Math.min(100, currentTime / duration * 100)) : 0;
+  const label = isPlaying ? 'Pause recording playback' : 'Play recording';
+  const handlePointerSeek = (event: MouseEvent<HTMLButtonElement>) => {
+    // Keyboard activation of the button has no pointer coordinates.
+    if (!canSeek || event.detail === 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width > 0) onSeek?.(Math.max(0, Math.min(duration, (event.clientX - rect.left) / rect.width * duration)));
+  };
+  const handleKeySeek = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? duration : ['ArrowRight', 'ArrowUp'].includes(event.key) ? currentTime + 5 : ['ArrowLeft', 'ArrowDown'].includes(event.key) ? currentTime - 5 : null;
+    if (next !== null && canSeek) { event.preventDefault(); onSeek?.(Math.max(0, Math.min(duration, next))); }
+  };
+  const seekProps = {
+    type: 'button' as const, role: 'slider' as const,
+    'aria-valuemin': 0, 'aria-valuemax': duration, 'aria-valuenow': Math.min(duration, Math.max(0, currentTime)),
+    'aria-valuetext': formatDuration(currentTime) + ' of ' + formatDuration(duration),
+    disabled: !canSeek, onClick: handlePointerSeek, onKeyDown: handleKeySeek,
+  };
+  return <section aria-label="Recording playback" className="shrink-0 border-b border-border bg-card">
+    <div className="flex items-center gap-4 px-5 py-4">
+    <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="h-11 w-11 shrink-0 rounded-full" aria-label={label} disabled={!onPlayPause} onClick={onPlayPause}>
+      {isPlaying ? <Pause /> : <Play />}
+    </Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>
+    <span className="shrink-0 font-mono text-xs tabular-nums text-primary">{formatDuration(currentTime)}</span>
+    <Button variant="ghost" {...seekProps} aria-label="Seek recording"
+      className="relative h-10 min-w-0 flex-1 overflow-hidden rounded-sm p-0 hover:bg-muted/40 disabled:opacity-100">
+      <span aria-hidden className="pointer-events-none absolute inset-0">
+        {timed ? <SegmentBars segments={timedSegments} duration={duration} /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-muted" />}
+        <span className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - played}% 0 0)` }}>{timed ? <SegmentBars segments={timedSegments} duration={duration} played /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-brand-gradient" />}</span>
+        <span className="absolute inset-y-1 w-px bg-foreground" style={{ left: played + '%' }} />
+      </span>
+    </Button>
+    <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{formatDuration(duration)}</span>
+    </div>
+    {showSpeakerAttribution && lanes.length > 0 && <div className="space-y-1.5 px-5 pb-4">
+      {lanes.map(lane => <div key={lane.speaker} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
+        <span className="truncate font-mono text-xs font-medium text-muted-foreground" title={lane.speaker}>{lane.speaker}</span>
+        <Button variant="ghost" {...seekProps} aria-label={`Seek ${lane.speaker} timeline`}
+          className="relative h-5 w-full overflow-hidden rounded-sm bg-muted/45 p-0 hover:bg-muted/70 disabled:opacity-100">
+          <LaneBars lane={lane} duration={duration} />
+          <span aria-hidden className="pointer-events-none absolute inset-y-0 w-px bg-foreground/80" style={{ left: played + '%' }} />
+        </Button>
+      </div>)}
+    </div>}
+  </section>;
 }

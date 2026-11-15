@@ -10,6 +10,7 @@ const meetings=[{id:'one',title:'Planning meeting'},{id:'two',title:'Budget revi
 const ui={
   '@/components/ui/button':{Button:'button'}, '@/components/ui/input':{Input:'input'},
   '@/components/ui/scroll-area':{ScrollArea:'scroll-area'},
+  '@/components/ui/tooltip':{Tooltip:'tooltip',TooltipTrigger:'tooltip-trigger',TooltipContent:'tooltip-content'},
   '@/components/ui/dialog':Object.fromEntries(['Dialog','DialogContent','DialogDescription','DialogHeader','DialogTitle'].map(name=>[name,name])),
 };
 function attachment({meetingId,targets=meetings,open=async()=> 'planning.pdf',service={},attached=()=>{}}={}) {
@@ -154,7 +155,7 @@ test('Meeting memory exposes attachment beside Sources and includes the destinat
   } finally { hooks.unmount(); }
 });
 
-function cornerChat(service) {
+function cornerChat(service, options = {}) {
   const hooks=createHookHarness();
   const selected=[],state={scope:{kind:'meeting',meeting_id:'one'},messages:[],documents:[{attachment:{id:'file',display_name:'Plan.pdf'},meeting_ids:['one']}],selectedDocumentIds:[],cancel(){},reloadHistory(){},reloadDocuments(){},refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled])};
   const {useKnowledgeSearch}=service?loadTsModule('src/hooks/useKnowledgeSearch.ts',{
@@ -163,6 +164,7 @@ function cornerChat(service) {
   }):{useKnowledgeSearch:scope=>({...state,scope})};
   const {MeetingChat}=loadTsModule('src/components/MeetingDetails/MeetingChat.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
+    'react-dom':{createPortal:(children,container)=>jsx('portal',{children,container})},
     'lucide-react':{MessageSquare:'chat-icon',X:'close',ChevronDown:'down'},
     '@/hooks/useKnowledgeSearch':{useKnowledgeSearch},
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsError:null,projectTagsLoading:false})},
@@ -174,7 +176,7 @@ function cornerChat(service) {
     './ReferenceDocuments':{ReferenceDocuments:'references'},
     './AttachReferenceButton':{AttachReferenceButton:'attach'},
   });
-  const render=()=>hooks.render(()=>MeetingChat({meetingId:'one',provider:'ollama',model:'fixture'}));
+  const render=()=>hooks.render(()=>MeetingChat({meetingId:'one',provider:'ollama',model:'fixture',...options}));
   return {...hooks,render,state,selected,chat:()=>nodes(render()).find(node=>node.type==='knowledge-chat')};
 }
 
@@ -196,6 +198,131 @@ test('corner chat keeps fixed sizing, non-modal behavior and configuration in a 
   let prevented=0;nodes(render()).find(node=>node.type==='popup').props.onEscapeKeyDown({preventDefault:()=>prevented++});
   assert.equal(prevented,1,'outer chat must ignore Escape while Context is open');
   app.unmount();
+});
+
+test('meeting chat docks at 1280px and returns to its popover without changing scope', () => {
+  const previousWindow = globalThis.window;
+  let onResize;
+  const media = { matches: false, addEventListener: (_, callback) => { onResize = callback; }, removeEventListener: () => { onResize = null; } };
+  globalThis.window = { matchMedia: query => { assert.equal(query, '(min-width: 1280px)'); return media; } };
+  const dockTarget = { id: 'summary-dock' }, dockChanges = [];
+  const app = cornerChat(undefined, { dockTarget, onDockOpenChange: open => dockChanges.push(open) });
+  try {
+    const launcher = nodes(app.render()).find(node => node.props?.['aria-label'] === 'Chat with this meeting' && node.type === 'button');
+    assert.equal(text(launcher), 'Chat with this meeting');
+    assert.doesNotMatch(launcher.props.className, /fixed|rounded-full/);
+    nodes(app.render()).find(node => node.type === 'popover').props.onOpenChange(true);
+    const scope = app.chat().props.state.scope;
+    media.matches = true; onResize();
+    let tree = app.render();
+    assert.equal(nodes(tree).find(node => node.type === 'portal').props.container, dockTarget);
+    assert.equal(nodes(tree).filter(node => node.type === 'knowledge-chat').length, 1);
+    assert.equal(nodes(tree).some(node => node.type === 'popup'), false);
+    assert.equal(dockChanges.at(-1), true);
+    assert.deepEqual(app.chat().props.state.scope, scope);
+    media.matches = false; onResize(); tree = app.render();
+    assert.ok(nodes(tree).some(node => node.type === 'popup'));
+    assert.equal(nodes(tree).some(node => node.type === 'portal'), false);
+    assert.equal(dockChanges.at(-1), false);
+  } finally {
+    app.unmount();
+    assert.equal(onResize, null);
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('chat focuses on open, retains composer focus and selection on resize, and closes its dock with Escape', () => {
+  const previousWindow = globalThis.window, previousDocument = globalThis.document;
+  let onResize, focusCount = 0, launcherFocus = 0, selectionRestores = 0;
+  const media = { matches: false, addEventListener: (_, callback) => { onResize = callback; }, removeEventListener() {} };
+  const doc = { activeElement: null, createElement: () => host };
+  const composer = { selectionStart: 4, selectionEnd: 4, selectionDirection: 'none', focus() { focusCount++; doc.activeElement = this; }, setSelectionRange(start, end) { selectionRestores++; this.selectionStart = start; this.selectionEnd = end; } };
+  const host = { ownerDocument: doc, parent: null, className: '', contains: element => element === composer, querySelector: () => composer, remove() { this.parent = null; if (doc.activeElement === composer) doc.activeElement = null; } };
+  const popup = { appendChild(node) { node.parent = this; } };
+  const dock = { appendChild(node) { node.parent = this; } };
+  const launcher = { focus() { launcherFocus++; doc.activeElement = this; } };
+  globalThis.window = { matchMedia: () => media };
+  globalThis.document = doc;
+  const app = cornerChat(undefined, { dockTarget: dock });
+  try {
+    let tree = app.render();
+    nodes(tree).find(node => node.type === 'button' && node.props['aria-label'] === 'Chat with this meeting').props.ref.current = launcher;
+    const content = nodes(tree).find(node => node.type === 'popup');
+    nodes(content).find(node => node.type === 'div').props.ref(popup);
+    nodes(tree).find(node => node.type === 'popover').props.onOpenChange(true);
+    tree = app.render();
+    assert.equal(nodes(tree).find(node => node.type === 'portal').props.container, host);
+    assert.equal(host.parent, popup);
+    assert.equal(doc.activeElement, composer, 'popover attachment must focus its composer after mounting');
+    assert.equal(focusCount, 1);
+    let prevented = 0; content.props.onOpenAutoFocus({ preventDefault() { prevented++; } });
+    assert.equal(prevented, 1, 'Radix must leave focus to the delayed host attachment');
+    media.matches = true; onResize(); host.remove(); tree = app.render();
+    assert.equal(nodes(tree).find(node => node.type === 'portal').props.container, host);
+    assert.equal(host.parent, dock);
+    assert.equal(doc.activeElement, composer, 'moving the host must restore a focused composer');
+    assert.equal(selectionRestores, 1);
+    assert.equal(composer.selectionStart, 4);
+    content.props.onCloseAutoFocus({ preventDefault() { prevented++; } });
+    assert.equal(prevented, 2, 'closing the old popover while docking must not focus the launcher');
+    const surface = nodes(tree).find(node => node.type === 'div' && node.props.onKeyDown);
+    surface.props.onKeyDown({ key: 'Escape', defaultPrevented: false, preventDefault() {}, stopPropagation() {} });
+    tree = app.render();
+    assert.equal(nodes(tree).some(node => node.type === 'portal'), false);
+    assert.equal(launcherFocus, 1);
+    assert.equal(doc.activeElement, launcher);
+    nodes(tree).find(node => node.type === 'popover').props.onOpenChange(true); app.render();
+    assert.equal(doc.activeElement, composer, 'opening the dock must also focus the composer');
+  } finally {
+    app.unmount();
+    assert.equal(host.parent, null);
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
+});
+
+test('chat waits for its visible dock before focusing and cancels pending focus on close', () => {
+  const previousWindow = globalThis.window, previousDocument = globalThis.document;
+  const frames = new Map(), cancelled = [];
+  let nextFrame = 0, onResize, focusCount = 0, pendingVisible = false;
+  const media = { matches: true, addEventListener: (_, callback) => { onResize = callback; }, removeEventListener() {} };
+  const doc = { activeElement: null, createElement: () => host };
+  const composer = { selectionStart: 0, selectionEnd: 0, selectionDirection: 'none', focus() {
+    if (host.parent === dock) assert.equal(dock.visible, true, 'focus must wait for the parent to reveal the dock');
+    focusCount++; doc.activeElement = this;
+  }, setSelectionRange() {} };
+  const host = { ownerDocument: doc, className: '', parent: null, contains: element => element === composer, querySelector: () => composer,
+    remove() { this.parent = null; if (doc.activeElement === composer) doc.activeElement = null; } };
+  const dock = { visible: false, appendChild(node) { node.parent = this; } };
+  const popup = { appendChild(node) { node.parent = this; } };
+  const launcher = { focus() { doc.activeElement = this; } };
+  globalThis.document = doc;
+  globalThis.window = { matchMedia: () => media,
+    requestAnimationFrame: callback => { frames.set(++nextFrame, callback); return nextFrame; },
+    cancelAnimationFrame: frame => { cancelled.push(frame); frames.delete(frame); },
+  };
+  const app = cornerChat(undefined, { dockTarget: dock, onDockOpenChange: value => { pendingVisible = value; } });
+  const flushFrames = () => { for (const [id, callback] of frames) { frames.delete(id); callback(); } };
+  try {
+    app.render(); let tree = app.render();
+    nodes(tree).find(node => node.type === 'button' && node.props['aria-label'] === 'Chat with this meeting').props.ref.current = launcher;
+    nodes(tree).find(node => node.type === 'popover').props.onOpenChange(true); tree = app.render();
+    assert.equal(pendingVisible, true); assert.equal(focusCount, 0); assert.equal(frames.size, 1);
+    dock.visible = pendingVisible; flushFrames();
+    assert.equal(focusCount, 1); assert.equal(doc.activeElement, composer);
+    media.matches = false; onResize(); tree = app.render();
+    nodes(nodes(tree).find(node => node.type === 'popup')).find(node => node.type === 'div').props.ref(popup);
+    tree = app.render(); assert.equal(frames.size, 1);
+    const pendingFrame = nextFrame;
+    nodes(tree).find(node => node.type === 'popover').props.onOpenChange(false); app.render();
+    assert.ok(cancelled.includes(pendingFrame)); assert.equal(frames.size, 0);
+    flushFrames(); assert.equal(focusCount, 1); assert.equal(doc.activeElement, launcher);
+  } finally {
+    app.unmount();
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
 });
 
 test('context summarizes scope and selected file count and bounds the searchable meeting picker',()=>{

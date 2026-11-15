@@ -1,14 +1,16 @@
 "use client";
 
 import { Input } from '@/components/ui/input';
-import { Summary, SummaryResponse, Transcript } from '@/types';
+import { Summary, Transcript } from '@/types';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
-import { EmptyStateSummary } from '@/components/EmptyStateSummary';
+import { MeetingChat } from './MeetingChat';
+import { ActionIcon } from './ActionIcon';
+import { Textarea } from '@/components/ui/textarea';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { SummarySurface } from '@/components/AISummary/SummarySurface';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
-import { MeetingExportButtons } from './MeetingExportButtons';
-import { ProjectTags } from './ProjectTags';
 import Analytics from '@/lib/analytics';
 import { TextReplaceDialog } from './TextReplaceDialog';
 import { SummarySources, ResolvedSummarySource } from './SummarySources';
@@ -42,10 +44,6 @@ interface SummaryPanelProps {
     created_at: string;
   };
   meetingTitle: string;
-  onTitleChange: (title: string) => void;
-  isEditingTitle: boolean;
-  onStartEditTitle: () => void;
-  onFinishEditTitle: () => void;
   isTitleDirty: boolean;
   summaryRef: RefObject<BlockNoteSummaryViewRef | null>;
   isSaving: boolean;
@@ -61,7 +59,8 @@ interface SummaryPanelProps {
   onGenerateSummary: (customPrompt: string) => Promise<void>;
   onStopGeneration: () => void;
   customPrompt: string;
-  summaryResponse: SummaryResponse | null;
+  contextLoading: boolean;
+  onPromptChange: (value: string) => void;
   onSaveSummary: (summary: Summary | { markdown?: string; summary_json?: any[] }) => Promise<void>;
   onSummaryChange: (summary: Summary) => void;
   onDirtyChange: (isDirty: boolean) => void;
@@ -87,10 +86,6 @@ export function SummaryPanel({
   onPlaySource,
   meeting,
   meetingTitle,
-  onTitleChange,
-  isEditingTitle,
-  onStartEditTitle,
-  onFinishEditTitle,
   isTitleDirty,
   summaryRef,
   isSaving,
@@ -105,8 +100,7 @@ export function SummaryPanel({
   onSaveModelConfig,
   onGenerateSummary,
   onStopGeneration,
-  customPrompt,
-  summaryResponse,
+  customPrompt, contextLoading, onPromptChange,
   onSaveSummary,
   onSummaryChange,
   onDirtyChange,
@@ -119,6 +113,20 @@ export function SummaryPanel({
   isModelConfigLoading = false,
   onOpenModelSettings
 }: SummaryPanelProps) {
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [compactToolbar, setCompactToolbar] = useState(true);
+  useEffect(() => {
+    const node = toolbarRef.current;
+    if (!node) return;
+    const measure = () => setCompactToolbar(node.clientWidth < 700);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [dockTarget, setDockTarget] = useState<HTMLDivElement | null>(null);
+  const [chatDocked, setChatDocked] = useState(false);
   const [summaryLang, setSummaryLang] = useState<string | null>(null);
   const [summaryLangStorage, setSummaryLangStorage] = useState<SummaryLanguageStorage>('metadata');
   const [langPickerOpen, setLangPickerOpen] = useState(false);
@@ -132,6 +140,7 @@ export function SummaryPanel({
   const languageSaveVersionRef = useRef(0);
   const languageSaveLoopRunningRef = useRef(false);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const retainFindFocusRef = useRef(false);
   const summarySearchRootRef = useRef<HTMLDivElement>(null);
   const latestLanguageSaveRequestRef = useRef<{
     version: number;
@@ -252,18 +261,6 @@ export function SummaryPanel({
   };
 
   const isSummaryLoading = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
-  const meetingDateLabel = (() => {
-    const created = new Date(meeting.created_at);
-    return Number.isNaN(created.getTime())
-      ? 'Meeting notes'
-      : created.toLocaleString([], {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-  })();
-
   const collectSummaryMatches = (query: string): SummaryTextMatch[] => {
     const root = summarySearchRootRef.current;
     const normalizedQuery = query.trim().toLowerCase();
@@ -336,6 +333,7 @@ export function SummaryPanel({
   };
 
   const openSummaryFind = () => {
+    retainFindFocusRef.current = true;
     setIsFindOpen(true);
     window.requestAnimationFrame(() => {
       findInputRef.current?.focus();
@@ -353,18 +351,19 @@ export function SummaryPanel({
 
   const languageSlot = (
     <Popover open={langPickerOpen} onOpenChange={setLangPickerOpen}>
-      <PopoverTrigger asChild>
+      <Tooltip><TooltipTrigger asChild><PopoverTrigger asChild>
         <Button
-          variant="outline"
+          variant="ghost"
           size="sm"
+          className="h-8 px-2"
           title={`Summary language: ${effectiveLangLabel}${isLocalFallbackLanguage ? ' (saved on this device)' : ''}`}
           aria-label="Set summary language"
         >
           <Languages size={18} />
-          <span className="hidden 2xl:inline">{effectiveLangLabel}</span>
-          <ChevronDown size={14} className="text-muted-foreground" />
+          {!compactToolbar && <span>{effectiveLangLabel}</span>}
+
         </Button>
-      </PopoverTrigger>
+      </PopoverTrigger></TooltipTrigger><TooltipContent>Summary language: {effectiveLangLabel}</TooltipContent></Tooltip>
       <PopoverContent
         align="end"
         className="w-auto p-0 border-0 shadow-none bg-transparent"
@@ -382,88 +381,27 @@ export function SummaryPanel({
   return (
     <div tabIndex={0} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h' && aiSummary && !isSummaryLoading) { event.preventDefault(); setReplaceOpen(true); }
-    }} className="flex-1 min-h-[24rem] min-w-0 flex flex-col bg-card overflow-hidden">
-      {/* Title area */}
-      <div className="border-b border-border p-3">
-        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-          <div className="min-w-0 flex-1 basis-64">
-            {isEditingTitle ? (
-              <Input
-                value={meetingTitle}
-                disabled={isSummaryLoading}
-                onChange={(e) => onTitleChange(e.target.value)}
-                onBlur={onFinishEditTitle}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') onFinishEditTitle();
-                  if (e.key === 'Escape') onFinishEditTitle();
-                }}
-                className="h-auto shadow-none w-full min-w-0 rounded-md border border-input bg-background px-2 py-1 text-sm md:text-sm font-semibold text-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
-                autoFocus
-              />
-            ) : (
-              <Button variant="ghost"
-                type="button"
-                onClick={onStartEditTitle}
-                className="h-auto gap-0 py-0  hover:text-foreground block max-w-full truncate rounded px-1 text-left text-sm font-semibold text-foreground hover:bg-muted"
-                title="Edit meeting title"
-              >
-                {meetingTitle}
-              </Button>
-            )}
-            <p className="mt-0.5 truncate px-1 text-xs text-muted-foreground">
-              Summary document · {meetingDateLabel}
-            </p>
+    }} className="flex-1 min-h-[24rem] min-w-0 flex flex-col bg-card overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+      <div ref={toolbarRef} className="meeting-summary-toolbar shrink-0 border-b border-border px-3 py-2">
+        <div className="flex min-w-0 flex-nowrap items-center gap-2">
+          <h2 className="shrink-0 text-sm font-semibold">Summary</h2>
+          <div className="min-w-0 flex-1">
+            {aiSummary && <span className="block truncate text-xs text-muted-foreground" role="status" title={saveState === 'error' ? 'Save failed — edits retained' : undefined}>
+              {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}
+            </span>}
           </div>
-
-          <div className="flex max-w-full flex-wrap gap-2">
-            <ProjectTags key={`tags-${meeting.id}`} meetingId={meeting.id} />
-            <MeetingExportButtons key={meeting.id}
-              meetingId={meeting.id}
-              meetingTitle={meetingTitle}
-              meetingCreatedAt={meeting.created_at}
-              disabled={isSummaryLoading}
-              getMarkdown={async () => (await summaryRef.current?.getMarkdown()) ?? ''} />
-          </div>
-          {/* Button groups - only show when summary exists */}
-          {aiSummary && !isSummaryLoading && (
-            <div className="flex min-w-0 max-w-full flex-1 basis-[28rem] flex-wrap items-center justify-end gap-2">
-              <SummaryGeneratorButtonGroup
-                modelConfig={modelConfig}
-                setModelConfig={setModelConfig}
-                onSaveModelConfig={onSaveModelConfig}
-                onGenerateSummary={onGenerateSummary}
-                onStopGeneration={onStopGeneration}
-                customPrompt={customPrompt}
-                summaryStatus={summaryStatus}
-                availableTemplates={availableTemplates}
-                selectedTemplate={selectedTemplate}
-                onTemplateSelect={onTemplateSelect}
-                hasTranscripts={transcripts.length > 0}
-                hasSummary={!!aiSummary}
-                isModelConfigLoading={isModelConfigLoading}
-                onOpenModelSettings={onOpenModelSettings}
-                languageSlot={languageSlot}
-              />
-
-              <SummaryUpdaterButtonGroup
-                isSaving={isSaving}
-                isDirty={isTitleDirty || (summaryRef.current?.isDirty || false)}
-                onSave={onSaveAll}
-                onCopy={onCopySummary}
-                onFind={openSummaryFind}
-                onOpenFolder={onOpenFolder}
-                hasSummary={!!aiSummary}
-              />
-
-              <Button variant="outline" size="sm" onClick={() => setReplaceOpen(true)}>Replace text</Button>
-            </div>
-          )}
+          <SummaryGeneratorButtonGroup compact={compactToolbar} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
+            onActionsCloseAutoFocus={event => {
+              if (retainFindFocusRef.current) event.preventDefault();
+              retainFindFocusRef.current = false;
+            }}
+            onGenerateSummary={onGenerateSummary} onStopGeneration={onStopGeneration} customPrompt={customPrompt} summaryStatus={summaryStatus}
+            availableTemplates={availableTemplates} selectedTemplate={selectedTemplate} onTemplateSelect={onTemplateSelect}
+            hasTranscripts={transcripts.length > 0} hasSummary={!!aiSummary} isModelConfigLoading={isModelConfigLoading} onOpenModelSettings={onOpenModelSettings} languageSlot={languageSlot}
+            actionsSlot={<SummaryUpdaterButtonGroup isSaving={isSaving} isDirty={saveState !== 'saved' || isTitleDirty} onSave={onSaveAll} onCopy={onCopySummary}
+              onFind={openSummaryFind} onOpenFolder={onOpenFolder} hasSummary={!!aiSummary} disabled={isSummaryLoading} onReplace={() => setReplaceOpen(true)}
+              onRestore={hasPreviousSummary ? () => void onRestorePrevious() : undefined} />} />
         </div>
-      </div>
-
-      <div className="flex items-center gap-2 px-4 py-1 text-xs text-muted-foreground" role="status">
-        <span>{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}</span>
-        {hasPreviousSummary && <Button variant="ghost" size="sm" disabled={isSummaryLoading || isSaving} onClick={() => void onRestorePrevious()}>Restore previous summary</Button>}
       </div>
       <TextReplaceDialog open={replaceOpen} onOpenChange={setReplaceOpen} title="summary"
         preview={async options => {
@@ -506,172 +444,44 @@ export function SummaryPanel({
                 : 'No matches'
               : ''}
           </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => runSummaryFind(-1)}
-            disabled={!findQuery.trim()}
-            title="Previous match"
-          >
-            <ChevronUp className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => runSummaryFind(1)}
-            disabled={!findQuery.trim()}
-            title="Next match"
-          >
-            <ChevronDown className="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="sm" onClick={closeSummaryFind} title="Close find">
+          <ActionIcon label="Previous match" onClick={() => runSummaryFind(-1)} disabled={!findQuery.trim()}><ChevronUp className="h-4 w-4" /></ActionIcon>
+          <ActionIcon label="Next match" onClick={() => runSummaryFind(1)} disabled={!findQuery.trim()}><ChevronDown className="h-4 w-4" /></ActionIcon>
+          <ActionIcon label="Close find" onClick={closeSummaryFind}>
             <X className="h-4 w-4" />
-          </Button>
+          </ActionIcon>
         </div>
       )}
 
-      {isSummaryLoading ? (
-        <div className="flex flex-col h-full">
-          {/* Show button group during generation */}
-          <div className="flex items-center justify-center pt-8 pb-4">
-            <SummaryGeneratorButtonGroup
-              modelConfig={modelConfig}
-              setModelConfig={setModelConfig}
-              onSaveModelConfig={onSaveModelConfig}
-              onGenerateSummary={onGenerateSummary}
-              onStopGeneration={onStopGeneration}
-              customPrompt={customPrompt}
-              summaryStatus={summaryStatus}
-              availableTemplates={availableTemplates}
-              selectedTemplate={selectedTemplate}
-              onTemplateSelect={onTemplateSelect}
-              hasTranscripts={transcripts.length > 0}
-              isModelConfigLoading={isModelConfigLoading}
-              onOpenModelSettings={onOpenModelSettings}
-            />
-          </div>
-          {/* Loading spinner */}
-          <div className="flex items-center justify-center flex-1">
-            <div className="text-center">
-              <div className="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary mb-4"></div>
-              <p className="text-muted-foreground">Generating AI Summary...</p>
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          {isSummaryLoading ? <div role="status" className="flex h-full min-h-48 items-center justify-center gap-3 p-8 text-sm text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />Generating summary…</div>
+          : !aiSummary ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
+              <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>
+              <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Choose a template and generate meeting notes using the toolbar above.' : 'Transcribe the recording first, then generate a summary.'}</p>
             </div>
-          </div>
-        </div>
-      ) : !aiSummary ? (
-        <div className="flex flex-col h-full">
-          {/* Centered Summary Generator Button Group when no summary */}
-          <div className="flex items-center justify-center gap-2 pt-8 pb-4">
-            <SummaryGeneratorButtonGroup
-              modelConfig={modelConfig}
-              setModelConfig={setModelConfig}
-              onSaveModelConfig={onSaveModelConfig}
-              onGenerateSummary={onGenerateSummary}
-              onStopGeneration={onStopGeneration}
-              customPrompt={customPrompt}
-              summaryStatus={summaryStatus}
-              availableTemplates={availableTemplates}
-              selectedTemplate={selectedTemplate}
-              onTemplateSelect={onTemplateSelect}
-              hasTranscripts={transcripts.length > 0}
-              hasSummary={false}
-              isModelConfigLoading={isModelConfigLoading}
-              onOpenModelSettings={onOpenModelSettings}
-              languageSlot={transcripts.length > 0 ? languageSlot : undefined}
-            />
-          </div>
-          {/* Empty state message */}
-          <EmptyStateSummary
-            hasTranscript={transcripts.length > 0}
-            onGenerate={() => onGenerateSummary(customPrompt)}
-            hasModel={modelConfig.provider !== null && modelConfig.model !== null}
-            isGenerating={isSummaryLoading}
-          />
-        </div>
-      ) : transcripts?.length > 0 && (
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {summaryResponse && (
-            <div className="fixed bottom-0 left-0 right-0 bg-card shadow-lg p-4 max-h-1/3 overflow-y-auto">
-              <h3 className="text-lg font-semibold mb-2">Meeting summary</h3>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-background p-4 rounded-lg shadow-sm">
-                  <h4 className="font-medium mb-1">Key points</h4>
-                  <ul className="list-disc pl-4">
-                    {summaryResponse.summary.key_points.blocks.map((block, i) => (
-                      <li key={i} className="text-sm">{block.content}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="bg-background p-4 rounded-lg shadow-sm mt-4">
-                  <h4 className="font-medium mb-1">Action items</h4>
-                  <ul className="list-disc pl-4">
-                    {summaryResponse.summary.action_items.blocks.map((block, i) => (
-                      <li key={i} className="text-sm">{block.content}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="bg-background p-4 rounded-lg shadow-sm mt-4">
-                  <h4 className="font-medium mb-1">Decisions</h4>
-                  <ul className="list-disc pl-4">
-                    {summaryResponse.summary.decisions.blocks.map((block, i) => (
-                      <li key={i} className="text-sm">{block.content}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="bg-background p-4 rounded-lg shadow-sm mt-4">
-                  <h4 className="font-medium mb-1">Main topics</h4>
-                  <ul className="list-disc pl-4">
-                    {summaryResponse.summary.main_topics.blocks.map((block, i) => (
-                      <li key={i} className="text-sm">{block.content}</li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-              {summaryResponse.raw_summary ? (
-                <div className="mt-4">
-                  <h4 className="font-medium mb-1">Full summary</h4>
-                  <p className="text-sm whitespace-pre-wrap">{summaryResponse.raw_summary}</p>
-                </div>
-              ) : null}
-            </div>
-          )}
-          <div ref={summarySearchRootRef} className="w-full bg-background/60 p-5">
-            <div className="mx-auto max-w-[72rem] rounded-xl bg-card p-4 text-foreground sm:p-8 shadow-sm ring-1 ring-foreground/10">
+          : <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
-              <BlockNoteSummaryView
-                key={`${meeting.id}:${summaryRevision}`}
-                saveState={saveState}
-                onDraftChange={onSummaryDraft}
-                ref={summaryRef}
-                summaryData={aiSummary}
-                onSave={onSaveSummary}
-                onSummaryChange={onSummaryChange}
-                onDirtyChange={onDirtyChange}
-                status={summaryStatus}
-                error={summaryError}
-                onRegenerateSummary={() => {
-                  Analytics.trackButtonClick('regenerate_summary', 'meeting_details');
-                  onRegenerateSummary(customPrompt);
-                }}
-                meeting={{
-                  id: meeting.id,
-                  title: meetingTitle,
-                  created_at: meeting.created_at
-                }}
-              />
+                <SummarySurface><BlockNoteSummaryView key={`${meeting.id}:${summaryRevision}`} saveState={saveState} onDraftChange={onSummaryDraft} ref={summaryRef}
+                  summaryData={aiSummary} onSave={onSaveSummary} onSummaryChange={onSummaryChange} onDirtyChange={onDirtyChange} status={summaryStatus} error={summaryError}
+                  onRegenerateSummary={() => { Analytics.trackButtonClick('regenerate_summary', 'meeting_details'); void onRegenerateSummary(customPrompt); }}
+                  meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
               </SummarySources>
-            </div>
-          </div>
-          {summaryStatus !== 'idle' && (
-            <div className={`mt-4 p-4 rounded-lg ${summaryStatus === 'error' ? 'bg-error text-error-foreground' :
-              summaryStatus === 'completed' ? 'bg-success text-success-foreground' :
-                'bg-secondary text-primary'
-              }`}>
-              <p className="text-sm font-medium">{getSummaryStatusMessage(summaryStatus)}</p>
-            </div>
-          )}
+            </div>}
+          {summaryStatus === 'error' && <p role="alert" className="m-4 rounded border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{summaryError || getSummaryStatusMessage(summaryStatus)}</p>}
         </div>
-      )}
+        <div ref={setDockTarget} role="complementary" aria-label="Meeting chat panel" className={chatDocked ? 'flex w-[25rem] shrink-0 flex-col border-l border-border' : 'hidden'} />
+      </div>
+      <footer className="shrink-0 border-t border-border px-3 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <Button variant="ghost" size="sm" className="min-w-0 px-1 text-xs text-muted-foreground" aria-expanded={contextOpen} aria-controls={`summary-context-${meeting.id}`} disabled={contextLoading} onClick={() => setContextOpen(value => !value)}>
+            {customPrompt?.trim() ? 'Context added, edit' : 'Add context for the summary'}
+          </Button>
+          <MeetingChat key={meeting.id} meetingId={meeting.id} provider={modelConfig?.provider} model={modelConfig?.model} dockTarget={dockTarget} onDockOpenChange={setChatDocked} />
+        </div>
+        {contextOpen && <label className="mt-2 block text-xs text-muted-foreground" id={`summary-context-${meeting.id}`}>Context for the summary
+          <Textarea aria-label="Context for the summary" placeholder="People involved, meeting overview, objectives…" rows={3} className="mt-1 max-h-40 min-h-20 resize-y" disabled={contextLoading} aria-busy={contextLoading} value={customPrompt} onChange={event => onPromptChange(event.target.value)} />
+        </label>}
+      </footer>
     </div>
   );
 }

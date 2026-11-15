@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import plugin from "tailwindcss/plugin";
 const hsl = (variable: string) => `hsl(var(${variable}) / <alpha-value>)`;
 
 export default {
@@ -148,6 +149,12 @@ export default {
           800: hsl('--theme-warning-fg'),
         },
       },
+      textColor: {
+        destructive: {
+          DEFAULT: hsl('--destructive-text'),
+          foreground: hsl('--destructive-foreground'),
+        },
+      },
       borderRadius: {
         DEFAULT: '3px',
         sm: '2px',
@@ -180,5 +187,12 @@ export default {
       }
     }
   },
-  plugins: [require("tailwindcss-animate")],
+  plugins: [
+    require("tailwindcss-animate"),
+    plugin(({ addUtilities }) => {
+      // Opaque rings use the progressively enhanced color; opacity modifiers
+      // retain Tailwind's HSL color so they work without color-mix support.
+      addUtilities({ '.ring-ring': { '--tw-ring-color': 'var(--focus-ring)' } });
+    }),
+  ],
 } satisfies Config;

@@ -2,7 +2,8 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { ActionIcon } from './ActionIcon';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,11 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
-  ChevronDown,
-  Copy,
-  FolderOpen,
-  RefreshCw,
-  Users,
+  MoreHorizontal,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -35,6 +32,8 @@ interface SpeakerDiarizationError {
 }
 
 interface TranscriptButtonGroupProps {
+  onFindReplace?: () => void; onAddBookmark?: () => void;
+  correctionActions?: { busy: boolean; canUndo: boolean; canRestore: boolean; undo: () => void; restore: () => void };
   transcriptCount: number;
   transcribeOpen: boolean;
   onTranscribeOpenChange: (open: boolean) => void;
@@ -47,6 +46,7 @@ interface TranscriptButtonGroupProps {
 }
 
 export function TranscriptButtonGroup({
+  onFindReplace, onAddBookmark, correctionActions,
   transcriptCount,
   transcribeOpen,
   onTranscribeOpenChange,
@@ -235,94 +235,36 @@ export function TranscriptButtonGroup({
   }, [meetingFolderPath, meetingId, showDiarizationComplete, showDiarizationError]);
 
   const speakerDetectionDisabled = transcriptCount === 0 || isDiarizing;
+  const hasRecordingFolder = Boolean(meetingFolderPath?.trim());
+  const recordingFolderAction = (
+    <DropdownMenuItem disabled={!hasRecordingFolder} onSelect={() => { if (hasRecordingFolder) void onOpenMeetingFolder(); }}>
+      Open recording folder
+    </DropdownMenuItem>
+  );
 
   return (
-    <div className="flex shrink-0 items-center justify-end gap-2">
-      <ButtonGroup>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            Analytics.trackButtonClick('copy_transcript', 'meeting_details');
-            onCopyTranscript();
-          }}
-          disabled={transcriptCount === 0}
-          title={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
-        >
-          <Copy />
-          <span className="hidden 2xl:inline">Copy</span>
-        </Button>
+    <div className="flex shrink-0 items-center justify-end gap-1">
+      {onFindReplace && <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={correctionActions?.busy || transcriptCount === 0} onClick={onFindReplace}>Find and replace</Button>}
+      <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={transcriptCount === 0} onClick={() => { Analytics.trackButtonClick('copy_transcript', 'meeting_details'); onCopyTranscript(); }}>Copy</Button>
+      <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon label="More transcript actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {hasRecordingFolder ? recordingFolderAction : <Tooltip>
+            <TooltipTrigger asChild><span className="block" tabIndex={0}>{recordingFolderAction}</span></TooltipTrigger>
+            <TooltipContent>No recording folder is attached to this meeting.</TooltipContent>
+          </Tooltip>}
+          {meetingId && meetingFolderPath && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
+          {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark</DropdownMenuItem>}
+          {correctionActions?.canUndo && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.undo}>Undo last correction</DropdownMenuItem>}
+          {correctionActions?.canRestore && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.restore}>Restore previous transcript</DropdownMenuItem>}
+          {showSpeakerAttribution && meetingId && meetingFolderPath && <>
+            <DropdownMenuSeparator /><DropdownMenuLabel>{isDiarizing ? diarizationMessage ?? 'Detecting speakers…' : 'Detect speakers'}</DropdownMenuLabel>
+            <DropdownMenuItem disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(null)}>Auto detect</DropdownMenuItem>
+            {[2, 3, 4, 5, 6].map(count => <DropdownMenuItem key={count} disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(count)}>{count} speakers</DropdownMenuItem>)}
+          </>}
+          {isDiarizing && <DropdownMenuItem disabled={isCancelling} onSelect={() => void handleCancelDiarization()}>{isCancelling ? 'Cancelling…' : 'Cancel speaker detection'}</DropdownMenuItem>}
+        </DropdownMenuContent>
+      </DropdownMenu>
 
-        <Button
-          size="sm"
-          variant="outline"
-          className="2xl:px-4"
-          onClick={() => {
-            Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
-            onOpenMeetingFolder();
-          }}
-          title="Open Recording Folder"
-        >
-          <FolderOpen className="2xl:mr-2" size={18} />
-          <span className="hidden 2xl:inline">Recording</span>
-        </Button>
-
-        {showSpeakerAttribution && meetingId && meetingFolderPath && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                size="sm"
-                variant="outline"
-                className="2xl:px-4"
-                disabled={speakerDetectionDisabled}
-                title={diarizationMessage ?? "Detect speakers from the saved recording"}
-              >
-                {isDiarizing ? (
-                  <RefreshCw className="animate-spin 2xl:mr-2" size={18} />
-                ) : (
-                  <Users className="2xl:mr-2" size={18} />
-                )}
-                <span className="hidden 2xl:inline">Speakers</span>
-                <ChevronDown className="ml-1 size-3.5 opacity-70" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuLabel>Speaker count</DropdownMenuLabel>
-              <DropdownMenuItem onSelect={() => void handleRunSpeakerDiarization(null)}>
-                Auto detect
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              {[2, 3, 4, 5, 6].map((count) => (
-                <DropdownMenuItem key={count} onSelect={() => void handleRunSpeakerDiarization(count)}>
-                  {count} speakers
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-
-        {isDiarizing && (
-          <Button size="sm" variant="outline" disabled={isCancelling} onClick={() => void handleCancelDiarization()}>
-            {isCancelling ? 'Cancelling…' : 'Cancel speaker detection'}
-          </Button>
-        )}
-
-        {meetingId && meetingFolderPath && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="bg-primary/10 hover:bg-primary/20 border-primary/30 text-foreground 2xl:px-4"
-            onClick={() => {
-              Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
-              onTranscribeOpenChange(true);
-            }}
-            title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'}
-          >
-            <RefreshCw className="2xl:mr-2" size={18} />
-            <span className={transcriptCount === 0 ? '' : 'hidden 2xl:inline'}>{transcriptCount === 0 ? 'Transcribe' : 'Enhance'}</span>
-          </Button>
-        )}
-      </ButtonGroup>
 
       {meetingId && meetingFolderPath && (
         <RetranscribeDialog

@@ -36,6 +36,7 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [referenceReveal, setReferenceReveal] = useState(0);
   useEffect(() => {
     let active = true, reading = false;
@@ -64,9 +65,13 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
   const attachmentMeetingId = !all && selected.length === 1 && attachmentMeetings.some(meeting => meeting.id === selected[0]) ? selected[0] : undefined;
   const attached = (id: string) => {
     if (!all) setSelected(ids => [...new Set([...ids, id])]);
-    state.reloadDocuments(); setReferenceReveal(value => value + 1);
+    state.reloadDocuments(); setReferenceReveal(value => value + 1); setToolsOpen(true);
   };
   const secondary = <div className="space-y-3">
+    <Button variant="ghost" size="sm" className="text-muted-foreground" aria-expanded={toolsOpen} aria-controls="memory-source-tools" onClick={() => setToolsOpen(value => !value)}>
+      <ChevronDown className={toolsOpen ? "rotate-180" : ""} />Reference documents and source search
+    </Button>
+    <div id="memory-source-tools" hidden={!toolsOpen} className="space-y-3">
     <ReferenceDocuments state={state} provider={modelConfig?.provider} reveal={referenceReveal} />
     <Button variant="ghost" size="sm" className="text-muted-foreground" aria-expanded={searchOpen} aria-controls="transcript-search" onClick={() => setSearchOpen(value => !value)}>
       <ChevronDown className={searchOpen ? "rotate-180" : ""} />Source search
@@ -89,11 +94,12 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
       {indexError && <p role="status" className="text-xs text-muted-foreground">Search status is unavailable. Keyword search is available.</p>}
       <SearchResults state={state} />
     </div>}
+    </div>
   </div>;
   return <section className="flex h-full min-h-0 flex-col gap-4 overflow-hidden" aria-label="Meeting memory">
     <fieldset className="shrink-0 space-y-3">
       <legend className="mb-2 text-sm font-medium">Sources</legend>
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3 text-sm [&_button]:text-sm">
         <label className="flex items-center gap-2 text-sm"><Switch checked={all} onCheckedChange={setAll} />Search all saved meetings</label>
         {!all && <Popover open={pickerOpen} onOpenChange={setPickerOpen}><PopoverTrigger asChild><Button variant="outline" size="sm">Choose meetings{selected.length ? ` (${selected.length})` : ""}</Button></PopoverTrigger>
           <PopoverContent align="start" className="w-96 max-w-[calc(100vw-3rem)] space-y-3">
@@ -127,10 +133,16 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
         })}
         {selected.length > 3 && <Button variant="ghost" size="sm" onClick={() => setPickerOpen(true)}>+{selected.length - 3} meetings</Button>}
       </div></TooltipProvider>}
-      {!all && !selected.length && <p className="text-xs text-muted-foreground">Choose at least one meeting to begin.</p>}
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
     </fieldset>
-    <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary} /></div>
+    <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
+      inputDisabled={!sourcesReady}
+      emptyState={!all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
+        <h3 className="text-lg font-semibold">Choose meetings to ask about</h3>
+        <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>
+        <Button className="mt-4" onClick={() => setPickerOpen(true)}>Choose meetings</Button>
+      </div> : undefined}
+    /></div>
     <EvidencePreview state={state} />
   </section>;
 }

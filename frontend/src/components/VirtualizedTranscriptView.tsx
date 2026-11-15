@@ -21,6 +21,7 @@ import {
     DropdownMenuSubTrigger,
     DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
+import { Pencil } from "lucide-react";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
@@ -202,7 +203,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            className={`mb-4 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isActive ? "bg-accent/10 ring-1 ring-accent/30" : ""}`}
+            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isActive ? "bg-accent/10 ring-1 ring-accent/30" : ""}`}
         >
             <div className="flex items-start gap-3">
                 <Tooltip>
@@ -224,7 +225,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         )}
                     </TooltipContent>
                 </Tooltip>
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 pr-7">
                     {showSpeakerLabels && onSpeakerChange ? (
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
@@ -352,16 +353,18 @@ const TranscriptSegment = memo(function TranscriptSegment({
                             {currentSpeaker}
                         </span>
                     )}
-                    {onEdit && <div className="mb-1 flex items-center gap-2 text-xs">
-                        <Button variant="ghost" type="button" onClick={onEdit} className="h-auto gap-0 whitespace-normal text-xs font-normal hover:bg-transparent rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Correct transcript passage">Edit text</Button>
-                        {originalText != null && originalText !== text && <span className="text-primary">Edited</span>}
+                    {onEdit && <div className="absolute right-1 top-1 flex items-center gap-1">
+                        {originalText != null && originalText !== text && <span className="text-xs text-primary">Edited</span>}
+                        <Tooltip><TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" type="button" onClick={onEdit} className="h-7 w-7 bg-card opacity-0 group-hover/segment:opacity-100 group-focus-within/segment:opacity-100 focus-visible:opacity-100" aria-label="Edit segment"><Pencil className="h-3.5 w-3.5" /></Button>
+                        </TooltipTrigger><TooltipContent>Edit segment</TooltipContent></Tooltip>
                     </div>}
                     {isStreaming ? (
                         <div className="bg-muted border border-border rounded-lg px-3 py-2">
-                            <p className="text-[15px] leading-7 text-foreground/90">{displayText}</p>
+                            <p className="text-[15px] leading-[1.5] text-foreground/90">{displayText}</p>
                         </div>
                     ) : (
-                        <p className="text-[15px] leading-7 text-foreground/90">{displayText}</p>
+                        <p className="text-[15px] leading-[1.5] text-foreground/90">{displayText}</p>
                     )}
                 </div>
             </div>

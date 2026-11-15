@@ -3,13 +3,14 @@ import { useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Command, CommandInput, CommandList, CommandItem, CommandEmpty } from '@/components/ui/command';
 import { addTag, suggestTags, removeLastTag } from '@/lib/library';
 
-export function ProjectTags({ meetingId }: { meetingId: string }) {
+export function ProjectTags({ meetingId, compact = false }: { meetingId: string; compact?: boolean }) {
   const { projectTags, projectTagsError, projectTagsLoading, refreshProjectTags } = useSidebar();
   const tags = projectTags.filter(tag => tag.meeting_id === meetingId).map(tag => tag.tag);
   const [open, setOpen] = useState(false);
@@ -39,7 +40,7 @@ export function ProjectTags({ meetingId }: { meetingId: string }) {
     finally { pending.current = false; setBusy(false); }
   };
   return <>
-    <Button variant="outline" size="sm" className="max-w-64" disabled={projectTagsLoading} title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags); setQuery(''); setError(''); setPickerOpen(false); setOpen(true); }}>
+    <Button variant={compact ? "ghost" : "outline"} size="sm" className={compact ? "h-6 min-w-0 max-w-64 px-1 text-xs font-normal text-muted-foreground" : "max-w-64"} disabled={projectTagsLoading} title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags); setQuery(''); setError(''); setPickerOpen(false); setOpen(true); }}>
       <span className="truncate">{projectTagsLoading ? 'Loading project tags…' : projectTagsError ? 'Retry loading tags' : tags.length ? `Tags: ${tags.join(', ')}` : 'Project tags'}</span>
     </Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent>
@@ -47,7 +48,7 @@ export function ProjectTags({ meetingId }: { meetingId: string }) {
       <ul aria-label="Selected tags" className="flex flex-wrap gap-2">
         {draft.map(tag => <li key={tag.toLowerCase()} className="inline-flex max-w-full items-center gap-1 rounded-full bg-muted py-1 pl-3 pr-1 text-sm">
           <span className="break-all">{tag}</span>
-          <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0 rounded-full" disabled={busy} aria-label={`Remove ${tag}`} onClick={() => { setDraft(draft.filter(value => value !== tag)); setError(''); }}>×</Button>
+          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 shrink-0 rounded-full" disabled={busy} aria-label={`Remove ${tag}`} onClick={() => { setDraft(draft.filter(value => value !== tag)); setError(''); }}>×</Button></TooltipTrigger><TooltipContent>Remove {tag}</TooltipContent></Tooltip>
         </li>)}
       </ul>
       <Popover open={pickerOpen} onOpenChange={setPickerOpen}>

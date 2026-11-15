@@ -175,7 +175,7 @@ export default function SettingsPage() {
         <nav className="w-60 shrink-0 overflow-y-auto border-r border-border px-3 py-5">
           {GROUPS.map((group) => (
             <div key={group.label} className="mb-5">
-              <p className="px-3 pb-1.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground/70">
+              <p className="px-3 pb-1.5 text-xs text-muted-foreground">
                 {group.label}
               </p>
               <div className="space-y-0.5">

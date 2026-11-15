@@ -82,9 +82,10 @@ function conversationName(messages: HistoryMessage[]) {
   const label = first.content.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra }: {
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState, inputDisabled = false }: {
   state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
   contextBar?: ReactNode; composerStart?: ReactNode; attachments?: ReactNode; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
+  emptyState?: ReactNode; inputDisabled?: boolean;
 }) {
   const [question, setQuestion] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -99,7 +100,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
   const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
   const needsSharing = externalReferences && !state.sharingEnabled;
-  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
+  const ready = !inputDisabled && !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
   // Draft keystrokes must not rebuild the Markdown/citation tree for the entire history.
   const messages = useMemo(() => state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
     <p className="mb-1 text-xs font-medium text-muted-foreground">{message.role === "user" ? "You" : "Assistant"}{message.status !== "completed" ? ` · ${message.status === "failed" ? "Failed" : message.status === "cancelled" ? "Cancelled" : "Pending"}` : ""}</p>
@@ -143,7 +144,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       request.finished = true; if (pending.current === request) setSettled(current => current + 1);
     });
   };
-  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={compact ? 1 : 2} placeholder={compact ? "Ask about this meeting…" : "What did we decide?"} className={`${compact ? "min-h-10" : "min-h-16"} resize-none`}
+  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} disabled={inputDisabled} rows={1} placeholder={compact ? "Ask about this meeting…" : "Ask about decisions, action items or what was said"} className={`${compact ? "min-h-10" : "min-h-11"} resize-none`}
     onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />;
   return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
@@ -166,15 +167,15 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       {headerActions}
     </header>
     {compact && contextBar && <div className="shrink-0 border-b border-border px-3 py-1">{contextBar}</div>}
-    <ScrollArea className="min-h-0 flex-1">
-      <div className={`space-y-4 ${compact ? "p-3" : "p-5"}`} aria-live="polite">
+    <ScrollArea className={`min-h-0 flex-1 ${emptyState ? "[&_[data-radix-scroll-area-viewport]>div]:h-full" : ""}`}>
+      <div className={`space-y-4 ${compact ? "p-3" : "p-5"} ${emptyState ? "flex h-full flex-col" : ""}`} aria-live="polite">
         {!compact && secondary}
         {state.historyLoading && <p role="status" className="text-sm text-muted-foreground">Loading conversation…</p>}
         {state.creating && !state.sending && <p role="status" className="text-sm text-muted-foreground">Creating conversation…</p>}
-        {!state.messages.length && !state.historyLoading && (compact && suggestions?.length ? <div className="flex flex-col items-start gap-2" aria-label="Suggested questions">
+        {emptyState ? <div className="flex flex-1 items-center justify-center py-12">{emptyState}</div> : !state.messages.length && !state.historyLoading && (compact && suggestions?.length ? <div className="flex flex-col items-start gap-2" aria-label="Suggested questions">
           {suggestions.slice(0, 3).map(suggestion => <Button key={suggestion} type="button" variant="outline" size="sm" onClick={() => { setQuestion(suggestion); questionRef.current?.focus(); }}>{suggestion}</Button>)}
         </div> : <p className="text-sm text-muted-foreground">Ask about decisions, action items, or what was said.</p>)}
-        {messages}
+        {!emptyState && messages}
         {state.sending && <p role="status" className="text-sm text-muted-foreground">Finding sources and answering…</p>}
         {state.error && <p role="alert" className="text-sm text-destructive">{state.error}</p>}
         {state.eventError && <p role="status" className="text-xs text-muted-foreground">{state.eventError}</p>}
@@ -184,8 +185,8 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
     <form className={`sticky bottom-0 shrink-0 border-t border-border bg-card ${compact ? "space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
       <label className={compact ? "sr-only" : "block text-xs font-medium"} htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
       {compact && attachments}
-      {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : questionInput}
-      <div className="flex items-center gap-2"><Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button>
+      {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : <div className="flex items-end gap-3"><div className="min-w-0 flex-1">{questionInput}</div><Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button></div>}
+      <div className="flex items-center gap-2">{compact && <Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button>}
         {state.sending && <Button type="button" variant="outline" onClick={state.cancel}>Cancel answer</Button>}
         <span className="text-xs text-muted-foreground">Shift+Enter for a new line</span>
       </div>
