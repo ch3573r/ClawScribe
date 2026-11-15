@@ -6,11 +6,13 @@
 //!
 //! ```text
 //! cargo run --example live_cut_bench -- <model_dir> <wav> <reference.txt> \
-//!     <redemption_ms>:<cap_ms> [<redemption_ms>:<cap_ms> ...]
+//!     <redemption_ms>:<cap_ms>[:<lead_ms>:<trail_ms>] [...]
 //! ```
 //!
 //! `400:12000` is the live Parakeet setting. Optional third and fourth fields
-//! add that many milliseconds of silence before and after every segment. A cap of `0` disables the cap.
+//! add silence before and after every segment. A cap of `0` disables the cap.
+//! Set `LIVE_CUT_BENCH_RETRY` to retry blank segment decodes with leading silence.
+//! The switch does not affect `probe_empty`.
 
 use std::env;
 use std::fs;
@@ -20,7 +22,7 @@ use app_lib::audio::vad::ContinuousVadProcessor;
 use app_lib::parakeet_engine::ParakeetModel;
 
 const USAGE: &str =
-    "usage: live_cut_bench <model_dir> <wav_16k_mono_pcm> <reference.txt> <redemption_ms>:<cap_ms>...";
+    "usage: live_cut_bench <model_dir> <wav_16k_mono_pcm> <reference.txt> <redemption_ms>:<cap_ms>[:<lead_ms>:<trail_ms>]...";
 /// The live pipeline drops segments shorter than this before transcription.
 const MIN_SEGMENT_SAMPLES: usize = 800;
 /// Roughly the block size the live mixer hands to the VAD.
@@ -56,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut model = ParakeetModel::new(&model_dir, Some("int8"), false)?;
+    let retry_empty = env::var_os("LIVE_CUT_BENCH_RETRY").is_some();
 
     for setting in settings {
         let fields: Vec<u32> = setting
@@ -64,7 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Result<_, _>>()
             .map_err(|_| USAGE)?;
         let (redemption_ms, cap_ms) = match fields[..] {
-            [redemption_ms, cap_ms, ..] => (redemption_ms, cap_ms),
+            [redemption_ms, cap_ms]
+            | [redemption_ms, cap_ms, _]
+            | [redemption_ms, cap_ms, _, _] => (redemption_ms, cap_ms),
             _ => return Err(USAGE.into()),
         };
         // Optional third and fourth fields: silence added before and after
@@ -89,7 +94,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for segment in segments {
             durations.push(segment.samples.len() as f64 / 16_000.0);
             let padded = [lead.as_slice(), &segment.samples, trail.as_slice()].concat();
-            let text = model.transcribe_samples(padded)?.text;
+            let text = if retry_empty {
+                model.transcribe_samples_with_retry(padded, &|| false)?
+            } else {
+                model.transcribe_samples(padded)?
+            }
+            .text;
             empty += usize::from(text.trim().is_empty());
             if text.trim().is_empty() && env::var_os("LIVE_CUT_BENCH_PROBE").is_some() {
                 probe_empty(&mut model, &segment.samples, segment.start_timestamp_ms)?;

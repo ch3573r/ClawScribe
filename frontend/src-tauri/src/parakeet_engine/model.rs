@@ -18,6 +18,7 @@ const SUBSAMPLING_FACTOR: usize = 8;
 const WINDOW_SIZE: f32 = 0.01;
 const MAX_TOKENS_PER_STEP: usize = 3;
 const TDT_DURATIONS: [usize; 5] = [0, 1, 2, 3, 4];
+const SAMPLE_RATE: usize = 16_000;
 
 static DECODE_SPACE_RE: Lazy<Result<Regex, regex::Error>> =
     Lazy::new(|| Regex::new(r"\A\s|\s\B|(\s)\b"));
@@ -27,6 +28,82 @@ pub struct TimestampedResult {
     pub text: String,
     pub timestamps: Vec<f32>,
     pub tokens: Vec<String>,
+}
+
+fn retry_text_is_plausible(text: &str, original_duration_seconds: f64) -> bool {
+    let minimum_words = ((0.75 * original_duration_seconds).floor() as usize).max(2);
+    text.split_whitespace().count() >= minimum_words
+}
+
+fn shift_timestamps(timestamps: &mut [f32], padding_seconds: f32) {
+    for timestamp in timestamps {
+        *timestamp = (*timestamp - padding_seconds).max(0.0);
+    }
+}
+
+fn transcribe_with_empty_retry<F>(
+    samples: Vec<f32>,
+    is_cancelled: &dyn Fn() -> bool,
+    mut decode: F,
+) -> Result<TimestampedResult, ParakeetError>
+where
+    F: FnMut(Vec<f32>) -> Result<TimestampedResult, ParakeetError>,
+{
+    let sample_count = samples.len();
+    let duration_seconds = sample_count as f64 / SAMPLE_RATE as f64;
+    let rms = if sample_count == 0 {
+        0.0
+    } else {
+        (samples.iter().map(|sample| sample * sample).sum::<f32>() / sample_count as f32).sqrt()
+    };
+    // The first decode consumes the original buffer. Keep a retry copy only
+    // for audio long and audible enough for the empty-result retry gate.
+    let retry_samples = if sample_count >= SAMPLE_RATE && rms >= 0.005 {
+        Some(samples.clone())
+    } else {
+        None
+    };
+    let result = decode(samples)?;
+    if !result.text.trim().is_empty() {
+        return Ok(result);
+    }
+    let Some(samples) = retry_samples else {
+        return Ok(result);
+    };
+
+    for padding_ms in [300usize, 1000] {
+        if is_cancelled() {
+            return Ok(result);
+        }
+        let padding_samples = padding_ms * SAMPLE_RATE / 1000;
+        let mut padded = Vec::with_capacity(padding_samples + samples.len());
+        padded.resize(padding_samples, 0.0);
+        padded.extend_from_slice(&samples);
+        let mut retry = match decode(padded) {
+            Ok(retry) => retry,
+            Err(_) => {
+                log::warn!(
+                    "Parakeet empty-result retry decode failed: audio={:.2}s padding={}ms",
+                    duration_seconds,
+                    padding_ms
+                );
+                return Ok(result);
+            }
+        };
+        if retry_text_is_plausible(&retry.text, duration_seconds) {
+            shift_timestamps(&mut retry.timestamps, padding_ms as f32 / 1000.0);
+            log::info!(
+                "Parakeet empty-result retry recovered text for segment: audio={:.2}s",
+                duration_seconds
+            );
+            return Ok(retry);
+        }
+    }
+    log::debug!(
+        "Parakeet empty-result retries returned no plausible text for segment: audio={:.2}s",
+        duration_seconds
+    );
+    Ok(result)
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -549,6 +626,15 @@ impl ParakeetModel {
         }
     }
 
+    /// Retry an audible segment that decoded to blank with a short silence lead.
+    pub fn transcribe_samples_with_retry(
+        &mut self,
+        samples: Vec<f32>,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<TimestampedResult, ParakeetError> {
+        transcribe_with_empty_retry(samples, is_cancelled, |s| self.transcribe_samples(s))
+    }
+
     pub fn transcribe_samples(
         &mut self,
         samples: Vec<f32>,
@@ -574,5 +660,234 @@ impl ParakeetModel {
         })?;
 
         Ok(timestamped_result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        retry_text_is_plausible, shift_timestamps, transcribe_with_empty_retry, ParakeetError,
+        TimestampedResult, SAMPLE_RATE,
+    };
+
+    fn result(text: &str) -> TimestampedResult {
+        TimestampedResult {
+            text: text.to_string(),
+            timestamps: vec![0.1, 0.3, 0.8, 2.3],
+            tokens: vec!["first".to_string(), "second".to_string()],
+        }
+    }
+
+    fn assert_same_result(actual: &TimestampedResult, expected: &TimestampedResult) {
+        assert_eq!(actual.text, expected.text);
+        assert_eq!(actual.timestamps, expected.timestamps);
+        assert_eq!(actual.tokens, expected.tokens);
+    }
+
+    #[test]
+    fn retry_plausibility_requires_enough_words_for_the_original_duration() {
+        assert!(!retry_text_is_plausible("two words", 4.0));
+        assert!(retry_text_is_plausible("three recovered words", 4.0));
+        assert!(!retry_text_is_plausible("one", 1.0));
+        assert!(retry_text_is_plausible("two words", 1.0));
+        assert!(retry_text_is_plausible("three\nrecovered\twords", 5.0));
+        assert!(!retry_text_is_plausible(" \n\t", 1.0));
+    }
+
+    #[test]
+    fn non_empty_first_result_is_returned_untouched_after_one_decode() {
+        let samples = vec![0.1; 4 * SAMPLE_RATE];
+        let original_ptr = samples.as_ptr();
+        let expected = result("one");
+        let mut calls = 0;
+        let actual = transcribe_with_empty_retry(samples, &|| false, |input| {
+            calls += 1;
+            assert_eq!(input.as_ptr(), original_ptr);
+            Ok(expected.clone())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_same_result(&actual, &expected);
+    }
+
+    #[test]
+    fn empty_result_recovers_with_300_ms_padding_and_adjusted_timestamps() {
+        let recovered = result("three recovered words");
+        let mut responses = vec![Ok(result("")), Ok(recovered.clone())].into_iter();
+        let mut inputs = Vec::new();
+        let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| false, |input| {
+            inputs.push(input);
+            responses.next().expect("unexpected decode")
+        })
+        .unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].len(), 4 * SAMPLE_RATE);
+        assert_eq!(inputs[1].len(), 4 * SAMPLE_RATE + 4_800);
+        assert!(inputs[1][..4_800].iter().all(|&sample| sample == 0.0));
+        assert_eq!(&inputs[1][4_800..], inputs[0].as_slice());
+        assert_eq!(actual.text, recovered.text);
+        assert_eq!(actual.tokens, recovered.tokens);
+        for (actual, expected) in actual.timestamps.iter().zip([0.0, 0.0, 0.5, 2.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        assert_eq!(actual.timestamps.len(), 4);
+    }
+
+    #[test]
+    fn empty_results_recover_with_1000_ms_padding_on_the_third_decode() {
+        let recovered = result("three recovered words");
+        let mut responses = vec![Ok(result("")), Ok(result("")), Ok(recovered.clone())].into_iter();
+        let mut inputs = Vec::new();
+        let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| false, |input| {
+            inputs.push(input);
+            responses.next().expect("unexpected decode")
+        })
+        .unwrap();
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[1].len(), 4 * SAMPLE_RATE + 4_800);
+        assert_eq!(inputs[2].len(), 5 * SAMPLE_RATE);
+        assert!(inputs[2][..SAMPLE_RATE].iter().all(|&sample| sample == 0.0));
+        assert_eq!(&inputs[2][SAMPLE_RATE..], inputs[0].as_slice());
+        assert_eq!(actual.text, recovered.text);
+        assert_eq!(actual.tokens, recovered.tokens);
+        for (actual, expected) in actual.timestamps.iter().zip([0.0, 0.0, 0.0, 1.3]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        assert_eq!(actual.timestamps.len(), 4);
+    }
+
+    #[test]
+    fn all_empty_decodes_return_the_original_empty_result() {
+        let original = result(" \n\t");
+        let mut calls = 0;
+        let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| false, |_| {
+            calls += 1;
+            Ok(if calls == 1 {
+                original.clone()
+            } else {
+                result("")
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_same_result(&actual, &original);
+    }
+
+    #[test]
+    fn retry_decode_error_preserves_the_original_successful_empty_result() {
+        let original = result(" \n\t");
+        let mut calls = 0;
+        let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| false, |_| {
+            calls += 1;
+            if calls == 1 {
+                Ok(original.clone())
+            } else {
+                Err(ParakeetError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "fake decode failure",
+                )))
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_same_result(&actual, &original);
+    }
+
+    #[test]
+    fn implausible_retry_text_is_rejected() {
+        let original = result("");
+        let mut responses = vec![
+            Ok(original.clone()),
+            Ok(result("two words")),
+            Ok(result("one")),
+        ]
+        .into_iter();
+        let mut calls = 0;
+        let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| false, |_| {
+            calls += 1;
+            responses.next().expect("unexpected decode")
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_same_result(&actual, &original);
+    }
+
+    #[test]
+    fn implausible_retry_text_allows_the_next_attempt() {
+        let recovered = result("two words");
+        let mut responses =
+            vec![Ok(result("")), Ok(result("one")), Ok(recovered.clone())].into_iter();
+        let mut calls = 0;
+        let actual = transcribe_with_empty_retry(vec![0.1; SAMPLE_RATE], &|| false, |_| {
+            calls += 1;
+            responses.next().expect("unexpected decode")
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(actual.text, recovered.text);
+        assert_eq!(actual.tokens, recovered.tokens);
+    }
+
+    #[test]
+    fn cancellation_before_a_retry_stops_after_the_first_decode() {
+        let original = result("");
+        let mut calls = 0;
+        let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| true, |_| {
+            calls += 1;
+            Ok(original.clone())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_same_result(&actual, &original);
+    }
+
+    #[test]
+    fn cancellation_is_checked_before_each_retry() {
+        let original = result("");
+        let cancelled = std::cell::Cell::new(false);
+        let mut calls = 0;
+        let actual =
+            transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| cancelled.get(), |_| {
+                calls += 1;
+                if calls == 2 {
+                    cancelled.set(true);
+                }
+                Ok(original.clone())
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_same_result(&actual, &original);
+    }
+
+    #[test]
+    fn short_or_quiet_audio_is_not_retried() {
+        let original = result("");
+        for samples in [
+            vec![],
+            vec![0.1; SAMPLE_RATE - 1],
+            vec![0.001; 2 * SAMPLE_RATE],
+            vec![0.0; 2 * SAMPLE_RATE],
+        ] {
+            let mut calls = 0;
+            let actual = transcribe_with_empty_retry(samples, &|| false, |_| {
+                calls += 1;
+                Ok(original.clone())
+            })
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_same_result(&actual, &original);
+        }
+    }
+
+    #[test]
+    fn retry_timestamps_subtract_padding_and_clamp_at_zero() {
+        for padding in [0.3, 1.0] {
+            let mut timestamps = vec![0.0, padding / 2.0, padding, padding + 0.5, padding + 2.0];
+            shift_timestamps(&mut timestamps, padding);
+            for (actual, expected) in timestamps.iter().zip([0.0, 0.0, 0.0, 0.5, 2.0]) {
+                assert!((actual - expected).abs() < 1e-6);
+            }
+        }
+        shift_timestamps(&mut [], 0.3);
     }
 }
