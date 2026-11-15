@@ -165,6 +165,21 @@ test('identity, manifest and asset-set mismatches are reported', t => {
   assert.ok(failedNames(missing).includes(`asset present: ${names.msi}`));
 });
 
+test('the short commit may be any git abbreviation of the build commit', t => {
+  const staged = stage(t);
+  const metadata = fs.readFileSync(path.join(staged.dir, 'BUILD-METADATA.txt'), 'utf8');
+  const full = staged.options.expectedCommit;
+  const withShort = short => metadata.replace(/build_commit_short=.*/, `build_commit_short=${short}`);
+  for (const short of [full.slice(0, 8), full.slice(0, 12), full]) {
+    staged.write('BUILD-METADATA.txt', withShort(short));
+    assert.ok(!failedNames(verifyAssets(staged.options)).includes('metadata build_commit_short'), short);
+  }
+  for (const short of [full.slice(0, 6), '', `${full.slice(0, 7)}z`, '0'.repeat(7) === full.slice(0, 7) ? '1111111' : '0000000']) {
+    staged.write('BUILD-METADATA.txt', withShort(short));
+    assert.ok(failedNames(verifyAssets(staged.options)).includes('metadata build_commit_short'), short);
+  }
+});
+
 test('GitHub digests and sizes must match the local files', t => {
   const staged = stage(t);
   const assets = fs.readdirSync(staged.dir).map(name => ({ name, state: 'uploaded', size: staged.read(name).length, digest: `sha256:${sha256(staged.read(name))}` }));
