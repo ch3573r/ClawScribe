@@ -515,6 +515,7 @@ impl SummaryService {
                 | LLMProvider::CustomOpenAI
                 | LLMProvider::OpenClaw
                 | LLMProvider::Codex
+                | LLMProvider::ClaudeCode
         ) {
             // These providers don't require API keys from the standard database column
             String::new()

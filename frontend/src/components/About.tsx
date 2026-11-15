@@ -71,6 +71,9 @@ export function About() {
                 <p className="text-xs text-muted-foreground mt-2">
                     Advanced Codex app-server bundles @openai/codex 0.169.0 for Windows x64 under Apache-2.0. Runtime SHA256: ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0.
                 </p>
+                <p className="text-xs text-muted-foreground mt-2">
+                    Claude Code uses the program you installed and signed in to yourself. Your Claude plan&apos;s limits apply. Claude Code is not bundled with ClawScribe.
+                </p>
             </div>
 
         </div>

@@ -207,7 +207,17 @@ context, regenerate notes, and chat about the selected meeting. Per-meeting summ
 context is saved in the local library and included in backups. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
-bundled Codex app-server path.
+bundled Codex app-server path, plus **Claude Code** using your own installation.
+
+**Claude Code**: Uses the Claude Code you installed and signed in to. Your Claude
+plan's limits apply. Install it yourself, run `claude auth login` in a terminal,
+then select **Claude Code** in Summary settings. ClawScribe does not install
+Claude Code or handle its sign-in or credentials. It supports text summaries and
+meeting chat with tools disabled; choose Sonnet (default), Opus, or Haiku. These
+models use the Claude API provider's context budgets. Prompts travel through stdin
+and a temporary UTF-8 system file, keeping prompt text off the command line.
+See [Claude Code setup and limitations](docs/auth/claude-code.md), including
+Windows command shims and the optional Program path setting.
 
 The advanced Codex provider bundles app-server **0.169.0**, with GPT-6.1 Sol
 (`gpt-6.1-sol`) in its model catalog. Choose **Check bundled runtime** in Summary

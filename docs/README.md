@@ -38,6 +38,7 @@ from the source version.
 ## Authentication And Providers
 
 - [Codex authentication](auth/codex-auth.md)
+- [Claude Code setup and limitations](auth/claude-code.md)
 - [OpenAI authentication modes](openai-oauth.md)
 - [OpenAI authentication paths](auth/openai-login.md)
 - [Bundled Codex runtime](codex-runtime.md)

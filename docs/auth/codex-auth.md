@@ -11,6 +11,10 @@ Provider order:
 
 Normal ClawScribe meeting processing must work without any Codex runtime.
 
+For the separate provider that uses a user's own Claude Code installation,
+see [Claude Code setup and limitations](claude-code.md). Its authentication and
+process protocol are independent of the bundled Codex runtime.
+
 ## Boundary
 
 ClawScribe must not implement DIY OpenAI/Codex OAuth, copy Codex tokens, shape
