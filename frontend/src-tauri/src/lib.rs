@@ -41,6 +41,7 @@ pub(crate) use perf_trace;
 pub mod anthropic;
 pub mod api;
 pub mod audio;
+pub mod cli_control;
 pub mod config;
 pub mod console_utils;
 pub(crate) mod credentials;
@@ -524,7 +525,11 @@ pub fn run() {
                 cwd
             );
 
-            tray::focus_main_window(app);
+            if let Some(action) = cli_control::parse_cli_action(args.as_slice()) {
+                cli_control::run_cli_action(app, action);
+            } else {
+                tray::focus_main_window(app);
+            }
         }));
     }
 
