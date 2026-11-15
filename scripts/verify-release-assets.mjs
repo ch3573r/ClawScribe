@@ -113,7 +113,8 @@ export function verifyAssets({ dir, version, expectedCommit, tauriConf, repo, re
   check('metadata version', meta.version === version, meta.version);
   check('metadata installer_product_version', meta.installer_product_version === runtimeVersion, meta.installer_product_version);
   check('metadata build_commit equals expected commit', meta.build_commit === expectedCommit, meta.build_commit);
-  check('metadata build_commit_short', meta.build_commit_short === expectedCommit.slice(0, 7), meta.build_commit_short);
+  // git picks the abbreviation length (7 or more) from the repository size.
+  check('metadata build_commit_short', /^[0-9a-f]{7,40}$/.test(meta.build_commit_short || '') && expectedCommit.startsWith(meta.build_commit_short), meta.build_commit_short);
   try { JSON.parse(fs.readFileSync(path.join(dir, 'BUILD-METRICS.json'), 'utf8')); check('BUILD-METRICS.json parses', true); } catch (error) { check('BUILD-METRICS.json parses', false, error.message); }
 
   const latest = JSON.parse(fs.readFileSync(path.join(dir, 'latest.json'), 'utf8'));
