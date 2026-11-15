@@ -532,7 +532,7 @@ impl ParakeetEngine {
         audio_data: Vec<f32>,
     ) -> Result<TimestampedResult> {
         let mut model_guard = self.current_model.clone().write_owned().await;
-        crate::audio::inference::run(move |_cancelled| {
+        crate::audio::inference::run(move |cancelled| {
             let model = model_guard
                 .as_mut()
                 .ok_or_else(|| anyhow!("No Parakeet model loaded. Please load a model first."))?;
@@ -547,7 +547,9 @@ impl ParakeetEngine {
             // Transcribe using Parakeet model
             let start = Instant::now();
             let result = model
-                .transcribe_samples(audio_data)
+                .transcribe_samples_with_retry(audio_data, &|| {
+                    cancelled.load(std::sync::atomic::Ordering::Acquire)
+                })
                 .map_err(|e| anyhow!("Parakeet transcription failed: {}", e))?;
             let elapsed = start.elapsed();
             let elapsed_seconds = elapsed.as_secs_f64();

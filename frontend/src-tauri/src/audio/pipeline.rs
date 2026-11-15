@@ -16,11 +16,8 @@ use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState}
 use super::transcription::queue::{BufferedSpool, TranscriptionQueueSender};
 use super::vad::ContinuousVadProcessor;
 
-/// Ring buffer for synchronized audio mixing
-/// Accumulates samples from mic and system streams until we have aligned windows
 /// Live VAD max-segment cap (ms). Set per active transcription provider at
-/// recording start; the pipeline reads it when creating the VAD. Lower = lower
-/// live latency. Default 6s (Parakeet/Whisper).
+/// recording start; the pipeline reads it when creating the VAD. Default 6s.
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
 const SYSTEM_AUDIO_SILENCE_WARNING: &str = "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).";
@@ -81,18 +78,105 @@ impl SystemAudioWarningTracker {
 /// Choose the live VAD segment cap for the active transcription provider.
 /// Nemotron transcribes each VAD segment offline at only ~2.5x realtime, so a 6s
 /// cap can leave continuous speech several seconds behind; cap its live segments
-/// shorter (3s) to cut perceived latency. Other providers keep the 6s default.
+/// shorter (3s) to cut perceived latency. Whisper and cloud providers keep 6s.
 /// Import/retranscription is unaffected — it uses silence-aware splitting, not
 /// this cap.
+///
+/// Parakeet gets a longer cap (12s). It decodes far faster than realtime, and
+/// it is unreliable on short pieces of a sentence: in `live_cut_bench` some
+/// segments under 6s decoded to no text at all, while none of 8s or more did.
+/// The price is that uninterrupted speech can appear up to 12s late.
+/// Cutting earlier at a pause was measured with `live_cut_bench` and made Parakeet
+/// less accurate, so the cap is the only limit.
 pub fn set_live_max_segment_ms_for_provider(provider: &str) {
-    let ms = if provider.eq_ignore_ascii_case("nemotron") {
-        3_000
-    } else {
-        6_000
-    };
-    LIVE_MAX_SEGMENT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    LIVE_MAX_SEGMENT_MS.store(
+        live_max_segment_ms_for_provider(provider),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
+fn live_max_segment_ms_for_provider(provider: &str) -> u32 {
+    if provider.eq_ignore_ascii_case("nemotron") {
+        3_000
+    } else if provider.eq_ignore_ascii_case("parakeet") {
+        12_000
+    } else {
+        6_000
+    }
+}
+
+struct SourceAttributionWindow {
+    start_timestamp_ms: f64,
+    end_timestamp_ms: f64,
+    mic_snr: f32,
+    sys_snr: f32,
+}
+
+/// Mixer-window ratios on the VAD's sample-count timeline. Retain the tail
+/// after a cut, but bound storage even during long stretches without speech.
+#[derive(Default)]
+struct SourceAttributionHistory {
+    windows: VecDeque<SourceAttributionWindow>,
+    input_samples: u64,
+}
+
+impl SourceAttributionHistory {
+    fn record_window(&mut self, sample_count: usize, sample_rate: u32, mic_snr: f32, sys_snr: f32) {
+        if sample_count == 0 {
+            return;
+        }
+        let start_timestamp_ms = self.input_samples as f64 / sample_rate as f64 * 1000.0;
+        self.input_samples += sample_count as u64;
+        let end_timestamp_ms = self.input_samples as f64 / sample_rate as f64 * 1000.0;
+        self.windows.push_back(SourceAttributionWindow {
+            start_timestamp_ms,
+            end_timestamp_ms,
+            mic_snr,
+            sys_snr,
+        });
+        let oldest_ms = end_timestamp_ms - 150_000.0;
+        while self
+            .windows
+            .front()
+            .map_or(false, |window| window.end_timestamp_ms <= oldest_ms)
+        {
+            self.windows.pop_front();
+        }
+    }
+
+    fn source_for_segment(&self, start_ms: f64, end_ms: f64) -> (DeviceType, f32, f32) {
+        let mut mic_snr = 0.0;
+        let mut sys_snr = 0.0;
+        for window in &self.windows {
+            let window_duration = window.end_timestamp_ms - window.start_timestamp_ms;
+            let overlap = (end_ms.min(window.end_timestamp_ms)
+                - start_ms.max(window.start_timestamp_ms))
+            .max(0.0);
+            // Half-open ranges give no weight to windows touching only an edge.
+            let weight = if window_duration > 0.0 {
+                (overlap / window_duration) as f32
+            } else {
+                0.0
+            };
+            if weight > 0.0 {
+                mic_snr += window.mic_snr * weight;
+                sys_snr += window.sys_snr * weight;
+            }
+        }
+        // Normalizing by the total weight cancels in the ratio. Preserve the
+        // microphone fallback when both sums are zero. The threshold may need calibration.
+        const MIC_DOMINANCE: f32 = 1.5;
+        let source = if mic_snr >= sys_snr * MIC_DOMINANCE {
+            DeviceType::Microphone
+        } else {
+            DeviceType::System
+        };
+        (source, mic_snr, sys_snr)
+    }
+}
+
+/// Ring buffer for synchronized audio mixing.
+/// Accumulates mic and system samples until we have aligned windows.
 struct AudioMixerRingBuffer {
     mic_buffer: VecDeque<f32>,
     system_buffer: VecDeque<f32>,
@@ -801,6 +885,9 @@ pub struct AudioPipeline {
     transcription_sender: BufferedSpool,
     state: Arc<RecordingState>,
     vad_processor: Option<ContinuousVadProcessor>,
+    attribution_history: SourceAttributionHistory,
+    mic_floor: f32,
+    sys_floor: f32,
     sample_rate: u32,
     chunk_id_counter: u64,
     // Performance optimization: reduce logging frequency
@@ -872,9 +959,9 @@ impl AudioPipeline {
                 ) {
                     Ok(processor) => {
                         info!(
-                    "VAD-driven pipeline: live speech segments capped at {}ms for lower latency",
-                    live_max_segment_ms
-                );
+                            "VAD-driven pipeline: live speech segments capped at {}ms for lower latency",
+                            live_max_segment_ms
+                        );
                         processor
                     }
                     Err(e) => {
@@ -899,6 +986,9 @@ impl AudioPipeline {
             transcription_sender: BufferedSpool::new(transcription_sender, state.clone(), false),
             state,
             vad_processor,
+            attribution_history: SourceAttributionHistory::default(),
+            mic_floor: 1e-4,
+            sys_floor: 1e-4,
             sample_rate,
             chunk_id_counter: 0,
             // Performance optimization: reduce logging frequency
@@ -951,13 +1041,6 @@ impl AudioPipeline {
         // system-only playback (e.g. a YouTube video) mislabeled as "Me".
         // Measuring excess-over-floor cancels that bias. Transcription itself is
         // unchanged — it still runs on the mixed audio.
-        let mut mic_snr_acc = 0.0f32;
-        let mut sys_snr_acc = 0.0f32;
-        // Per-stream noise floors, tracked across the whole meeting (NOT reset
-        // per segment): fall fast toward a new quiet level, rise slowly so brief
-        // speech doesn't inflate the baseline.
-        let mut mic_floor = 1e-4f32;
-        let mut sys_floor = 1e-4f32;
 
         // CRITICAL FIX: Continue processing until channel is closed, not based on recording state
         // This ensures ALL chunks are processed during shutdown, fixing premature meeting completion
@@ -1020,33 +1103,6 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
-                            // Per-source SNR (energy above each stream's own rolling
-                            // noise floor). Comparing SNRs — not raw levels — keeps the
-                            // loudness-normalized mic from structurally dominating the
-                            // raw system stream.
-                            let rms = |w: &[f32]| -> f32 {
-                                if w.is_empty() {
-                                    0.0
-                                } else {
-                                    (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt()
-                                }
-                            };
-                            let mic_rms = rms(&mic_window);
-                            let sys_rms = rms(&sys_window);
-                            // Asymmetric floor tracker: fall fast (0.10) toward a new low,
-                            // rise slowly (0.001) so sustained speech can't raise the floor.
-                            let track = |floor: &mut f32, rms: f32| {
-                                let a = if rms < *floor { 0.10 } else { 0.001 };
-                                *floor += a * (rms - *floor);
-                                if *floor < 1e-6 {
-                                    *floor = 1e-6;
-                                }
-                            };
-                            track(&mut mic_floor, mic_rms);
-                            track(&mut sys_floor, sys_rms);
-                            mic_snr_acc += mic_rms / mic_floor;
-                            sys_snr_acc += sys_rms / sys_floor;
-
                             // Simple mixing without aggressive ducking
                             let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
 
@@ -1060,6 +1116,13 @@ impl AudioPipeline {
                                 .await?;
 
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
+                            if self.vad_processor.is_some() {
+                                self.record_attribution_window(
+                                    &mic_window,
+                                    &sys_window,
+                                    mixed_with_gain.len(),
+                                );
+                            }
                             match self
                                 .vad_processor
                                 .as_mut()
@@ -1067,26 +1130,11 @@ impl AudioPipeline {
                                 .transpose()
                             {
                                 Ok(Some(speech_segments)) => {
-                                    let had_segments = !speech_segments.is_empty();
-                                    // Attribute the segment to the dominant source by SNR
-                                    // accumulated over the windows feeding it. "Me" only when
-                                    // the mic's SNR clearly leads the system's — real mic speech
-                                    // does; normalized room tone or speaker bleed during system
-                                    // playback does not. The /n averaging cancels in the ratio,
-                                    // so the accumulators are compared directly.
-                                    // (MIC_DOMINANCE may need on-device calibration.)
-                                    const MIC_DOMINANCE: f32 = 1.5;
-                                    let segment_source =
-                                        if mic_snr_acc >= sys_snr_acc * MIC_DOMINANCE {
-                                            DeviceType::Microphone
-                                        } else {
-                                            DeviceType::System
-                                        };
-                                    perf_debug!(
-                                        "🗣️ attribution: mic_snr={:.1} sys_snr={:.1} floors(mic={:.5},sys={:.5}) -> {:?}",
-                                        mic_snr_acc, sys_snr_acc, mic_floor, sys_floor, segment_source
-                                    );
                                     for segment in speech_segments {
+                                        let segment_source = self.segment_source(
+                                            segment.start_timestamp_ms,
+                                            segment.end_timestamp_ms,
+                                        );
                                         let duration_ms =
                                             segment.end_timestamp_ms - segment.start_timestamp_ms;
 
@@ -1103,7 +1151,7 @@ impl AudioPipeline {
                                                 sample_rate: 16000,
                                                 timestamp: segment.start_timestamp_ms / 1000.0,
                                                 chunk_id: self.chunk_id_counter,
-                                                device_type: segment_source.clone(),
+                                                device_type: segment_source,
                                             };
 
                                             if self
@@ -1117,18 +1165,8 @@ impl AudioPipeline {
                                                    duration_ms, segment.samples.len());
                                         }
                                     }
-
-                                    if had_segments {
-                                        // Reset per-segment SNR sums; floors persist as
-                                        // long-running baselines.
-                                        mic_snr_acc = 0.0;
-                                        sys_snr_acc = 0.0;
-                                    }
                                 }
-                                Ok(None) => {
-                                    mic_snr_acc = 0.0;
-                                    sys_snr_acc = 0.0;
-                                }
+                                Ok(None) => {}
                                 Err(_) => {
                                     self.transcription_sender.mark_failed();
                                     self.state.report_warning("Speech detection failed. Recorded audio is retained; use Retranscribe after stopping.");
@@ -1175,6 +1213,50 @@ impl AudioPipeline {
 
         info!("VAD-driven audio pipeline ended");
         Ok(())
+    }
+
+    fn record_attribution_window(&mut self, mic: &[f32], system: &[f32], sample_count: usize) {
+        let rms = |window: &[f32]| -> f32 {
+            if window.is_empty() {
+                0.0
+            } else {
+                (window.iter().map(|s| s * s).sum::<f32>() / window.len() as f32).sqrt()
+            }
+        };
+        let mic_rms = rms(mic);
+        let sys_rms = rms(system);
+        // Floors persist across segments: fall fast toward quiet, rise slowly
+        // so sustained speech does not inflate the baseline.
+        let track = |floor: &mut f32, rms: f32| {
+            let a = if rms < *floor { 0.10 } else { 0.001 };
+            *floor += a * (rms - *floor);
+            if *floor < 1e-6 {
+                *floor = 1e-6;
+            }
+        };
+        track(&mut self.mic_floor, mic_rms);
+        track(&mut self.sys_floor, sys_rms);
+        self.attribution_history.record_window(
+            sample_count,
+            self.sample_rate,
+            mic_rms / self.mic_floor,
+            sys_rms / self.sys_floor,
+        );
+    }
+
+    fn segment_source(&self, start_ms: f64, end_ms: f64) -> DeviceType {
+        let attribution = self
+            .attribution_history
+            .source_for_segment(start_ms, end_ms);
+        perf_debug!(
+            "🗣️ attribution: mic_snr={:.1} sys_snr={:.1} floors(mic={:.5},sys={:.5}) -> {:?}",
+            attribution.1,
+            attribution.2,
+            self.mic_floor,
+            self.sys_floor,
+            attribution.0
+        );
+        attribution.0
     }
 
     async fn preserve_mixed_audio(&mut self, samples: &[f32], timestamp: f64) -> Result<()> {
@@ -1224,18 +1306,23 @@ impl AudioPipeline {
             self.preserve_mixed_audio(&mixed, self.recording_buffer_timestamp)
                 .await?;
             self.flush_recording_buffer().await?;
+            if self.vad_processor.is_some() {
+                self.record_attribution_window(&mic, &system, mixed.len());
+            }
             let segments = self.vad_processor.as_mut().map(|vad| vad.process_audio(&mixed)).transpose().map(|segments| segments.unwrap_or_default()).unwrap_or_else(|_| {
                 self.transcription_sender.mark_failed();
                 self.state.report_warning("Final speech detection failed; use Retranscribe to recover speech from the saved audio.");
                 Vec::new()
             });
             for segment in segments {
+                let segment_source =
+                    self.segment_source(segment.start_timestamp_ms, segment.end_timestamp_ms);
                 let chunk = AudioChunk {
                     data: segment.samples,
                     sample_rate: 16000,
                     timestamp: segment.start_timestamp_ms / 1000.0,
                     chunk_id: self.chunk_id_counter,
-                    device_type: DeviceType::Microphone,
+                    device_type: segment_source,
                 };
                 if self.enqueue_transcription_chunk(chunk).await {
                     self.chunk_id_counter += 1;
@@ -1251,6 +1338,8 @@ impl AudioPipeline {
         match vad.flush() {
             Ok(final_segments) => {
                 for segment in final_segments {
+                    let segment_source =
+                        self.segment_source(segment.start_timestamp_ms, segment.end_timestamp_ms);
                     let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
 
                     // Send segments >= 50ms (800 samples at 16kHz) - matches main pipeline filter
@@ -1266,7 +1355,7 @@ impl AudioPipeline {
                             sample_rate: 16000,
                             timestamp: segment.start_timestamp_ms / 1000.0,
                             chunk_id: self.chunk_id_counter,
-                            device_type: DeviceType::Microphone,
+                            device_type: segment_source,
                         };
 
                         if self.enqueue_transcription_chunk(transcription_chunk).await {
@@ -1393,6 +1482,123 @@ impl AudioPipelineManager {
 impl Default for AudioPipelineManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod live_segment_cap_tests {
+    use super::live_max_segment_ms_for_provider;
+
+    #[test]
+    fn each_provider_gets_its_live_segment_cap() {
+        assert_eq!(live_max_segment_ms_for_provider("parakeet"), 12_000);
+        assert_eq!(live_max_segment_ms_for_provider("Parakeet"), 12_000);
+        assert_eq!(live_max_segment_ms_for_provider("nemotron"), 3_000);
+        assert_eq!(live_max_segment_ms_for_provider("localWhisper"), 6_000);
+        assert_eq!(live_max_segment_ms_for_provider(""), 6_000);
+    }
+}
+
+#[cfg(test)]
+mod source_attribution_tests {
+    use super::{DeviceType, SourceAttributionHistory};
+
+    #[test]
+    fn segments_emitted_together_use_their_own_source_windows() {
+        let mut history = SourceAttributionHistory::default();
+        history.record_window(48_000, 48_000, 10.0, 1.0);
+        history.record_window(48_000, 48_000, 1.0, 10.0);
+        let labels: Vec<_> = [(0.0, 1000.0), (1000.0, 2000.0)]
+            .into_iter()
+            .map(|(start, end)| history.source_for_segment(start, end).0)
+            .collect();
+        assert_eq!(labels, vec![DeviceType::Microphone, DeviceType::System]);
+    }
+
+    #[test]
+    fn a_cut_retains_tail_windows_without_inheriting_the_previous_segment() {
+        let mut history = SourceAttributionHistory::default();
+        history.record_window(16_000, 16_000, 100.0, 1.0);
+        history.record_window(16_000, 16_000, 1.0, 10.0);
+        // The cut is inside the second window, whose tail remains in the VAD.
+        assert_eq!(
+            history.source_for_segment(0.0, 1500.0).0,
+            DeviceType::Microphone
+        );
+        history.record_window(16_000, 16_000, 1.0, 10.0);
+        let (source, mic, system) = history.source_for_segment(1500.0, 3000.0);
+        assert_eq!(source, DeviceType::System);
+        assert_eq!((mic, system), (1.5, 15.0));
+    }
+
+    #[test]
+    fn short_microphone_segment_after_system_audio_weights_straddling_windows() {
+        let mut history = SourceAttributionHistory::default();
+        for _ in 0..20 {
+            history.record_window(9_600, 16_000, 1.0, 40.0);
+        }
+        history.record_window(9_600, 16_000, 10.0, 1.0);
+        history.record_window(9_600, 16_000, 10.0, 1.0);
+        // Only 50 ms of the last system window and 550 ms of the last mic
+        // window belong to this 1.2 s segment.
+        let (source, mic, system) = history.source_for_segment(11_950.0, 13_150.0);
+        assert_eq!(source, DeviceType::Microphone);
+        assert!((mic - 19.25).abs() < 1e-5);
+        assert!((system - 5.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn zero_length_windows_and_non_overlapping_segments_have_zero_weight() {
+        let mut history = SourceAttributionHistory::default();
+        history.record_window(16_000, 16_000, 10.0, 1.0);
+        history.windows.push_back(super::SourceAttributionWindow {
+            start_timestamp_ms: 500.0,
+            end_timestamp_ms: 500.0,
+            mic_snr: 0.0,
+            sys_snr: 1000.0,
+        });
+        assert_eq!(
+            history.source_for_segment(0.0, 1000.0),
+            (DeviceType::Microphone, 10.0, 1.0)
+        );
+        for (start, end) in [(1000.0, 2000.0), (500.0, 500.0), (700.0, 500.0)] {
+            assert_eq!(
+                history.source_for_segment(start, end),
+                (DeviceType::Microphone, 0.0, 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn attribution_keeps_the_existing_zero_sum_fallback() {
+        let mut history = SourceAttributionHistory::default();
+        assert_eq!(
+            history.source_for_segment(0.0, 1000.0).0,
+            DeviceType::Microphone
+        );
+        history.record_window(16_000, 16_000, 0.0, 0.0);
+        assert_eq!(
+            history.source_for_segment(0.0, 1000.0).0,
+            DeviceType::Microphone
+        );
+        assert_eq!(
+            history.source_for_segment(1000.0, 2000.0).0,
+            DeviceType::Microphone
+        );
+    }
+
+    #[test]
+    fn attribution_history_discards_windows_older_than_150_seconds() {
+        let mut history = SourceAttributionHistory::default();
+        for _ in 0..200 {
+            history.record_window(16_000, 16_000, 1.0, 10.0);
+        }
+        assert_eq!(history.windows.len(), 150);
+        assert_eq!(history.source_for_segment(0.0, 50_000.0).1, 0.0);
+        assert_eq!(
+            history.source_for_segment(50_000.0, 51_000.0).0,
+            DeviceType::System
+        );
     }
 }
 
