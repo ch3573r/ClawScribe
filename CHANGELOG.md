@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.57
+
+- Improve live Parakeet transcription. Cut uninterrupted speech at a pause, allow live segments of up to 12 seconds (was 6, so text for nonstop speech can appear up to 12 seconds late), retry an audible segment that returns no text, and take speaker labels (beta) from each segment's own time range. Measured on two synthetic clips only: word errors 6 to 2 in English and 6 to 5 in German; not yet checked on real meetings.
+- Add a custom vocabulary under transcription in Settings. Transcript words close to a listed entry are replaced by its spelling in live recording, import and retranscription. Entries of up to 4 characters match exactly only, possessive and plural endings are kept, and entries with umlauts work. It applies to new transcripts and retranscription.
+- Add Run transcription in a separate process (beta, off by default). Parakeet runs in a child process that the app restarts, retrying the segment, if the speech model crashes or stops responding; after a GPU failure the rest of the session uses the CPU and the settings page says so. Parakeet only; Whisper and Nemotron are unchanged.
+- Add Parakeet Ultra to the model catalog, a fine-tune of Parakeet v3 for 25 languages, as 8-bit and 16-bit downloads. Published German and English word error rates measured by others are 4.58 % and 4.26 % against 5.24 % and 4.83 % for Parakeet v3. The default model is unchanged and we have not run it yet.
+- Launching the app again with --toggle-recording, --start-recording or --stop-recording controls the running instance.
+- Update the bundled Codex app-server from 0.159.2 to 0.169.0. Build releases with link-time optimisation and stripped symbols.
+- Advance installer/runtime/updater version to 0.5.57 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
+- Installed acceptance with real meeting audio remains pending: live Parakeet, custom vocabulary and the beta switch in light and dark themes, a recording with the separate process on (including GPU), Parakeet Ultra download and transcription, a Codex sign-in with one summary and one meeting chat, and the command-line flags, along with the 0.5.56 chat popup, focus and portal checks and exact-build recording, upgrade/update and two-hour live-assistance acceptance. See `docs/releases/0.5.57.md`.
+
 ## 0.5.56
 
 - Keep the compact meeting chat conversation first. A slim Context control opens the meeting scope (a searchable, height-limited picker with project filters behind Filters) and the reference files with Add file; a paperclip beside the question field attaches a file with the existing local extraction, and selected files show as removable chips above it. Search mode moved to More options, and the empty chat offers three suggested questions that only fill the field. The Meeting memory page is unchanged.
