@@ -27,3 +27,10 @@ cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
 # esaxx-rs intentionally remains on crates.io. A former patch in the member
 # manifest was never active; enabling a replacement now would be a separate
 # dependency behavior change that needs its own review and Windows validation.
+
+# Smaller, faster release binaries; applies to every workspace member.
+# This lengthens release builds.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
