@@ -141,8 +141,34 @@ impl From<std::io::Error> for ParakeetEngineError {
     }
 }
 
+const PARAKEET_V3_BASE_URL: &str =
+    "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce";
+const PARAKEET_ULTRA_BASE_URL: &str =
+    "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1";
+
+fn is_parakeet_ultra(model_name: &str) -> bool {
+    model_name.contains("-ultra-")
+}
+
+/// Download and verification URL for one file of a Parakeet model.
+///
+/// Parakeet Ultra ships only the fine-tuned encoder and decoder; its
+/// preprocessor and vocabulary are the unchanged v3 files.
+fn parakeet_file_url(model_name: &str, filename: &str) -> String {
+    let shared_v3_file = matches!(filename, "nemo128.onnx" | "vocab.txt");
+    let base = if is_parakeet_ultra(model_name) && shared_v3_file {
+        PARAKEET_V3_BASE_URL
+    } else {
+        parakeet_base_url(model_name)
+    };
+    format!("{base}/{filename}")
+}
+
 fn parakeet_base_url(model_name: &str) -> &'static str {
-    if model_name.contains("smoothquant") {
+    if is_parakeet_ultra(model_name) {
+        // Must precede the "-fp16" check: the Ultra fp16 name contains it.
+        PARAKEET_ULTRA_BASE_URL
+    } else if model_name.contains("smoothquant") {
         "https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-smoothquant-onnx/resolve/2748538802098c611cf00e7c9a959a1515f695f7"
     } else if model_name.contains("-fp16") {
         "https://huggingface.co/grikdotnet/parakeet-tdt-0.6b-fp16/resolve/dc9871ec5ad84a420940077e76e8741b3609bf8b"
@@ -150,7 +176,7 @@ fn parakeet_base_url(model_name: &str) -> &'static str {
         "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85"
     } else {
         // Default to v3 for v3 models
-        "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+        PARAKEET_V3_BASE_URL
     }
 }
 
@@ -226,6 +252,20 @@ impl ParakeetEngine {
                 QuantizationType::Int8,
                 "Experimental (SmoothQuant)",
                 "Larger SmoothQuant int8 export intended to improve long-audio accuracy versus stock int8.",
+            ),
+            (
+                "parakeet-tdt-0.6b-ultra-int8",
+                671,
+                QuantizationType::Int8,
+                "Parakeet Ultra",
+                "Fine-tuned v3 with better accuracy in German and English. 25 languages.",
+            ),
+            (
+                "parakeet-tdt-0.6b-ultra-fp16",
+                1276,
+                QuantizationType::FP16,
+                "Parakeet Ultra (fp16)",
+                "Fine-tuned v3 at higher precision, with better accuracy in German and English. 25 languages. Larger download.",
             ),
             (
                 "parakeet-tdt-0.6b-v2-int8",
@@ -393,7 +433,7 @@ impl ParakeetEngine {
                 .ok_or_else(|| anyhow!("Invalid model folder"))?;
             crate::model_download::verify_pinned_file(
                 &model_dir.join(filename),
-                &format!("{}/{filename}", parakeet_base_url(model_name)),
+                &parakeet_file_url(model_name, filename),
             )
             .await?;
             let file_path = model_dir.join(filename);
@@ -662,9 +702,6 @@ impl ParakeetEngine {
         if let Some(model) = self.available_models.write().await.get_mut(model_name) {
             model.status = ModelStatus::Downloading { progress: 0 };
         }
-        // Source URL for Parakeet models (variant-specific).
-        let base_url = parakeet_base_url(model_name);
-
         // Determine which files to download based on quantization
         let files_to_download = match model_info.quantization {
             QuantizationType::Int8 => vec![
@@ -698,7 +735,7 @@ impl ParakeetEngine {
                 let mut previous_bytes = None;
                 let size = crate::model_download::download_file(
                     &client,
-                    &format!("{base_url}/{filename}"),
+                    &parakeet_file_url(model_name, filename),
                     &model_info.path.join(filename),
                     reservation.token(),
                     |bytes, total| {
@@ -757,6 +794,75 @@ impl ParakeetEngine {
 
     pub async fn cancel_download(&self, model_name: &str) -> Result<()> {
         self.downloads.cancel(model_name).await
+    }
+}
+
+#[cfg(test)]
+mod catalog_url_tests {
+    use super::*;
+
+    const ULTRA: &str = "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1";
+    const V3: &str = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce";
+
+    #[test]
+    fn ultra_models_split_files_between_ultra_and_v3_repositories() {
+        for (name, encoder, decoder) in [
+            (
+                "parakeet-tdt-0.6b-ultra-int8",
+                "encoder-model.int8.onnx",
+                "decoder_joint-model.int8.onnx",
+            ),
+            (
+                "parakeet-tdt-0.6b-ultra-fp16",
+                "encoder-model.fp16.onnx",
+                "decoder_joint-model.fp16.onnx",
+            ),
+        ] {
+            assert_eq!(parakeet_file_url(name, encoder), format!("{ULTRA}/{encoder}"));
+            assert_eq!(parakeet_file_url(name, decoder), format!("{ULTRA}/{decoder}"));
+            assert_eq!(
+                parakeet_file_url(name, "nemo128.onnx"),
+                format!("{V3}/nemo128.onnx")
+            );
+            assert_eq!(parakeet_file_url(name, "vocab.txt"), format!("{V3}/vocab.txt"));
+            for file in [encoder, decoder, "nemo128.onnx", "vocab.txt"] {
+                crate::model_download::pinned_file(&parakeet_file_url(name, file))
+                    .unwrap_or_else(|_| panic!("{name}/{file} has no integrity pin"));
+            }
+        }
+    }
+
+    #[test]
+    fn ultra_pins_match_published_sizes_and_hashes() {
+        let pin = |file: &str| {
+            crate::model_download::pinned_file(&format!("{ULTRA}/{file}")).unwrap()
+        };
+        let encoder = pin("encoder-model.int8.onnx");
+        assert_eq!(encoder.size, 652_183_214);
+        assert_eq!(
+            encoder.sha256,
+            "46e78f85f1ae43b43bd359889c966da5c7ca401df60a42eeffc2e7699b357ba6"
+        );
+        let encoder = pin("encoder-model.fp16.onnx");
+        assert_eq!(encoder.size, 1_239_245_869);
+        assert_eq!(
+            encoder.sha256,
+            "f1da16b46daeb9b5430e2fb5743efb42f49998d2e45cfd48fcf4f2965e45dd4d"
+        );
+    }
+
+    #[test]
+    fn existing_models_keep_their_single_base_url() {
+        assert_eq!(
+            parakeet_file_url("parakeet-tdt-0.6b-v3-int8", "vocab.txt"),
+            format!("{V3}/vocab.txt")
+        );
+        assert!(parakeet_file_url("parakeet-tdt-0.6b-v2-int8", "nemo128.onnx")
+            .contains("parakeet-tdt-0.6b-v2-onnx"));
+        assert!(
+            parakeet_file_url("parakeet-tdt-0.6b-v3-smoothquant-int8", "vocab.txt")
+                .contains("smoothquant")
+        );
     }
 }
 

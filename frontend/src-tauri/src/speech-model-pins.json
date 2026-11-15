@@ -258,5 +258,25 @@
     "url": "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/wespeaker_en_voxceleb_CAM%2B%2B.onnx",
     "size": 29292684,
     "sha256": "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef"
+  },
+  {
+    "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/encoder-model.int8.onnx",
+    "size": 652183214,
+    "sha256": "46e78f85f1ae43b43bd359889c966da5c7ca401df60a42eeffc2e7699b357ba6"
+  },
+  {
+    "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/decoder_joint-model.int8.onnx",
+    "size": 18202004,
+    "sha256": "2276a335d4c8dc48686e931475a634595954956427d485830e1214c0d1a18d07"
+  },
+  {
+    "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/encoder-model.fp16.onnx",
+    "size": 1239245869,
+    "sha256": "f1da16b46daeb9b5430e2fb5743efb42f49998d2e45cfd48fcf4f2965e45dd4d"
+  },
+  {
+    "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/decoder_joint-model.fp16.onnx",
+    "size": 36268312,
+    "sha256": "e2d0d174a2ca425aaf3a4161bd43c9487e4060e74c88dac2771913238876111d"
   }
 ]
