@@ -24,25 +24,16 @@ pub fn parse_cli_action<S: AsRef<str>>(args: &[S]) -> Option<CliAction> {
     })
 }
 
-/// Performs the action through the tray's toggle handler (the same path the
-/// global start/stop shortcut uses). Start and stop only toggle when the
-/// current state differs, so repeating a command is harmless.
+/// Performs the action through the tray's recording handler (the same path the
+/// global start/stop shortcut uses). Start and stop carry their intent, so
+/// repeating a command is harmless and a request never does the opposite.
 pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
-    match action {
-        CliAction::ToggleRecording => crate::tray::toggle_recording_handler(app),
-        CliAction::StartRecording | CliAction::StopRecording => {
-            let want_recording = action == CliAction::StartRecording;
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let recording = crate::audio::recording_commands::is_recording().await;
-                if recording != want_recording {
-                    crate::tray::toggle_recording_handler(&app);
-                } else {
-                    log::info!("Command-line request ignored: recording state already matches");
-                }
-            });
-        }
-    }
+    let want_recording = match action {
+        CliAction::ToggleRecording => None,
+        CliAction::StartRecording => Some(true),
+        CliAction::StopRecording => Some(false),
+    };
+    crate::tray::recording_intent_handler(app, want_recording);
 }
 
 #[cfg(test)]
