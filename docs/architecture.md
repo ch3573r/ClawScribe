@@ -120,6 +120,38 @@ so live, import, and retranscription use the same system-locale Auto policy.
 Unknown source language remains unset instead of being inferred from the engine
 name. Whisper's text normalization collapses whitespace and preserves words.
 
+Custom vocabulary is a local Tauri store preference (`custom_vocabulary.json`),
+exposed by `get_custom_vocabulary` and `set_custom_vocabulary`. Set normalizes
+whitespace at entry edges, removes empty and case-insensitive duplicate entries,
+and rejects more than 500 unique entries, entries over 64 Unicode characters,
+control characters, and entries without a letter or number. Matching is adapted
+from Handy (MIT), using Unicode alphanumeric lowercase keys and character-based
+Levenshtein distance over up to three source words. Single-character keys are
+disabled; keys of 2–4 characters require equality. Keys of 5–7 characters allow
+at most one edit with the same first character, excluding final-character
+substitutions to keep names such as Maria and Mario distinct. Keys of 8 or more
+characters use the normalized distance with threshold 0.18 and a cached Soundex
+boost only for ASCII alphabetic keys, requiring at least six candidate characters.
+Joins use the same key-length rules as single words. They never consume opening
+punctuation on a non-first word or trailing punctuation before the last word.
+A candidate equal to another listed key cannot be changed to a different key.
+Possessive and exact plural endings are preserved; unchanged spellings produce
+no edits. Matching does not transliterate or expand spoken ampersands.
+Live transcription snapshots the list once and corrects before ingestion and
+emission; import and retranscription correct stitched segments before database
+and JSON writes, including whole-file cloud results. Empty lists bypass matching.
+The same edit plan updates word anchors: joins merge source ranges, replacement
+phrases estimate their internal boundaries, and mismatched provider anchors are
+replaced with explicitly estimated segment timings. Segments without word
+anchors remain without them. Original audio is unchanged; saved transcripts
+change only through new transcription, retranscription, or explicit editing.
+Unreadable or malformed vocabulary settings yield an empty list; invalid entries
+are dropped and valid lists are capped at 500 entries. Recovery logs one sanitized
+warning per read and emits no recording warning. Reads never rewrite the saved
+file. Saves validate the new list independently and atomically replace the same
+Tauri-store-compatible JSON file, so corrupt content cannot block editing.
+Settings keep failed edits actionable without logging list or transcript contents.
+
 `RecordingStateContext` subscribes before reading the initial recording snapshot,
 restores polling for an active session after a reload, and permits one poll at a
 time. Lifecycle events invalidate older polls. Cleanup also removes subscriptions

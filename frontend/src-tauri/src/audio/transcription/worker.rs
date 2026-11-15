@@ -188,6 +188,9 @@ pub fn start_transcription_task<R: Runtime>(
             }
         };
 
+        // Snapshot once per recording; an empty list adds no per-segment matching.
+        let vocabulary = Arc::new(crate::audio::vocabulary_settings::load_vocabulary(&app));
+
         // Serial processing keeps transcript emission in chronological order.
         const NUM_WORKERS: usize = 1;
         // A single buffered item plus the item currently in inference bounds the
@@ -224,6 +227,7 @@ pub fn start_transcription_task<R: Runtime>(
             let metrics_clone = task_metrics.clone();
             let failure_notice = failure_notice.clone();
             let live_sink = live_sink.clone();
+            let vocabulary = vocabulary.clone();
 
             worker_handles.spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -305,7 +309,7 @@ pub fn start_transcription_task<R: Runtime>(
                                 .await
                             {
                                 Ok((
-                                    transcript,
+                                    mut transcript,
                                     confidence_opt,
                                     is_partial,
                                     provider_word_timestamps,
@@ -351,7 +355,7 @@ pub fn start_transcription_task<R: Runtime>(
                                         } else {
                                             Some(source_label)
                                         };
-                                        let word_timestamps = provider_word_timestamps
+                                        let mut word_timestamps = provider_word_timestamps
                                             .map(|words| with_word_speaker(words, source_label_opt))
                                             .or_else(|| {
                                                 crate::audio::common::estimate_word_timestamps(
@@ -362,6 +366,11 @@ pub fn start_transcription_task<R: Runtime>(
                                                     source_label_opt,
                                                 )
                                             });
+
+                                        crate::audio::vocabulary_settings::correct_transcript(
+                                            &vocabulary, &mut transcript, &mut word_timestamps,
+                                            audio_start_time, audio_end_time,
+                                        );
 
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
