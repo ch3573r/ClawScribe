@@ -181,7 +181,7 @@ providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
 bundled Codex app-server path.
 
-The advanced Codex provider bundles app-server **0.159.2**, with GPT-6.1 Sol
+The advanced Codex provider bundles app-server **0.169.0**, with GPT-6.1 Sol
 (`gpt-6.1-sol`) in its model catalog. Choose **Check bundled runtime** in Summary
 settings after upgrading to refresh models. Availability depends on the signed-in account and workspace;
 your saved model selection is preserved. OpenAI's API model fallback list also
