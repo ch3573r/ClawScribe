@@ -7,16 +7,16 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.58**. This Windows GPU preview reworks the meeting details
+Source version: **0.5.58**. This Windows GPU release reworks the meeting details
 screen (title header, segment playback strip, one-row toolbars, docked chat),
 tidies the Meetings page and the Add-ons settings, and adds Claude Code as an
 optional summary and meeting chat provider. It includes the live Parakeet
 improvements and custom vocabulary from 0.5.57. See the
-[0.5.58 preview notes](docs/releases/0.5.58.md) and the
+[0.5.58 release notes](docs/releases/0.5.58.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
-Stable remains **0.5.48**. Enable **Include prereleases** to discover published
-previews; drafts are excluded from updates. Installed acceptance remains
-pending for this preview; stable promotion follows real-device acceptance.
+Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
+**Include prereleases** to discover later previews; drafts are excluded from
+updates.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -190,8 +190,8 @@ and playback acceptance remains pending; see the
 [local library guide](docs/local-library.md#meeting-memory) and
 [preview acceptance policy](docs/windows-release.md#required-real-device-acceptance).
 Exact-build dual-source recording and comparable two-hour enabled/disabled
-Live performance acceptance remain pending. This source implementation does
-not establish stable readiness; stable remains **0.5.48**.
+Live performance acceptance remain pending. Stable **0.5.58** was published
+without these checks.
 
 - **Local Word export:** save a summary, full transcript, or both as `.docx`,
   including tables, with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
@@ -303,7 +303,7 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What changed in 0.5.58 preview
+## What changed in 0.5.58
 
 - Meeting details has the title in a header across the page, a playback strip that
   shows the transcript segments, and one-row toolbars with menus for the less
@@ -317,10 +317,10 @@ retain Tauri signature verification and remain subject to Windows security polic
   installed and signed-in Claude Code.
 - Error messages are app notifications, not browser alerts. Error text in the dark
   theme and keyboard focus rings are easier to see.
-- Check these on an installed build in light and dark themes. These checks and
-  inherited recording acceptance remain pending before stable promotion.
+- These changes were published to stable without installed acceptance. Installed
+  checks in light and dark themes and recording acceptance remain open.
 
-See the [preview notes](docs/releases/0.5.58.md), the
+See the [release notes](docs/releases/0.5.58.md), the
 [previous transcription preview](docs/releases/0.5.57.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status

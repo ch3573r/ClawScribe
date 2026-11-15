@@ -414,7 +414,8 @@ version, audio devices, and result without publishing private meeting content.
    assistance-induced capture gaps or unbounded memory and no Stop wait on
    assistance backlog. Exact-build installed and two-hour checks remain pending
    when only fixture/helper/native tests exist. Preview notes must disclose
-   those missing checks; stable remains 0.5.48 until real-device acceptance.
+   those missing checks. Stable is 0.5.58, which the owner published on 2026-11-15
+   without real-device acceptance; that exception does not change this policy.
 
 Optional hosted-provider verification is documented in
 [hosted-transcription-smoke.md](hosted-transcription-smoke.md). OpenClaw handoff
