@@ -30,11 +30,6 @@ pub struct TimestampedResult {
     pub tokens: Vec<String>,
 }
 
-fn retry_text_is_plausible(text: &str, original_duration_seconds: f64) -> bool {
-    let minimum_words = ((0.75 * original_duration_seconds).floor() as usize).max(2);
-    text.split_whitespace().count() >= minimum_words
-}
-
 fn shift_timestamps(timestamps: &mut [f32], padding_seconds: f32) {
     for timestamp in timestamps {
         *timestamp = (*timestamp - padding_seconds).max(0.0);
@@ -90,7 +85,9 @@ where
                 return Ok(result);
             }
         };
-        if retry_text_is_plausible(&retry.text, duration_seconds) {
+        // Any recovered words are kept, however few: a short answer is still
+        // an answer.
+        if !retry.text.trim().is_empty() {
             shift_timestamps(&mut retry.timestamps, padding_ms as f32 / 1000.0);
             log::info!(
                 "Parakeet empty-result retry recovered text for segment: audio={:.2}s",
@@ -100,7 +97,7 @@ where
         }
     }
     log::debug!(
-        "Parakeet empty-result retries returned no plausible text for segment: audio={:.2}s",
+        "Parakeet empty-result retries returned no text for segment: audio={:.2}s",
         duration_seconds
     );
     Ok(result)
@@ -666,7 +663,7 @@ impl ParakeetModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_text_is_plausible, shift_timestamps, transcribe_with_empty_retry, ParakeetError,
+        shift_timestamps, transcribe_with_empty_retry, ParakeetError,
         TimestampedResult, SAMPLE_RATE,
     };
 
@@ -682,16 +679,6 @@ mod tests {
         assert_eq!(actual.text, expected.text);
         assert_eq!(actual.timestamps, expected.timestamps);
         assert_eq!(actual.tokens, expected.tokens);
-    }
-
-    #[test]
-    fn retry_plausibility_requires_enough_words_for_the_original_duration() {
-        assert!(!retry_text_is_plausible("two words", 4.0));
-        assert!(retry_text_is_plausible("three recovered words", 4.0));
-        assert!(!retry_text_is_plausible("one", 1.0));
-        assert!(retry_text_is_plausible("two words", 1.0));
-        assert!(retry_text_is_plausible("three\nrecovered\twords", 5.0));
-        assert!(!retry_text_is_plausible(" \n\t", 1.0));
     }
 
     #[test]
@@ -794,36 +781,16 @@ mod tests {
     }
 
     #[test]
-    fn implausible_retry_text_is_rejected() {
-        let original = result("");
-        let mut responses = vec![
-            Ok(original.clone()),
-            Ok(result("two words")),
-            Ok(result("one")),
-        ]
-        .into_iter();
+    fn a_short_recovered_answer_is_kept() {
+        let recovered = result("Ja");
+        let mut responses = vec![Ok(result("")), Ok(recovered.clone())].into_iter();
         let mut calls = 0;
         let actual = transcribe_with_empty_retry(vec![0.1; 4 * SAMPLE_RATE], &|| false, |_| {
             calls += 1;
             responses.next().expect("unexpected decode")
         })
         .unwrap();
-        assert_eq!(calls, 3);
-        assert_same_result(&actual, &original);
-    }
-
-    #[test]
-    fn implausible_retry_text_allows_the_next_attempt() {
-        let recovered = result("two words");
-        let mut responses =
-            vec![Ok(result("")), Ok(result("one")), Ok(recovered.clone())].into_iter();
-        let mut calls = 0;
-        let actual = transcribe_with_empty_retry(vec![0.1; SAMPLE_RATE], &|| false, |_| {
-            calls += 1;
-            responses.next().expect("unexpected decode")
-        })
-        .unwrap();
-        assert_eq!(calls, 3);
+        assert_eq!(calls, 2);
         assert_eq!(actual.text, recovered.text);
         assert_eq!(actual.tokens, recovered.tokens);
     }
