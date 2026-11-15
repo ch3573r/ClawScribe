@@ -1,4 +1,7 @@
 use crate::parakeet_engine::model::{ParakeetModel, TimestampedResult};
+use crate::parakeet_engine::worker::{
+    directml_session_disabled, transcription_timeout, LoadSpec, TranscriptionWorker,
+};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,6 +15,10 @@ use tokio::sync::RwLock;
 /// execution provider. Beta, opt-in: set via `set_parakeet_use_directml`, read
 /// when a model is (re)loaded. No effect unless the `directml` feature is built.
 pub static USE_PARAKEET_DIRECTML: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Opt-in process isolation, sampled when a model is loaded.
+pub static USE_PARAKEET_WORKER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Quantization type for Parakeet models
@@ -180,9 +187,15 @@ fn parakeet_base_url(model_name: &str) -> &'static str {
     }
 }
 
+// Both backends share the same authoritative model slot and write lock.
+enum LoadedModel {
+    InProcess(ParakeetModel),
+    Worker(TranscriptionWorker),
+}
+
 pub struct ParakeetEngine {
     models_dir: PathBuf,
-    current_model: Arc<RwLock<Option<ParakeetModel>>>,
+    current_model: Arc<RwLock<Option<LoadedModel>>>,
     current_model_name: Arc<RwLock<Option<String>>>,
     pub(crate) available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
     downloads: crate::model_download::Downloads,
@@ -502,10 +515,29 @@ impl ParakeetEngine {
                 let precision_suffix = model_info.quantization.model_suffix();
                 // Beta opt-in: route inference through DirectML (Windows GPU) when enabled.
                 let use_directml = USE_PARAKEET_DIRECTML.load(std::sync::atomic::Ordering::Relaxed);
+                let use_worker = USE_PARAKEET_WORKER.load(std::sync::atomic::Ordering::Relaxed);
                 let path = model_info.path.clone();
-                let model = crate::audio::inference::run(move |_cancelled| {
-                    ParakeetModel::new(&path, precision_suffix, use_directml)
+                let model = crate::audio::inference::run(move |cancelled| {
+                    if use_worker {
+                        let mut worker = TranscriptionWorker::new()?;
+                        worker.load(
+                            LoadSpec {
+                                model_dir: path,
+                                precision_suffix: precision_suffix.map(str::to_owned),
+                                use_directml,
+                            },
+                            &|| cancelled.load(std::sync::atomic::Ordering::Acquire),
+                        )?;
+                        Ok(LoadedModel::Worker(worker))
+                    } else {
+                        ParakeetModel::new(
+                            &path,
+                            precision_suffix,
+                            use_directml && !directml_session_disabled(),
+                        )
+                        .map(LoadedModel::InProcess)
                         .map_err(anyhow::Error::from)
+                    }
                 })
                 .await
                 .map_err(|e| anyhow!("Failed to load Parakeet model {}: {}", model_name, e))?;
@@ -538,14 +570,39 @@ impl ParakeetEngine {
 
     /// Unload the current model
     pub async fn unload_model(&self) -> bool {
-        let mut model_guard = self.current_model.write().await;
-        let unloaded = model_guard.take().is_some();
+        let mut model_guard = self.current_model.clone().write_owned().await;
+        // Clear metadata before handing shutdown to a blocking task, which
+        // completes even if its async waiter is cancelled.
+        self.current_model_name.write().await.take();
+        let unloaded = if matches!(model_guard.as_ref(), Some(LoadedModel::Worker(_))) {
+            // Shutting down a child needs only the model lock, never NATIVE:
+            // the just-finished call can still be releasing that permit. Keep
+            // the lock through kill/reap, away from the async runtime thread.
+            match tokio::task::spawn_blocking(move || {
+                let model = model_guard.take();
+                let unloaded = model.is_some();
+                if let Some(LoadedModel::Worker(mut worker)) = model {
+                    worker.shutdown();
+                }
+                // Keep the write lock until shutdown and Drop have completed.
+                drop(model_guard);
+                unloaded
+            })
+            .await
+            {
+                Ok(unloaded) => unloaded,
+                Err(_) => {
+                    log::error!("Parakeet worker shutdown task failed");
+                    // The moved guard/worker is dropped even on unwind.
+                    false
+                }
+            }
+        } else {
+            model_guard.take().is_some()
+        };
         if unloaded {
             log::info!("Parakeet model unloaded");
         }
-
-        let mut model_name_guard = self.current_model_name.write().await;
-        model_name_guard.take();
 
         unloaded
     }
@@ -557,6 +614,9 @@ impl ParakeetEngine {
 
     /// Check if a model is loaded
     pub async fn is_model_loaded(&self) -> bool {
+        // A worker entry retains the successful load spec after a crash or
+        // cancellation even if its child is gone. This means logically loaded;
+        // the next transcription lazily respawns/reloads under the model lock.
         self.current_model.read().await.is_some()
     }
 
@@ -586,11 +646,22 @@ impl ParakeetEngine {
 
             // Transcribe using Parakeet model
             let start = Instant::now();
-            let result = model
-                .transcribe_samples_with_retry(audio_data, &|| {
-                    cancelled.load(std::sync::atomic::Ordering::Acquire)
-                })
-                .map_err(|e| anyhow!("Parakeet transcription failed: {}", e))?;
+            let result = match model {
+                LoadedModel::InProcess(model) => model
+                    .transcribe_samples_with_retry(audio_data, &|| {
+                        cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    })
+                    .map_err(anyhow::Error::from),
+                LoadedModel::Worker(worker) => {
+                    let timeout = transcription_timeout(audio_data.len());
+                    worker
+                        .transcribe(audio_data, timeout, &|| {
+                            cancelled.load(std::sync::atomic::Ordering::Acquire)
+                        })
+                        .map_err(anyhow::Error::from)
+                }
+            }
+            .map_err(|e| anyhow!("Parakeet transcription failed: {}", e))?;
             let elapsed = start.elapsed();
             let elapsed_seconds = elapsed.as_secs_f64();
             let speed = if elapsed_seconds > 0.0 {
@@ -870,6 +941,35 @@ mod catalog_url_tests {
 mod model_switch_tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn worker_unload_does_not_need_native_admission() {
+        let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().unwrap();
+        let engine =
+            ParakeetEngine::new_with_models_dir(Some(directory.path().to_path_buf())).unwrap();
+        // The worker branch must unload even if a completed call still owns
+        // NATIVE. No child/model is needed to exercise that admission race.
+        *engine.current_model.write().await = Some(LoadedModel::Worker(
+            TranscriptionWorker::with_program(directory.path().join("unused-worker"), vec![]),
+        ));
+        *engine.current_model_name.write().await = Some("previous".into());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let native = tokio::spawn(crate::audio::inference::run(move |_| {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            Ok(())
+        }));
+        started_rx.await.unwrap();
+        let unloaded = tokio::time::timeout(Duration::from_secs(5), engine.unload_model()).await;
+        // Release the other task before assertions, including on failure.
+        let _ = release_tx.send(());
+        native.await.unwrap().unwrap();
+        assert!(unloaded.expect("worker shutdown must not wait for NATIVE"));
+        assert!(!engine.is_model_loaded().await);
+        assert_eq!(engine.get_current_model().await, None);
+    }
 
     #[tokio::test]
     async fn switching_model_releases_name_lock_before_unloading() {

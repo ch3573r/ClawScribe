@@ -13,12 +13,16 @@
 //! add silence before and after every segment. A cap of `0` disables the cap.
 //! Set `LIVE_CUT_BENCH_RETRY` to retry blank segment decodes with leading silence.
 //! The switch does not affect `probe_empty`.
+//! `LIVE_CUT_BENCH_WORKER` uses supervised inference (including empty retries).
+//! `LIVE_CUT_BENCH_KILL_AFTER=<n>` kills that worker once after n successful
+//! segments to exercise recovery. Worker mode does not support the raw probe.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use app_lib::audio::vad::ContinuousVadProcessor;
+use app_lib::parakeet_engine::worker::{transcription_timeout, LoadSpec, TranscriptionWorker};
 use app_lib::parakeet_engine::ParakeetModel;
 
 const USAGE: &str =
@@ -29,6 +33,9 @@ const MIN_SEGMENT_SAMPLES: usize = 800;
 const FEED_SAMPLES: usize = 1_600;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(code) = app_lib::parakeet_engine::worker::dispatch() {
+        std::process::exit(code);
+    }
     let mut args = env::args().skip(1);
     let model_dir = args.next().map(PathBuf::from).ok_or(USAGE)?;
     let wav = args.next().map(PathBuf::from).ok_or(USAGE)?;
@@ -57,7 +64,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reference.len()
     );
 
-    let mut model = ParakeetModel::new(&model_dir, Some("int8"), false)?;
+    let use_worker = env::var_os("LIVE_CUT_BENCH_WORKER").is_some();
+    let kill_after = env::var("LIVE_CUT_BENCH_KILL_AFTER")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    if kill_after.is_some() && !use_worker {
+        return Err("LIVE_CUT_BENCH_KILL_AFTER requires LIVE_CUT_BENCH_WORKER".into());
+    }
+    if use_worker && env::var_os("LIVE_CUT_BENCH_PROBE").is_some() {
+        return Err("LIVE_CUT_BENCH_PROBE requires in-process inference".into());
+    }
+    let mut worker = if use_worker {
+        let mut worker = TranscriptionWorker::new()?;
+        worker.load(
+            LoadSpec {
+                model_dir: model_dir.clone(),
+                precision_suffix: Some("int8".into()),
+                use_directml: false,
+            },
+            &|| false,
+        )?;
+        Some(worker)
+    } else {
+        None
+    };
+    let mut model = if use_worker {
+        None
+    } else {
+        Some(ParakeetModel::new(&model_dir, Some("int8"), false)?)
+    };
+    let mut successful_segments = 0usize;
+    let mut killed = false;
+    if kill_after == Some(0) {
+        if let Some(worker) = worker.as_mut() {
+            worker.kill_child()?;
+            killed = true;
+            println!("worker: forced termination before the first segment");
+        }
+    }
     let retry_empty = env::var_os("LIVE_CUT_BENCH_RETRY").is_some();
 
     for setting in settings {
@@ -94,15 +139,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for segment in segments {
             durations.push(segment.samples.len() as f64 / 16_000.0);
             let padded = [lead.as_slice(), &segment.samples, trail.as_slice()].concat();
-            let text = if retry_empty {
-                model.transcribe_samples_with_retry(padded, &|| false)?
+            let text = if let Some(worker) = worker.as_mut() {
+                let timeout = transcription_timeout(padded.len());
+                worker.transcribe(padded, timeout, &|| false)?
             } else {
-                model.transcribe_samples(padded)?
+                let model = model.as_mut().ok_or("No in-process model loaded")?;
+                if retry_empty {
+                    model.transcribe_samples_with_retry(padded, &|| false)?
+                } else {
+                    model.transcribe_samples(padded)?
+                }
             }
             .text;
+            successful_segments += 1;
+            if !killed && kill_after == Some(successful_segments) {
+                if let Some(worker) = worker.as_mut() {
+                    worker.kill_child()?;
+                    killed = true;
+                    println!(
+                        "worker: forced termination after {successful_segments} successful segments"
+                    );
+                }
+            }
             empty += usize::from(text.trim().is_empty());
             if text.trim().is_empty() && env::var_os("LIVE_CUT_BENCH_PROBE").is_some() {
-                probe_empty(&mut model, &segment.samples, segment.start_timestamp_ms)?;
+                probe_empty(
+                    model.as_mut().ok_or("No in-process model loaded")?,
+                    &segment.samples,
+                    segment.start_timestamp_ms,
+                )?;
             }
             pieces.push(text);
         }

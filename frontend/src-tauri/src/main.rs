@@ -11,5 +11,8 @@ fn main() {
     if let Some(code) = app_lib::knowledge::documents::worker::dispatch() {
         std::process::exit(code);
     }
+    if let Some(code) = app_lib::parakeet_engine::worker::dispatch() {
+        std::process::exit(code);
+    }
     app_lib::run();
 }

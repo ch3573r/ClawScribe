@@ -620,3 +620,35 @@ pub async fn get_parakeet_use_directml() -> Result<bool, String> {
             .load(std::sync::atomic::Ordering::Relaxed),
     )
 }
+
+#[command]
+pub async fn get_parakeet_directml_session_disabled() -> Result<bool, String> {
+    Ok(crate::parakeet_engine::worker::directml_session_disabled())
+}
+
+/// Beta opt-in: isolate Parakeet in a supervised process on the next load.
+#[command]
+pub async fn set_parakeet_use_worker(enabled: bool) -> Result<(), String> {
+    let _job = crate::audio::inference::claim_job()
+        .map_err(|error| format!("PARAKEET_WORKER_BUSY: {error}"))?;
+    crate::parakeet_engine::parakeet_engine::USE_PARAKEET_WORKER
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+
+    let engine = {
+        let guard = PARAKEET_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    if let Some(engine) = engine {
+        engine.unload_model().await;
+    }
+    log::info!(
+        "Parakeet process isolation set to {enabled}; unloaded model so it reloads with the change"
+    );
+    Ok(())
+}
+
+#[command]
+pub async fn get_parakeet_use_worker() -> Result<bool, String> {
+    Ok(crate::parakeet_engine::parakeet_engine::USE_PARAKEET_WORKER
+        .load(std::sync::atomic::Ordering::Relaxed))
+}
