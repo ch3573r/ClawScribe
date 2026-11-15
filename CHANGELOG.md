@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.58
+
+- Rework meeting details. The title, date, segment count and tags sit in a header across the page; the playback strip shows the transcript segments and keeps speaker lanes when speaker labels (beta) are on; the transcript and summary toolbars are one row each with menus for the less common actions; segment editing is a pencil button on hover and focus; the Bookmarks row shows only when the meeting has bookmarks.
+- Render the summary on the pane surface with section labels on their own line, theme-coloured links and mono timestamps. Context for the summary moved under the summary. Chat opens from a button there and docks beside the summary in windows 1280 px and wider.
+- Simplify the Meetings list (one link per meeting with date and tags, one count, empty states with actions) and give Meeting memory a Choose meetings prompt.
+- Add-ons: one Microsoft 365 card, a Change folder dialog for OneDrive, no status pills for normal states, and no endless retry after a failed OneDrive folder load. Microsoft product and Confluence icons use their product colours.
+- Add Claude Code as an optional summary and meeting chat provider. It uses the Claude Code you installed and signed in to; ClawScribe does not bundle it, sign in for you or read its credentials. See `docs/auth/claude-code.md`.
+- Replace browser alert and confirm dialogs with app notifications and dialogs. Make error text readable in the dark theme (1.89:1 to 8.87:1), use 2 px focus rings that reach 3:1 with every accent, and stop decorative animation under reduced motion.
+- Advance installer/runtime/updater version to 0.5.58 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
+- Nothing in this release has been run on an installed build. The interface changes were checked in a browser against a mocked backend in the dark theme only, and a Claude Code summary has not been run end to end. Installed acceptance remains pending along with the checks carried over from 0.5.57 and 0.5.56. See `docs/releases/0.5.58.md`.
+
 ## 0.5.57
 
 - Improve live Parakeet transcription. Cut uninterrupted speech at a pause, allow live segments of up to 12 seconds (was 6, so text for nonstop speech can appear up to 12 seconds late), retry an audible segment that returns no text, and take speaker labels (beta) from each segment's own time range. Measured on two synthetic clips only: word errors 6 to 2 in English and 6 to 5 in German; not yet checked on real meetings.
