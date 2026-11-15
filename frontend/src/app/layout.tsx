@@ -139,9 +139,10 @@ export default function RootLayout({
   }, [])
 
   useEffect(() => {
-    // Push the stored Parakeet DirectML preference to the backend on startup so
-    // it applies before the first recording even if Beta settings isn't opened.
-    void import('@/lib/parakeetAccel').then((m) => m.applyParakeetDirectml())
+    // Push stored Parakeet preferences to the backend on startup so
+    // they apply even if Beta settings isn't opened. Busy worker changes retry
+    // briefly without blocking startup or interrupting a running task.
+    void import('@/lib/parakeetAccel').then((m) => m.applyParakeetPreferences())
   }, [])
 
   useEffect(() => {

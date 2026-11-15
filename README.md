@@ -100,6 +100,14 @@ start a recording.
 | Hosted Whisper | Import and Enhance only (beta), through an opt-in OpenAI-compatible file-transcription API. |
 | MAI-Transcribe | Import and Enhance only (beta), through opt-in Azure Speech Fast Transcription; credentials are separate from Microsoft Graph sign-in. |
 
+**Run transcription in a separate process (beta).** With this switch on in the beta
+settings, Parakeet loads and transcribes in a separate process. If the speech
+model crashes or stops responding, ClawScribe restarts it and retries that
+segment once, so the recording keeps running. After a failure with GPU
+acceleration on, the rest of the session uses the CPU and the settings page says
+so. The switch is off by default and applies to Parakeet only; Whisper and
+Nemotron run inside the app as before.
+
 Speech, speaker-detection, and Built-in AI summary models downloaded in the app
 are pinned to specific revisions and SHA-256-verified before use. Damaged or
 incomplete files require re-download; unchanged verified files reuse their
