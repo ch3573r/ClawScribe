@@ -81,7 +81,7 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 
 | Engine | Role |
 | --- | --- |
-| Parakeet | Default local fast path, with stock v3 int8, SmoothQuant int8, and v2 int8 options. Supported GPU builds can use DirectML. |
+| Parakeet | Default local fast path, with stock v3 int8, Parakeet Ultra (fine-tuned v3, int8 or fp16), SmoothQuant int8, and v2 int8 options. Supported GPU builds can use DirectML. |
 | Whisper | Local whisper.cpp/whisper-rs engine with selectable models and Vulkan support in the Windows GPU build. |
 | Nemotron | Beta multilingual Nemotron 3.5 ASR path. fp16 is CPU-capable; int8 is intended for DirectML-capable builds. |
 | Hosted Whisper | Import and Enhance only (beta), through an opt-in OpenAI-compatible file-transcription API. |

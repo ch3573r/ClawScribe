@@ -80,7 +80,7 @@ make performance regressions easier to compare.
 
 | Engine | Variants | Notes |
 | --- | --- | --- |
-| Parakeet | v3 int8, v3 SmoothQuant int8, v2 int8 | Fast default. Best current realtime path on DirectML-capable Windows systems. |
+| Parakeet | v3 int8, Ultra int8/fp16, v3 SmoothQuant int8, v2 int8 | Fast default. Best current realtime path on DirectML-capable Windows systems. |
 | Nemotron | fp16, int8 | Multilingual beta path. Requires per-hardware validation because DirectML graph behavior varies. |
 | Whisper | local whisper.cpp models | Compatibility path with feature-specific acceleration options. |
 
