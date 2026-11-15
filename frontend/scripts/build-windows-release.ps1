@@ -198,11 +198,11 @@ $metadata = @(
     "build_commit=$commit",
     "build_commit_short=$shortCommit",
     "build_date_utc=$buildDateUtc",
-    "codex_runtime_version=0.159.2",
+    "codex_runtime_version=0.169.0",
     "codex_runtime_target=$windowsTarget",
-    "codex_runtime_source_package=@openai/codex@0.159.2-win32-x64",
-    "codex_runtime_source_url=https://registry.npmjs.org/@openai/codex/-/codex-0.159.2-win32-x64.tgz",
-    "codex_runtime_sha256=52f75c649bebb8001102a1dd129c1ea6d02b0940321e6d7e82ee0526753bd58a",
+    "codex_runtime_source_package=@openai/codex@0.169.0-win32-x64",
+    "codex_runtime_source_url=https://registry.npmjs.org/@openai/codex/-/codex-0.169.0-win32-x64.tgz",
+    "codex_runtime_sha256=ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0",
     "codex_runtime_license=Apache-2.0"
 )
 $metadata | Set-Content -LiteralPath $metadataPath -Encoding ascii

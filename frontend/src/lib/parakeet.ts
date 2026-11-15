@@ -51,6 +51,18 @@ export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
     tagline: 'Experimental • Long-audio int8 quality',
     tier: 'balanced'
   },
+  'parakeet-tdt-0.6b-ultra-int8': {
+    friendlyName: 'Parakeet Ultra',
+    icon: '🎯',
+    tagline: 'Better German and English accuracy',
+    tier: 'precise'
+  },
+  'parakeet-tdt-0.6b-ultra-fp16': {
+    friendlyName: 'Parakeet Ultra (fp16)',
+    icon: '🎯',
+    tagline: 'Higher precision • Larger download',
+    tier: 'precise'
+  },
   'parakeet-tdt-0.6b-v2-int8': {
     friendlyName: 'Compact',
     icon: '📦',
@@ -76,6 +88,20 @@ export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> 
     accuracy: 'High',
     speed: 'Very Fast',
     quantization: 'Int8'
+  },
+  'parakeet-tdt-0.6b-ultra-int8': {
+    description: 'Fine-tuned v3 with better accuracy in German and English. 25 languages.',
+    size_mb: 671,
+    accuracy: 'High',
+    speed: 'Fast',
+    quantization: 'Int8'
+  },
+  'parakeet-tdt-0.6b-ultra-fp16': {
+    description: 'Fine-tuned v3 at higher precision, with better accuracy in German and English. 25 languages. Larger download.',
+    size_mb: 1276,
+    accuracy: 'High',
+    speed: 'Fast',
+    quantization: 'FP16'
   },
   'parakeet-tdt-0.6b-v2-int8': {
     description: '25x real-time, smaller size with good accuracy',
