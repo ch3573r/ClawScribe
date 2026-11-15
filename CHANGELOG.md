@@ -8,8 +8,8 @@
 - Add-ons: one Microsoft 365 card, a Change folder dialog for OneDrive, no status pills for normal states, and no endless retry after a failed OneDrive folder load. Microsoft product and Confluence icons use their product colours.
 - Add Claude Code as an optional summary and meeting chat provider. It uses the Claude Code you installed and signed in to; ClawScribe does not bundle it, sign in for you or read its credentials. See `docs/auth/claude-code.md`.
 - Replace browser alert and confirm dialogs with app notifications and dialogs. Make error text readable in the dark theme (1.89:1 to 8.87:1), use 2 px focus rings that reach 3:1 with every accent, and stop decorative animation under reduced motion.
-- Advance installer/runtime/updater version to 0.5.58 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.48.
-- Nothing in this release has been run on an installed build. The interface changes were checked in a browser against a mocked backend in the dark theme only, and a Claude Code summary has not been run end to end. Installed acceptance remains pending along with the checks carried over from 0.5.57 and 0.5.56. See `docs/releases/0.5.58.md`.
+- Advance installer/runtime/updater version to 0.5.58. Published on 2026-11-15 as the stable release (the first since 0.5.48) after the draft's assets were verified.
+- Nothing in this release has been run on an installed build. The interface changes were checked in a browser against a mocked backend in the dark theme only, and a Claude Code summary has not been run end to end. It was published to stable without installed acceptance; those checks and the ones carried over from 0.5.57 and 0.5.56 remain open. See `docs/releases/0.5.58.md`.
 
 ## 0.5.57
 
