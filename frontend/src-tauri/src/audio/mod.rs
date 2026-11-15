@@ -5,6 +5,8 @@ pub mod decoder;
 pub mod encode;
 pub mod ffmpeg;
 pub mod vad;
+pub mod vocabulary;
+pub mod vocabulary_settings;
 
 // Modularized device management
 pub mod capture;
