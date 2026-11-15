@@ -81,7 +81,7 @@ exporting tasks. Obtain the recording permissions required for your meeting.
 
 | Engine | Role |
 | --- | --- |
-| Parakeet | Default local fast path, with stock v3 int8, SmoothQuant int8, and v2 int8 options. Supported GPU builds can use DirectML. |
+| Parakeet | Default local fast path, with stock v3 int8, Parakeet Ultra (fine-tuned v3, int8 or fp16), SmoothQuant int8, and v2 int8 options. Supported GPU builds can use DirectML. |
 | Whisper | Local whisper.cpp/whisper-rs engine with selectable models and Vulkan support in the Windows GPU build. |
 | Nemotron | Beta multilingual Nemotron 3.5 ASR path. fp16 is CPU-capable; int8 is intended for DirectML-capable builds. |
 | Hosted Whisper | Import and Enhance only (beta), through an opt-in OpenAI-compatible file-transcription API. |
@@ -181,7 +181,7 @@ providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
 bundled Codex app-server path.
 
-The advanced Codex provider bundles app-server **0.159.2**, with GPT-6.1 Sol
+The advanced Codex provider bundles app-server **0.169.0**, with GPT-6.1 Sol
 (`gpt-6.1-sol`) in its model catalog. Choose **Check bundled runtime** in Summary
 settings after upgrading to refresh models. Availability depends on the signed-in account and workspace;
 your saved model selection is preserved. OpenAI's API model fallback list also
