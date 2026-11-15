@@ -13,9 +13,10 @@ const controls = {
   '@/components/ui/select': Object.fromEntries(['Select', 'SelectTrigger', 'SelectValue', 'SelectContent', 'SelectItem'].map(name => [name, element('div')])),
   '@/components/ui/accordion': Object.fromEntries(['Accordion', 'AccordionItem', 'AccordionTrigger', 'AccordionContent'].map(name => [name, element('div')])),
 };
-const card = (status, extra = {}) => {
+const card = (status, extra = {}, platform = 'windows') => {
   const { ClaudeCodeProviderCard } = loadTsModule('src/components/ClaudeCodeProviderCard.tsx', {
     ...controls, '@/lib/openExternal': { openExternal() {} },
+    '@tauri-apps/plugin-os': { platform: () => platform },
   });
   return renderToStaticMarkup(React.createElement(ClaudeCodeProviderCard, {
     status, busy: false, programPath: '', model: 'sonnet', onProgramPathChange() {}, onModelChange() {}, onCheck() {}, ...extra,
@@ -32,12 +33,22 @@ test('Claude Code card explains installation and provides copyable commands with
   assert.doesNotMatch(html, /Sign in with|API key|<img/);
 });
 
+test('Claude Code installation command is Windows-only, with the guide on every platform', () => {
+  for (const platform of ['macos', 'linux', null]) {
+    const html = card({ state: 'not_installed' }, {}, platform);
+    assert.doesNotMatch(html, /winget|Install command/);
+    assert.match(html, /Open install guide/);
+  }
+});
+
 test('Claude Code signed-out and ready states expose only applicable information', () => {
   assert.match(card({ state: 'not_signed_in' }), /claude auth login/);
   const ready = card({ state: 'ready', version: '2.1.0', plan: 'Max' });
   assert.match(ready, /2\.1\.0/);
   assert.match(ready, /Max/);
-  for (const model of ['sonnet', 'opus', 'haiku']) assert.match(ready, new RegExp(model, 'i'));
+  for (const [value, label] of [['sonnet', 'Sonnet'], ['opus', 'Opus'], ['haiku', 'Haiku']]) {
+    assert.match(ready, new RegExp(`value="${value}">${label}</div>`));
+  }
   assert.match(ready, /Advanced/);
   assert.match(ready, /Program path/);
   assert.doesNotMatch(ready, /winget install|claude auth login/);

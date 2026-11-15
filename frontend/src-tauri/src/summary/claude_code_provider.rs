@@ -15,10 +15,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const TIMEOUT: Duration = Duration::from_secs(300);
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const STDERR_LIMIT: usize = 256 * 1024;
 const LOGIN: &str = "Claude Code is not signed in. Open a terminal and run: claude auth login";
 const NOT_INSTALLED: &str = "Claude Code was not found. Install it yourself or update Program path";
+const INVALID_PROGRAM: &str = "Choose the full path to the Claude Code program";
 const GENERIC_ERROR: &str = "Claude Code returned an error";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -224,15 +226,16 @@ fn parse_result(bytes: &[u8]) -> Result<String, String> {
         _ => None,
     }
     .ok_or("Claude Code returned an empty result")?;
-    if result.get("is_error").and_then(Value::as_bool) == Some(true)
-        || result.get("subtype").and_then(Value::as_str) != Some("success")
-    {
+    if result.get("is_error").and_then(Value::as_bool) == Some(true) {
         let reason = result
             .get("result")
             .and_then(Value::as_str)
             .or_else(|| result.get("error").and_then(Value::as_str))
             .unwrap_or("");
         return Err(map_error(reason));
+    }
+    if result.get("subtype").and_then(Value::as_str) != Some("success") {
+        return Err(GENERIC_ERROR.into());
     }
     result
         .get("result")
@@ -243,7 +246,7 @@ fn parse_result(bytes: &[u8]) -> Result<String, String> {
         .ok_or_else(|| "Claude Code returned an empty result".into())
 }
 
-fn generation_args(model: &str, system: &str, persistence: bool) -> Vec<String> {
+fn generation_args(model: &str, system_file: &str, persistence: bool) -> Vec<String> {
     let mut args = vec![
         "-p",
         "--output-format",
@@ -263,8 +266,8 @@ fn generation_args(model: &str, system: &str, persistence: bool) -> Vec<String> 
         "dontAsk",
         "--settings",
         r#"{"disableAllHooks":true}"#,
-        "--system-prompt",
-        system,
+        "--system-prompt-file",
+        system_file,
     ]);
     args.into_iter().map(str::to_string).collect()
 }
@@ -313,42 +316,61 @@ fn scrub_environment(command: &mut Command) {
     }
 }
 
-fn resolve_program(config: &ClaudeCodeConfig) -> Option<PathBuf> {
-    let name = config
+fn resolve_program(config: &ClaudeCodeConfig) -> Result<Option<PathBuf>, String> {
+    if let Some(configured) = config
         .program_path
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())
-        .unwrap_or("claude");
-    let path = Path::new(name);
-    if path.is_absolute() || path.components().count() > 1 {
-        return program_candidates(path)
-            .into_iter()
-            .find(|path| path.is_file())
-            .and_then(|path| std::fs::canonicalize(path).ok());
+    {
+        let path = Path::new(configured);
+        if !path.is_absolute() || !is_program_file(path) {
+            return Err(INVALID_PROGRAM.into());
+        }
+        return std::fs::canonicalize(path)
+            .map(Some)
+            .map_err(|_| INVALID_PROGRAM.into());
     }
     if let Some(found) = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .filter(|dir| dir.is_absolute())
-        .flat_map(|dir| program_candidates(&dir.join(name)))
-        .find(|path| path.is_file())
+        .flat_map(|dir| program_candidates(&dir.join("claude")))
+        .find(|path| is_program_file(path))
     {
-        return std::fs::canonicalize(found).ok();
+        return Ok(std::fs::canonicalize(found).ok());
     }
-    if config
-        .program_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .is_none()
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let name = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
+    Ok(std::env::var_os(home_key)
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".local").join("bin").join(name))
+        .filter(|path| is_program_file(path))
+        .and_then(|path| std::fs::canonicalize(path).ok()))
+}
+fn is_program_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
     {
-        return std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .map(|home| home.join(".local/bin/claude.exe"))
-            .filter(|path| path.is_file());
+        path.extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| ["exe", "com", "cmd", "bat"].contains(&ext.to_ascii_lowercase().as_str()))
+            .unwrap_or(false)
     }
-    None
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
 }
 fn program_candidates(path: &Path) -> Vec<PathBuf> {
     #[cfg(windows)]
@@ -405,17 +427,6 @@ fn program_command(program: &Path, args: &[String]) -> Result<Command, String> {
             .iter()
             .map(|arg| batch_argument(arg))
             .collect::<Result<Vec<_>, _>>()?;
-        // cmd has a smaller command-line limit than native executables. Never let it
-        // truncate an encoded argument or the enclosing quote pair.
-        let units = program.encode_utf16().count()
-            + encoded
-                .iter()
-                .map(|arg| arg.encode_utf16().count() + 1)
-                .sum::<usize>()
-            + 64;
-        if units > 8000 {
-            return Err("Claude Code system instructions are too long for a Windows command shim. Choose native claude.exe in Program path or shorten the instructions".into());
-        }
         let mut command = Command::new(interpreter);
         command.args(["/d", "/s", "/e:on", "/v:off", "/c"]);
         // Each raw argument is separately encoded for cmd, never interpolated as shell syntax.
@@ -434,13 +445,12 @@ fn program_command(program: &Path, args: &[String]) -> Result<Command, String> {
 
 #[cfg(windows)]
 fn batch_argument(arg: &str) -> Result<String, String> {
-    if arg.contains('\0') {
+    if arg.chars().any(|ch| ['\0', '\r', '\n'].contains(&ch)) {
         return Err("Claude Code received an unsupported argument".into());
     }
-    // cmd cannot carry line breaks in a batch argument. Keep system instructions as one line.
+    // Only fixed flags, the model alias and file paths reach this encoder.
     // Percent expansion is neutralized; delayed expansion is off. Quotes are doubled for cmd
     // and its CRT consumer, including backslashes immediately before a quote.
-    let arg = arg.replace(|ch| ch == '\r' || ch == '\n', " ");
     let mut encoded = String::from("\"");
     let mut slashes = 0;
     for ch in arg.chars() {
@@ -465,8 +475,11 @@ fn batch_argument(arg: &str) -> Result<String, String> {
 
 impl ClaudeCodeProvider {
     pub async fn status(&self) -> ClaudeCodeStatus {
-        let Some(program) = resolve_program(&self.config) else {
-            return ClaudeCodeStatus::NotInstalled;
+        // Both saved settings and the UI's draft config use this validation.
+        let program = match resolve_program(&self.config) {
+            Ok(Some(program)) => program,
+            Ok(None) => return ClaudeCodeStatus::NotInstalled,
+            Err(message) => return ClaudeCodeStatus::Error { message },
         };
         let result = async {
             let version = self
@@ -525,12 +538,21 @@ impl ClaudeCodeProvider {
         if token.is_cancelled() {
             return Err("Claude Code request cancelled".into());
         }
-        let program = resolve_program(&self.config).ok_or(NOT_INSTALLED)?;
+        let program = resolve_program(&self.config)?.ok_or(NOT_INSTALLED)?;
         let deadline = tokio::time::Instant::now() + TIMEOUT;
         for persistence in [true, false] {
-            let command = program_command(&program, &generation_args(model, system, persistence))?;
+            let scratch = scratch()?;
+            let system_file = scratch.path().join("system-prompt.txt");
+            tokio::fs::write(&system_file, system.as_bytes())
+                .await
+                .map_err(|_| "Could not prepare Claude Code system instructions")?;
+            let system_file = system_file
+                .to_str()
+                .ok_or("Claude Code working directory path is not supported")?;
+            let command =
+                program_command(&program, &generation_args(model, system_file, persistence))?;
             let output =
-                run_process(command, scratch()?, prompt.into(), token.clone(), deadline).await?;
+                run_process(command, scratch, prompt.into(), token.clone(), deadline).await?;
             let stderr = String::from_utf8_lossy(&output.stderr);
             if persistence && unsupported_persistence(&stderr) {
                 continue;
@@ -617,6 +639,8 @@ async fn run_process(
             let stdout = child.stdout.take().ok_or(GENERIC_ERROR)?;
             let stderr = child.stderr.take().ok_or(GENERIC_ERROR)?;
             let exchange = async {
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
                 let write = async {
                     if let Err(error) = stdin.write_all(input.as_bytes()).await {
                         // An auth/option failure may close stdin early. Preserve its sanitized
@@ -626,8 +650,33 @@ async fn run_process(
                     drop(stdin);
                     Ok::<_, String>(())
                 };
-                let (_, stdout, stderr, status) = tokio::try_join!(write, read_bounded(stdout, OUTPUT_LIMIT), read_bounded(stderr, STDERR_LIMIT), async { child.wait().await.map_err(|_| GENERIC_ERROR.to_string()) })?;
-                Ok(ProcessOutput { status, stdout, stderr })
+                let status = {
+                    let io = async {
+                        tokio::try_join!(
+                            write,
+                            read_bounded(stdout, OUTPUT_LIMIT, &mut stdout_bytes),
+                            read_bounded(stderr, STDERR_LIMIT, &mut stderr_bytes)
+                        )?;
+                        Ok::<_, String>(())
+                    };
+                    tokio::pin!(io);
+                    tokio::select! { biased;
+                        result = &mut io => {
+                            result?;
+                            child.wait().await.map_err(|_| GENERIC_ERROR.to_string())?
+                        }
+                        status = child.wait() => {
+                            let status = status.map_err(|_| GENERIC_ERROR.to_string())?;
+                            // A descendant can retain either pipe after the direct child exits.
+                            // Drop pending I/O after a short drain, retaining its bounded buffers.
+                            if let Ok(result) = tokio::time::timeout(DRAIN_GRACE, &mut io).await {
+                                result?;
+                            }
+                            status
+                        }
+                    }
+                };
+                Ok(ProcessOutput { status, stdout: stdout_bytes, stderr: stderr_bytes })
             };
             tokio::select! { biased;
                 _ = owned.cancelled() => Err("Claude Code request cancelled".into()),
@@ -642,6 +691,15 @@ async fn run_process(
         let _ = child.wait().await;
         #[cfg(test)]
         REAPED_PIDS.lock().unwrap().push(pid);
+        // A process that was just ended can keep the folder busy for a moment on
+        // Windows, and a single failed removal would leave it behind.
+        let scratch_dir = scratch.path().to_path_buf();
+        for _ in 0..60 {
+            if tokio::fs::remove_dir_all(&scratch_dir).await.is_ok() || !scratch_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         drop(scratch);
         result
     });
@@ -650,19 +708,27 @@ async fn run_process(
     result
 }
 async fn read_bounded(
-    reader: impl tokio::io::AsyncRead + Unpin,
+    mut reader: impl tokio::io::AsyncRead + Unpin,
     limit: usize,
-) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    reader
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| GENERIC_ERROR)?;
-    if bytes.len() > limit {
-        return Err("Claude Code returned an error: Response exceeded the size limit".into());
+    bytes: &mut Vec<u8>,
+) -> Result<(), String> {
+    let mut buffer = [0; 8192];
+    loop {
+        // read() is cancellation-safe. Completed reads live outside this future,
+        // so a drain timeout keeps every byte already read without detached tasks.
+        let capacity = buffer.len().min(limit.saturating_sub(bytes.len()) + 1);
+        let count = reader
+            .read(&mut buffer[..capacity])
+            .await
+            .map_err(|_| GENERIC_ERROR)?;
+        if count == 0 {
+            return Ok(());
+        }
+        if count > limit - bytes.len() {
+            return Err("Claude Code returned an error: Response exceeded the size limit".into());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
     }
-    Ok(bytes)
 }
 
 #[cfg(windows)]

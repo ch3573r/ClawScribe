@@ -51,6 +51,32 @@ fn result_parser_uses_the_last_result_and_rejects_failed_or_empty_results() {
 }
 
 #[test]
+fn result_parser_maps_only_explicit_errors_never_model_output() {
+    for text in [
+        "Please login",
+        "OAuth session expired",
+        "usage limit reached",
+        "invalid model",
+    ] {
+        for is_error in [None, Some(false)] {
+            let mut value = json!({"type":"result", "subtype":"success", "result":text});
+            if let Some(flag) = is_error {
+                value["is_error"] = json!(flag);
+            }
+            assert_eq!(
+                parse_result(&serde_json::to_vec(&value).unwrap()).unwrap(),
+                text
+            );
+            value["subtype"] = json!("error");
+            assert_eq!(
+                parse_result(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+                GENERIC_ERROR
+            );
+        }
+    }
+}
+
+#[test]
 fn errors_are_fixed_actionable_messages_never_raw_diagnostics() {
     assert!(map_error("usage limit reached").contains("plan limit"));
     assert!(map_error("rate limit").contains("plan limit"));
@@ -67,9 +93,9 @@ fn errors_are_fixed_actionable_messages_never_raw_diagnostics() {
 }
 
 #[test]
-fn generation_arguments_disable_tools_hooks_and_persistence_with_stdin_only_prompt() {
+fn generation_arguments_contain_only_fixed_options_model_and_system_file() {
     assert_eq!(
-        generation_args("sonnet", "system", true),
+        generation_args("sonnet", "scratch/system-prompt.txt", true),
         [
             "-p",
             "--output-format",
@@ -85,16 +111,20 @@ fn generation_arguments_disable_tools_hooks_and_persistence_with_stdin_only_prom
             "dontAsk",
             "--settings",
             r#"{"disableAllHooks":true}"#,
-            "--system-prompt",
-            "system"
+            "--system-prompt-file",
+            "scratch/system-prompt.txt"
         ]
     );
-    assert!(!generation_args("sonnet", "system", true)
-        .join(" ")
-        .contains("private user prompt"));
-    assert!(!generation_args("sonnet", "system", false)
-        .iter()
-        .any(|arg| arg == "--no-session-persistence"));
+    assert!(
+        !generation_args("sonnet", "scratch/system-prompt.txt", true)
+            .join(" ")
+            .contains("private user prompt")
+    );
+    assert!(
+        !generation_args("sonnet", "scratch/system-prompt.txt", false)
+            .iter()
+            .any(|arg| arg == "--no-session-persistence")
+    );
 }
 
 #[test]
@@ -141,7 +171,7 @@ struct Fixture {
 impl Fixture {
     fn new(mode: &str) -> Self {
         let dir = tempfile::Builder::new()
-            .prefix("claude fake with spaces ")
+            .prefix("claude fake with spaces Grüße ")
             .tempdir()
             .unwrap();
         let node = std::env::split_paths(&std::env::var_os("PATH").unwrap())
@@ -204,23 +234,13 @@ async fn fake_status_covers_installed_signed_out_unknown_and_error() {
         let status = fixture.provider().status().await;
         assert_eq!(serde_json::to_value(status).unwrap()["state"], expected);
     }
-    let dir = tempfile::tempdir().unwrap();
-    let provider = ClaudeCodeProvider {
-        config: ClaudeCodeConfig {
-            program_path: Some(dir.path().join("absent").to_string_lossy().into()),
-        },
-    };
-    assert!(matches!(
-        provider.status().await,
-        ClaudeCodeStatus::NotInstalled
-    ));
 }
 
 #[tokio::test]
-async fn fake_generation_round_trips_shim_arguments_stdin_scrubbed_env_and_empty_cwd() {
+async fn fake_generation_preserves_system_file_bytes_and_keeps_both_prompts_off_arguments() {
     let fixture = Fixture::new("verify");
     let provider = fixture.provider();
-    let system = r#"system with "quotes" & | < > ^ %PATH% !literal! \"#;
+    let system = "first\r\nsecond\n\"quotes\" %PATH% & | < > ^ !literal!\tGrüße 日本語 🦀 \\";
     assert_eq!(
         provider
             .generate(
@@ -236,16 +256,195 @@ async fn fake_generation_round_trips_shim_arguments_stdin_scrubbed_env_and_empty
     let observed = fixture.observed();
     assert_eq!(observed["input"], "synthetic private prompt");
     assert_eq!(observed["args"][6], "");
+    let system_file = Path::new(observed["cwd"].as_str().unwrap()).join("system-prompt.txt");
     assert_eq!(
         observed["args"],
-        json!(generation_args("sonnet", system, true))
+        json!(generation_args(
+            "sonnet",
+            system_file.to_str().unwrap(),
+            true
+        ))
     );
-    assert_eq!(observed["initialFiles"], json!([]));
+    assert_eq!(observed["systemBytes"], json!(system.as_bytes()));
+    let args = observed["args"].to_string();
+    assert!(!args.contains("synthetic private prompt"));
+    assert!(!args.contains("first") && !args.contains("quotes") && !args.contains("日本語"));
+    assert_eq!(observed["initialFiles"], json!(["system-prompt.txt"]));
     assert_eq!(observed["secretKeys"], json!([]));
     assert!(
         !Path::new(observed["cwd"].as_str().unwrap()).exists(),
         "scratch directory is removed after reaping"
     );
+}
+
+#[tokio::test]
+async fn one_hundred_thousand_character_system_prompt_works_through_the_shim() {
+    let fixture = Fixture::new("verify");
+    let system = "x".repeat(100_000);
+    assert_eq!(
+        fixture
+            .provider()
+            .generate("sonnet", &system, "synthetic", &CancellationToken::new())
+            .await
+            .unwrap(),
+        "safe answer"
+    );
+    let observed = fixture.observed();
+    assert_eq!(observed["systemBytes"], json!(system.as_bytes()));
+    assert!(observed["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|arg| !arg.as_str().unwrap().contains(system.as_str())));
+}
+
+#[tokio::test]
+async fn system_file_path_with_spaces_and_unicode_survives_the_shim() {
+    let fixture = Fixture::new("verify");
+    let scratch = tempfile::Builder::new()
+        .prefix("claude scratch Grüße ")
+        .tempdir()
+        .unwrap();
+    let system_file = scratch.path().join("system-prompt.txt");
+    std::fs::write(&system_file, "Grüße\n\t日本語").unwrap();
+    let command = program_command(
+        &fixture.program,
+        &generation_args("sonnet", system_file.to_str().unwrap(), true),
+    )
+    .unwrap();
+    let output = run_process(
+        command,
+        scratch,
+        "synthetic".into(),
+        CancellationToken::new(),
+        tokio::time::Instant::now() + Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parse_result(&output.stdout).unwrap(), "safe answer");
+    assert_eq!(
+        fixture.observed()["systemBytes"],
+        json!("Grüße\n\t日本語".as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn relative_missing_directory_and_unsupported_program_paths_are_status_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = dir.path().join("not-a-program.txt");
+    std::fs::write(&text, "synthetic").unwrap();
+    // status() is also the path used for the unsaved config passed by the UI.
+    for path in [
+        PathBuf::from("relative/program.cmd"),
+        dir.path().join("missing.exe"),
+        dir.path().to_path_buf(),
+        text,
+    ] {
+        let provider = ClaudeCodeProvider {
+            config: ClaudeCodeConfig {
+                program_path: Some(path.to_str().unwrap().into()),
+            },
+        };
+        assert!(
+            matches!(provider.status().await, ClaudeCodeStatus::Error { message } if message == "Choose the full path to the Claude Code program")
+        );
+        assert_eq!(
+            provider
+                .generate("sonnet", "system", "synthetic", &CancellationToken::new())
+                .await
+                .unwrap_err(),
+            "Choose the full path to the Claude Code program"
+        );
+    }
+    let relative_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let relative_file = relative_dir.path().join(if cfg!(windows) {
+        "program.exe"
+    } else {
+        "program"
+    });
+    std::fs::write(&relative_file, "synthetic").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&relative_file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let relative = relative_file
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap();
+    assert!(resolve_program(&ClaudeCodeConfig {
+        program_path: Some(relative.to_str().unwrap().into())
+    })
+    .is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_nonexecutable_program_override_is_a_status_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("claude");
+    std::fs::write(&program, "synthetic").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let provider = ClaudeCodeProvider {
+        config: ClaudeCodeConfig {
+            program_path: Some(program.to_str().unwrap().into()),
+        },
+    };
+    assert!(
+        matches!(provider.status().await, ClaudeCodeStatus::Error { message } if message == "Choose the full path to the Claude Code program")
+    );
+}
+
+#[tokio::test]
+async fn finished_child_returns_after_drain_grace_when_descendant_holds_both_pipes() {
+    let fixture = Fixture::new("hold-pipes");
+    let command = program_command(&fixture.program, &["-p".into()]).unwrap();
+    let started = tokio::time::Instant::now();
+    let output = run_process(
+        command,
+        scratch().unwrap(),
+        "synthetic".into(),
+        CancellationToken::new(),
+        started + Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parse_result(&output.stdout).unwrap(), "safe answer");
+    assert_eq!(output.stderr.as_slice(), b"synthetic stderr\n");
+    assert!(output.status.success());
+    // No lower bound: on Windows the job object ends the descendant as soon as
+    // the child exits, so the pipes may close before the grace period.
+    assert!(started.elapsed() < Duration::from_secs(8));
+    let observed = fixture.observed();
+    assert!(observed["descendantPid"].as_u64().is_some());
+    assert!(REAPED_PIDS
+        .lock()
+        .unwrap()
+        .contains(&(observed["parentPid"].as_u64().unwrap() as u32)));
+    assert!(!Path::new(observed["cwd"].as_str().unwrap()).exists());
+}
+
+#[tokio::test]
+async fn bounded_reader_retains_partial_bytes_when_drain_is_cancelled() {
+    let (mut writer, reader) = tokio::io::duplex(32);
+    writer.write_all(b"synthetic").await.unwrap();
+    let mut bytes = Vec::new();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(50),
+        read_bounded(reader, 32, &mut bytes)
+    )
+    .await
+    .is_err());
+    assert_eq!(bytes.as_slice(), b"synthetic");
+}
+
+#[tokio::test]
+async fn bounded_reader_rejects_excess_output_without_growing_past_the_limit() {
+    for (data, succeeds) in [(b"abcd".as_slice(), true), (b"abcde".as_slice(), false)] {
+        let mut bytes = Vec::new();
+        assert_eq!(read_bounded(data, 4, &mut bytes).await.is_ok(), succeeds);
+        assert!(bytes.len() <= 4);
+    }
 }
 
 #[tokio::test]
@@ -278,6 +477,13 @@ async fn unknown_option_retries_only_once_and_array_and_error_results_are_suppor
         .await
         .unwrap_err()
         .contains("plan limit"));
+    let fixture = Fixture::new("expired");
+    assert!(fixture
+        .provider()
+        .generate("sonnet", "system", "synthetic", &CancellationToken::new())
+        .await
+        .unwrap_err()
+        .contains("sign-in expired"));
 }
 
 #[tokio::test]
@@ -393,18 +599,10 @@ fn configured_model_and_program_path_are_independent_of_api_credentials() {
 
 #[cfg(windows)]
 #[test]
-fn command_shims_reject_truncation_and_normalize_system_line_breaks() {
-    assert_eq!(
-        batch_argument("first\r\nsecond").unwrap(),
-        "\"first  second\""
-    );
-    assert!(program_command(
-        Path::new("claude.cmd"),
-        &generation_args("sonnet", &"x".repeat(9000), true)
-    )
-    .err()
-    .unwrap()
-    .contains("too long"));
+fn command_shims_reject_unsupported_path_characters_instead_of_rewriting_them() {
+    for arg in ["first\r\nsecond", "path\0name"] {
+        assert!(batch_argument(arg).is_err());
+    }
     assert!(program_command(Path::new("percent%path/claude.cmd"), &["--version".into()]).is_err());
 }
 
@@ -495,7 +693,14 @@ async fn configured_chat_dispatch_needs_no_credential_table_and_reports_actual_p
     .await
     .unwrap();
     assert_eq!(resolved.model, "sonnet");
-    assert_eq!(resolved.budget.context_tokens, 32_768);
+    let api_budget = super::super::context_budget::resolve(
+        &super::super::llm_client::LLMProvider::Claude,
+        "claude-sonnet",
+        None,
+        None,
+    );
+    assert_eq!(resolved.budget.context_tokens, api_budget.context_tokens);
+    assert_eq!(resolved.budget.output_tokens, api_budget.output_tokens);
     let reply = super::super::llm_client::dispatch_resolved_text(
         resolved,
         "system".into(),
@@ -519,4 +724,56 @@ fn observed_signed_out_result_and_status_shapes_are_understood() {
     let failed = br#"{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate"}"#;
     let error = super::parse_result(failed).unwrap_err();
     assert!(error.contains("claude auth login"), "{error}");
+}
+
+static ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Default)]
+struct TestEnvironment(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+impl TestEnvironment {
+    fn set(&mut self, key: &str, value: &OsStr) {
+        self.0.push((key.into(), std::env::var_os(key)));
+        std::env::set_var(key, value);
+    }
+}
+impl Drop for TestEnvironment {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..).rev() {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn child_environment_excludes_secrets_inherited_from_the_test_process() {
+    let _lock = ENVIRONMENT_LOCK.lock().await;
+    let fixture = Fixture::new("verify");
+    let mut environment = TestEnvironment::default();
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "claude_code_custom",
+        "aNtHrOpIc_ApI_kEy",
+    ] {
+        environment.set(key, OsStr::new("synthetic-secret"));
+    }
+    environment.set("CLAWSCRIBE_TEST_PRESERVED", OsStr::new("preserved"));
+    assert_eq!(
+        fixture
+            .provider()
+            .generate("sonnet", "system", "synthetic", &CancellationToken::new())
+            .await
+            .unwrap(),
+        "safe answer"
+    );
+    let observed = fixture.observed();
+    assert_eq!(observed["secretKeys"], json!([]));
+    assert_eq!(observed["preservedTestVariable"], "preserved");
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { platform } from '@tauri-apps/plugin-os';
 import { openExternal } from '@/lib/openExternal';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -94,6 +95,8 @@ function CopyCommand({ command, label }: { command: string; label: string }) {
 
 export function ClaudeCodeProviderCard({ status, busy, programPath, model, onProgramPathChange, onModelChange, onCheck }: Props) {
   const [guideError, setGuideError] = useState('');
+  let isWindows = false;
+  try { isWindows = platform() === 'windows'; } catch { /* The guide also works when the platform is unknown. */ }
   const installGuide = async () => {
     try { await openExternal('https://code.claude.com/docs/en/setup'); }
     catch { setGuideError('Could not open the install guide. Try again'); }
@@ -107,7 +110,7 @@ export function ClaudeCodeProviderCard({ status, busy, programPath, model, onPro
       {busy && <p role="status" className="text-sm text-muted-foreground">Checking Claude Code…</p>}
       {!busy && status?.state === 'not_installed' && <>
         <p className="text-sm text-muted-foreground">Install Claude Code yourself, then check again.</p>
-        <CopyCommand command="winget install Anthropic.ClaudeCode" label="Install command" />
+        {isWindows && <CopyCommand command="winget install Anthropic.ClaudeCode" label="Install command" />}
         <Button type="button" variant="outline" onClick={installGuide}>Open install guide</Button>
       </>}
       {!busy && status?.state === 'not_signed_in' && <>
@@ -120,7 +123,7 @@ export function ClaudeCodeProviderCard({ status, busy, programPath, model, onPro
           <Label htmlFor="claude-code-model">Model</Label>
           <Select value={model} onValueChange={onModelChange} disabled={busy}>
             <SelectTrigger id="claude-code-model"><SelectValue placeholder="Select model" /></SelectTrigger>
-            <SelectContent>{CLAUDE_CODE_MODELS.map(alias => <SelectItem key={alias} value={alias}>{alias}</SelectItem>)}</SelectContent>
+            <SelectContent>{CLAUDE_CODE_MODELS.map(alias => <SelectItem key={alias} value={alias}>{alias.charAt(0).toUpperCase() + alias.slice(1)}</SelectItem>)}</SelectContent>
           </Select>
         </div>
       </>}
@@ -131,8 +134,8 @@ export function ClaudeCodeProviderCard({ status, busy, programPath, model, onPro
           <AccordionTrigger>Advanced</AccordionTrigger>
           <AccordionContent>
             <Label htmlFor="claude-code-program">Program path</Label>
-            <Input id="claude-code-program" className="mt-2" value={programPath} placeholder="claude" disabled={busy} onChange={event => onProgramPathChange(event.target.value)} />
-            <p className="mt-2 text-xs text-muted-foreground">Leave blank to find Claude Code automatically. Use an executable or Windows command shim path. Save settings to keep this path.</p>
+            <Input id="claude-code-program" className="mt-2" value={programPath} placeholder="Full path (optional)" disabled={busy} onChange={event => onProgramPathChange(event.target.value)} />
+            <p className="mt-2 text-xs text-muted-foreground">Leave blank to find Claude Code automatically. Otherwise, use the full path to the program or Windows command shim. Save settings to keep this path.</p>
           </AccordionContent>
         </AccordionItem>
       </Accordion>

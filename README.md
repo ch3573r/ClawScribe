@@ -213,7 +213,9 @@ bundled Codex app-server path, plus **Claude Code** using your own installation.
 plan's limits apply. Install it yourself, run `claude auth login` in a terminal,
 then select **Claude Code** in Summary settings. ClawScribe does not install
 Claude Code or handle its sign-in or credentials. It supports text summaries and
-meeting chat with tools disabled; choose `sonnet` (default), `opus`, or `haiku`.
+meeting chat with tools disabled; choose Sonnet (default), Opus, or Haiku. These
+models use the Claude API provider's context budgets. Prompts travel through stdin
+and a temporary UTF-8 system file, keeping prompt text off the command line.
 See [Claude Code setup and limitations](docs/auth/claude-code.md), including
 Windows command shims and the optional Program path setting.
 

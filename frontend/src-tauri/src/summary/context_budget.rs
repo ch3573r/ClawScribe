@@ -19,6 +19,10 @@ pub(crate) fn resolve(
     context: Option<usize>,
     output: Option<usize>,
 ) -> ModelBudget {
+    if *provider == LLMProvider::ClaudeCode && matches!(model.trim(), "sonnet" | "opus" | "haiku") {
+        // These aliases select the same current Claude families as the API provider.
+        return resolve(&LLMProvider::Claude, model, context, output);
+    }
     let name = model
         .rsplit('/')
         .next()
@@ -179,6 +183,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_code_aliases_reuse_api_budgets_for_long_meetings() {
+        for alias in ["sonnet", "opus", "haiku"] {
+            let cli = resolve(&LLMProvider::ClaudeCode, alias, None, None);
+            let api = resolve(&LLMProvider::Claude, &format!("claude-{alias}"), None, None);
+            assert_eq!(cli.context_tokens, api.context_tokens);
+            assert_eq!(cli.output_tokens, api.output_tokens);
+            assert_eq!(cli.reasoning, api.reasoning);
+            let input = cli.input(&LLMProvider::ClaudeCode, alias, 1024).unwrap();
+            assert_eq!(chunks_by_bytes(&"x".repeat(300_000), input).len(), 1);
+        }
+    }
     #[test]
     fn real_bundled_prompts_fit_and_sixty_kb_has_bounded_piece_counts() {
         let cases = [
