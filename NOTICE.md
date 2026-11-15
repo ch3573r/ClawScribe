@@ -24,6 +24,7 @@ Additional upstream acknowledgments retained from the original project:
 - Code or implementation ideas from [transcribe-rs](https://crates.io/crates/transcribe-rs)
 - NVIDIA for the Parakeet model
 - [istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) for the ONNX conversion of the Parakeet model
+- Moondream, for the Parakeet TDT 0.6B v3 fine-tune behind the Parakeet Ultra option (CC-BY-4.0), and [Masterx](https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx) for its ONNX export
 - NVIDIA for the Nemotron 3.5 ASR Streaming model
 - [soniqo](https://huggingface.co/soniqo) for the ONNX (INT8/INT4) conversions of the Nemotron model
 - [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) for voice-activity detection
