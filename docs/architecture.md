@@ -173,6 +173,30 @@ local recording. `summary/context_budget.rs` bounds hierarchical reduction, and
 `summary/chat_context.rs` selects question-relevant evidence from across the
 meeting instead of silently discarding its middle.
 
+### Parakeet worker process (opt-in beta)
+
+With `set_parakeet_use_worker(true)`, `ParakeetEngine` keeps its model in a child
+process instead of in the app. The child is the app executable started with
+`--clawscribe-transcription-worker`, dispatched in `main.rs` before the Tauri
+runtime. `parakeet_engine/worker` holds the framed stdin/stdout protocol, the
+child loop and the supervisor.
+
+- The supervisor owns at most one child, in a Windows job object that ends it
+  with the app. Every call runs inside `inference::run`, so the native permit and
+  the cancellation flag keep their meaning.
+- A load has 180 seconds. A transcription has the larger of 20 seconds and four
+  times the audio length. On a timeout, a crash, a malformed frame or
+  cancellation the child is killed and reaped.
+- After a crash or timeout the supervisor starts a new child, reloads the model
+  and retries the segment once. A cancelled call is never retried.
+- A crash or timeout while DirectML was in use turns DirectML off for every
+  later Parakeet load in this app session, in the child and in the app, and the
+  beta settings page reports it.
+- Unloading the model ends the child, which returns all of its memory. It needs
+  no native permit.
+- Whisper, Nemotron, voice activity detection, speaker detection and embeddings
+  still run in the app process.
+
 ## Recording Modes And Meeting Review
 
 `audio/recording_mode.rs` persists the next-session mode through the Tauri store.
