@@ -7,12 +7,12 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.56**. This Windows GPU preview keeps the meeting chat
-conversation first, with scope and reference files behind a Context control and a
-paperclip beside the question field, and removes reference documents that no
-meeting uses any more. It includes the Attach file and compact chat work from 0.5.55
-and the manual live assistance from 0.5.54. See the
-[0.5.56 preview notes](docs/releases/0.5.56.md) and the
+Source version: **0.5.57**. This Windows GPU preview improves live Parakeet
+transcription (pause-aware cuts and retries), adds a custom vocabulary and an
+optional separate transcription process (beta), lists Parakeet Ultra in the model
+catalog, and adds command-line recording control. It includes the meeting chat
+Context control from 0.5.56. See the
+[0.5.57 preview notes](docs/releases/0.5.57.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable remains **0.5.48**. Enable **Include prereleases** to discover published
 previews; drafts are excluded from updates. Installed acceptance remains
@@ -278,22 +278,24 @@ Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
 
-## What changed in 0.5.56 preview
+## What changed in 0.5.57 preview
 
-- Open Context in the meeting chat to choose This meeting only or other saved
-  meetings, filter by project and manage reference files. Use the paperclip beside
-  the question field to attach a file; selected files appear as removable chips.
-- Search mode is in the chat's More options menu. Suggested questions fill the
-  field and never send.
-- Deleting a meeting or detaching its last reference now removes the reference
-  and its original file. Startup cleans up leftovers from earlier previews, and
-  portable backups include only attached references.
-- Check the chat in light, dark and accent themes, focus and keyboard use. These
-  installed checks and inherited recording/live-assistance acceptance remain
-  pending before stable promotion.
+- Live Parakeet transcription cuts nonstop speech at a pause and allows segments of
+  up to 12 seconds, so text can appear up to 12 seconds late. Empty results are
+  retried and speaker labels (beta) use each segment's own time range.
+- Add names and terms under transcription in Settings. Close matches are replaced
+  by your spelling in live recording, import and retranscription.
+- Turn on Run transcription in a separate process (beta) to restart Parakeet after
+  a crash and fall back to the CPU after a GPU failure.
+- Parakeet Ultra is in the model catalog; the default model is unchanged.
+- Launch the app again with `--toggle-recording`, `--start-recording` or
+  `--stop-recording` to control the running instance.
+- Check these on an installed build with real meeting audio, in light and dark
+  themes. These checks and inherited recording acceptance remain pending before
+  stable promotion.
 
-See the [preview notes](docs/releases/0.5.56.md), the
-[previous attachment preview](docs/releases/0.5.55.md), and the [changelog](CHANGELOG.md).
+See the [preview notes](docs/releases/0.5.57.md), the
+[previous chat preview](docs/releases/0.5.56.md), and the [changelog](CHANGELOG.md).
 
 ## Notebook Performance And Product Status
 
