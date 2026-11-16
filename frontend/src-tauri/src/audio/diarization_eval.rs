@@ -107,35 +107,53 @@ pub struct DerReport {
     pub mapping: Vec<(String, usize)>,
 }
 
-// Pad to a square with zero-weight dummy speakers. State = used hypothesis
-// columns; popcount(state) is the next reference row. O(n * 2^n), n <= 12.
-fn optimal_assignment(weights: &[Vec<f64>], size: usize) -> Vec<usize> {
-    let mut best = vec![f64::NEG_INFINITY; 1 << size];
-    let mut parent = vec![0; 1 << size];
-    best[0] = 0.0;
-    for mask in 0usize..(1 << size) {
-        let row = mask.count_ones() as usize;
-        for column in 0..size {
-            if mask & (1 << column) != 0 {
+// Each reference row gets at most one hypothesis column and the reverse. State
+// = set of reference rows already matched; columns are taken one at a time, so
+// the hypothesis may have any number of speakers. O(columns * rows * 2^rows),
+// rows <= 12. An unmatched row maps to `usize::MAX`.
+fn optimal_assignment(weights: &[Vec<f64>], rows: usize, columns: usize) -> Vec<usize> {
+    const UNMATCHED: u8 = u8::MAX;
+    let states = 1usize << rows;
+    let mut best = vec![0.0f64; states];
+    let mut reachable = vec![false; states];
+    reachable[0] = true;
+    let mut choices = Vec::with_capacity(columns);
+    for column in 0..columns {
+        let mut next = best.clone();
+        let mut next_reachable = reachable.clone();
+        let mut choice = vec![UNMATCHED; states];
+        for mask in 0..states {
+            if !reachable[mask] {
                 continue;
             }
-            let next = mask | (1 << column);
-            let weight = weights
-                .get(row)
-                .and_then(|r| r.get(column))
-                .copied()
-                .unwrap_or(0.0);
-            if best[mask] + weight > best[next] {
-                best[next] = best[mask] + weight;
-                parent[next] = column;
+            for row in 0..rows {
+                if mask & (1 << row) != 0 {
+                    continue;
+                }
+                let target = mask | (1 << row);
+                let total = best[mask] + weights[row][column];
+                if !next_reachable[target] || total > next[target] {
+                    next[target] = total;
+                    next_reachable[target] = true;
+                    choice[target] = row as u8;
+                }
             }
         }
+        best = next;
+        reachable = next_reachable;
+        choices.push(choice);
     }
-    let mut assignment = vec![0; size];
-    let mut mask = (1 << size) - 1;
-    for row in (0..size).rev() {
-        assignment[row] = parent[mask];
-        mask ^= 1 << parent[mask];
+    let mut mask = (0..states)
+        .filter(|&mask| reachable[mask])
+        .max_by(|&a, &b| best[a].total_cmp(&best[b]))
+        .unwrap_or(0);
+    let mut assignment = vec![usize::MAX; rows];
+    for column in (0..columns).rev() {
+        let row = choices[column][mask];
+        if row != UNMATCHED {
+            assignment[row as usize] = column;
+            mask ^= 1 << row;
+        }
     }
     assignment
 }
@@ -174,8 +192,8 @@ pub fn score_der(
         .into_iter()
         .collect();
     ensure!(
-        refs.len() <= 12 && hyps.len() <= 12,
-        "DER supports at most 12 reference and 12 hypothesis speakers"
+        refs.len() <= 12,
+        "DER supports at most 12 reference speakers"
     );
     let mut collars = Vec::new();
     if options.collar_seconds > 0.0 {
@@ -233,7 +251,7 @@ pub fn score_der(
             && weights.iter().flatten().all(|v| v.is_finite()),
         "DER time totals overflowed"
     );
-    let assignment = optimal_assignment(&weights, refs.len().max(hyps.len()));
+    let assignment = optimal_assignment(&weights, refs.len(), hyps.len());
     let mut speaker_confusion = 0.0;
     for (duration, active_ref, active_hyp) in intervals {
         let correct = active_ref
@@ -1014,7 +1032,16 @@ mod tests {
             .collect();
         let hyp: Vec<_> = (0..13).map(|s| turn(s as f64, s as f64 + 1.0, s)).collect();
         assert!(score_der(&refs, &[], options()).is_err());
-        assert!(score_der(&[], &hyp, options()).is_err());
+        // Any number of hypothesis speakers is scored: the thirteenth turn is a
+        // one-second false alarm beside twelve correct seconds.
+        metrics(
+            &score_der(&refs[..12], &hyp, options()).unwrap(),
+            12.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0 / 12.0,
+        );
         // Twelve is supported exactly; 12/12 seconds correct.
         metrics(
             &score_der(&refs[..12], &hyp[..12], options()).unwrap(),
