@@ -504,6 +504,20 @@ fn diarization_accuracy_benchmark() -> Result<()> {
         Err(std::env::VarError::NotPresent) => "cpu".into(),
         Err(_) => bail!("CLAWSCRIBE_DIARIZATION_EVAL_PROVIDER must be valid text"),
     };
+    let thresholds = match std::env::var("CLAWSCRIBE_DIARIZATION_EVAL_THRESHOLDS") {
+        Ok(value) => Some(
+            value
+                .split(',')
+                .map(|t| t.trim().parse::<f32>().ok().filter(|t| (0.0..=2.0).contains(t)))
+                .collect::<Option<Vec<_>>>()
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("CLAWSCRIBE_DIARIZATION_EVAL_THRESHOLDS requires comma-separated numbers in 0..2")
+                })?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => bail!("CLAWSCRIBE_DIARIZATION_EVAL_THRESHOLDS must be valid text"),
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -558,14 +572,26 @@ fn diarization_accuracy_benchmark() -> Result<()> {
             "Evaluation audio has no decodable samples"
         );
         for (descriptor, embedding) in &embeddings {
-            for count in std::iter::once(None).chain(explicit.map(Some)) {
-                let config = benchmark_diarization_config(
+            // A sweep only varies Auto; a fixed count ignores the threshold.
+            let runs = match &thresholds {
+                Some(values) => values.iter().map(|&t| (None, Some(t))).collect::<Vec<_>>(),
+                None => std::iter::once(None)
+                    .chain(explicit.map(Some))
+                    .map(|count| (count, None))
+                    .collect(),
+            };
+            for (count, threshold) in runs {
+                let mut config = benchmark_diarization_config(
                     &segmentation,
                     embedding,
                     descriptor,
                     count,
                     &provider,
                 );
+                if let Some(threshold) = threshold {
+                    config.clustering_threshold = threshold;
+                }
+                let clustering_threshold = config.clustering_threshold;
                 let started = Instant::now();
                 let diarizer = SherpaOfflineDiarizer::new(config).map_err(|_| {
                     anyhow!("Could not initialize diarization model {}", descriptor.id)
@@ -580,13 +606,12 @@ fn diarization_accuracy_benchmark() -> Result<()> {
                     item: item.name.clone(),
                     language: item.language.clone(),
                     model: descriptor.id.into(),
-                    mode: if count.is_some() {
-                        "known count"
-                    } else {
-                        "auto"
-                    }
-                    .into(),
-                    clustering_threshold: descriptor.default_clustering_threshold,
+                    mode: match (count, threshold) {
+                        (Some(_), _) => "known count".into(),
+                        (None, Some(t)) => format!("auto {t:.2}"),
+                        (None, None) => "auto".into(),
+                    },
+                    clustering_threshold,
                     seconds,
                     report,
                 });
