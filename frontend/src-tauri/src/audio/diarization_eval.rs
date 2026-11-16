@@ -1,8 +1,9 @@
 //! Test-only accuracy measurement; no app state, downloads or transcript access.
 
 use super::{
-    model_descriptor_by_id, prepare_diarization_turns_for_mapping, DiarizationTurn,
-    SherpaDiarizationConfig, SherpaOfflineDiarizer, EMBEDDING_MODEL_CATALOG,
+    diarization_config_for_provider, model_descriptor_by_id, prepare_diarization_turns_for_mapping,
+    DiarizationModelDescriptor, DiarizationModelPaths, DiarizationTurn, SherpaDiarizationConfig,
+    SherpaOfflineDiarizer, EMBEDDING_MODEL_CATALOG,
 };
 use anyhow::{anyhow, bail, ensure, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +13,8 @@ use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct ReferenceSegment {
+    pub recording: String,
+    pub channel: String,
     pub start: f64,
     pub end: f64,
     pub speaker: String,
@@ -45,12 +48,35 @@ pub fn parse_rttm(text: &str) -> Result<Vec<ReferenceSegment>> {
             return Err(invalid());
         }
         segments.push(ReferenceSegment {
+            recording: fields[1].into(),
+            channel: fields[2].into(),
             start,
             end,
             speaker: fields[7].into(),
         });
     }
     Ok(segments)
+}
+
+pub fn select_recording(
+    segments: &[ReferenceSegment],
+    recording: &str,
+) -> Result<Vec<ReferenceSegment>> {
+    let selected: Vec<_> = segments
+        .iter()
+        .filter(|segment| segment.recording == recording)
+        .cloned()
+        .collect();
+    ensure!(
+        !selected.is_empty(),
+        "No RTTM segments match recording '{recording}'"
+    );
+    let channel = &selected[0].channel;
+    ensure!(
+        selected.iter().all(|segment| &segment.channel == channel),
+        "RTTM recording '{recording}' has multiple channels; multi-channel files are not supported"
+    );
+    Ok(selected)
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -257,11 +283,18 @@ struct Manifest {
 #[derive(serde::Deserialize)]
 struct ManifestItem {
     name: String,
+    recording: Option<String>,
     audio: String,
     rttm: String,
     language: String,
     // A Value keeps this field required while allowing explicit JSON null.
     num_speakers: serde_json::Value,
+}
+
+impl ManifestItem {
+    fn recording_id(&self) -> &str {
+        self.recording.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -297,6 +330,30 @@ fn required_env(name: &str) -> Result<String> {
     let value = std::env::var(name).map_err(|_| anyhow!("Set {name}"))?;
     ensure!(!value.trim().is_empty(), "Set {name} to a non-empty value");
     Ok(value)
+}
+
+fn benchmark_diarization_config(
+    segmentation: &Path,
+    embedding: &Path,
+    descriptor: &DiarizationModelDescriptor,
+    explicit_num_speakers: Option<i32>,
+    provider: &str,
+) -> SherpaDiarizationConfig {
+    // Explicit model files have no download descriptors in production either.
+    let model_paths = DiarizationModelPaths {
+        segmentation_model: segmentation.to_path_buf(),
+        embedding_model: embedding.to_path_buf(),
+        segmentation_descriptor: None,
+        embedding_descriptor: None,
+        can_download_segmentation: false,
+        can_download_embedding: false,
+    };
+    diarization_config_for_provider(
+        &model_paths,
+        explicit_num_speakers,
+        provider,
+        descriptor.default_clustering_threshold,
+    )
 }
 
 fn manifest_path(directory: &Path, relative: &str, field: &str) -> Result<PathBuf> {
@@ -466,6 +523,7 @@ fn diarization_accuracy_benchmark() -> Result<()> {
         let reference = std::fs::read_to_string(rttm)
             .map_err(|_| anyhow!("Could not read manifest RTTM file"))?;
         let reference = parse_rttm(&reference)?;
+        let reference = select_recording(&reference, item.recording_id())?;
         let samples = runtime
             .block_on(super::super::batch_audio::prepare_diarization_samples(
                 &audio,
@@ -483,11 +541,13 @@ fn diarization_accuracy_benchmark() -> Result<()> {
         );
         for (descriptor, embedding) in &embeddings {
             for count in std::iter::once(None).chain(explicit.map(Some)) {
-                let mut config =
-                    SherpaDiarizationConfig::new(segmentation.clone(), embedding.clone());
-                config.provider = provider.clone();
-                config.num_clusters = count;
-                config.clustering_threshold = descriptor.default_clustering_threshold;
+                let config = benchmark_diarization_config(
+                    &segmentation,
+                    embedding,
+                    descriptor,
+                    count,
+                    &provider,
+                );
                 let started = Instant::now();
                 let diarizer = SherpaOfflineDiarizer::new(config).map_err(|_| {
                     anyhow!("Could not initialize diarization model {}", descriptor.id)
@@ -562,6 +622,8 @@ mod tests {
 
     fn reference(start: f64, end: f64, speaker: &str) -> ReferenceSegment {
         ReferenceSegment {
+            recording: "mix".into(),
+            channel: "1".into(),
             start,
             end,
             speaker: speaker.into(),
@@ -799,12 +861,128 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_config_matches_production_for_auto_and_known_counts() {
+        let model_paths = super::super::DiarizationModelPaths {
+            segmentation_model: PathBuf::from("segmentation.onnx"),
+            embedding_model: PathBuf::from("embedding.onnx"),
+            segmentation_descriptor: None,
+            embedding_descriptor: None,
+            can_download_segmentation: false,
+            can_download_embedding: false,
+        };
+        for descriptor in EMBEDDING_MODEL_CATALOG {
+            for provider in ["cpu", "directml"] {
+                for (count, min_on, min_off) in
+                    [(None, 0.3, 0.5), (Some(4), 0.25, 0.25), (Some(1), 0.3, 0.5)]
+                {
+                    let benchmark = benchmark_diarization_config(
+                        &model_paths.segmentation_model,
+                        &model_paths.embedding_model,
+                        descriptor,
+                        count,
+                        provider,
+                    );
+                    let production = super::super::diarization_config_for_provider(
+                        &model_paths,
+                        count,
+                        provider,
+                        descriptor.default_clustering_threshold,
+                    );
+                    assert_eq!(benchmark.min_duration_on, production.min_duration_on);
+                    assert_eq!(benchmark.min_duration_off, production.min_duration_off);
+                    assert_eq!(benchmark.num_clusters, production.num_clusters);
+                    assert_eq!(
+                        benchmark.clustering_threshold,
+                        production.clustering_threshold
+                    );
+                    assert_eq!(benchmark.provider, production.provider);
+                    assert_eq!(
+                        benchmark.segmentation_model_path,
+                        production.segmentation_model_path
+                    );
+                    assert_eq!(
+                        benchmark.embedding_model_path,
+                        production.embedding_model_path
+                    );
+                    assert_eq!(benchmark.min_duration_on, min_on);
+                    assert_eq!(benchmark.min_duration_off, min_off);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn select_recording_keeps_perfect_hypothesis_at_zero_der() {
+        let segments = parse_rttm(
+            "SPEAKER first 1 0 2 <NA> <NA> speaker-a <NA> <NA>\n\
+             SPEAKER second 2 0 2 <NA> <NA> speaker-b <NA> <NA>\n",
+        )
+        .unwrap();
+        let hypothesis = [turn(0.0, 2.0, 0)];
+        // Merging the unrelated recordings would miss 2 of 4 speaker-seconds.
+        close(
+            score_der(&segments, &hypothesis, options()).unwrap().der,
+            0.5,
+        );
+        let selected = select_recording(&segments, "first").unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].recording, "first");
+        assert_eq!(selected[0].channel, "1");
+        assert_eq!(selected[0].speaker, "speaker-a");
+        metrics(
+            &score_der(&selected, &hypothesis, options()).unwrap(),
+            2.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        );
+    }
+
+    #[test]
+    fn select_recording_rejects_unknown_recording() {
+        let segments = parse_rttm("SPEAKER mix 1 0 2 <NA> <NA> a <NA> <NA>\n").unwrap();
+        let error = select_recording(&segments, "missing")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("No RTTM segments"), "{error}");
+        assert!(error.contains("missing"), "{error}");
+    }
+
+    #[test]
+    fn select_recording_rejects_multiple_channels() {
+        let segments = parse_rttm(
+            "SPEAKER mix 1 0 2 <NA> <NA> a <NA> <NA>\n\
+             SPEAKER mix 2 0 2 <NA> <NA> b <NA> <NA>\n",
+        )
+        .unwrap();
+        let error = select_recording(&segments, "mix").unwrap_err().to_string();
+        assert!(
+            error.contains("multi-channel files are not supported"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn manifest_recording_defaults_to_name_and_accepts_override() {
+        for (recording_field, expected) in [("", "mix"), (r#", "recording": "source""#, "source")] {
+            let item: ManifestItem = serde_json::from_str(&format!(
+                r#"{{"name":"mix","audio":"mix.wav","rttm":"combined.rttm","language":"de","num_speakers":null{recording_field}}}"#
+            ))
+            .unwrap();
+            assert_eq!(item.recording_id(), expected);
+        }
+    }
+
+    #[test]
     fn rttm_success_and_line_numbered_failures() {
         let segments = parse_rttm(
             "\n;; comment\nLEXEME ignored\nSPEAKER mix 1 1.25 2.5 <NA> <NA> speaker-a <NA> <NA>\n",
         )
         .unwrap();
         assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].recording, "mix");
+        assert_eq!(segments[0].channel, "1");
         assert_eq!(segments[0].speaker, "speaker-a");
         close(segments[0].start, 1.25);
         close(segments[0].end, 3.75);

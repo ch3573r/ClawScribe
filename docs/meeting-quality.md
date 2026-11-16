@@ -266,6 +266,8 @@ directory configured, the benchmark prints a skip notice and returns.
 
 Existing datasets can supply `manifest.json` with an `items` array; each item
 requires `name`, `audio`, `rttm`, `language` and `num_speakers` (1–12 or `null`).
+The optional string `recording` defaults to `name` and selects the recording id
+in the RTTM file, including combined files containing multiple recordings.
 Audio and RTTM paths must be relative files inside the evaluation directory.
 The benchmark uses the production decoder and prepared turn pipeline. A known
 speaker count runs both auto and known-count modes; `null` runs auto only.
