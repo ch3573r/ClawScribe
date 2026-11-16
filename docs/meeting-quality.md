@@ -224,6 +224,71 @@ If labels save to the database but the recording-folder transcript copy cannot
 be updated, the app reports a pending file warning. **Retry file update** writes
 the saved database transcript when that folder is available again.
 
+### Measuring speaker detection
+
+Keep evaluation audio, models and generated results outside the repository.
+Arrange clips in one directory per speaker, using anonymous directory names
+without spaces; each directory must contain 16 kHz mono PCM16 WAV files.
+Use speech-only clips: every excerpt is labeled as speech by that speaker.
+Convert other formats separately with
+`ffmpeg -i in.mp3 -ac 1 -ar 16000 -sample_fmt s16 out.wav`.
+From the repository root, build repeatable mixtures and reference RTTM labels:
+
+```powershell
+node scripts/build-diarization-eval-set.mjs --clips "<speaker-clips-directory>" --out "<evaluation-directory>" --count 5 --speakers 4 --minutes 5 --seed 1 --overlap 0.05 --language de
+```
+
+`--gap-min`/`--gap-max` default to 0.2/1.5 seconds and
+`--turn-min`/`--turn-max` to 2/12 seconds; every clip must be at least the minimum
+turn length. Turn boundaries use whole milliseconds (16 samples), so the
+three-decimal RTTM labels are sample-exact. Overlaps are summed with a shared
+gain reduction when needed to prevent clipping. The last turn may be truncated.
+Reusing the clips, options and seed reproduces the set; language defaults to
+`und` if omitted.
+
+Run the ignored Rust benchmark from the repository root with existing models:
+
+```powershell
+$env:CLAWSCRIBE_DIARIZATION_EVAL_DIR = "<evaluation-directory>"
+$env:CLAWSCRIBE_DIARIZATION_SEGMENTATION_MODEL = "<segmentation-model.onnx>"
+$env:CLAWSCRIBE_DIARIZATION_EMBEDDING_MODELS = "nemo-titanet-small-en=<embedding-model.onnx>"
+$env:CLAWSCRIBE_DIARIZATION_EVAL_PROVIDER = "cpu"
+$env:CLAWSCRIBE_DIARIZATION_EVAL_OUT = "<results-directory>"
+cargo test --lib diarization::eval::diarization_accuracy_benchmark -- --ignored --nocapture
+```
+
+Embedding models are comma-separated `catalog-id=path` pairs; paths may be
+absolute or relative to the working directory and must not contain commas.
+IDs and default clustering thresholds come from `EMBEDDING_MODEL_CATALOG` in
+`diarization.rs`. CPU is the default provider. Output is printed; the optional
+output directory also receives `results.json` and `results.md`. With no evaluation
+directory configured, the benchmark prints a skip notice and returns.
+
+Existing datasets can supply `manifest.json` with an `items` array; each item
+requires `name`, `audio`, `rttm`, `language` and `num_speakers` (1–12 or `null`).
+The optional string `recording` defaults to `name` and selects the recording id
+in the RTTM file, including combined files containing multiple recordings.
+Audio and RTTM paths must be relative files inside the evaluation directory.
+The benchmark uses the production decoder and prepared turn pipeline. A known
+speaker count runs both auto and known-count modes; `null` runs auto only.
+Models and their catalog thresholds are compared on identical data, with
+unweighted mean DER per model and per language, separately for each mode.
+Timing includes model loading, inference and turn preparation, excluding decode
+and scoring; it is an accuracy benchmark, not a long-meeting performance claim.
+
+DER is missed speech plus false alarm plus speaker confusion, divided by scored
+reference speaker-seconds after optimal one-to-one speaker matching.
+Miss measures reference speaker time with too few detected speakers.
+False alarm measures detected speaker time in excess of the reference count.
+Confusion measures detected speech attributed to the wrong mapped speaker.
+The scorer excludes ±0.25 seconds around every reference boundary by default,
+counts overlapped speech per speaker, and supports excluding reference overlap
+in its unit-tested options; zero scored speech with non-zero errors is rejected.
+
+Synthetic mixtures of studio-quality clips are an optimistic, relative
+comparison: they do not capture room acoustics, codecs or crosstalk. Real German
+speech and a long mixed-source meeting remain required quality cases.
+
 ## Summary Reliability
 
 Completed `<think>` and `<thinking>` blocks are removed from model output,

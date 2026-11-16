@@ -26,6 +26,10 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "diarization_eval.rs"]
+mod eval;
+
 const FLOAT_TIE_EPSILON: f64 = 1e-9;
 const MIN_SPLIT_SPEAKER_OVERLAP_SECONDS: f64 = 0.2;
 const MIN_SPLIT_PART_SECONDS: f64 = 1.25;
@@ -49,10 +53,13 @@ const FIXED_COUNT_MIN_DURATION_OFF_SECONDS: f32 = 0.25;
 const DIARIZATION_SAMPLE_RATE: i32 = 16_000;
 const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 const DEFAULT_SEGMENTATION_MODEL_ID: &str = "pyannote-segmentation-3-0-int8";
-const DEFAULT_EMBEDDING_MODEL_ID: &str = "wespeaker-camplusplus-en";
+const DEFAULT_EMBEDDING_MODEL_ID: &str = "nemo-titanet-small-en";
 const ZH_CN_EMBEDDING_MODEL_ID: &str = "3dspeaker-eres2net-base-zh-cn";
 const SEGMENTATION_MODEL_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
-const DEFAULT_EMBEDDING_MODEL_DIR: &str = "sherpa-onnx-wespeaker_en_voxceleb_CAMplusplus";
+const DEFAULT_EMBEDDING_MODEL_DIR: &str = "sherpa-onnx-nemo_en_titanet_small";
+// Measured on seven four-person AMI meetings: Auto found 3 to 9 speakers at this
+// threshold, against 42 to 230 at the library default of 0.5.
+const TITANET_CLUSTERING_THRESHOLD: f32 = 1.15;
 const ZH_CN_EMBEDDING_MODEL_DIR: &str =
     "sherpa-onnx-3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k";
 const SEGMENTATION_MODEL_URL: &str =
@@ -393,11 +400,11 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
     },
     DiarizationModelDescriptor {
         kind: DiarizationModelKind::Embedding,
-        id: DEFAULT_EMBEDDING_MODEL_ID,
+        id: "wespeaker-camplusplus-en",
         display_name: "WeSpeaker CAM++ English VoxCeleb",
         family: "WeSpeaker CAM++",
         language: Some("en"),
-        cache_dir: DEFAULT_EMBEDDING_MODEL_DIR,
+        cache_dir: "sherpa-onnx-wespeaker_en_voxceleb_CAMplusplus",
         cache_file: "model.onnx",
         source_file: "wespeaker_en_voxceleb_CAM++.onnx",
         download_url:
@@ -407,16 +414,16 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
         ),
         expected_bytes: Some(29_292_684),
         default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-        is_default: true,
+        is_default: false,
         legacy_flat_file: None,
     },
     DiarizationModelDescriptor {
         kind: DiarizationModelKind::Embedding,
-        id: "nemo-titanet-small-en",
+        id: DEFAULT_EMBEDDING_MODEL_ID,
         display_name: "NeMo TitaNet small English",
         family: "NeMo TitaNet",
         language: Some("en"),
-        cache_dir: "sherpa-onnx-nemo_en_titanet_small",
+        cache_dir: DEFAULT_EMBEDDING_MODEL_DIR,
         cache_file: "model.onnx",
         source_file: "nemo_en_titanet_small.onnx",
         download_url:
@@ -425,8 +432,8 @@ const EMBEDDING_MODEL_CATALOG: &[DiarizationModelDescriptor] = &[
             "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
         ),
         expected_bytes: Some(40_257_283),
-        default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-        is_default: false,
+        default_clustering_threshold: TITANET_CLUSTERING_THRESHOLD,
+        is_default: true,
         legacy_flat_file: None,
     },
 ];
@@ -3204,11 +3211,12 @@ fn fallback_embedding_model_ids(
     current_id: Option<&str>,
     allow_zh_cn_fallback: bool,
 ) -> Vec<&'static str> {
+    // Best measured accuracy first.
     let mut ids = vec![
-        "3dspeaker-campplus-en",
-        "3dspeaker-eres2net-en",
-        "nemo-titanet-small-en",
         DEFAULT_EMBEDDING_MODEL_ID,
+        "3dspeaker-eres2net-en",
+        "wespeaker-camplusplus-en",
+        "3dspeaker-campplus-en",
     ];
     if allow_zh_cn_fallback {
         ids.push(ZH_CN_EMBEDDING_MODEL_ID);
@@ -4726,14 +4734,14 @@ mod tests {
             1
         );
         assert_eq!(descriptor.language, Some("en"));
-        assert_eq!(descriptor.source_file, "wespeaker_en_voxceleb_CAM++.onnx");
+        assert_eq!(descriptor.source_file, "nemo_en_titanet_small.onnx");
         assert_eq!(
             descriptor.expected_sha256,
-            Some("c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef")
+            Some("ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e")
         );
         assert_eq!(
             descriptor.default_clustering_threshold,
-            DEFAULT_CLUSTERING_THRESHOLD
+            TITANET_CLUSTERING_THRESHOLD
         );
     }
 
@@ -4773,7 +4781,7 @@ mod tests {
                 "nemo_en_titanet_small.onnx",
                 "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
                 40_257_283u64,
-                DEFAULT_CLUSTERING_THRESHOLD,
+                TITANET_CLUSTERING_THRESHOLD,
             ),
         ];
 
@@ -4817,7 +4825,7 @@ mod tests {
         );
         assert_eq!(
             default_clustering_threshold(&paths),
-            DEFAULT_CLUSTERING_THRESHOLD
+            TITANET_CLUSTERING_THRESHOLD
         );
         assert!(paths.can_download_segmentation);
         assert!(paths.can_download_embedding);
@@ -5267,8 +5275,8 @@ mod tests {
         let ids = fallback_embedding_model_ids(Some(DEFAULT_EMBEDDING_MODEL_ID), false);
 
         assert!(!ids.contains(&DEFAULT_EMBEDDING_MODEL_ID));
-        assert_eq!(ids.first().copied(), Some("3dspeaker-campplus-en"));
-        assert!(ids.contains(&"nemo-titanet-small-en"));
+        assert_eq!(ids.first().copied(), Some("3dspeaker-eres2net-en"));
+        assert!(ids.contains(&"wespeaker-camplusplus-en"));
         assert!(!ids.contains(&ZH_CN_EMBEDDING_MODEL_ID));
     }
 
