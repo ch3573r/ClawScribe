@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
+import { createHookHarness } from './hook-harness.mjs';
 
 const modulePath = fileURLToPath(new URL('../../src/lib/speaker-attribution.ts', import.meta.url));
 
@@ -36,4 +37,21 @@ test('detection needs a recording folder and transcript rows, independently of l
   assert.equal(canDetectSpeakers(true, 0), false);
   assert.equal(canDetectSpeakers(false, 1), false);
   assert.equal(canDetectSpeakers(false, 0), false);
+});
+
+test('speaker controls persist across clearing labels and reopening only the same meeting in a session', () => {
+  let hooks = createHookHarness();
+  const { useSpeakerLabelVisibility } = loadTsModule(fileURLToPath(new URL('../../src/hooks/useSpeakerLabelVisibility.ts', import.meta.url)), {
+    react: { useEffect: (...args) => hooks.react.useEffect(...args) },
+  });
+  const render = (id, labelled) => hooks.render(() => useSpeakerLabelVisibility(id, labelled));
+  assert.equal(render('meeting-a', false), false);
+  assert.equal(render('meeting-a', true), true);
+  assert.equal(render('meeting-a', false), true);
+  assert.equal(render('meeting-b', false), false);
+  hooks.unmount();
+  hooks = createHookHarness();
+  assert.equal(render('meeting-a', false), true);
+  assert.equal(render('meeting-b', false), false);
+  hooks.unmount();
 });

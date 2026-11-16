@@ -9,6 +9,8 @@ import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
 
 interface TranscriptPanelProps {
+  speakerSegments?: TranscriptSegmentData[];
+  sourceAttributionEnabled?: boolean;
   focusedSource?: { id: string; request: number };
   transcripts: Transcript[];
   onCopyTranscript: () => void;
@@ -39,6 +41,8 @@ interface TranscriptPanelProps {
 
 export function TranscriptPanel({
   focusedSource,
+  speakerSegments,
+  sourceAttributionEnabled,
   transcripts,
   onCopyTranscript,
   onOpenMeetingFolder,
@@ -127,6 +131,8 @@ export function TranscriptPanel({
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView
           focusedSource={focusedSource}
+          speakerSegments={speakerSegments}
+          sourceAttributionEnabled={sourceAttributionEnabled}
           onEditSegment={meetingId && !isRecording ? setEditing : undefined}
           segments={convertedSegments}
           emptyState={emptyState}

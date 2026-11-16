@@ -97,7 +97,7 @@ function transcriptView(props = {}) {
   const hooks = createHookHarness();
   const { VirtualizedTranscriptView } = loadTsModule(component('VirtualizedTranscriptView'), {
     './ui/button': { Button: 'button' },
-    './ui/input': { Input: 'input' },
+    './MeetingDetails/SpeakerLabelPopover': stubs(['SpeakerLabelPopover', 'SpeakerDot']),
     react: { ...hooks.react, memo: fn => fn, useReducer: () => [0, () => {}] },
     '@tanstack/react-virtual': { useVirtualizer: () => ({}) },
     '@/hooks/useAutoScroll': { useAutoScroll: () => ({ autoScroll: false, scrollToBottom() {} }) },
@@ -106,7 +106,6 @@ function transcriptView(props = {}) {
     './ConfidenceIndicator': stubs(['ConfidenceIndicator']),
     './RecordingStatusBar': stubs(['RecordingStatusBar']),
     './ui/tooltip': stubs(['Tooltip', 'TooltipTrigger', 'TooltipContent']),
-    './ui/dropdown-menu': {},
   });
   const tree = hooks.render(() => VirtualizedTranscriptView({ segments: [], ...props }));
   hooks.unmount();
