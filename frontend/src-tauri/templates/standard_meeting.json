@@ -14,9 +14,14 @@
     },
     {
       "title": "Action Items",
-      "instruction": "List all assigned tasks with their owners and due date. Always add reference transcript segment and timestamp in the table.",
+      "instruction": "List every task someone agreed to do or said needs doing, with its owner and due date. Use \"Unassigned\" when no owner is named and \"Not specified\" when no date is given. Do not list open questions here.",
       "format": "list",
-      "item_format": "| **Owner** | Task | Due | Reference Transcript Segment | Segment Time stamp |\n| --- | --- | --- | --- | --- |"
+      "item_format": "- Task in one sentence. Owner: name or Unassigned; Due: date or Not specified"
+    },
+    {
+      "title": "Open Questions",
+      "instruction": "List questions raised that were left unanswered and points the participants said still need to be found out or clarified.",
+      "format": "list"
     },
     {
       "title": "Discussion Highlights",

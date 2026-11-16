@@ -13,6 +13,7 @@ function createView(overrides = {}) {
   const react = {
     memo: component => component,
     useMemo: compute => compute(),
+    useCallback: callback => callback,
     useEffect() {},
     startTransition: action => action(),
     useRef(value) { return slots[cursor++] ??= { current: value }; },
@@ -35,9 +36,11 @@ function createView(overrides = {}) {
     './ConfidenceIndicator': { ConfidenceIndicator: 'ConfidenceIndicator' },
     './RecordingStatusBar': { RecordingStatusBar: 'RecordingStatusBar' },
     './ui/button': { Button: 'button' },
-    './ui/input': { Input: 'input' },
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/separator': { Separator: 'separator' },
+    '@/components/ui/popover': Object.fromEntries(['Popover', 'PopoverContent', 'PopoverTrigger'].map(name => [name, name])),
     './ui/tooltip': Object.fromEntries(['Tooltip', 'TooltipTrigger', 'TooltipContent'].map(name => [name, name])),
-    './ui/dropdown-menu': Object.fromEntries(['DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuLabel', 'DropdownMenuSeparator', 'DropdownMenuSub', 'DropdownMenuSubContent', 'DropdownMenuSubTrigger', 'DropdownMenuTrigger'].map(name => [name, name])),
   };
   const modulePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/components/VirtualizedTranscriptView.tsx');
   const { VirtualizedTranscriptView } = loadTsModule(modulePath, mocks);
@@ -84,7 +87,7 @@ test('failed custom speaker save preserves the input and shows an actionable err
   let nodes = view.render();
   find(nodes, node => node.type === 'input').props.onChange({ target: { value: 'Alex' } });
   nodes = view.render();
-  find(nodes, node => node.type === 'button' && node.props.children === 'Set').props.onClick();
+  find(nodes, node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   await new Promise(setImmediate);
   nodes = view.render();
   assert.equal(find(nodes, node => node.type === 'input').props.value, 'Alex');
@@ -96,7 +99,7 @@ test('successful custom speaker save clears the input only after persistence', a
   const calls = [];
   const view = createView({ onSpeakerChange: async (...args) => calls.push(args) });
   find(view.render(), node => node.type === 'input').props.onChange({ target: { value: 'Alex' } });
-  find(view.render(), node => node.type === 'button' && node.props.children === 'Set').props.onClick();
+  find(view.render(), node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   await new Promise(setImmediate);
   assert.deepEqual(calls, [['one', 'Alex']]);
   assert.equal(find(view.render(), node => node.type === 'input').props.value, '');
@@ -106,9 +109,9 @@ test('an in-flight speaker save cannot be submitted twice before React renders',
   let resolveSave;
   let saves = 0;
   const view = createView({ onSpeakerChange: () => { saves++; return new Promise(resolve => { resolveSave = resolve; }); } });
-  const item = find(view.render(), node => node.type === 'DropdownMenuItem' && node.props.children === 'Participants');
-  const first = item.props.onSelect();
-  const second = item.props.onSelect();
+  const item = find(view.render(), node => node.type === 'button' && node.props['aria-label'] === 'Assign Participants');
+  const first = item.props.onClick();
+  const second = item.props.onClick();
   assert.equal(saves, 1);
   resolveSave();
   await Promise.all([first, second]);
@@ -119,4 +122,86 @@ test('shows a live-follow recovery button only during an active recording', () =
   assert.ok(live.some(node => node.type === 'button' && node.props.children === 'Jump to live transcript'));
   const saved = createView({ isRecording: false }).render();
   assert.ok(!saved.some(node => node.props.children === 'Jump to live transcript'));
+});
+
+test('choosing an existing speaker changes only this row and closes after saving', async () => {
+  const single = [], matching = [];
+  const view = createView({
+    speakerSegments: [{ timestamp: 0, speaker: 'Me' }, { timestamp: 20, speaker: 'Alex' }],
+    onSpeakerChange: async (...args) => single.push(args),
+    onApplySpeakerToMatching: (...args) => matching.push(args),
+  });
+  find(view.render(), node => node.type === 'Popover').props.onOpenChange(true);
+  find(view.render(), node => node.props['aria-label'] === 'Assign Alex').props.onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(single, [['one', 'Alex']]);
+  assert.deepEqual(matching, []);
+  assert.equal(find(view.render(), node => node.type === 'Popover').props.open, false);
+});
+
+test('remove label changes only this row and unlabeled rows offer Add speaker', async () => {
+  const calls = [];
+  const view = createView({ onSpeakerChange: async (...args) => calls.push(args), onApplySpeakerToMatching: () => assert.fail('must not change matching rows') });
+  find(view.render(), node => node.props.children === 'Remove label').props.onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [['one', null]]);
+  const unlabeled = createView({ segments: [{ id: 'one', timestamp: 17, text: 'Synthetic speech.' }] }).render();
+  assert.ok(unlabeled.some(node => node.props.children === 'Add speaker'));
+  assert.ok(unlabeled.some(node => node.props['aria-label'] === 'Change speaker for segment at 00:17, currently unlabeled'));
+});
+
+test('row rename uses full timeline count, detects merge and saves matching labels only', async () => {
+  const calls = [];
+  const view = createView({
+    speakerSegments: [{ timestamp: 0, speaker: 'Me' }, { timestamp: 2, speaker: 'Me' }, { timestamp: 4, speaker: 'Alex' }],
+    onSpeakerChange: () => assert.fail('rename must not save one row'),
+    onApplySpeakerToMatching: async (...args) => calls.push(args),
+  });
+  find(view.render(), node => node.type === 'Popover').props.onOpenChange(true);
+  find(view.render(), node => node.type === 'button' && Array.isArray(node.props.children) && node.props.children[0] === 'Rename ').props.onClick();
+  let nodes = view.render();
+  assert.equal(find(nodes, node => node.type === 'input').props.value, 'Me');
+  assert.ok(nodes.some(node => node.props.children === 'Applies to 2 segments'));
+  find(nodes, node => node.type === 'input').props.onChange({ target: { value: ' Alex ' } });
+  nodes = view.render();
+  assert.ok(nodes.some(node => node.props.children === 'Merges with Alex'));
+  assert.ok(nodes.some(node => node.type === 'button' && node.props.children === 'Merge'));
+  find(nodes, node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [['Me', 'Alex']]);
+  assert.equal(find(view.render(), node => node.type === 'Popover').props.open, false);
+});
+
+test('visible speakers remain available when the timeline has not loaded', () => {
+  const view = createView({ speakerSegments: [] });
+  assert.ok(view.render().some(node => node.props['aria-label'] === 'Assign Me'));
+});
+
+test('saving disables every speaker control and a failure leaves the popover open', async () => {
+  let rejectSave;
+  const view = createView({ onSpeakerChange: () => new Promise((resolve, reject) => { rejectSave = reject; }) });
+  find(view.render(), node => node.type === 'Popover').props.onOpenChange(true);
+  find(view.render(), node => node.props['aria-label'] === 'Assign Participants').props.onClick();
+  let nodes = view.render();
+  for (const node of nodes.filter(node => node.type === 'input' || node.type === 'button' && !node.props['aria-label']?.startsWith('Play recording'))) {
+    assert.equal(node.props.disabled, true);
+  }
+  rejectSave(new Error('Synthetic failure'));
+  await new Promise(setImmediate);
+  nodes = view.render();
+  assert.equal(find(nodes, node => node.type === 'Popover').props.open, true);
+  assert.equal(view.errors.length, 1);
+});
+
+test('speaker option arrows move focus without handling keys from the text input', () => {
+  const nodes = createView().render();
+  const group = find(nodes, node => node.props['aria-label'] === 'Meeting speakers');
+  const focused = [];
+  const buttons = [0, 1].map(index => ({ focus: () => focused.push(index) }));
+  let prevented = 0;
+  group.props.onKeyDown({ key: 'ArrowDown', target: buttons[0], currentTarget: { querySelectorAll: () => buttons }, preventDefault() { prevented++; } });
+  group.props.onKeyDown({ key: 'ArrowUp', target: buttons[0], currentTarget: { querySelectorAll: () => buttons }, preventDefault() { prevented++; } });
+  assert.deepEqual(focused, [1, 1]);
+  assert.equal(prevented, 2);
+  assert.equal(find(nodes, node => node.type === 'input').props.onKeyDown, undefined);
 });

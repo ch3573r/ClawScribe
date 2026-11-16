@@ -24,6 +24,7 @@ function timeline(props = {}) {
   const { SpeakerLaneTimeline } = loadTsModule(source('components/MeetingDetails/SpeakerLaneTimeline'), {
     react: { ...hooks.react, memo: fn => fn },
     '@/components/ui/button': { Button: 'button' },
+    './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
     'lucide-react': { Activity: 'Activity', Pause: 'Pause', Play: 'Play' },
   });
@@ -150,8 +151,35 @@ test('playing audio shows Pause; unavailable audio renders no player', () => {
   assert.equal(timeline({ isAudioReady: false }).tree, null);
 });
 
-async function page(attribution, segments) {
+test('an open lane rename survives optimistic merge until explicitly closed', () => {
   const hooks = createHookHarness();
+  const { SpeakerLaneTimeline } = loadTsModule(source('components/MeetingDetails/SpeakerLaneTimeline'), {
+    react: { ...hooks.react, memo: fn => fn },
+    '@/components/ui/button': { Button: 'button' },
+    './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
+    '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
+    'lucide-react': { Pause: 'Pause', Play: 'Play' },
+  });
+  const props = { segments: [
+    { id: 'first', timestamp: 0, endTime: 1, speaker: 'A', text: 'Synthetic speech.' },
+    { id: 'second', timestamp: 2, endTime: 3, speaker: 'B', text: 'Synthetic speech.' },
+  ], isAudioReady: true, onApplySpeakerToMatching() {} };
+  const render = () => hooks.render(() => SpeakerLaneTimeline(props));
+  const rename = nodes(render()).find(node => node.type === 'RenameSpeakerPopover' && node.props.speaker === 'B');
+  rename.props.onOpenChange(true);
+  props.segments = props.segments.map(row => ({ ...row, speaker: 'A' }));
+  assert.ok(nodes(render()).some(node => node.type === 'RenameSpeakerPopover' && node.props.speaker === 'B'));
+  rename.props.onOpenChange(false);
+  assert.equal(nodes(render()).some(node => node.type === 'RenameSpeakerPopover' && node.props.speaker === 'B'), false);
+  hooks.unmount();
+});
+
+async function page(attribution, segments, updatedSegments) {
+  // Keep fixture logging out of node:test's subprocess output stream.
+  const previousLog = console.log;
+  console.log = () => {};
+  const hooks = createHookHarness();
+  let summaryOptions, copyOptions;
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {} };
   const audio = { currentTime: 0, duration: 600, error: null, isPlaying: false, play() {}, pause() {}, seek() {} };
@@ -166,9 +194,9 @@ async function page(attribution, segments) {
     '@/hooks/useSourceAttribution': { useSourceAttribution: () => attribution },
     '@/hooks/useAudioPlayer': { useAudioPlayer: () => audio },
     '@/hooks/meeting-details/useMeetingData': { useMeetingData: () => ({ transcripts: [], blockNoteSummaryRef: { current: null } }) },
-    '@/hooks/meeting-details/useSummaryGeneration': { useSummaryGeneration: () => ({}) },
+    '@/hooks/meeting-details/useSummaryGeneration': { useSummaryGeneration: options => { summaryOptions = options; return {}; } },
     '@/hooks/meeting-details/useTemplates': { useTemplates: () => ({}) },
-    '@/hooks/meeting-details/useCopyOperations': { useCopyOperations: () => ({}) },
+    '@/hooks/meeting-details/useCopyOperations': { useCopyOperations: options => { copyOptions = options; return {}; } },
     '@/hooks/meeting-details/useMeetingOperations': { useMeetingOperations: () => ({}) },
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
@@ -181,31 +209,61 @@ async function page(attribution, segments) {
   try {
     assert.equal(nodes(render()).some(node => node.type === 'SpeakerLaneTimeline'), false);
     await flush();
-    const tree = render();
+    let tree = render();
+    const beforeAttribution = nodes(tree).find(node => node.type === 'TranscriptPanel').props.showSpeakerAttribution;
+    if (updatedSegments) {
+      props.timelineSegments = updatedSegments;
+      props.segments = updatedSegments.slice(0, 100);
+      tree = render();
+    }
     return {
+      beforeAttribution, summaryOptions, copyOptions,
       timeline: nodes(tree).find(node => node.type === 'SpeakerLaneTimeline'),
       transcript: nodes(tree).find(node => node.type === 'TranscriptPanel'),
       header: nodes(tree).find(node => node.type === 'MeetingHeader'),
     };
   } finally {
+    console.log = previousLog;
     hooks.unmount();
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
 }
 
-for (const [attribution, segments] of [[true, []], [false, longSegments], [true, longSegments]]) {
+for (const [attribution, segments, expectedAttribution] of [
+  [true, [], true], [false, longSegments, true], [true, longSegments, true],
+  [false, longSegments.map(row => ({ ...row, speaker: '' })), false],
+  [false, longSegments.map((row, index) => ({ ...row, speaker: index === 249 ? 'Speaker 2' : '' })), true],
+]) {
   test(`meeting page exposes ready audio with attribution=${attribution} and ${segments.length} rows`, async () => {
     const result = await page(attribution, segments);
     assert.ok(result.timeline);
     assert.equal(result.timeline.props.segments, segments);
-    assert.equal(result.timeline.props.showSpeakerAttribution, attribution);
+    assert.equal(result.timeline.props.showSpeakerAttribution, expectedAttribution);
+    assert.equal(result.transcript.props.showSpeakerAttribution, expectedAttribution);
+    assert.equal(result.summaryOptions.includeSpeakerLabels, expectedAttribution);
+    assert.equal(result.copyOptions.includeSpeakerLabels, expectedAttribution);
     assert.equal(result.timeline.props.totalCount, segments.length);
     assert.equal(result.timeline.props.isAudioReady, true);
     assert.equal(result.transcript.props.segments.length, Math.min(100, segments.length));
     assert.equal(result.header.props.segmentCount, segments.length);
   });
 }
+
+test('refreshed speaker labels appear without changing the Beta toggle', async () => {
+  const result = await page(false, longSegments.map(row => ({ ...row, speaker: '' })), longSegments);
+  assert.equal(result.beforeAttribution, false);
+  assert.equal(result.timeline.props.showSpeakerAttribution, true);
+  assert.equal(result.transcript.props.showSpeakerAttribution, true);
+  assert.equal(result.summaryOptions.includeSpeakerLabels, true);
+  assert.equal(result.copyOptions.includeSpeakerLabels, true);
+});
+
+test('removing the last label keeps speaker controls available with Beta disabled', async () => {
+  const result = await page(false, longSegments, longSegments.map(row => ({ ...row, speaker: '' })));
+  assert.equal(result.transcript.props.showSpeakerAttribution, true);
+  assert.equal(result.timeline.props.showSpeakerAttribution, true);
+});
 
 test('meeting header metadata displays the total segment count', () => {
   const hooks = createHookHarness();

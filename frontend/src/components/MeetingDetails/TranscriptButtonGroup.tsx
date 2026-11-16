@@ -19,6 +19,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { canDetectSpeakers } from '@/lib/speaker-attribution';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import {
   SpeakerDiarizationDialog,
@@ -41,7 +42,6 @@ interface TranscriptButtonGroupProps {
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
-  showSpeakerAttribution?: boolean;
   onRefetchTranscripts?: () => Promise<void>;
 }
 
@@ -54,7 +54,6 @@ export function TranscriptButtonGroup({
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
-  showSpeakerAttribution = true,
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
   const [showDiarizationDialog, setShowDiarizationDialog] = useState(false);
@@ -256,7 +255,7 @@ export function TranscriptButtonGroup({
           {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark</DropdownMenuItem>}
           {correctionActions?.canUndo && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.undo}>Undo last correction</DropdownMenuItem>}
           {correctionActions?.canRestore && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.restore}>Restore previous transcript</DropdownMenuItem>}
-          {showSpeakerAttribution && meetingId && meetingFolderPath && <>
+          {meetingId && canDetectSpeakers(hasRecordingFolder, transcriptCount) && <>
             <DropdownMenuSeparator /><DropdownMenuLabel>{isDiarizing ? diarizationMessage ?? 'Detecting speakers…' : 'Detect speakers'}</DropdownMenuLabel>
             <DropdownMenuItem disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(null)}>Auto detect</DropdownMenuItem>
             {[2, 3, 4, 5, 6].map(count => <DropdownMenuItem key={count} disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(count)}>{count} speakers</DropdownMenuItem>)}

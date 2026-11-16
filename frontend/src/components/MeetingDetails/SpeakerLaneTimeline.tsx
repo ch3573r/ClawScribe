@@ -2,11 +2,14 @@
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { memo, useMemo, type KeyboardEvent, type MouseEvent } from "react";
+import { memo, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { Pause, Play } from "lucide-react";
+import { buildSpeakerCatalog, getSpeakerColor, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
+import { RenameSpeakerPopover, type RenameSpeaker } from "./SpeakerLabelPopover";
 import { TranscriptSegmentData } from "@/types";
 
 interface SpeakerLaneTimelineProps {
+  onApplySpeakerToMatching?: RenameSpeaker;
   segments: TranscriptSegmentData[]; totalCount?: number; showSpeakerAttribution?: boolean;
   currentTime?: number; durationSeconds?: number; isPlaying?: boolean; isAudioReady?: boolean;
   onPlayPause?: () => void; onSeek?: (seconds: number) => void;
@@ -15,38 +18,28 @@ interface SpeakerLaneTimelineProps {
 type TimedSegment = TranscriptSegmentData & { endTime: number };
 interface TimelineLane {
   speaker: string;
+  label: string | null;
   color: string;
   segments: TimedSegment[];
 }
 
-const LANE_COLORS = [
-  "hsl(var(--primary))",
-  "hsl(var(--chart-2))",
-  "hsl(var(--theme-warning-fg))",
-  "hsl(var(--theme-error-fg))",
-  "hsl(var(--chart-4))",
-  "hsl(var(--theme-success-fg))",
-];
 const MAX_VISIBLE_LANES = 6;
 
-function normalizeSpeaker(speaker: string | undefined): string {
-  return speaker?.trim().replace(/\s+/g, " ") || "Unlabeled";
-}
-
-function buildTimeline(segments: TranscriptSegmentData[]) {
+function buildTimeline(segments: TranscriptSegmentData[], catalog: readonly SpeakerDetails[]) {
   const timedSegments = segments.filter((segment): segment is TimedSegment =>
     Number.isFinite(segment.timestamp) && segment.timestamp >= 0 &&
     Number.isFinite(segment.endTime) && segment.endTime! > segment.timestamp
   ).sort((left, right) => left.timestamp - right.timestamp);
-  const lanes = new Map<string, TimelineLane>();
+  const lanes = new Map<string | null, TimelineLane>();
   let duration = 0;
   for (const segment of timedSegments) {
     duration = Math.max(duration, segment.endTime);
-    const speaker = normalizeSpeaker(segment.speaker);
-    let lane = lanes.get(speaker);
+    const label = speakerLabel(segment.speaker);
+    const speaker = label ?? "Unlabeled";
+    let lane = lanes.get(label);
     if (!lane && lanes.size < MAX_VISIBLE_LANES) {
-      lane = { speaker, color: LANE_COLORS[lanes.size], segments: [] };
-      lanes.set(speaker, lane);
+      lane = { speaker, label, color: getSpeakerColor(catalog, label), segments: [] };
+      lanes.set(label, lane);
     }
     lane?.segments.push(segment);
   }
@@ -63,7 +56,7 @@ const SegmentBars = memo(function SegmentBars({ segments, duration, played = fal
   return <>{segments.map(segment => {
     const left = Math.max(0, Math.min(100, segment.timestamp / duration * 100));
     const width = Math.max(0, Math.min(100 - left, ((segment.endTime! - segment.timestamp) / duration) * 100));
-    return <span key={segment.id} data-timeline-segment={played ? undefined : segment.id} className={`absolute inset-y-2 rounded-sm border-x border-card ${played ? "bg-brand-gradient" : "bg-muted-foreground/40"}`}
+    return <span key={segment.id} data-timeline-segment={played ? undefined : segment.id} className={`absolute inset-y-2 rounded-sm border-x border-card ${played ? "bg-gradient-to-r from-primary to-primary/70" : "bg-muted-foreground/40"}`}
       style={{ left: left + '%', width: width + '%' }}
       title={played ? undefined : formatDuration(segment.timestamp) + '-' + formatDuration(segment.endTime)} />;
   })}</>;
@@ -83,8 +76,12 @@ const LaneBars = memo(function LaneBars({ lane, duration }: { lane: TimelineLane
   })}</>;
 });
 
-export function SpeakerLaneTimeline({ segments, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek }: SpeakerLaneTimelineProps) {
-  const { timedSegments, lanes, duration: segmentDuration } = useMemo(() => buildTimeline(segments), [segments]);
+export function SpeakerLaneTimeline({ segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek }: SpeakerLaneTimelineProps) {
+  // Keep the rename anchor and draft mounted through optimistic label updates.
+  const [renameSnapshot, setRenameSnapshot] = useState<TranscriptSegmentData[] | null>(null);
+  const laneSegments = renameSnapshot ?? segments;
+  const catalog = useMemo(() => buildSpeakerCatalog(laneSegments), [laneSegments]);
+  const { timedSegments, lanes, duration: segmentDuration } = useMemo(() => buildTimeline(laneSegments, catalog), [laneSegments, catalog]);
   if (!isAudioReady) return null;
   const duration = Math.max(segmentDuration, Number.isFinite(durationSeconds) ? durationSeconds : 0);
   const timed = timedSegments.length > 0;
@@ -117,15 +114,17 @@ export function SpeakerLaneTimeline({ segments, showSpeakerAttribution = true, c
       className="relative h-10 min-w-0 flex-1 overflow-hidden rounded-sm p-0 hover:bg-muted/40 disabled:opacity-100">
       <span aria-hidden className="pointer-events-none absolute inset-0">
         {timed ? <SegmentBars segments={timedSegments} duration={duration} /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-muted" />}
-        <span className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - played}% 0 0)` }}>{timed ? <SegmentBars segments={timedSegments} duration={duration} played /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-brand-gradient" />}</span>
+        <span className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - played}% 0 0)` }}>{timed ? <SegmentBars segments={timedSegments} duration={duration} played /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary to-primary/70" />}</span>
         <span className="absolute inset-y-1 w-px bg-foreground" style={{ left: played + '%' }} />
       </span>
     </Button>
     <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{formatDuration(duration)}</span>
     </div>
     {showSpeakerAttribution && lanes.length > 0 && <div className="space-y-1.5 px-5 pb-4">
-      {lanes.map(lane => <div key={lane.speaker} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
-        <span className="truncate font-mono text-xs font-medium text-muted-foreground" title={lane.speaker}>{lane.speaker}</span>
+      {lanes.map(lane => <div key={lane.segments[0].id} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
+        {lane.label && onApplySpeakerToMatching ? <RenameSpeakerPopover speaker={lane.label} catalog={catalog} onRename={onApplySpeakerToMatching}
+          onOpenChange={open => setRenameSnapshot(open ? segments : null)} /> :
+          <span className="truncate font-mono text-xs font-medium text-muted-foreground" title={lane.speaker}>{lane.speaker}</span>}
         <Button variant="ghost" {...seekProps} aria-label={`Seek ${lane.speaker} timeline`}
           className="relative h-5 w-full overflow-hidden rounded-sm bg-muted/45 p-0 hover:bg-muted/70 disabled:opacity-100">
           <LaneBars lane={lane} duration={duration} />
