@@ -7,12 +7,11 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.58**. This Windows GPU release reworks the meeting details
-screen (title header, segment playback strip, one-row toolbars, docked chat),
-tidies the Meetings page and the Add-ons settings, and adds Claude Code as an
-optional summary and meeting chat provider. It includes the live Parakeet
-improvements and custom vocabulary from 0.5.57. See the
-[0.5.58 release notes](docs/releases/0.5.58.md) and the
+Source version: **0.5.59**. This Windows GPU preview changes the default voice
+model for speaker detection, reworks speaker relabeling, points summary citations
+at the cited segment and lists action items so they can be exported. It builds on
+the meeting details rework and the Claude Code provider from 0.5.58. See the
+[0.5.59 preview notes](docs/releases/0.5.59.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -302,6 +301,24 @@ checks. You still choose when to install; checking at launch is a separate optio
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in 0.5.59 preview
+
+- Speaker detection uses a different voice model and grouping threshold. On a test
+  set of four-person meetings it found 3 to 9 speakers where the previous default
+  found 10 to 114. The model (about 40 MB) downloads on the next detection.
+- Detect speakers no longer needs the Beta source attribution setting, and speaker
+  labels show whenever a meeting has them.
+- Relabeling is two actions: "Who said this?" on a transcript row, and renaming or
+  merging a speaker from the timeline.
+- Summary citations point at a passage of at most 10 seconds, not 45.
+- Action items are a list with owner and due date that Planner and To Do export can
+  read. Unanswered questions get their own Open questions section.
+- The playback strip and the active transcript row follow the accent colour.
+- Check these on an installed build with real meeting audio. These checks remain
+  pending before stable promotion.
+
+See the [preview notes](docs/releases/0.5.59.md) and the [changelog](CHANGELOG.md).
 
 ## What changed in 0.5.58
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.59
+
+- Speaker detection defaults to the NeMo TitaNet small voice model with a grouping threshold of 1.15, and fallback models are ordered by measured accuracy. On seven four-person AMI meetings the mean error in Auto fell from 54% to 23% and the detected speaker count from 10–114 to 3–9. Add an accuracy evaluation harness; evaluation audio, models and results stay outside the repository.
+- Detect speakers is available without the Beta source attribution setting, and speaker labels show whenever a meeting has them.
+- Rework speaker relabeling into "Who said this?" on a transcript row and rename or merge from the timeline. Names match existing speakers regardless of case; chips and lanes share one colour per speaker.
+- Summary citations resolve to passages of at most 10 seconds (previously 45).
+- The standard meeting template lists action items as bullets with owner and due date, which Planner and To Do export can read, and adds an Open questions section. Empty sections read "None noted." without a placeholder table.
+- The playback strip and the active transcript row follow the accent colour. Chat and live assistance show a friendly model name with the full identifier in a tooltip.
+- Semantic search model details open on click.
+- Advance installer/runtime/updater version to 0.5.59 for a Windows GPU preview. Stage a draft, verify assets, then publish as a prerelease with latest=false. Stable remains 0.5.58.
+- Nothing in this release has been run on an installed build. Speaker detection was measured on one English corpus only; German and two-person calls are not measured. Installed acceptance remains pending along with the checks carried over from 0.5.58.
+
 ## 0.5.58
 
 - Rework meeting details. The title, date, segment count and tags sit in a header across the page; the playback strip shows the transcript segments and keeps speaker lanes when speaker labels (beta) are on; the transcript and summary toolbars are one row each with menus for the less common actions; segment editing is a pencil button on hover and focus; the Bookmarks row shows only when the meeting has bookmarks.
