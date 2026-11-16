@@ -63,7 +63,7 @@ const SegmentBars = memo(function SegmentBars({ segments, duration, played = fal
   return <>{segments.map(segment => {
     const left = Math.max(0, Math.min(100, segment.timestamp / duration * 100));
     const width = Math.max(0, Math.min(100 - left, ((segment.endTime! - segment.timestamp) / duration) * 100));
-    return <span key={segment.id} data-timeline-segment={played ? undefined : segment.id} className={`absolute inset-y-2 rounded-sm border-x border-card ${played ? "bg-brand-gradient" : "bg-muted-foreground/40"}`}
+    return <span key={segment.id} data-timeline-segment={played ? undefined : segment.id} className={`absolute inset-y-2 rounded-sm border-x border-card ${played ? "bg-gradient-to-r from-primary to-primary/70" : "bg-muted-foreground/40"}`}
       style={{ left: left + '%', width: width + '%' }}
       title={played ? undefined : formatDuration(segment.timestamp) + '-' + formatDuration(segment.endTime)} />;
   })}</>;
@@ -117,7 +117,7 @@ export function SpeakerLaneTimeline({ segments, showSpeakerAttribution = true, c
       className="relative h-10 min-w-0 flex-1 overflow-hidden rounded-sm p-0 hover:bg-muted/40 disabled:opacity-100">
       <span aria-hidden className="pointer-events-none absolute inset-0">
         {timed ? <SegmentBars segments={timedSegments} duration={duration} /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-muted" />}
-        <span className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - played}% 0 0)` }}>{timed ? <SegmentBars segments={timedSegments} duration={duration} played /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-brand-gradient" />}</span>
+        <span className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - played}% 0 0)` }}>{timed ? <SegmentBars segments={timedSegments} duration={duration} played /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary to-primary/70" />}</span>
         <span className="absolute inset-y-1 w-px bg-foreground" style={{ left: played + '%' }} />
       </span>
     </Button>

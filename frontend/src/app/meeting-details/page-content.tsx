@@ -23,6 +23,7 @@ import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperatio
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
 
 export default function PageContent({
   meeting,
@@ -130,10 +131,12 @@ export default function PageContent({
   // Audio actions operate on the recording folder. The player/timeline waits for
   // a resolved media file, which can lag behind freshly saved recordings.
   const hasRecordingFolder = Boolean(meeting.folder_path);
-  const showSpeakerAttribution = sourceAttributionEnabled && hasRecordingFolder;
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
+  const showSpeakerAttribution = shouldShowSpeakerAttribution(
+    sourceAttributionEnabled, hasRecordingFolder, timelineSegments, segments, meetingData.transcripts,
+  );
   const templates = useTemplates();
 
   // Callback to register the modal open function

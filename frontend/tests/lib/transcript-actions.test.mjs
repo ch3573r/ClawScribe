@@ -16,8 +16,8 @@ function text(node) {
   return node ? text(node.props?.children) : '';
 }
 
-for (const meetingFolderPath of [null, '', 'synthetic-recording']) {
-  test(`transcript menu retains the recording-folder action with ${meetingFolderPath ? 'an available' : 'no'} path`, () => {
+for (const meetingFolderPath of [null, '', 'synthetic-recording']) for (const transcriptCount of [0, 2]) {
+  test(`transcript menu retains the recording-folder action with ${meetingFolderPath ? 'an available' : 'no'} path and ${transcriptCount} rows`, () => {
     const hooks = createHookHarness();
     const { TranscriptButtonGroup } = loadTsModule(fileURLToPath(new URL('../../src/components/MeetingDetails/TranscriptButtonGroup.tsx', import.meta.url)), {
       react: hooks.react,
@@ -35,13 +35,16 @@ for (const meetingFolderPath of [null, '', 'synthetic-recording']) {
     });
     let opened = 0;
     const tree = hooks.render(() => TranscriptButtonGroup({
-      transcriptCount: 2, meetingId: 'synthetic-meeting', meetingFolderPath,
+      transcriptCount, meetingId: 'synthetic-meeting', meetingFolderPath,
       transcribeOpen: false, onTranscribeOpenChange() {}, onCopyTranscript() {},
-      onOpenMeetingFolder: async () => { opened++; }, showSpeakerAttribution: false,
+      onOpenMeetingFolder: async () => { opened++; },
     }));
     try {
       const item = nodes(tree).find(node => node.type === 'DropdownMenuItem' && text(node) === 'Open recording folder');
       assert.ok(item);
+      const detect = nodes(tree).find(node => node.type === 'DropdownMenuItem' && text(node) === 'Auto detect');
+      assert.equal(Boolean(detect), Boolean(meetingFolderPath && transcriptCount > 0));
+      if (detect) assert.equal(detect.props.disabled, false);
       assert.equal(item.props.disabled, !meetingFolderPath);
       if (meetingFolderPath) {
         item.props.onSelect();

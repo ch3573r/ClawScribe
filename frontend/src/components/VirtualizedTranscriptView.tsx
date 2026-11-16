@@ -203,7 +203,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isActive ? "bg-accent/10 ring-1 ring-accent/30" : ""}`}
+            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
         >
             <div className="flex items-start gap-3">
                 <Tooltip>
