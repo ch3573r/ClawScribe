@@ -24,6 +24,7 @@ function timeline(props = {}) {
   const { SpeakerLaneTimeline } = loadTsModule(source('components/MeetingDetails/SpeakerLaneTimeline'), {
     react: { ...hooks.react, memo: fn => fn },
     '@/components/ui/button': { Button: 'button' },
+    './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
     'lucide-react': { Activity: 'Activity', Pause: 'Pause', Play: 'Play' },
   });
@@ -150,7 +151,33 @@ test('playing audio shows Pause; unavailable audio renders no player', () => {
   assert.equal(timeline({ isAudioReady: false }).tree, null);
 });
 
+test('an open lane rename survives optimistic merge until explicitly closed', () => {
+  const hooks = createHookHarness();
+  const { SpeakerLaneTimeline } = loadTsModule(source('components/MeetingDetails/SpeakerLaneTimeline'), {
+    react: { ...hooks.react, memo: fn => fn },
+    '@/components/ui/button': { Button: 'button' },
+    './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
+    '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
+    'lucide-react': { Pause: 'Pause', Play: 'Play' },
+  });
+  const props = { segments: [
+    { id: 'first', timestamp: 0, endTime: 1, speaker: 'A', text: 'Synthetic speech.' },
+    { id: 'second', timestamp: 2, endTime: 3, speaker: 'B', text: 'Synthetic speech.' },
+  ], isAudioReady: true, onApplySpeakerToMatching() {} };
+  const render = () => hooks.render(() => SpeakerLaneTimeline(props));
+  const rename = nodes(render()).find(node => node.type === 'RenameSpeakerPopover' && node.props.speaker === 'B');
+  rename.props.onOpenChange(true);
+  props.segments = props.segments.map(row => ({ ...row, speaker: 'A' }));
+  assert.ok(nodes(render()).some(node => node.type === 'RenameSpeakerPopover' && node.props.speaker === 'B'));
+  rename.props.onOpenChange(false);
+  assert.equal(nodes(render()).some(node => node.type === 'RenameSpeakerPopover' && node.props.speaker === 'B'), false);
+  hooks.unmount();
+});
+
 async function page(attribution, segments, updatedSegments) {
+  // Keep fixture logging out of node:test's subprocess output stream.
+  const previousLog = console.log;
+  console.log = () => {};
   const hooks = createHookHarness();
   let summaryOptions, copyOptions;
   const previousWindow = globalThis.window;
@@ -196,6 +223,7 @@ async function page(attribution, segments, updatedSegments) {
       header: nodes(tree).find(node => node.type === 'MeetingHeader'),
     };
   } finally {
+    console.log = previousLog;
     hooks.unmount();
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
@@ -229,6 +257,12 @@ test('refreshed speaker labels appear without changing the Beta toggle', async (
   assert.equal(result.transcript.props.showSpeakerAttribution, true);
   assert.equal(result.summaryOptions.includeSpeakerLabels, true);
   assert.equal(result.copyOptions.includeSpeakerLabels, true);
+});
+
+test('removing the last label keeps speaker controls available with Beta disabled', async () => {
+  const result = await page(false, longSegments, longSegments.map(row => ({ ...row, speaker: '' })));
+  assert.equal(result.transcript.props.showSpeakerAttribution, true);
+  assert.equal(result.timeline.props.showSpeakerAttribution, true);
 });
 
 test('meeting header metadata displays the total segment count', () => {

@@ -1,32 +1,23 @@
 'use client';
 
-import { useRef, useReducer, startTransition, useEffect, useState, memo, useMemo, useId } from "react";
+import { useRef, useReducer, startTransition, useEffect, memo, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
 import { formatTranscriptDisplayText } from "@/lib/transcriptDisplay";
-import { toast } from "sonner";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuLabel,
-    DropdownMenuSeparator,
-    DropdownMenuSub,
-    DropdownMenuSubContent,
-    DropdownMenuSubTrigger,
-    DropdownMenuTrigger,
-} from "./ui/dropdown-menu";
+import { SpeakerLabelPopover, SpeakerDot } from "./MeetingDetails/SpeakerLabelPopover";
+import { buildSpeakerCatalog, getSpeakerColor, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
 import { Pencil } from "lucide-react";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 
 export interface VirtualizedTranscriptViewProps {
+    speakerSegments?: TranscriptSegmentData[];
+    sourceAttributionEnabled?: boolean;
     focusedSource?: { id: string; request: number };
     onEditSegment?: (segment: TranscriptSegmentData) => void;
     /** Transcript segments to display */
@@ -68,7 +59,6 @@ export interface VirtualizedTranscriptViewProps {
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
-const SPEAKER_PRESET_LABELS = ["Me", "Participants"];
 
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
@@ -79,26 +69,6 @@ function formatRecordingTime(seconds: number | undefined): string {
     const secs = totalSeconds % 60;
 
     return `[${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-}
-
-function normalizeSpeakerOption(speaker: string | null | undefined): string | null {
-    const label = speaker?.trim().replace(/\s+/g, " ");
-    return label || null;
-}
-
-function collectSpeakerOptions(segments: TranscriptSegmentData[]): string[] {
-    const seen = new Set<string>();
-    const options: string[] = [];
-
-    for (const segment of segments) {
-        const label = normalizeSpeakerOption(segment.speaker);
-        if (label && !seen.has(label)) {
-            seen.add(label);
-            options.push(label);
-        }
-    }
-
-    return options;
 }
 
 // Memoized transcript segment component
@@ -113,7 +83,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence,
     onSpeakerChange,
     onApplySpeakerToMatching,
-    speakerOptions,
+    speakerCatalog,
+    sourceAttributionEnabled,
     isActive,
     onSeekToTime,
     onEdit,
@@ -131,27 +102,15 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence: boolean;
     onSpeakerChange?: (segmentId: string, speaker: string | null) => Promise<void> | void;
     onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number> | number | void;
-    speakerOptions: string[];
+    speakerCatalog: readonly SpeakerDetails[];
+    sourceAttributionEnabled: boolean;
     /** Whether playback is currently inside this segment. Computed by the
      * parent so a clock tick only re-renders the rows whose state flips. */
     isActive: boolean;
     onSeekToTime?: (seconds: number) => void;
 }) {
     const displayText = formatTranscriptDisplayText(text);
-    // "Me" = your microphone, "Participants" = system audio. Color-code so the
-    // two sides of the conversation are scannable.
-    const currentSpeaker = showSpeakerLabels ? normalizeSpeakerOption(speaker) : null;
-    const isMe = currentSpeaker === "Me";
-    const [customSpeaker, setCustomSpeaker] = useState("");
-    const [isSaving, setIsSaving] = useState(false);
-    const savingRef = useRef(false);
-    const speakerInputId = useId();
-    const canReplaceMatching = Boolean(currentSpeaker && onApplySpeakerToMatching);
-    const presetOptions = SPEAKER_PRESET_LABELS.filter((label) => label !== currentSpeaker);
-    const existingSpeakerOptions = speakerOptions.filter(
-        (label) => label !== currentSpeaker && !SPEAKER_PRESET_LABELS.includes(label)
-    );
-    const replacementVerb = canReplaceMatching ? "Replace" : "Set";
+    const currentSpeaker = showSpeakerLabels ? speakerLabel(speaker) : null;
     const canSeek = Boolean(onSeekToTime && Number.isFinite(timestamp) && timestamp >= 0);
 
     const seekToSegment = () => {
@@ -159,46 +118,6 @@ const TranscriptSegment = memo(function TranscriptSegment({
             onSeekToTime?.(timestamp);
         }
     };
-
-    const persistSpeakerChange = async (operation: () => Promise<unknown> | unknown): Promise<boolean> => {
-        if (savingRef.current) return false;
-        savingRef.current = true;
-        setIsSaving(true);
-        try {
-            await operation();
-            return true;
-        } catch {
-            toast.error("Could not save the speaker label. Please try again.");
-            return false;
-        } finally {
-            savingRef.current = false;
-            setIsSaving(false);
-        }
-    };
-
-    const saveSpeaker = (nextSpeaker: string | null): Promise<boolean> => {
-        if (!onSpeakerChange) return Promise.resolve(false);
-        return persistSpeakerChange(() => onSpeakerChange(id, nextSpeaker));
-    };
-
-    const replaceSpeaker = (nextSpeaker: string | null): Promise<boolean> => {
-        if (canReplaceMatching && onApplySpeakerToMatching) {
-            return persistSpeakerChange(() => onApplySpeakerToMatching(currentSpeaker, nextSpeaker));
-        }
-        return saveSpeaker(nextSpeaker);
-    };
-
-    const saveCustomSpeaker = async () => {
-        const nextSpeaker = customSpeaker.trim().replace(/\s+/g, " ");
-        if (!nextSpeaker) return;
-        if (await replaceSpeaker(nextSpeaker)) setCustomSpeaker("");
-    };
-
-    const speakerClass = isMe
-        ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
-        : currentSpeaker
-            ? "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-muted-foreground"
-            : "border border-dashed border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-muted-foreground";
 
     return (
         <div
@@ -227,130 +146,12 @@ const TranscriptSegment = memo(function TranscriptSegment({
                 </Tooltip>
                 <div className="min-w-0 flex-1 pr-7">
                     {showSpeakerLabels && onSpeakerChange ? (
-                        <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                                <Button
-                                    variant="ghost"
-                                    type="button"
-                                    disabled={isSaving}
-                                    onClick={(event) => event.stopPropagation()}
-                                    onKeyDown={(event) => event.stopPropagation()}
-                                    className={`h-auto gap-0 whitespace-normal hover:text-current mb-0.5 inline-flex max-w-[11rem] items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide transition disabled:opacity-60 ${speakerClass}`}
-                                >
-                                    <span className="truncate">{currentSpeaker ?? "Label"}</span>
-                                </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="start" className="w-64">
-                                <DropdownMenuLabel className="min-w-0">
-                                    <span className="block truncate">
-                                        {canReplaceMatching ? `Replace ${currentSpeaker}` : "Speaker label"}
-                                    </span>
-                                </DropdownMenuLabel>
-                                {presetOptions.map((label) => (
-                                    <DropdownMenuItem key={label} onSelect={() => void replaceSpeaker(label)}>
-                                        {canReplaceMatching ? `Replace with ${label}` : label}
-                                    </DropdownMenuItem>
-                                ))}
-                                <DropdownMenuItem onSelect={() => void replaceSpeaker(null)}>
-                                    {canReplaceMatching ? "Clear matching labels" : "Clear label"}
-                                </DropdownMenuItem>
-                                {existingSpeakerOptions.length > 0 && (
-                                    <>
-                                        <DropdownMenuSeparator />
-                                        <DropdownMenuLabel className="px-2 py-1 text-xs font-medium text-muted-foreground">
-                                            Existing labels
-                                        </DropdownMenuLabel>
-                                        {existingSpeakerOptions.map((label) => (
-                                            <DropdownMenuItem
-                                                key={label}
-                                                onSelect={() => void replaceSpeaker(label)}
-                                                className="min-w-0"
-                                            >
-                                                <span className="truncate">
-                                                    {canReplaceMatching ? `Replace with ${label}` : label}
-                                                </span>
-                                            </DropdownMenuItem>
-                                        ))}
-                                    </>
-                                )}
-                                <DropdownMenuSeparator />
-                                <div
-                                    className="space-y-1.5 px-2 py-1.5"
-                                    onClick={(e) => e.stopPropagation()}
-                                    onKeyDown={(e) => e.stopPropagation()}
-                                >
-                                    <label htmlFor={speakerInputId} className="text-xs font-medium text-muted-foreground">
-                                        {canReplaceMatching ? "Custom replacement" : "Custom label"}
-                                    </label>
-                                    <div className="flex gap-1.5">
-                                        <Input
-                                            id={speakerInputId}
-                                            disabled={isSaving}
-                                            value={customSpeaker}
-                                            onChange={(e) => setCustomSpeaker(e.target.value)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === "Enter") {
-                                                    e.preventDefault();
-                                                    void saveCustomSpeaker();
-                                                }
-                                            }}
-                                            maxLength={64}
-                                            placeholder="Speaker name"
-                                            className="h-auto min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs md:text-xs shadow-none outline-none focus:border-primary"
-                                        />
-                                        <Button
-                                            variant="ghost"
-                                            type="button"
-                                            onClick={() => void saveCustomSpeaker()}
-                                            disabled={isSaving || !customSpeaker.trim()}
-                                            className="h-auto gap-0 whitespace-normal hover:text-foreground rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
-                                        >
-                                            {replacementVerb}
-                                        </Button>
-                                    </div>
-                                </div>
-                                {canReplaceMatching && (
-                                    <>
-                                        <DropdownMenuSeparator />
-                                        <DropdownMenuSub>
-                                            <DropdownMenuSubTrigger className="min-w-0">
-                                                <span className="truncate">Only this segment</span>
-                                            </DropdownMenuSubTrigger>
-                                            <DropdownMenuSubContent className="w-56">
-                                                {presetOptions.map((label) => (
-                                                    <DropdownMenuItem key={label} onSelect={() => void saveSpeaker(label)}>
-                                                        Set to {label}
-                                                    </DropdownMenuItem>
-                                                ))}
-                                                {existingSpeakerOptions.length > 0 && (
-                                                    <>
-                                                        <DropdownMenuSeparator />
-                                                        {existingSpeakerOptions.map((label) => (
-                                                            <DropdownMenuItem
-                                                                key={label}
-                                                                onSelect={() => void saveSpeaker(label)}
-                                                                className="min-w-0"
-                                                            >
-                                                                <span className="truncate">Set to {label}</span>
-                                                            </DropdownMenuItem>
-                                                        ))}
-                                                    </>
-                                                )}
-                                                <DropdownMenuSeparator />
-                                                <DropdownMenuItem onSelect={() => void saveSpeaker(null)}>
-                                                    Clear this label
-                                                </DropdownMenuItem>
-                                            </DropdownMenuSubContent>
-                                        </DropdownMenuSub>
-                                    </>
-                                )}
-                            </DropdownMenuContent>
-                        </DropdownMenu>
+                        <SpeakerLabelPopover segmentId={id} timestamp={formatRecordingTime(timestamp).slice(1, -1)}
+                            speaker={speaker} catalog={speakerCatalog} sourceAttributionEnabled={sourceAttributionEnabled}
+                            onSpeakerChange={onSpeakerChange} onRename={onApplySpeakerToMatching} />
                     ) : showSpeakerLabels && currentSpeaker && (
-                        <span
-                            className={`mb-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${speakerClass}`}
-                        >
-                            {currentSpeaker}
+                        <span className="mb-0.5 inline-flex items-center gap-1.5 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-foreground">
+                            <SpeakerDot color={getSpeakerColor(speakerCatalog, currentSpeaker)} />{currentSpeaker}
                         </span>
                     )}
                     {onEdit && <div className="absolute right-1 top-1 flex items-center gap-1">
@@ -374,6 +175,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
 
 export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps> = ({
     onEditSegment,
+    speakerSegments,
+    sourceAttributionEnabled = false,
     focusedSource,
     segments,
     emptyState,
@@ -503,7 +306,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
     // Use simple rendering for small lists, virtualization for large lists
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
-    const speakerOptions = useMemo(() => collectSpeakerOptions(segments), [segments]);
+    const speakerCatalog = useMemo(() => buildSpeakerCatalog(speakerSegments?.length ? speakerSegments : segments), [speakerSegments, segments]);
 
     // Resolve the playback position to a single active segment id, so clock
     // ticks re-render at most the two rows whose highlight state changes
@@ -599,7 +402,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
-                                        speakerOptions={speakerOptions}
+                                        speakerCatalog={speakerCatalog}
+                                        sourceAttributionEnabled={sourceAttributionEnabled}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                     />
@@ -665,7 +469,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         onSpeakerChange={showSpeakerLabels ? onSpeakerChange : undefined}
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
-                                        speakerOptions={speakerOptions}
+                                        speakerCatalog={speakerCatalog}
+                                        sourceAttributionEnabled={sourceAttributionEnabled}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                     />

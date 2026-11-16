@@ -24,6 +24,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
+import { useSpeakerLabelVisibility } from '@/hooks/useSpeakerLabelVisibility';
 
 export default function PageContent({
   meeting,
@@ -134,9 +135,10 @@ export default function PageContent({
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
-  const showSpeakerAttribution = shouldShowSpeakerAttribution(
+  const hasSpeakerAttribution = shouldShowSpeakerAttribution(
     sourceAttributionEnabled, hasRecordingFolder, timelineSegments, segments, meetingData.transcripts,
   );
+  const showSpeakerAttribution = useSpeakerLabelVisibility(meeting.id, hasSpeakerAttribution);
   const templates = useTemplates();
 
   // Callback to register the modal open function
@@ -306,9 +308,11 @@ export default function PageContent({
         getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder} />
       {isAudioReady && (
         <SpeakerLaneTimeline
+          key={meeting.id}
           segments={timelineSegments ?? []}
           showSpeakerAttribution={showSpeakerAttribution}
           totalCount={totalCount}
+          onApplySpeakerToMatching={onApplySpeakerToMatching}
           currentTime={audioPlayer.currentTime}
           durationSeconds={audioPlayer.duration || undefined}
           isPlaying={audioPlayer.isPlaying}
@@ -320,6 +324,8 @@ export default function PageContent({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
           focusedSource={focusedSource}
+          speakerSegments={timelineSegments}
+          sourceAttributionEnabled={sourceAttributionEnabled}
           transcripts={meetingData.transcripts}
           onCopyTranscript={copyOperations.handleCopyTranscript}
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
