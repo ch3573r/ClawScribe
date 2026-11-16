@@ -172,7 +172,8 @@ Source also includes a collapsible **Live assistance** panel above the Home
 transcript. Explicitly choose **Ask**, **Summarize so far**, or **List open
 questions** using the configured summary provider; no provider request runs
 automatically. **Share live transcript with the provider** is off by default
-and remembered for future recordings, with the same control in Memory settings.
+and remembered for future recordings. Switch it on in Memory settings; the panel
+shows during a recording only while it is on.
 Selected saved meetings can supplement the current recording. Document selection
 is explicit, and document sharing is independent and resets for each recording.
 The panel and each answer show finalized-through time and incomplete status;

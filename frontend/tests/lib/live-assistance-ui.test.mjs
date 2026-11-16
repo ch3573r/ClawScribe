@@ -97,9 +97,13 @@ test('each manual action displays the response finalized time and actual provide
 });
 
 test('sharing remains an explicit separate control and unavailable modes offer saved-meeting guidance', async () => {
-  const app = await panel({ sharing: false });
+  const hidden = await panel({ sharing: false });
+  try { assert.equal(hidden.render(), null, 'the panel stays off the recording screen while sharing is off'); }
+  finally { hidden.dispose(); }
+  const app = await panel();
   try {
-    app.expand(); const controls = nodes(app.render()).filter(node => node.type === 'switch');
+    app.expand(); await app.owner.setTranscriptSharing(false);
+    const controls = nodes(app.render()).filter(node => node.type === 'switch');
     const transcriptControl = nodes(app.render()).find(node => node.type?.name === 'TranscriptSharingControl');
     assert.ok(transcriptControl, 'the live transcript control renders as a child component');
     assert.equal(transcriptControl.props.state.transcriptSharing, false);
