@@ -251,7 +251,7 @@ Run the ignored Rust benchmark from the repository root with existing models:
 ```powershell
 $env:CLAWSCRIBE_DIARIZATION_EVAL_DIR = "<evaluation-directory>"
 $env:CLAWSCRIBE_DIARIZATION_SEGMENTATION_MODEL = "<segmentation-model.onnx>"
-$env:CLAWSCRIBE_DIARIZATION_EMBEDDING_MODELS = "wespeaker-camplusplus-en=<embedding-model.onnx>"
+$env:CLAWSCRIBE_DIARIZATION_EMBEDDING_MODELS = "nemo-titanet-small-en=<embedding-model.onnx>"
 $env:CLAWSCRIBE_DIARIZATION_EVAL_PROVIDER = "cpu"
 $env:CLAWSCRIBE_DIARIZATION_EVAL_OUT = "<results-directory>"
 cargo test --lib diarization::eval::diarization_accuracy_benchmark -- --ignored --nocapture
