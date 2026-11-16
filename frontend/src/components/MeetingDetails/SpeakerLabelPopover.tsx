@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { getSpeakerColor, getSpeakerOptions, getSpeakerRename, normalizeSpeakerName, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
+import { getSpeakerColor, getSpeakerOptions, getSpeakerRename, resolveSpeakerName, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
 
 export type RenameSpeaker = (from: string | null | undefined, to: string | null) => Promise<number> | number | void;
 
@@ -35,22 +35,25 @@ export function SpeakerDot({ color }: { color: string }) {
   return <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />;
 }
 
-function RenameSpeakerForm({ speaker, catalog, saving, onRename }: {
-  speaker: string; catalog: readonly SpeakerDetails[]; saving: boolean; onRename: (name: string) => void;
+function RenameSpeakerForm({ speaker, catalog, saving, onRename, onBack }: {
+  speaker: string; catalog: readonly SpeakerDetails[]; saving: boolean; onRename: (name: string) => void; onBack?: () => void;
 }) {
   const [value, setValue] = useState(speaker);
   const id = useId();
   const selectInput = useCallback((input: HTMLInputElement | null) => { if (input) { input.focus(); input.select(); } }, []);
   const rename = getSpeakerRename(catalog, speaker, value);
-  return <form className="space-y-3" onSubmit={event => { event.preventDefault(); if (rename.name && !saving) onRename(rename.name); }}>
+  return <form className="space-y-3" onSubmit={event => { event.preventDefault(); if (rename.name && rename.changed && !saving) onRename(rename.name); }}>
     <label htmlFor={id} className="block text-sm font-semibold">Rename speaker</label>
     <Input id={id} aria-describedby={`${id}-help`} value={value} maxLength={64} disabled={saving}
       ref={selectInput}
       onChange={event => setValue(event.target.value)} />
     <p id={`${id}-help`} className="text-xs text-muted-foreground">
-      {rename.merge ? `Merges with ${rename.merge}` : `Applies to ${rename.count} segments`}
+      {rename.merge ? `Merges with ${rename.merge}` : `Applies to ${rename.count} ${rename.count === 1 ? "segment" : "segments"}`}
     </p>
-    <Button type="submit" size="sm" disabled={saving || !rename.name}>{rename.merge ? "Merge" : "Rename"}</Button>
+    <div className="flex gap-2">
+      <Button type="submit" size="sm" disabled={saving || !rename.changed}>{rename.merge ? "Merge" : "Rename"}</Button>
+      {onBack && <Button type="button" variant="ghost" size="sm" disabled={saving} onClick={onBack}>Back</Button>}
+    </div>
   </form>;
 }
 
@@ -93,13 +96,13 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
 }) {
   const current = speakerLabel(speaker);
   const [open, setOpen] = useState(false);
-  const [renaming, setRenaming] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [value, setValue] = useState("");
   const trigger = useRef<HTMLButtonElement>(null);
   const id = useId();
   const { saving, save } = useSpeakerSave();
   const options = getSpeakerOptions(catalog, sourceAttributionEnabled);
-  const nextName = normalizeSpeakerName(value);
+  const nextName = resolveSpeakerName(catalog, value, sourceAttributionEnabled);
   const close = () => { setOpen(false); setValue(""); };
   const assign = (name: string | null) => save(() => onSpeakerChange(segmentId, name), close);
   const moveOption = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -111,7 +114,7 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
     event.preventDefault();
     buttons[next].focus();
   };
-  return <Popover open={open} onOpenChange={next => { if (!saving) { setOpen(next); if (next) setRenaming(false); } }}>
+  return <Popover open={open} onOpenChange={next => { if (!saving) { setOpen(next); if (next) setRenaming(null); } }}>
     <PopoverTrigger asChild>
       <Button ref={trigger} variant="ghost" type="button" disabled={saving}
         aria-label={`Change speaker for segment at ${timestamp}, currently ${current ?? "unlabeled"}`}
@@ -124,8 +127,9 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
       onCloseAutoFocus={event => { event.preventDefault(); trigger.current?.focus(); }}
       onEscapeKeyDown={event => { if (saving) event.preventDefault(); }}>
       <h3 id={`${id}-title`} className={`text-sm font-semibold ${renaming ? "sr-only" : "mb-2"}`}>{renaming ? "Rename speaker" : "Who said this?"}</h3>
-      {renaming && current && onRename ? <RenameSpeakerForm speaker={current} catalog={catalog} saving={saving}
-        onRename={name => void save(() => onRename(current, name), close)} /> : <>
+      {renaming && onRename ? <RenameSpeakerForm speaker={renaming} catalog={catalog} saving={saving}
+        onBack={() => setRenaming(null)}
+        onRename={name => void save(() => onRename(renaming, name), close)} /> : <>
         <div role="group" aria-label="Meeting speakers" className="max-h-52 space-y-1 overflow-y-auto" onKeyDown={moveOption}>
           {options.map(name => <Button key={name} variant="ghost" type="button" disabled={saving}
             aria-label={`Assign ${name}`} aria-pressed={name === current} onClick={() => void assign(name)}
@@ -137,13 +141,13 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
         <form className="mt-3 space-y-1.5" onSubmit={event => { event.preventDefault(); if (nextName) void assign(nextName); }}>
           <label htmlFor={id} className="text-xs font-medium">New speaker</label>
           <div className="flex gap-2">
-            <Input id={id} placeholder="New speaker" value={value} maxLength={64} disabled={saving} onChange={event => setValue(event.target.value)} />
+            <Input id={id} placeholder="Name" value={value} maxLength={64} disabled={saving} onChange={event => setValue(event.target.value)} />
             <Button size="sm" type="submit" disabled={saving || !nextName}>Add</Button>
           </div>
         </form>
         {current && <>
           <Separator className="my-3" />
-          {onRename && <Button variant="ghost" type="button" disabled={saving} onClick={() => setRenaming(true)}
+          {onRename && <Button variant="ghost" type="button" disabled={saving} onClick={() => setRenaming(current)}
             className="h-auto w-full justify-start whitespace-normal px-2 py-1.5 text-left text-xs">Rename {current} everywhere</Button>}
           <Button variant="ghost" type="button" disabled={saving} onClick={() => void assign(null)}
             className="h-auto w-full justify-start px-2 py-1.5 text-xs text-muted-foreground">Remove label</Button>

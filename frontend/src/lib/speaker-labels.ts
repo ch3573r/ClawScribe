@@ -10,7 +10,7 @@ const LANE_COLORS = [
   "hsl(var(--primary))",
   "hsl(var(--chart-2))",
   "hsl(var(--theme-warning-fg))",
-  "hsl(var(--theme-error-fg))",
+  "hsl(var(--chart-5))",
   "hsl(var(--chart-4))",
   "hsl(var(--theme-success-fg))",
 ];
@@ -30,11 +30,13 @@ export function normalizeSpeakerName(value: string): string | null {
 export function buildSpeakerCatalog(rows: readonly SpeakerRow[]): SpeakerDetails[] {
   const catalog = new Map<string | null, SpeakerDetails>();
   const time = (row: SpeakerRow) => Number.isFinite(row.timestamp) && row.timestamp! >= 0 ? row.timestamp! : Infinity;
+  let named = 0;
   for (const row of [...rows].sort((a, b) => time(a) - time(b))) {
     const name = speakerLabel(row.speaker);
     const existing = catalog.get(name);
     if (existing) existing.count++;
-    else catalog.set(name, { name, count: 1, color: LANE_COLORS[catalog.size] ?? NEUTRAL_COLOR });
+    // Unlabelled rows never take a palette slot, so labelling one does not recolour the others.
+    else catalog.set(name, { name, count: 1, color: name === null ? NEUTRAL_COLOR : LANE_COLORS[named++] ?? NEUTRAL_COLOR });
   }
   return [...catalog.values()];
 }
@@ -51,11 +53,24 @@ export function getSpeakerOptions(catalog: readonly SpeakerDetails[], sourceAttr
   return names;
 }
 
-export function getSpeakerRename(catalog: readonly SpeakerDetails[], from: string, value: string) {
+const sameName = (left: string, right: string) => left.toLocaleLowerCase() === right.toLocaleLowerCase();
+
+/** Resolve a typed name to an existing speaker's spelling, ignoring case, so "alice" joins "Alice". */
+export function resolveSpeakerName(catalog: readonly SpeakerDetails[], value: string, sourceAttributionEnabled = false): string | null {
   const name = normalizeSpeakerName(value);
+  if (!name) return null;
+  return getSpeakerOptions(catalog, sourceAttributionEnabled).find(option => sameName(option, name)) ?? name;
+}
+
+export function getSpeakerRename(catalog: readonly SpeakerDetails[], from: string, value: string) {
+  const current = speakerLabel(from);
+  const typed = normalizeSpeakerName(value);
+  const other = typed ? catalog.find(entry => entry.name && entry.name !== current && sameName(entry.name, typed))?.name ?? null : null;
+  const name = other ?? typed;
   return {
     name,
-    count: catalog.find(entry => entry.name === speakerLabel(from))?.count ?? 0,
-    merge: name && name !== speakerLabel(from) && catalog.some(entry => entry.name === name) ? name : null,
+    count: catalog.find(entry => entry.name === current)?.count ?? 0,
+    merge: other,
+    changed: name !== null && name !== current,
   };
 }

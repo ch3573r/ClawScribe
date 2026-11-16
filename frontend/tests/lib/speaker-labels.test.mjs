@@ -13,15 +13,16 @@ test('new speaker names collapse whitespace and reject empty or oversized names'
   assert.equal(normalizeSpeakerName('a'.repeat(65)), null);
 });
 
-test('catalog orders speakers by time, counts all loaded rows and reserves the unlabeled lane colour', () => {
+test('catalog orders speakers by time, counts all loaded rows and keeps unlabeled rows neutral', () => {
   const { buildSpeakerCatalog, getSpeakerColor } = load();
   const catalog = buildSpeakerCatalog([
     { timestamp: 30, speaker: 'Ada' }, { timestamp: 20, speaker: ' Ben ' },
     { timestamp: 0 }, { timestamp: 10, speaker: 'Ada' },
   ]);
   assert.deepEqual(Array.from(catalog, entry => [entry.name, entry.count]), [[null, 1], ['Ada', 2], ['Ben', 1]]);
-  assert.equal(getSpeakerColor(catalog, ' Ada '), 'hsl(var(--chart-2))');
-  assert.equal(getSpeakerColor(catalog, 'Ben'), 'hsl(var(--theme-warning-fg))');
+  assert.equal(getSpeakerColor(catalog, ' Ada '), 'hsl(var(--primary))');
+  assert.equal(getSpeakerColor(catalog, 'Ben'), 'hsl(var(--chart-2))');
+  assert.equal(getSpeakerColor(catalog, null), 'hsl(var(--muted-foreground))');
 });
 
 test('speakers beyond the six lane colours use a neutral dot', () => {
@@ -44,4 +45,25 @@ test('rename detects merging into another speaker and reports the full matching 
   assert.equal(getSpeakerRename(catalog, 'A', ' B ').merge, 'B');
   assert.equal(getSpeakerRename(catalog, 'A', 'New person').count, 2);
   assert.equal(getSpeakerRename(catalog, 'A', ' A ').merge, null);
+});
+
+test('names match existing speakers regardless of case', () => {
+  const { buildSpeakerCatalog, getSpeakerRename, resolveSpeakerName } = load();
+  const catalog = buildSpeakerCatalog([{ speaker: 'Alice', timestamp: 0 }, { speaker: 'Speaker 2', timestamp: 1 }]);
+  const merge = getSpeakerRename(catalog, 'Speaker 2', 'alice');
+  assert.equal(merge.merge, 'Alice');
+  assert.equal(merge.name, 'Alice');
+  assert.equal(getSpeakerRename(catalog, 'Alice', 'ALICE').merge, null);
+  assert.equal(getSpeakerRename(catalog, 'Alice', 'ALICE').changed, true);
+  assert.equal(getSpeakerRename(catalog, 'Alice', ' Alice ').changed, false);
+  assert.equal(resolveSpeakerName(catalog, 'alice'), 'Alice');
+  assert.equal(resolveSpeakerName(catalog, 'me', true), 'Me');
+  assert.equal(resolveSpeakerName(catalog, 'Bob'), 'Bob');
+});
+
+test('unlabelled rows do not take a speaker colour', () => {
+  const { buildSpeakerCatalog } = load();
+  const withGap = buildSpeakerCatalog([{ timestamp: 0 }, { speaker: 'A', timestamp: 1 }]);
+  const without = buildSpeakerCatalog([{ speaker: 'A', timestamp: 1 }]);
+  assert.equal(withGap.find(entry => entry.name === 'A').color, without[0].color);
 });
