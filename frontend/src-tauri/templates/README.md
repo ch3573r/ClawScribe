@@ -22,6 +22,7 @@ General-purpose meeting notes template focusing on key outcomes and actions.
 - Summary
 - Key Decisions
 - Action Items
+- Open Questions
 - Discussion Highlights
 
 ## Template Structure

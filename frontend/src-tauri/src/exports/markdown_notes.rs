@@ -258,7 +258,7 @@ fn extract_labeled_owner(text: &str) -> Option<String> {
         .next()
         .unwrap_or(value)
         .trim();
-    if value.is_empty() {
+    if value.is_empty() || value.eq_ignore_ascii_case("unassigned") {
         None
     } else {
         Some(value.to_string())
@@ -291,8 +291,15 @@ fn clean_task_text(text: &str) -> String {
             t.truncate(pos);
         }
     }
+    // Drop an inline "Owner: …; Due: …" tail, the form the standard template
+    // asks for, so only the task itself becomes the title.
+    if let Some(pos) = t.to_lowercase().find(" owner:") {
+        if t.is_char_boundary(pos) {
+            t.truncate(pos);
+        }
+    }
     t.trim()
-        .trim_end_matches(['-', '—', ':'])
+        .trim_end_matches(['-', '—', ':', '('])
         .trim()
         .to_string()
 }
@@ -432,6 +439,20 @@ Some closing thoughts.";
         let html = markdown_to_xhtml("- <script>alert(1)</script>");
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn parses_the_standard_template_action_list() {
+        let items = parse_action_items(
+            "**Action Items**\n- Send the budget to finance. Owner: Dana; Due: 2026-06-20 [00:01:18](#clawscribe-source-abc123)\n- Find out who approves the contract. Owner: Unassigned; Due: Not specified\n\n**Open Questions**\n- Who signs?",
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].task, "Send the budget to finance.");
+        assert_eq!(items[0].owner.as_deref(), Some("Dana"));
+        assert_eq!(items[0].due_date.as_deref(), Some("2026-06-20"));
+        assert_eq!(items[1].task, "Find out who approves the contract.");
+        assert!(items[1].owner.is_none() && items[1].due_date.is_none());
+        assert!(parse_action_items("## Action Items\nNone noted.\n").is_empty());
     }
 
     #[test]

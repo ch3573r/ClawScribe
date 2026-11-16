@@ -110,7 +110,7 @@ export function TranscriptPanel({
         <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
         <TranscriptButtonGroup transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
           onCopyTranscript={onCopyTranscript} onOpenMeetingFolder={onOpenMeetingFolder} meetingId={meetingId} meetingFolderPath={meetingFolderPath}
-          showSpeakerAttribution={showSpeakerAttribution} onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? () => setReplaceOpen(true) : undefined}
+          onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? () => setReplaceOpen(true) : undefined}
           onAddBookmark={meetingId ? () => setBookmarkOpen(true) : undefined} correctionActions={actions} />
       </div>
   );

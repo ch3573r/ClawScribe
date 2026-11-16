@@ -11,18 +11,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { citationParts, contextLinks, scopeReady, MAX_EVIDENCE_ENTRIES } from "@/lib/knowledge-state";
 import { documentAnchor } from "@/lib/knowledge-documents";
+import { friendlyModel } from "@/lib/friendly-model";
 import { knowledgeService } from "@/services/knowledgeService";
 import { openExternal } from "@/lib/openExternal";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
 import type { AssistantReply, HistoryMessage, SearchMode } from "@/types/knowledge";
 
-function friendlyModel(model?: string) {
-  if (!model) return "Choose a model";
-  const gpt = /gpt[- ]?(\d+(?:\.\d+)?)/i.exec(model);
-  if (gpt) return `GPT-${gpt[1]}`;
-  const named = /^(qwen|llama|gemma|claude|gemini|deepseek)[-:]?([\d.]*)/i.exec(model.split("/").pop() ?? "");
-  return named ? `${named[1][0].toUpperCase()}${named[1].slice(1)}${named[2] ? ` ${named[2]}` : ""}` : "Selected model";
-}
 function sourceTime(reply: AssistantReply, tag: number) {
   const locator = reply.evidence[tag - 1].locator;
   if (locator.kind === "document") return documentAnchor(locator);
@@ -71,7 +65,7 @@ export function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Pi
           aria-label={`Open question for source ${link.cited_tag}`} onClick={() => void state.inspect(reply.evidence[link.context_tag - 1], reply.evidence_metadata[link.context_tag - 1], reply.evidence[link.cited_tag - 1])}>question</Button>
       </TooltipTrigger><TooltipContent>{reply.evidence_metadata[link.context_tag - 1].title} · {sourceTime(reply, link.context_tag)}</TooltipContent></Tooltip>)}
       <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" aria-label="Answer details"><Info className="h-3.5 w-3.5" /></Button></TooltipTrigger>
-        <TooltipContent>Answered with {friendlyModel(reply.model)} · {reply.provider} · {reply.retrieval_mode === "hybrid" ? "Semantic + keyword" : "Keyword"} search</TooltipContent></Tooltip>
+        <TooltipContent>Answered with {reply.model || friendlyModel(reply.model)} · {reply.provider} · {reply.retrieval_mode === "hybrid" ? "Semantic + keyword" : "Keyword"} search</TooltipContent></Tooltip>
     </div>
   </TooltipProvider>;
 }
@@ -149,7 +143,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
       <h2 className={`min-w-0 flex-1 font-semibold ${compact ? "text-sm" : ""}`}>{title}</h2>
-      <span className="rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">{friendlyModel(model)}</span>
+      <TooltipProvider><Tooltip><TooltipTrigger asChild><span tabIndex={0} className="max-w-48 truncate rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{friendlyModel(model)}</span></TooltipTrigger><TooltipContent>{model || "Choose a model"}</TooltipContent></Tooltip></TooltipProvider>
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={compact ? "More options" : "Conversations"} disabled={state.sending || state.creating || state.historyLoading}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="max-w-sm">
           {compact && headerMenuExtra}

@@ -18,6 +18,7 @@ import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { knowledgeService } from '@/services/knowledgeService';
 import { documentAnchor, knowledgeProviderLabel } from '@/lib/knowledge-documents';
+import { friendlyModel } from '@/lib/friendly-model';
 import type { EvidenceDisplay, EvidenceRef, ResolvedEvidence } from '@/types/knowledge';
 
 function time(seconds: number) {
@@ -90,7 +91,7 @@ export function LiveAssistancePanel() {
     </div>
     {expanded && <div id="live-assistance-body" className="space-y-4 border-t border-border p-4">
       <div className="flex flex-wrap items-center gap-2 text-sm"><span>Provider: {knowledgeProviderLabel(state.provider)}</span>
-        {state.model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm">Selected model</Button></TooltipTrigger><TooltipContent>{state.model}</TooltipContent></Tooltip>}
+        {state.model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm">{friendlyModel(state.model)}</Button></TooltipTrigger><TooltipContent>{state.model}</TooltipContent></Tooltip>}
       </div>
       <TranscriptSharingControl {...live} />
       {state.sharingBusy && <p role="status" className="text-xs text-muted-foreground">Saving live sharing…</p>}
