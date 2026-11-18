@@ -14,6 +14,7 @@ function panel(name,service={},options={}) {
     react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},
     '@tauri-apps/api/core':{invoke:async()=>{}},sonner:{toast:{}},
     '@/components/UnencryptedHttpOptIn':{UnencryptedHttpOptIn:'http-option'},
+    '@/components/ICalendarSettings':{ICalendarSettings: 'ical-settings'},
     '@/components/IntegrationIcons':Object.fromEntries(['Microsoft365','OneNote','OneDrive','Planner','ToDo','OutlookCalendar'].map(name=>[`${name}Icon`,`${name}-icon`])),
     '@/components/ui/button':{Button:'button'},'@/components/ui/input':{Input:'input'},
     '@/components/ui/dialog':{Dialog:'dialog',DialogTrigger:'trigger',DialogContent:'content',DialogHeader:'header',DialogTitle:'title',DialogDescription:'description',DialogFooter:'footer'},

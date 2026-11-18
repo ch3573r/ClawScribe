@@ -85,6 +85,19 @@ transcripts, summaries, logs, or the entire database. Local data relies on the
 Windows account, filesystem permissions, device/storage protection, and backup
 practices.
 
+## iCalendar sources
+
+Importing an `.ics` file saves a local copy, which can contain private
+calendar details. Adding a subscription lets ClawScribe retrieve calendar
+data from its provider over HTTPS. The subscription URL uses protected
+credential storage. Removing the source stops refreshes and removes the
+local source from the app.
+
+Choosing an event for a recording saves its title and reviewed invitees
+with the meeting's calendar association. The summary provider receives the
+attendee context when you generate a summary using it. Calendar descriptions,
+attachments and subscription URLs are excluded from that context.
+
 ## Call detection
 
 When enabled, call detection checks local Windows processes, window titles

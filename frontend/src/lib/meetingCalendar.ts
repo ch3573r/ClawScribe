@@ -1,6 +1,6 @@
 "use client";
 
-// Links a recording to a Microsoft calendar event (title + invited attendees),
+// Links a recording to a chosen calendar event (title + invited attendees),
 // for title prefill and attendee context in summaries. UI association, not
 // meeting content — no DB column.
 //
@@ -12,9 +12,12 @@
 //    lazily at summary time, so attendees can't attach to the wrong recording.
 //
 // Privacy: only the minimal title + invited-attendee names/emails are stored
-// (no Teams join URL), and everything is cleared on Microsoft sign-out.
+// (no join URL). Microsoft sign-out clears only the Microsoft associations.
 
 export interface MeetingCalendarLink {
+  /** Older saved links came from Microsoft and have no source discriminator. */
+  source?: "microsoft" | "ical";
+  sourceId?: string;
   eventId: string;
   subject: string | null;
   attendees: MeetingCalendarAttendee[];
@@ -42,6 +45,7 @@ function read(store: Storage | undefined, key: string): MeetingCalendarLink | nu
 
 function normalizeLink(link: MeetingCalendarLink): MeetingCalendarLink {
   return {
+    ...(link.source === "ical" ? { source: "ical", sourceId: link.sourceId } : {}),
     eventId: link.eventId,
     subject: link.subject ?? null,
     attendees: (link.attendees ?? []).map((a) => ({
@@ -52,30 +56,35 @@ function normalizeLink(link: MeetingCalendarLink): MeetingCalendarLink {
   };
 }
 
-function write(store: Storage | undefined, key: string, link: MeetingCalendarLink | null): void {
+function write(store: Storage | undefined, key: string, link: MeetingCalendarLink | null): boolean {
   try {
-    if (!store) return;
+    if (!store) return false;
     if (link) store.setItem(key, JSON.stringify(link));
     else store.removeItem(key);
+    return true;
   } catch {
-    // Best-effort; the app works without the association.
+    return false;
   }
 }
 
-const session = (): Storage | undefined =>
-  typeof window === "undefined" ? undefined : window.sessionStorage;
-const local = (): Storage | undefined =>
-  typeof window === "undefined" ? undefined : window.localStorage;
+function storage(kind: "sessionStorage" | "localStorage"): Storage | undefined {
+  try { return typeof window === "undefined" ? undefined : window[kind]; }
+  catch { return undefined; }
+}
+const session = () => storage("sessionStorage");
+const local = () => storage("localStorage");
 
 /** The calendar event chosen for the next recording (title prefill source). */
 export function getPendingCalendar(): MeetingCalendarLink | null {
   return read(session(), PENDING_KEY);
 }
-export function setPendingCalendar(link: MeetingCalendarLink | null): void {
-  write(session(), PENDING_KEY, link);
+export function setPendingCalendar(link: MeetingCalendarLink | null): boolean {
+  const saved = write(session(), PENDING_KEY, link);
+  if (saved && typeof window !== "undefined") window.dispatchEvent(new Event("clawscribe-pending-calendar-changed"));
+  return saved;
 }
 export function clearPendingCalendar(): void {
-  write(session(), PENDING_KEY, null);
+  setPendingCalendar(null);
 }
 
 /**
@@ -90,7 +99,8 @@ export function clearPendingCalendar(): void {
 export function beginRecordingCalendar(snapshot: MeetingCalendarLink | null): void {
   write(session(), ACTIVE_KEY, snapshot);
   const pending = getPendingCalendar();
-  if (snapshot && pending && pending.eventId === snapshot.eventId) {
+  if (snapshot && pending && pending.eventId === snapshot.eventId &&
+      (pending.source ?? "microsoft") === (snapshot.source ?? "microsoft")) {
     clearPendingCalendar();
   }
 }
@@ -115,17 +125,17 @@ export function setMeetingCalendar(
   write(local(), MEETING_PREFIX + meetingId, link);
 }
 
-/** Drop all calendar associations + the pending selection (on MS sign-out). */
-export function clearAllCalendarLinks(): void {
-  clearPendingCalendar();
-  write(session(), ACTIVE_KEY, null);
+/** A Microsoft sign-out also clears Graph links created before iCalendar support. */
+export function clearMicrosoftCalendarLinks(): void {
+  if (getPendingCalendar()?.source !== "ical") clearPendingCalendar();
+  if (read(session(), ACTIVE_KEY)?.source !== "ical") write(session(), ACTIVE_KEY, null);
   const store = local();
   if (!store) return;
   try {
     const keys: string[] = [];
     for (let i = 0; i < store.length; i++) {
       const k = store.key(i);
-      if (k && k.startsWith(MEETING_PREFIX)) keys.push(k);
+      if (k && k.startsWith(MEETING_PREFIX) && read(store, k)?.source !== "ical") keys.push(k);
     }
     keys.forEach((k) => store.removeItem(k));
   } catch {

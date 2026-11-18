@@ -257,6 +257,12 @@ link to inspect the text, reveal it in the transcript, or play its saved audio.
 Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
+**Settings → Add-ons → iCalendar** lets you import an `.ics` file or add a
+read-only subscription from a calendar provider. Upcoming meetings appears
+on Home. Choose **Use for next recording** to use an event title and invitees.
+You can review individual invitees in Add-ons. iCalendar works without a
+Microsoft account. See [iCalendar files and subscriptions](docs/integrations/icalendar.md).
+
 Microsoft sign-in supports calendar context and exports. Windows call detection
 can prompt or start recording for the Teams, Zoom, Webex and Google Meet
 providers you enable. Optional automatic stop applies to the recording started

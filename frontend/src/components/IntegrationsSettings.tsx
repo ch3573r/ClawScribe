@@ -1,6 +1,8 @@
 "use client";
 
 import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
+import { ICalendarSettings } from "@/components/ICalendarSettings";
+import { usePendingCalendar } from "@/hooks/usePendingCalendar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ElementType, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -2097,7 +2099,7 @@ function CalendarPanel() {
   const ms = useMicrosoftExport();
   const isConnected = ms.connection.state === "connected";
   const calendarAvailable = isConnected && !ms.connection.unavailableExports?.includes("Calendar lookup");
-  const [usedForNext, setUsedForNext] = useState(false);
+  const pending = usePendingCalendar();
   const [attendeeIncluded, setAttendeeIncluded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -2129,12 +2131,7 @@ function CalendarPanel() {
     : "Your current/next meeting and upcoming events, with invited attendees.";
   const current = ms.currentMeeting;
 
-  // The "Set for your next recording" confirmation belongs to the event shown;
-  // reset it whenever the current/next meeting changes (reload or rollover) so
-  // it can't claim a different visible event was selected.
-  useEffect(() => {
-    setUsedForNext(false);
-  }, [current?.id]);
+  const usedForNext = pending !== null && pending.source !== "ical" && pending.eventId === current?.id;
 
   useEffect(() => {
     const next: Record<string, boolean> = {};
@@ -2225,7 +2222,7 @@ function CalendarPanel() {
                 type="button"
                 className="h-auto mt-2 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary hover:bg-primary/20"
                 onClick={() => {
-                  setPendingCalendar({
+                  const saved = setPendingCalendar({
                     eventId: current.id,
                     subject: current.subject,
                     attendees: current.attendees.map((attendee, index) => ({
@@ -2233,7 +2230,7 @@ function CalendarPanel() {
                       included: attendeeIncluded[attendeeKey(attendee, index)] !== false,
                     })),
                   });
-                  setUsedForNext(true);
+                  if (!saved) toast.error("Could not save the calendar selection on this device.");
                 }}
                 title="Title your next recording from this event and add its invited attendees to the summary"
               >
@@ -2828,6 +2825,8 @@ export function IntegrationsSettings() {
           )}
         </div>
       </section>
+
+      <ICalendarSettings />
 
       <section className="space-y-4">
         <GroupHeader

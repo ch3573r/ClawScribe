@@ -91,6 +91,9 @@ The app uses the selected event to seed the next recording title and to prepend
 invited attendees to the generated summary as a checklist. The event body is not
 read for summary context. Invited attendees are not proof of actual attendance.
 
+ClawScribe also supports [local iCalendar files and read-only subscriptions](icalendar.md).
+Those sources and their recording associations remain available after Microsoft sign-out.
+
 ## OneNote
 
 The reliable OneNote path is create-by-name/create-by-ID, not section listing.

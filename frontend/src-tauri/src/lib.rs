@@ -50,6 +50,7 @@ pub mod diagnostics;
 pub mod exports;
 mod external_url;
 pub mod groq;
+mod ical_sources;
 pub mod knowledge;
 pub mod library;
 pub mod mcp;
@@ -603,6 +604,7 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
+        .manage(ical_sources::CalendarStore::default())
         .manage(summary::edit_exit::SummaryEditsState::default())
         .manage(knowledge::KnowledgeState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
@@ -1092,6 +1094,11 @@ pub fn run() {
             exports::commands::create_onedrive_destination_folder,
             exports::commands::export_meeting_to_onedrive_files,
             exports::commands::list_calendar_events,
+            ical_sources::list_ical_sources,
+            ical_sources::add_ical_file,
+            ical_sources::add_ical_subscription,
+            ical_sources::read_ical_source,
+            ical_sources::remove_ical_source,
             exports::commands::current_or_next_meeting,
             exports::commands::preview_planner_tasks,
             exports::commands::export_selected_planner_tasks,

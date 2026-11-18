@@ -12,7 +12,7 @@ import {
   type ToDoListInfo,
   type CalendarEvent,
 } from "@/services/microsoftExportService";
-import { clearAllCalendarLinks } from "@/lib/meetingCalendar";
+import { clearMicrosoftCalendarLinks } from "@/lib/meetingCalendar";
 
 export function useMicrosoftExport() {
   const [connection, setConnection] = useState<MicrosoftConnectionInfo>({
@@ -134,8 +134,8 @@ export function useMicrosoftExport() {
       setOneNoteNotebookListingLimited(false);
       setCalendarEvents([]);
       setCurrentMeeting(null);
-      // Drop any stored calendar associations (attendee PII) on sign-out.
-      clearAllCalendarLinks();
+      // Drop Microsoft calendar associations and their attendee data on sign-out.
+      clearMicrosoftCalendarLinks();
       // Broadcast so the OTHER hook instances (OneNote / Planner panels, which
       // each call this hook separately) also reset and don't show stale data.
       // Sign-in already broadcasts this event from the backend.

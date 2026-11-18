@@ -122,6 +122,7 @@ try {
         "teams_detection::",
         "database::meeting_files::tests",
         "credentials::tests",
+        "ical_sources::",
         "exports::",
         "openclaw::tests",
         "openai::",

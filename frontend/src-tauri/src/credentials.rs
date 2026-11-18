@@ -56,6 +56,23 @@ pub(crate) fn open(scope: &str, stored: &str) -> Result<String, String> {
     open_with(scope, stored, &PlatformCredentials)
 }
 
+/// Remove the external keyring entry. An inline DPAPI value is removed with its record.
+pub(crate) fn forget(scope: &str, stored: &str) -> Result<(), String> {
+    if let Some(id) = stored.strip_prefix(&format!("{PREFIX}keyring:")) {
+        let id = uuid::Uuid::parse_str(id).map_err(|_| UNAVAILABLE)?;
+        return match keyring::Entry::new(SERVICE, &format!("{scope}/{id}"))
+            .and_then(|entry| entry.delete_credential())
+        {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(UNAVAILABLE.into()),
+        };
+    }
+    if stored.starts_with(&format!("{PREFIX}dpapi:")) {
+        return Ok(());
+    }
+    Err(UNAVAILABLE.into())
+}
+
 fn open_with(scope: &str, stored: &str, backend: &dyn CredentialBackend) -> Result<String, String> {
     if stored.is_empty() {
         return Ok(String::new());
