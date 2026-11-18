@@ -7,11 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.59**. This Windows GPU preview changes the default voice
-model for speaker detection, reworks speaker relabeling, points summary citations
-at the cited segment and lists action items so they can be exported. It builds on
-the meeting details rework and the Claude Code provider from 0.5.58. See the
-[0.5.59 preview notes](docs/releases/0.5.59.md) and the
+**0.5.60** is a Windows GPU preview. You can select your next meeting from an
+iCalendar file or subscription, test an installed transcription model on this
+PC, and give a local assistant read-only access to saved meetings. See the
+[0.5.60 preview notes](docs/releases/0.5.60.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -331,6 +330,20 @@ checks. You still choose when to install; checking at launch is a separate optio
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.5.60 preview
+
+- Import an iCalendar file or add a read-only subscription in **Settings → Add-ons**.
+  Choose an upcoming event to prefill the next recording title and review invitees.
+- Enable call detection for Teams, Zoom, Webex or Google Meet. Automatic stop can
+  finish the recording that the detector started when the call ends.
+- See language estimates for the microphone and system audio when source
+  attribution is enabled. **Test this PC** times an installed speech model.
+- Connect an MCP client to the local meeting library with read-only access.
+  The Live assistance panel appears when live transcript sharing is enabled.
+
+See the [preview notes](docs/releases/0.5.60.md) for updater settings and pending
+real-device checks.
 
 ## What changed in 0.5.59 preview
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.60
+
+- Import local iCalendar files or subscribe to a read-only HTTPS or webcal feed. Upcoming meetings combines these events with Microsoft meetings. Choose an event to prefill the next recording title and review the invitees. iCalendar works while signed out of Microsoft.
+- Windows call detection supports Teams, Zoom, Webex and Google Meet. Optional automatic stop applies to the recording started for the detected call.
+- With source attribution enabled, supported multilingual transcription models track microphone and system-audio languages separately. Test this PC measures an installed model on German and English speech samples.
+- Enable local assistant access to let an MCP client search and read saved meeting information. Live assistance stays hidden when live transcript sharing is off.
+- The Windows GPU installers and updater use version 0.5.60. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Installed upgrade and update discovery, real calendar subscriptions, dual-source recording and playback, call start and stop on target devices, and two-hour meeting performance still need real-device acceptance.
+
 ## 0.5.59
 
 - Speaker detection defaults to the NeMo TitaNet small voice model with a grouping threshold of 1.15, and fallback models are ordered by measured accuracy. On seven four-person AMI meetings the mean error in Auto fell from 54% to 23% and the detected speaker count from 10–114 to 3–9. Add an accuracy evaluation harness; evaluation audio, models and results stay outside the repository.
