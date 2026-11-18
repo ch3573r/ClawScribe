@@ -92,6 +92,18 @@ mod stop_tests {
             prepare_live_recording(&runtime, &mut second_manager, true).unwrap();
         let second = second_start.commit();
         assert_ne!(first, second);
+        first_manager.mark_detected_call(&first);
+        assert!(first_manager.owns_detected_call(&first));
+        assert!(
+            !second_manager.owns_detected_call(&second),
+            "Manual starts have no detector owner"
+        );
+        second_manager.mark_detected_call(&first);
+        assert!(
+            !second_manager.owns_detected_call(&first),
+            "A late response cannot claim a replacement session"
+        );
+        assert!(!second_manager.owns_detected_call(&second));
         assert!(uuid::Uuid::parse_str(&second).is_ok());
         drop(first_start); // A late failed-start guard must not clear the newer session.
         first_sink.ingest(&update); // The old producer retains its first ID.
@@ -452,14 +464,14 @@ pub struct TranscriptionStatus {
 
 /// Start recording with default devices
 pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    start_recording_with_meeting_name(app, None).await
+    start_recording_with_meeting_name(app, None).await.map(drop)
 }
 
 /// Start recording with default devices and optional meeting name
 pub async fn start_recording_with_meeting_name<R: Runtime>(
     app: AppHandle<R>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let start_timer = Instant::now();
     info!("Starting recording with default devices");
 
@@ -750,7 +762,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         start_timer.elapsed()
     );
 
-    Ok(())
+    Ok(live_session_id)
 }
 
 /// Start recording with specific devices
@@ -759,7 +771,9 @@ pub async fn start_recording_with_devices<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
 ) -> Result<(), String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
+    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None)
+        .await
+        .map(drop)
 }
 
 /// Start recording with specific devices and optional meeting name
@@ -768,7 +782,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let start_timer = Instant::now();
     info!("Starting recording with selected devices");
 
@@ -973,13 +987,41 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         start_timer.elapsed()
     );
 
-    Ok(())
+    Ok(live_session_id)
 }
 
 /// Stop recording with optimized graceful shutdown ensuring NO transcript chunks are lost
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
+) -> Result<bool, String> {
+    stop_recording_session(app, None).await
+}
+
+#[tauri::command]
+pub async fn stop_detected_call_recording<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> Result<bool, String> {
+    let stopped = stop_recording_session(app.clone(), Some(&session_id)).await?;
+    if stopped {
+        app.emit("recording-stop-complete", true)
+            .map_err(|_| "Recording stopped. Open ClawScribe to finish saving.".to_string())?;
+    }
+    Ok(stopped)
+}
+
+pub(crate) fn mark_detected_call(session: &str) {
+    if let Ok(mut manager) = RECORDING_MANAGER.lock() {
+        if let Some(manager) = manager.as_mut() {
+            manager.mark_detected_call(session);
+        }
+    }
+}
+
+async fn stop_recording_session<R: Runtime>(
+    app: AppHandle<R>,
+    expected_session: Option<&str>,
 ) -> Result<bool, String> {
     // All entry points share one owner through drain, save and completion.
     // Concurrent callers wait for that owner rather than taking its manager.
@@ -994,6 +1036,19 @@ pub async fn stop_recording<R: Runtime>(
     if !IS_RECORDING.load(Ordering::SeqCst) {
         info!("Recording was not active");
         return Ok(false);
+    }
+    // Validate inside the shared stop-owner guard. A delayed detector request
+    // cannot take ownership of a subsequent recording after a manual stop.
+    if let Some(expected) = expected_session {
+        let manager = RECORDING_MANAGER
+            .lock()
+            .map_err(|_| "Recording state unavailable")?;
+        if !manager
+            .as_ref()
+            .is_some_and(|m| m.owns_detected_call(expected))
+        {
+            return Ok(false);
+        }
     }
     IS_STOPPING.store(true, Ordering::Release);
     let stopped_live_identity =

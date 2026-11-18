@@ -1,5 +1,31 @@
 # Local meeting library
 
+## Local assistant access
+
+Open **Settings → Add-ons → Local assistant access** and enable **Allow
+read-only access**. Copy the displayed configuration into your MCP client's
+server settings and reconnect it. For clients with separate fields, use the
+ClawScribe executable as the command and `--mcp-stdio` as the sole argument.
+The client starts its own local process, including when the desktop window
+is closed.
+
+| Tool | Result |
+| --- | --- |
+| `list_meetings` | Saved meeting IDs, titles and dates, newest first. |
+| `search_meetings` | Meetings matching literal text in their title or current transcript. |
+| `get_meeting` | Saved meeting details, summary and notes. |
+| `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
+| `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
+
+Use the meeting ID from a list or search result. Follow the returned offsets
+for long transcripts and notes. Calendar invitations stored in the desktop
+calendar picker and attached reference documents are outside this interface.
+
+Enabling this setting grants access to local clients running under your user
+account. A client may send retrieved content to its own provider. Turning the
+switch off blocks new reads, including from clients already connected. Copies
+already read are under the client's control.
+
 ## Meeting memory
 
 The **Meetings** tab opens the saved archive. Switch to **Meeting memory** for

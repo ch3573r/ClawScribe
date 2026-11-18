@@ -85,6 +85,23 @@ transcripts, summaries, logs, or the entire database. Local data relies on the
 Windows account, filesystem permissions, device/storage protection, and backup
 practices.
 
+## Call detection
+
+When enabled, call detection checks local Windows processes, window titles
+and call controls for the meeting apps you selected. For supported websites,
+it reads the browser's address bar to identify the meeting service and room.
+The automation keeps the call identifier in memory and runs on your PC.
+
+## Local MCP clients
+
+The optional local MCP server uses the launching client's standard input and
+output. Its access setting starts off and applies to apps running as the
+current user. While enabled, clients can read saved meeting titles, notes,
+summaries and transcripts, and obtain paths to saved recordings. A client
+with access to those files can also read the audio. Turning access off
+revokes subsequent reads. A connected client determines how it stores or
+transmits content it has already received.
+
 ## Application Analytics
 
 ClawScribe contains no application analytics or telemetry client. The backend

@@ -72,10 +72,10 @@ import {
   type DriveDestination,
 } from "@/services/microsoftExportService";
 import {
-  getTeamsDetectionMode,
-  setTeamsDetectionMode,
-  type TeamsDetectionMode,
+  CALL_PROVIDERS, getCallSettings, setCallSettings,
+  type CallProvider, type CallSettings, type TeamsDetectionMode,
 } from "@/lib/autoRecord";
+import { getCallDetectionStatus } from "@/services/teamsDetectionService";
 
 type AddonState =
   | "ready"
@@ -1808,29 +1808,50 @@ function OpenClawPanel() {
 // Add-ons: how to react when a Teams meeting is detected. Live detection status
 // is in Diagnostics.
 function TeamsAutoStartPanel() {
-  const [mode, setMode] = useState<TeamsDetectionMode>("off");
+  const [settings, update] = useState<CallSettings>({ mode: "off", providers: ["teams"], autoStop: false });
+  const [checked, setChecked] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const revision = useRef(0);
   useEffect(() => {
-    setMode(getTeamsDetectionMode());
+    update(getCallSettings());
+    return () => { revision.current++; };
   }, []);
-  const onChange = (next: TeamsDetectionMode) => {
-    setMode(next);
-    setTeamsDetectionMode(next);
+  const change = (next: CallSettings) => {
+    try {
+      setCallSettings(next);
+      update(next);
+      revision.current++;
+      setChecked(null);
+      setChecking(false);
+    } catch { toast.error("Could not save call detection settings."); }
+  };
+  const check = async () => {
+    const version = ++revision.current;
+    setChecking(true);
+    try {
+      const scan = await getCallDetectionStatus(settings.providers);
+      if (version !== revision.current) return;
+      const names = [...new Set(scan.active.map(call => CALL_PROVIDERS[call.provider]))];
+      setChecked(!scan.supported ? "Call detection is available on Windows." : !scan.complete
+        ? "Could not check all meeting windows." : names.length ? `Active calls in ${names.join(", ")}.` : "No active call detected.");
+    } catch { if (version === revision.current) setChecked("Could not check meeting windows."); }
+    finally { if (version === revision.current) setChecking(false); }
   };
   return (
     <AddonPanel
       icon={TeamsIcon}
-      title="Teams auto-record"
-      state={mode === "off" ? "planned" : "ready"}
+      title="Call recording"
+      state={settings.mode === "off" ? "planned" : "ready"}
       showBadge={false}
-      detail="Windows detector for Teams desktop and browser meetings, in several UI languages."
+      detail="Detect active calls in selected apps on Windows."
     >
       <div className="space-y-2">
         <label className="block text-sm font-medium text-foreground">
           When a meeting is detected
         </label>
         <Select
-          value={mode}
-          onValueChange={(value) => onChange(value as TeamsDetectionMode)}
+          value={settings.mode}
+          onValueChange={(value) => change({ ...settings, mode: value as TeamsDetectionMode })}
         >
           <SelectTrigger aria-label="When a meeting is detected" className="h-auto shadow-none w-full rounded-lg border border-border bg-muted px-3 py-2 text-sm">
             <SelectValue />
@@ -1841,14 +1862,27 @@ function TeamsAutoStartPanel() {
             <SelectItem value="auto">Auto-start recording</SelectItem>
           </SelectContent>
         </Select>
-        <p className="text-xs text-muted-foreground">
-          {mode === "off"
-            ? "Detection runs but takes no action."
-            : mode === "prompt"
-              ? "Shows a prompt once per detected meeting; you choose whether to record."
-              : "Starts a recording once per detected meeting; re-arms when it ends. You can still stop manually."}{" "}
-          Live detection status is under Diagnostics.
-        </p>
+        <fieldset className="space-y-2 py-2">
+          <legend className="text-sm font-medium">Meeting apps</legend>
+          {(Object.keys(CALL_PROVIDERS) as CallProvider[]).map(provider => (
+            <label key={provider} className="flex items-center gap-2 text-sm">
+              <Checkbox checked={settings.providers.includes(provider)} onCheckedChange={on => change({
+                ...settings, providers: on === true ? [...settings.providers, provider] : settings.providers.filter(p => p !== provider),
+              })} />
+              {CALL_PROVIDERS[provider]}
+            </label>
+          ))}
+        </fieldset>
+        <label className="flex items-center gap-2 text-sm">
+          <Switch checked={settings.autoStop} disabled={settings.mode === "off" || !settings.providers.length}
+            onCheckedChange={autoStop => change({ ...settings, autoStop })} />
+          Stop and save when the detected call ends
+        </label>
+        <p className="text-xs text-muted-foreground">Applies to recordings started by call detection. Switching browser tabs keeps the recording running.</p>
+        <Button variant="outline" size="sm" disabled={checking || !settings.providers.length} onClick={check}>
+          {checking ? "Checking…" : "Check for a call"}
+        </Button>
+        {checked && <p role="status" className="text-xs text-muted-foreground">{checked}</p>}
       </div>
     </AddonPanel>
   );
@@ -2809,7 +2843,7 @@ export function IntegrationsSettings() {
         <GroupHeader
           icon={<TeamsIcon />}
           title="Meeting automation"
-          desc="Choose what ClawScribe does when a Teams meeting is detected. Live status is under Diagnostics."
+          desc="Choose which calls ClawScribe can record on Windows."
         />
         <TeamsAutoStartPanel />
       </section>

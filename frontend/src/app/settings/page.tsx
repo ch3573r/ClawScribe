@@ -20,6 +20,8 @@ import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
 import { CustomVocabularySettings } from "@/components/CustomVocabularySettings";
+import { TranscriptionPcTest } from "@/components/TranscriptionPcTest";
+import { LocalMcpSettings } from "@/components/LocalMcpSettings";
 import { RecordingSettings } from "@/components/RecordingSettings";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { SummaryModelSettings } from "@/components/SummaryModelSettings";
@@ -137,6 +139,8 @@ export default function SettingsPage() {
               transcriptModelConfig={transcriptModelConfig}
               setTranscriptModelConfig={setTranscriptModelConfig}
             />
+            <TranscriptionPcTest key={JSON.stringify([transcriptModelConfig.provider, transcriptModelConfig.model])}
+              provider={transcriptModelConfig.provider} model={transcriptModelConfig.model} />
             <CustomVocabularySettings />
           </div>
         );
@@ -145,7 +149,7 @@ export default function SettingsPage() {
       case "memory":
         return <KnowledgeSettings />;
       case "integrations":
-        return <IntegrationsSettings />;
+        return <div className="space-y-6"><IntegrationsSettings /><LocalMcpSettings /></div>;
       case "diagnostics":
         return <DiagnosticsSettings />;
       case "beta":

@@ -252,6 +252,16 @@ impl NemotronEngine {
         self.current_model_name.read().await.clone()
     }
 
+    pub(crate) async fn session_backends(
+        &self,
+    ) -> Option<(super::model::SessionBackend, super::model::SessionBackend)> {
+        self.current_model
+            .read()
+            .await
+            .as_ref()
+            .map(|model| model.backend)
+    }
+
     pub async fn is_model_loaded(&self) -> bool {
         self.current_model.read().await.is_some()
     }

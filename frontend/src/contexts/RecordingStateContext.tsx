@@ -30,6 +30,7 @@ export enum RecordingStatus {
 }
 
 interface RecordingState {
+  sessionId: string | null;
   sessionMode: RecordingMode;
   isRecording: boolean;           // Is a recording session active
   isPaused: boolean;              // Is the recording paused
@@ -97,6 +98,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     finally { modeSave.current = false; setIsSavingMode(false); }
   }, []);
   const [state, setState] = useState<RecordingState>({
+    sessionId: null,
     sessionMode: 'live',
     isRecording: false,
     isPaused: false,
@@ -175,9 +177,11 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         const status = backend.is_recording && lifecycleStatus.current === RecordingStatus.IDLE
           ? RecordingStatus.RECORDING : lifecycleStatus.current;
         lifecycleStatus.current = status;
+        const sessionId = backend.is_recording ? (backendSession?.id ?? metadata?.id ?? null) : null;
         setState(prev => {
           if (
             prev.status === status &&
+            prev.sessionId === sessionId &&
             prev.sessionMode === (backend.recording_mode ?? 'live') &&
             prev.isRecording === backend.is_recording &&
             prev.isPaused === backend.is_paused &&
@@ -186,7 +190,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
             prev.activeDuration === backend.active_duration
           ) return prev;
           return {
-            ...prev, status,
+            ...prev, status, sessionId,
             sessionMode: backend.recording_mode ?? 'live',
             isRecording: backend.is_recording,
             isPaused: backend.is_paused,
@@ -237,7 +241,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         lifecycleRevision.current++;
         lifecycleStatus.current = RecordingStatus.RECORDING;
         setState(prev => ({
-          ...prev, sessionMode: candidate.mode, isRecording: true,
+          ...prev, sessionId: canonical.id, sessionMode: candidate.mode, isRecording: true,
           isActive: !prev.isPaused, status: RecordingStatus.RECORDING, statusMessage: undefined, verificationError: null,
         }));
         startPolling();
@@ -311,7 +315,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
           return {
             ...prev, status,
             statusMessage: status === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
-            isRecording: false, isPaused: false, isActive: false,
+            sessionId: null, isRecording: false, isPaused: false, isActive: false,
             recordingDuration: null, activeDuration: null,
             verificationError: null,
           };

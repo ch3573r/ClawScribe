@@ -15,8 +15,8 @@ the last transcript segment beyond the source.
 
 Select the microphone and the output device actually used by the meeting app.
 Verify both sources in a short saved recording before relying on a long session.
-Teams detection is optional and distinct from audio capture; Webex and other
-applications can be recorded through system audio without a dedicated meeting bot.
+Call detection is optional. With the correct output device selected, manual
+recordings can capture audio from any meeting app.
 
 The Settings microphone test is independent of recording capture. On Windows,
 an unavailable preferred microphone falls back to the current default, with the
@@ -35,7 +35,37 @@ language/model selection. Playback is the reference when a name, number, short
 answer, or overlapping utterance needs review. A confidence value is not proof
 that a segment is correct or incorrect.
 
+## Testing local transcription speed
+
+In **Settings → Transcription**, select an installed Whisper, Parakeet or Nemotron model
+and choose **Test this PC**. When a hosted transcription provider is selected,
+the test uses the local Parakeet model used for live recording. The benchmark
+shares the recording and transcription job gate. Run it while those jobs are
+idle. It uses two synthetic, local speech samples (German and English) and
+reports inference time separately from model loading.
+
+Compare processing time with the sample duration. Taking longer than the
+audio means a stream of similar speech would accumulate a backlog. The result
+also identifies samples that produced no text. For slow results, try a
+smaller installed model or select **Record now, transcribe later**. Short
+sample timing measures model speed. Meeting duration, other apps, audio
+capture, language and overlapping speakers affect live performance.
+
 ## Live Transcript Behavior
+
+With **Auto** selected, ClawScribe compares each speech segment with the
+microphone and system-audio levels captured over the same interval. Only
+segments clearly attributable to one source can establish its language.
+Overlapping speakers are still transcribed from the mix.
+
+Whisper checks the language acoustically on longer turns. Two credible
+observations on the same source establish a language or confirm a switch.
+Short replies can then use the recent language for that source. For example,
+the microphone can remain German while remote participants switch to English.
+The live transcript displays the confirmed languages. Multilingual Parakeet
+v3 and Ultra estimate them from finalized text and keep using their normal
+decoder. Fixed-language and translation modes retain the user's choice.
+Starting a new recording clears both language histories.
 
 The transcript view preserves recognized words, including words that resemble
 English fillers in other languages. It does not silently remove German `er` or

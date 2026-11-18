@@ -52,6 +52,7 @@ mod external_url;
 pub mod groq;
 pub mod knowledge;
 pub mod library;
+pub mod mcp;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
 pub mod notifications;
@@ -422,6 +423,29 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     system_device_name: Option<String>,
     meeting_name: Option<String>,
 ) -> Result<(), String> {
+    start_named_session(app, mic_device_name, system_device_name, meeting_name)
+        .await
+        .map(drop)
+}
+
+#[tauri::command]
+async fn start_detected_call_recording<R: Runtime>(
+    app: AppHandle<R>,
+    mic_device_name: Option<String>,
+    system_device_name: Option<String>,
+    meeting_name: Option<String>,
+) -> Result<String, String> {
+    let id = start_named_session(app, mic_device_name, system_device_name, meeting_name).await?;
+    audio::recording_commands::mark_detected_call(&id);
+    Ok(id)
+}
+
+async fn start_named_session<R: Runtime>(
+    app: AppHandle<R>,
+    mic_device_name: Option<String>,
+    system_device_name: Option<String>,
+    meeting_name: Option<String>,
+) -> Result<String, String> {
     log_info!("Recording start requested");
 
     // Clone meeting_name for notification use later
@@ -447,7 +471,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     };
 
     match recording_result {
-        Ok(_) => {
+        Ok(session_id) => {
             log_info!("Recording started successfully via tauri command");
 
             // Notification work must not hold up the command response; capture
@@ -467,7 +491,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 }
             });
 
-            Ok(())
+            Ok(session_id)
         }
         Err(e) => {
             log_error!("Failed to start recording via tauri command: {}", e);
@@ -477,12 +501,17 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
 }
 
 #[tauri::command]
-async fn set_language_preference(language: String) -> Result<(), String> {
+async fn set_language_preference(app: AppHandle, language: String) -> Result<(), String> {
     let mut lang_pref = LANGUAGE_PREFERENCE
         .lock()
         .map_err(|e| format!("Failed to set language preference: {}", e))?;
+    if *lang_pref == language {
+        return Ok(());
+    }
     log_info!("Setting language preference to: {}", language);
     *lang_pref = language;
+    drop(lang_pref);
+    audio::transcription::worker::reset_live_source_languages(&app);
     Ok(())
 }
 
@@ -778,6 +807,9 @@ pub fn run() {
             get_audio_devices,
             trigger_microphone_permission,
             start_recording_with_devices,
+            start_detected_call_recording,
+            audio::recording_commands::stop_detected_call_recording,
+            audio::transcription::worker::get_live_source_languages,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
             stop_audio_level_monitoring,
@@ -807,6 +839,9 @@ pub fn run() {
             audio::recording_commands::get_active_audio_output,
             // OpenClaw handoff commands
             diagnostics::get_diagnostics_snapshot,
+            audio::pc_test::run_transcription_pc_test,
+            mcp::settings::get_mcp_access,
+            mcp::settings::set_mcp_access,
             openclaw::get_openclaw_config_status,
             openclaw::get_openclaw_submission_status,
             openclaw::save_openclaw_config,
@@ -814,6 +849,7 @@ pub fn run() {
             // Teams meeting detection commands
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,
+            teams_detection::calls::get_call_detection_status,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,

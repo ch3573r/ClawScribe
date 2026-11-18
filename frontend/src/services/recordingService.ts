@@ -111,6 +111,14 @@ export class RecordingService {
     });
   }
 
+  async startDetectedCall(micDeviceName: string | null, systemDeviceName: string | null, meetingName: string): Promise<string> {
+    return invoke('start_detected_call_recording', { micDeviceName, systemDeviceName, meetingName });
+  }
+
+  async stopDetectedCall(sessionId: string): Promise<boolean> {
+    return invoke('stop_detected_call_recording', { sessionId });
+  }
+
   /**
    * Stop recording and save to file
    * @param savePath - Path to save audio file

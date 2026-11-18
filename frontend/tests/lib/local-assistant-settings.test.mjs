@@ -1,0 +1,49 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
+import { loadTsModule } from './load-ts-module.mjs';
+
+const jsx = (type, props) => ({ type, props });
+function nodes(root) {
+  if (Array.isArray(root)) return root.flatMap(nodes);
+  return root?.props ? [root, ...nodes(root.props.children)] : [];
+}
+
+test('local assistant configuration appears only after a successful opt-in and disappears on revocation', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  let grant = false;
+  const save = deferred();
+  const calls = [];
+  const { LocalMcpSettings } = loadTsModule('src/components/LocalMcpSettings.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'Button' }, '@/components/ui/label': { Label: 'Label' },
+    '@/components/ui/page-section': { PageSection: 'PageSection' }, '@/components/ui/switch': { Switch: 'Switch' },
+    '@/components/ui/textarea': { Textarea: 'Textarea' },
+    '@tauri-apps/api/core': { invoke: async (name, args) => {
+      calls.push(name);
+      if (name === 'set_mcp_access') {
+        if (args.enabled) await save.promise;
+        grant = args.enabled;
+      }
+      return { enabled: grant, command: 'ClawScribe.exe' };
+    } },
+  });
+  const find = kind => nodes(hooks.render(LocalMcpSettings)).find(node => node.type === kind);
+  assert.equal(find('Switch').props.disabled, true);
+  await flush();
+  assert.equal(find('Textarea'), undefined);
+  const enable = find('Switch').props.onCheckedChange;
+  enable(true);
+  enable(true);
+  assert.equal(find('Textarea'), undefined);
+  assert.equal(calls.filter(name => name === 'set_mcp_access').length, 1);
+  save.resolve();
+  await flush();
+  const config = JSON.parse(find('Textarea').props.value);
+  assert.deepEqual(config.mcpServers.clawscribe, { command: 'ClawScribe.exe', args: ['--mcp-stdio'] });
+  find('Switch').props.onCheckedChange(false);
+  await flush();
+  assert.equal(find('Switch').props.checked, false);
+  assert.equal(find('Textarea'), undefined);
+});

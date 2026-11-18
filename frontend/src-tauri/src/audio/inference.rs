@@ -36,6 +36,12 @@ pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     Ok(permit)
 }
 
+/// A caller already holding the exclusive job may need to restore a model
+/// after cancelling a native load/decode. The native permit outlives its waiter.
+pub(crate) async fn wait_for_native_idle() {
+    drop(NATIVE.acquire().await);
+}
+
 pub(crate) async fn claim_job_preempting_local_summary(
     reason: &'static str,
 ) -> Result<OwnedSemaphorePermit, String> {

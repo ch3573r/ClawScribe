@@ -37,12 +37,7 @@ function isTranscriptionReadinessError(error: unknown): boolean {
  * - Recording notification display
  * - Auto-start from sidebar via sessionStorage flag
  */
-export function useRecordingStart(
-  isRecording: boolean,
-  setIsRecording: (value: boolean) => void
-): UseRecordingStartReturn {
-  const [isAutoStarting, setIsAutoStarting] = useState(false);
-
+export function useStartRecordingSession(setIsRecording: (value: boolean) => void) {
   const { clearTranscripts, setMeetingTitle } = useTranscripts();
   const { setIsMeetingActive } = useSidebar();
   const { selectedDevices } = useConfig();
@@ -73,19 +68,23 @@ export function useRecordingStart(
   }, [generateMeetingTitle]);
 
   const startBackendRecording = useCallback(
-    async (source: 'home_page' | 'sidebar_auto' | 'sidebar_direct'): Promise<string> => {
+    async (source: 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call'): Promise<{ title: string; sessionId?: string }> => {
       const { title, calendar: pendingCal } = snapshotPendingForStart();
       setMeetingTitle(title);
       setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
+      let sessionId: string | undefined;
+      const mic = selectedDevices?.micDevice || null;
+      const system = selectedDevices?.systemDevice || null;
       try {
-        await recordingService.startRecordingWithDevices(
-          selectedDevices?.micDevice || null,
-          selectedDevices?.systemDevice || null,
-          title,
-        );
+        if (source === 'detected_call') {
+          sessionId = await recordingService.startDetectedCall(mic, system, title);
+        } else {
+          await recordingService.startRecordingWithDevices(mic, system, title);
+        }
       } catch (error) {
-        await offerSpeakerDetectionCancellation(error, () => startBackendRecording(source));
+        // A delayed retry of a detected start needs fresh meeting evidence.
+        if (source !== 'detected_call') await offerSpeakerDetectionCancellation(error, () => startBackendRecording(source));
         throw error;
       }
 
@@ -95,7 +94,7 @@ export function useRecordingStart(
       setIsMeetingActive(true);
       Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();
-      return title;
+      return { title, sessionId };
     },
     [
       clearTranscripts,
@@ -107,12 +106,22 @@ export function useRecordingStart(
       snapshotPendingForStart,
     ],
   );
+  return startBackendRecording;
+}
+
+export function useRecordingStart(
+  isRecording: boolean,
+  setIsRecording: (value: boolean) => void
+): UseRecordingStartReturn {
+  const [isAutoStarting, setIsAutoStarting] = useState(false);
+  const startBackendRecording = useStartRecordingSession(setIsRecording);
+  const { setStatus } = useRecordingState();
 
   // Handle manual recording start (from button click)
   const handleRecordingStart = useCallback(async () => {
     try {
       console.log('handleRecordingStart called - starting backend recording');
-      const title = await startBackendRecording('home_page');
+      const { title } = await startBackendRecording('home_page');
       console.log('Backend recording started successfully');
       console.log('Recording title:', title);
     } catch (error) {
@@ -138,7 +147,7 @@ export function useRecordingStart(
 
           // Start the actual backend recording
           try {
-            const title = await startBackendRecording('sidebar_auto');
+            const { title } = await startBackendRecording('sidebar_auto');
             console.log('Auto-start backend recording completed:', title);
           } catch (error) {
             console.error('Failed to auto-start recording:', error);
@@ -158,7 +167,6 @@ export function useRecordingStart(
   }, [
     isRecording,
     isAutoStarting,
-    selectedDevices,
     setStatus,
     startBackendRecording,
   ]);
@@ -175,7 +183,7 @@ export function useRecordingStart(
       setIsAutoStarting(true);
 
       try {
-        const title = await startBackendRecording('sidebar_direct');
+        const { title } = await startBackendRecording('sidebar_direct');
         console.log('Backend recording completed:', title);
       } catch (error) {
         console.error('Failed to start recording from sidebar:', error);
@@ -197,7 +205,6 @@ export function useRecordingStart(
   }, [
     isRecording,
     isAutoStarting,
-    selectedDevices,
     setStatus,
     startBackendRecording,
   ]);

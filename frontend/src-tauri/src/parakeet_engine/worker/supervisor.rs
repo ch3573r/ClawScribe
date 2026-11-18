@@ -189,6 +189,8 @@ pub struct TranscriptionWorker {
     args: Vec<OsString>,
     child: Option<RunningChild>,
     last_load: Option<LoadSpec>,
+    directml_registered: bool,
+    successful_loads: u64,
     directml_disabled: Arc<AtomicBool>,
     load_timeout: Duration,
     #[cfg(test)]
@@ -212,6 +214,8 @@ impl TranscriptionWorker {
             args,
             child: None,
             last_load: None,
+            directml_registered: false,
+            successful_loads: 0,
             directml_disabled: DIRECTML_DISABLED
                 .get_or_init(|| Arc::new(AtomicBool::new(false)))
                 .clone(),
@@ -270,7 +274,11 @@ impl TranscriptionWorker {
             is_cancelled,
         )?;
         match response {
-            Response::Loaded => {
+            Response::Loaded {
+                directml_registered,
+            } => {
+                self.directml_registered = directml_registered;
+                self.successful_loads += 1;
                 self.last_load = Some(spec);
                 Ok(())
             }
@@ -285,6 +293,10 @@ impl TranscriptionWorker {
                 Err(WorkerError::Protocol)
             }
         }
+    }
+
+    pub(crate) fn session_status(&self) -> (bool, u64) {
+        (self.directml_registered, self.successful_loads)
     }
 
     pub fn transcribe(
@@ -720,7 +732,7 @@ while ($true) {{
             if ($mode -eq 'load-crash') {{ exit 9 }}
         }}
         if ($mode -eq 'reload-stall' -and [IO.File]::Exists($state)) {{ Start-Sleep -Seconds 60 }}
-        $response = '"Loaded"'
+        $response = ConvertTo-Json -Compress -InputObject @{{ Loaded = @{{ directml_registered = [bool]$request.Load.use_directml }} }}
     }} else {{
         $encodedPcm = if ($pcmLength -gt 0) {{ [Convert]::ToBase64String($pcm) }} else {{ '' }}
         Add-Content -LiteralPath ($state + '.pcm') -Value $encodedPcm
@@ -755,6 +767,7 @@ while ($true) {{
             let state = directory.path().join("state");
             let mut worker = fake(mode, &state);
             worker.load(spec(true), &|| false).unwrap();
+            assert_eq!(worker.session_status(), (true, 1));
             let result = worker
                 .transcribe(vec![0.0, 0.5], Duration::from_secs(8), &|| false)
                 .unwrap();
@@ -767,6 +780,7 @@ while ($true) {{
             assert_eq!(attempts.len(), 2);
             assert_eq!(attempts[0], attempts[1]);
             assert!(!worker.last_load.as_ref().unwrap().use_directml);
+            assert_eq!(worker.session_status(), (false, 2));
             worker.load(spec(true), &|| false).unwrap();
             worker.shutdown();
             let loads = std::fs::read_to_string(state.with_extension("loads")).unwrap();

@@ -8,6 +8,7 @@ pub mod nemotron_provider;
 pub mod parakeet_provider;
 pub mod provider;
 pub mod queue;
+pub(crate) mod source_language;
 pub mod whisper_provider;
 pub mod worker;
 

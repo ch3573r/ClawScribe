@@ -22,7 +22,11 @@ function panel(name,service={},options={}) {
     '@/lib/exportDestinations':{getExportDestinations:()=>options.destinations??{},setExportDestinations:value=>saved.push(value)},
     '@/services/microsoftExportService':{microsoftExportService:{listOneDriveDestinations:async()=>[root],...service}},
     '@/services/teamsDetectionService':{},'@/services/confluenceExportService':{confluenceExportService:options.confluence},'@/lib/meetingCalendar':{},
-    '@/lib/autoRecord':{getTeamsDetectionMode:()=>options.teamsMode??'off',setTeamsDetectionMode:()=>{}},
+    '@/lib/autoRecord':{
+      CALL_PROVIDERS:{teams:'Microsoft Teams',zoom:'Zoom',webex:'Webex',googleMeet:'Google Meet'},
+      getCallSettings:()=>({mode:options.teamsMode??'off',providers:['teams'],autoStop:false}),
+      setCallSettings:()=>{},
+    },
   });
   const settingsTree=IntegrationsSettings();
   const component=nodes(settingsTree).find(node=>node.type?.name===name);

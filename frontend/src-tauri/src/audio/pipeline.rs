@@ -121,6 +121,36 @@ struct SourceAttributionHistory {
 }
 
 impl SourceAttributionHistory {
+    // A language hint may affect later words, so require consistent speech on
+    // one input. The optional speaker labels use their existing, looser rule.
+    fn confidently_matches(&self, source: &DeviceType, start_ms: f64, end_ms: f64) -> bool {
+        let duration = end_ms - start_ms;
+        if duration <= 0.0 {
+            return false;
+        }
+        let mut clear_ms = 0.0;
+        let mut covered_ms = 0.0;
+        for window in &self.windows {
+            let overlap =
+                end_ms.min(window.end_timestamp_ms) - start_ms.max(window.start_timestamp_ms);
+            if overlap <= 0.0 {
+                continue;
+            }
+            covered_ms += overlap;
+            let (signal, other) = match source {
+                DeviceType::Microphone => (window.mic_snr, window.sys_snr),
+                DeviceType::System => (window.sys_snr, window.mic_snr),
+            };
+            if !signal.is_finite() || !other.is_finite() || other >= 3.0 {
+                return false;
+            }
+            if signal >= 3.0 && signal >= other * 4.0 {
+                clear_ms += overlap;
+            }
+        }
+        covered_ms >= 0.9 * duration && clear_ms >= 0.5 * duration
+    }
+
     fn record_window(&mut self, sample_count: usize, sample_rate: u32, mic_snr: f32, sys_snr: f32) {
         if sample_count == 0 {
             return;
@@ -1005,7 +1035,16 @@ impl AudioPipeline {
     }
 
     async fn enqueue_transcription_chunk(&mut self, chunk: AudioChunk) -> bool {
-        match self.transcription_sender.send(chunk).await {
+        let start_ms = chunk.timestamp * 1000.0;
+        let end_ms = start_ms + 1000.0 * chunk.data.len() as f64 / f64::from(chunk.sample_rate);
+        let clear_source =
+            self.attribution_history
+                .confidently_matches(&chunk.device_type, start_ms, end_ms);
+        match self
+            .transcription_sender
+            .send_with_source(chunk, clear_source)
+            .await
+        {
             Ok(()) => {
                 self.queue_write_failures.record_success();
                 true
@@ -1502,6 +1541,20 @@ mod live_segment_cap_tests {
 #[cfg(test)]
 mod source_attribution_tests {
     use super::{DeviceType, SourceAttributionHistory};
+
+    #[test]
+    fn language_attribution_requires_coverage_and_rejects_overlap_or_a_change_of_source() {
+        let mut history = SourceAttributionHistory::default();
+        for (mic, system) in [(10., 1.), (10., 1.), (1., 10.), (8., 7.), (1., 1.)] {
+            history.record_window(16_000, 16_000, mic, system);
+        }
+        assert!(history.confidently_matches(&DeviceType::Microphone, 0., 2000.));
+        assert!(history.confidently_matches(&DeviceType::System, 2000., 3000.));
+        assert!(!history.confidently_matches(&DeviceType::Microphone, 0., 3000.));
+        assert!(!history.confidently_matches(&DeviceType::System, 2000., 4000.));
+        assert!(!history.confidently_matches(&DeviceType::Microphone, 4000., 5000.));
+        assert!(!history.confidently_matches(&DeviceType::System, 5000., 6000.));
+    }
 
     #[test]
     fn segments_emitted_together_use_their_own_source_windows() {

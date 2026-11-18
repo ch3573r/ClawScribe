@@ -2,7 +2,7 @@ use ndarray::{Array, Array1, Array2, Array3, ArrayD, ArrayViewD, IxDyn};
 use once_cell::sync::Lazy;
 use ort::execution_providers::CPUExecutionProvider;
 #[cfg(feature = "directml")]
-use ort::execution_providers::DirectMLExecutionProvider;
+use ort::execution_providers::{DirectMLExecutionProvider, ExecutionProvider};
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -126,6 +126,7 @@ pub struct ParakeetModel {
     vocab: Vec<String>,
     blank_idx: i32,
     vocab_size: usize,
+    pub(crate) directml_registered: bool,
 }
 
 impl Drop for ParakeetModel {
@@ -145,14 +146,14 @@ impl ParakeetModel {
     ) -> Result<Self, ParakeetError> {
         let decoder_use_directml = Self::decoder_directml_enabled(precision_suffix, use_directml);
 
-        let encoder = Self::init_session(
+        let (encoder, encoder_directml) = Self::init_session(
             &model_dir,
             "encoder-model",
             None,
             precision_suffix,
             use_directml,
         )?;
-        let decoder_joint = Self::init_session(
+        let (decoder_joint, decoder_directml) = Self::init_session(
             &model_dir,
             "decoder_joint-model",
             None,
@@ -160,7 +161,7 @@ impl ParakeetModel {
             decoder_use_directml,
         )?;
         // Preprocessor is tiny — keep it on CPU to avoid DirectML transfer overhead.
-        let preprocessor = Self::init_session(&model_dir, "nemo128", None, None, false)?;
+        let (preprocessor, _) = Self::init_session(&model_dir, "nemo128", None, None, false)?;
 
         let (vocab, blank_idx) = Self::load_vocab(&model_dir)?;
         let vocab_size = vocab.len();
@@ -178,6 +179,7 @@ impl ParakeetModel {
             vocab,
             blank_idx,
             vocab_size,
+            directml_registered: encoder_directml || decoder_directml,
         })
     }
 
@@ -225,19 +227,21 @@ impl ParakeetModel {
         intra_threads: Option<usize>,
         precision_suffix: Option<&str>,
         use_directml: bool,
-    ) -> Result<Session, ParakeetError> {
-        // DirectML (Windows GPU) when compiled in and enabled; CPU is always the
-        // fallback so unsupported ops and non-directml builds still run.
-        let mut providers = Vec::new();
-        let using_directml = cfg!(feature = "directml") && use_directml;
+    ) -> Result<(Session, bool), ParakeetError> {
+        let mut builder =
+            Session::builder()?.with_optimization_level(GraphOptimizationLevel::Level3)?;
+        // ORT normally hides registration failures and proceeds with CPU.
+        // Keep that fallback but retain the actual session providers.
         #[cfg(feature = "directml")]
-        if use_directml {
-            log::info!("Parakeet: registering DirectML execution provider for {model_name}");
-            providers.push(DirectMLExecutionProvider::default().build());
-        }
+        let using_directml = use_directml
+            && DirectMLExecutionProvider::default()
+                .register(&mut builder)
+                .is_ok();
         #[cfg(not(feature = "directml"))]
-        let _ = use_directml;
-        providers.push(CPUExecutionProvider::default().build());
+        let using_directml = false;
+        if use_directml && !using_directml {
+            log::warn!("Parakeet: DirectML unavailable for {model_name}, using CPU");
+        }
 
         let model_filename = if let Some(suffix) = precision_suffix {
             let precision_name = format!("{model_name}.{suffix}.onnx");
@@ -257,9 +261,7 @@ impl ParakeetModel {
             regular_name
         };
 
-        let mut builder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_execution_providers(providers)?;
+        builder = builder.with_execution_providers([CPUExecutionProvider::default().build()])?;
 
         if using_directml {
             // DirectML requires sequential execution and disabled memory pattern
@@ -288,7 +290,7 @@ impl ParakeetModel {
             );
         }
 
-        Ok(session)
+        Ok((session, using_directml))
     }
 
     fn load_vocab<P: AsRef<Path>>(model_dir: P) -> Result<(Vec<String>, i32), ParakeetError> {

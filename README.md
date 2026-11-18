@@ -38,8 +38,8 @@ Choose a microphone and the output device used by Teams, Webex, or the other
 meeting application. Make a short test recording and verify that both your
 voice and the remote participants are audible in playback. Start recording,
 review the live transcript, then stop and allow queued transcription to finish
-before generating notes. Automatic meeting detection is a separate Teams
-feature; general system-audio capture does not require it.
+before generating notes. You can also enable call detection for selected
+meeting apps under **Settings → Add-ons**.
 
 **Test mic** in Recording settings shows the microphone actually tested. If a
 preferred Windows microphone is unavailable, the test identifies its fallback
@@ -112,10 +112,23 @@ are pinned to specific revisions and SHA-256-verified before use. Damaged or
 incomplete files require re-download; unchanged verified files reuse their
 integrity checks.
 
+In **Settings → Transcription**, choose **Test this PC** to time an installed
+Whisper, Parakeet or Nemotron model on two built-in speech samples in German and English.
+The result shows the model, runtime backend, and processing time for each
+sample. If the model falls behind, you can switch to **Record now, transcribe
+later**. The test runs locally and leaves the microphone free.
+
 Whisper preserves recognized repetitions and short answers instead of removing
 them through phrase matching. Nemotron's **Auto** language follows the system
 locale; select the spoken language explicitly when it differs. Parakeet's Auto
 selection does not label an unknown language as English.
+
+In **Auto** language mode, the live transcript can show a separate language for
+the microphone and system audio. Whisper uses confirmed languages to help with
+short replies and continues checking longer turns for language switches.
+Multilingual Parakeet estimates the languages from finalized text. When
+the two sources overlap, ClawScribe keeps the transcript and leaves each
+source's language unchanged. See [live transcript behavior](docs/meeting-quality.md#live-transcript-behavior).
 
 **Settings → Transcription → Custom vocabulary** stores up to 500 names or
 terms (64 characters each) and corrects similar spellings in new recordings,
@@ -244,8 +257,12 @@ link to inspect the text, reveal it in the transcript, or play its saved audio.
 Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
-Microsoft sign-in supports calendar context and exports. Teams detection can
-prompt or auto-start recording according to your setting. Invited attendees
+Microsoft sign-in supports calendar context and exports. Windows call detection
+can prompt or start recording for the Teams, Zoom, Webex and Google Meet
+providers you enable. Optional automatic stop applies to the recording started
+for that call after the detector observes its end. Existing Teams preferences
+remain Teams-only until you select other providers.
+See [call detection](docs/teams-detection.md). Invited attendees
 can be included as a reviewable attendance checklist; an invitation does not
 prove attendance.
 
@@ -273,6 +290,12 @@ OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
 ## Library And Data
+
+**Settings → Add-ons → Local assistant access** lets an MCP client read the
+saved meeting library. Enable the switch, copy the configuration, and add it
+to your assistant. It can search meetings, read their notes and transcripts,
+and locate saved recordings. The connection uses local standard input and
+output. Access is off by default. See [local assistant access](docs/local-library.md#local-assistant-access).
 
 **Backup and restore** saves a portable archive of meeting data, summary context,
 and recordings. Restore adds missing meetings and skips existing IDs. Backups

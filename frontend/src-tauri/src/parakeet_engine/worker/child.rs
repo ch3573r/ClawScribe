@@ -38,8 +38,11 @@ pub(super) fn run() -> i32 {
                 drop(model.take());
                 match ParakeetModel::new(&model_dir, precision_suffix.as_deref(), use_directml) {
                     Ok(loaded) => {
+                        let directml_registered = loaded.directml_registered;
                         model = Some(loaded);
-                        Response::Loaded
+                        Response::Loaded {
+                            directml_registered,
+                        }
                     }
                     // Fixed errors cannot accidentally include model/file/transcript contents.
                     Err(_) => Response::Error("Parakeet model could not be loaded".into()),

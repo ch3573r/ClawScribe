@@ -252,11 +252,10 @@ export function LanguageSelection({
           <p className="text-muted-foreground">
             <strong>Current:</strong> {languageLabel(selectedLanguageName)}
           </p>
-          {selectedLanguage === 'auto' && (
-            <div className="p-2 bg-warning border border-warning-border/30 rounded text-warning-foreground">
-              <p className="font-medium">⚠️ Auto detect may produce incorrect results</p>
-              <p className="mt-1">For best accuracy, select your specific language (e.g., English, Spanish, etc.)</p>
-            </div>
+          {selectedLanguage === 'auto' && provider === 'localWhisper' && (
+            <p className="text-sm text-muted-foreground">
+              During live recording, Whisper tracks the language of microphone and system speech independently when one source is clear.
+            </p>
           )}
           {selectedLanguage === 'auto-translate' && (
             <div className="p-2 bg-primary/10 border border-primary rounded text-primary">

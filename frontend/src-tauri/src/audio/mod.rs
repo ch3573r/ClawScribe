@@ -30,6 +30,7 @@ pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
 pub(crate) mod inference;
 pub mod level_monitor;
 pub mod outcome;
+pub mod pc_test;
 pub mod pipeline;
 pub mod playback_monitor;
 pub mod post_processor;

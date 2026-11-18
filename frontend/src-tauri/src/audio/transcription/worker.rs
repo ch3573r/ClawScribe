@@ -8,6 +8,9 @@ use super::queue::{
     QueuedAudioChunk, TranscriptionMetrics, TranscriptionMetricsSnapshot,
     TranscriptionQueueReceiver,
 };
+use super::source_language::{
+    parakeet_multilingual, LanguageEvidence, SourceLanguageSnapshot, SourceLanguages,
+};
 use crate::api::TranscriptWord;
 use crate::audio::AudioChunk;
 use log::{debug, error, info, warn};
@@ -74,6 +77,31 @@ pub fn current_transcription_metrics() -> Option<TranscriptionMetricsSnapshot> {
         .lock()
         .ok()
         .and_then(|metrics| metrics.as_ref().map(|metrics| metrics.snapshot()))
+}
+
+#[tauri::command]
+pub(crate) fn get_live_source_languages() -> Option<SourceLanguageSnapshot> {
+    let active = ACTIVE_TRANSCRIPTION_METRICS.lock().ok()?.clone()?;
+    let state = active.source_languages.lock().ok()?;
+    state.as_ref().map(SourceLanguages::snapshot)
+}
+
+pub(crate) fn reset_live_source_languages<R: Runtime>(app: &AppHandle<R>) {
+    let active = ACTIVE_TRANSCRIPTION_METRICS
+        .lock()
+        .ok()
+        .and_then(|metrics| metrics.clone());
+    let snapshot = active.and_then(|metrics| {
+        metrics
+            .source_languages
+            .lock()
+            .ok()?
+            .as_mut()
+            .map(SourceLanguages::reset)
+    });
+    if let Some(snapshot) = snapshot {
+        let _ = app.emit("live-source-languages", snapshot);
+    }
 }
 
 struct ProcessingMetricsGuard {
@@ -210,6 +238,22 @@ pub fn start_transcription_task<R: Runtime>(
         );
 
         let failure_notice = Arc::new(SegmentFailureNotice::default());
+        let current_model = transcription_engine
+            .get_current_model()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let evidence = match &transcription_engine {
+            TranscriptionEngine::Whisper(_) => Some(LanguageEvidence::WhisperAudio),
+            TranscriptionEngine::Parakeet(_) if parakeet_multilingual(&current_model) => {
+                Some(LanguageEvidence::TranscriptText)
+            }
+            _ => None,
+        };
+        if let Some(evidence) = evidence {
+            if let Ok(mut languages) = task_metrics.source_languages.lock() {
+                *languages = Some(SourceLanguages::new(live_sink.session_id.clone(), evidence));
+            }
+        }
 
         // Spawn worker tasks
         let mut worker_handles = tokio::task::JoinSet::new();
@@ -228,17 +272,13 @@ pub fn start_transcription_task<R: Runtime>(
             let failure_notice = failure_notice.clone();
             let live_sink = live_sink.clone();
             let vocabulary = vocabulary.clone();
+            let current_model = current_model.clone();
 
             worker_handles.spawn(async move {
                 info!("👷 Worker {} started", worker_id);
 
                 // PRE-VALIDATE model state to avoid repeated async calls per chunk
                 let initial_model_loaded = engine_clone.is_model_loaded().await;
-                let current_model = engine_clone
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-
                 let engine_name = engine_clone.provider_name();
 
                 if initial_model_loaded {
@@ -286,6 +326,18 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+                            let source = chunk.device_type.clone();
+                            let mut language = crate::get_language_preference_internal();
+                            let auto = matches!(language.as_deref(), None | Some("auto"));
+                            let input = if auto && queued_chunk.clear_source {
+                                metrics_clone.source_languages.lock().ok().and_then(|state|
+                                    state.as_ref().map(|s| s.input(&source, chunk_timestamp, chunk_duration)))
+                            } else {
+                                None
+                            };
+                            if let Some((_, Some(hint))) = input {
+                                language = Some(hint.to_owned());
+                            }
 
                             // Speaker label from the segment's dominant source (set
                             // by the pipeline): mic = "Me", system audio = "Participants".
@@ -305,7 +357,7 @@ pub fn start_transcription_task<R: Runtime>(
                             };
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(&engine_clone, chunk)
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, language)
                                 .await
                             {
                                 Ok((
@@ -313,6 +365,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     confidence_opt,
                                     is_partial,
                                     provider_word_timestamps,
+                                    detected_language,
                                 )) => {
                                     debug!("Transcription result: chars={}, confidence={:?}, partial={}", transcript.chars().count(), confidence_opt, is_partial);
                                     if is_partial {
@@ -326,6 +379,14 @@ pub fn start_transcription_task<R: Runtime>(
                                     // which silently dropped short valid utterances ("Ja",
                                     // "Nein", names, numbers). Confidence is display-only.
                                     if !transcript.trim().is_empty() {
+                                        if let Some((generation, _)) = input.filter(|_| !is_partial) {
+                                            let snapshot = metrics_clone.source_languages.lock().ok().and_then(|mut state| {
+                                                state.as_mut()?.observe(generation, &source, detected_language, chunk_timestamp, chunk_duration, confidence_opt, &transcript)
+                                            });
+                                            if let Some(snapshot) = snapshot {
+                                                let _ = app_clone.emit("live-source-languages", snapshot);
+                                            }
+                                        }
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         debug!("Recognized speech retained");
 
@@ -663,12 +724,20 @@ impl SegmentFailureNotice {
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
-/// Returns: (text, confidence Option, is_partial)
 async fn transcribe_chunk_with_provider(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
-) -> std::result::Result<(String, Option<f32>, bool, Option<Vec<TranscriptWord>>), TranscriptionError>
-{
+    language: Option<String>,
+) -> std::result::Result<
+    (
+        String,
+        Option<f32>,
+        bool,
+        Option<Vec<TranscriptWord>>,
+        Option<&'static str>,
+    ),
+    TranscriptionError,
+> {
     let chunk_start_time = chunk.timestamp;
     let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
     let chunk_end_time = chunk_start_time + chunk_duration;
@@ -705,17 +774,14 @@ async fn transcribe_chunk_with_provider(
     // Transcribe using the appropriate engine (with improved error handling)
     match engine {
         TranscriptionEngine::Whisper(whisper_engine) => {
-            // Get language preference from global state
-            let language = crate::get_language_preference_internal();
-
             match whisper_engine
-                .transcribe_audio_with_confidence(speech_samples, language)
+                .transcribe_live(speech_samples, language)
                 .await
             {
-                Ok((text, confidence, is_partial)) => {
+                Ok(((text, confidence, is_partial), detected)) => {
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), confidence, is_partial, None));
+                        return Ok((String::new(), confidence, is_partial, None, None));
                     }
 
                     debug!(
@@ -723,7 +789,7 @@ async fn transcribe_chunk_with_provider(
                         confidence, is_partial
                     );
 
-                    Ok((cleaned_text, confidence, is_partial, None))
+                    Ok((cleaned_text, confidence, is_partial, None, detected))
                 }
                 Err(e) => {
                     error!("Whisper transcription failed for chunk");
@@ -742,7 +808,7 @@ async fn transcribe_chunk_with_provider(
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), None, false, None));
+                        return Ok((String::new(), None, false, None, None));
                     }
 
                     debug!("Parakeet transcription completed");
@@ -758,7 +824,7 @@ async fn transcribe_chunk_with_provider(
                             None,
                         );
 
-                    Ok((cleaned_text, None, false, word_timestamps))
+                    Ok((cleaned_text, None, false, word_timestamps, None))
                 }
                 Err(e) => {
                     error!("Parakeet transcription failed for chunk");
@@ -771,13 +837,17 @@ async fn transcribe_chunk_with_provider(
         }
         TranscriptionEngine::Provider(provider) => {
             // NEW: Trait-based provider (clean, unified interface)
-            let language = crate::get_language_preference_internal();
-
             match provider.transcribe(speech_samples, language).await {
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), result.confidence, result.is_partial, None));
+                        return Ok((
+                            String::new(),
+                            result.confidence,
+                            result.is_partial,
+                            None,
+                            None,
+                        ));
                     }
 
                     debug!(
@@ -792,6 +862,7 @@ async fn transcribe_chunk_with_provider(
                         result.confidence,
                         result.is_partial,
                         result.word_timestamps,
+                        None,
                     ))
                 }
                 Err(e) => {

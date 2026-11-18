@@ -51,6 +51,7 @@ impl LiveTranscriptSink {
 
 /// Simplified recording manager that coordinates all audio components
 pub struct RecordingManager {
+    detected_call: bool,
     live: Option<LiveTranscriptSink>,
     mode: super::recording_mode::RecordingMode,
     state: Arc<RecordingState>,
@@ -74,6 +75,7 @@ impl RecordingManager {
 
         Self {
             live: None,
+            detected_call: false,
             mode: super::recording_mode::RecordingMode::Live,
             state,
             stream_manager,
@@ -94,6 +96,14 @@ impl RecordingManager {
     }
     pub(crate) fn live_session_id(&self) -> Option<&str> {
         self.live.as_ref().map(|sink| sink.session_id.as_str())
+    }
+    pub(super) fn mark_detected_call(&mut self, session: &str) {
+        if self.live_session_id() == Some(session) {
+            self.detected_call = true;
+        }
+    }
+    pub(super) fn owns_detected_call(&self, session: &str) -> bool {
+        self.detected_call && self.live_session_id() == Some(session)
     }
     pub(crate) fn live_recording_generation(
         &self,

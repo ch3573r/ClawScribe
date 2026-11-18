@@ -20,7 +20,9 @@ pub enum Request {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Response {
-    Loaded,
+    Loaded {
+        directml_registered: bool,
+    },
     Transcript {
         text: String,
         timestamps: Vec<f32>,
@@ -147,7 +149,9 @@ mod tests {
             assert!(read_frame::<Request>(&mut reader).unwrap().is_none());
         }
         for response in [
-            Response::Loaded,
+            Response::Loaded {
+                directml_registered: false,
+            },
             Response::Transcript {
                 text: "test".into(),
                 timestamps: vec![0.1],

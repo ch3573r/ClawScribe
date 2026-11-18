@@ -1,132 +1,69 @@
-# Teams Meeting Detection
+# Detecting calls on Windows
 
-ClawScribe detects likely Microsoft Teams meetings on Windows using local
-process/window evidence. It does not use Teams bots, Graph online-meeting APIs,
-presence APIs, or cloud transcript APIs.
+In **Settings → Add-ons → Meeting automation**, choose the meeting apps to
+watch and select **Prompt me to record** or **Auto-start recording**. Use
+**Check for a call** during a call to see which selected apps the detector
+recognizes. Detection starts off on a new installation. An existing Teams
+preference applies only to Teams until you select more apps. Automatic stopping
+has its own switch and starts off.
 
-There are two layers:
+| Meeting app | Evidence used |
+| --- | --- |
+| Microsoft Teams | Teams desktop process or a Teams website in a supported browser, with active call controls. |
+| Zoom | Zoom desktop process with a meeting-specific exit control, or a Zoom meeting window with its Leave or End button. |
+| Webex | Webex desktop process with a leave- or end-meeting button. |
+| Google Meet | A supported browser showing a Meet room URL with its leave-call button. |
 
-- Rust detection commands are read-only and return a status snapshot.
-- The frontend can use that snapshot to prompt or auto-start recording,
-  depending on the user's setting.
+ClawScribe uses Windows UI Automation locally. Browser detection checks the
+address control in the browser interface before inspecting in-call controls.
+Chrome, Edge, Brave and Firefox are eligible when their accessibility trees
+expose these controls. Button matching includes English and German labels.
+App updates, other interface languages, full-screen browser modes, or hidden
+toolbars can prevent a match. The check reports provider names. It does not
+save browser addresses or inspect the values of web forms.
 
-## Commands
+While detection is enabled, ClawScribe polls about every 12 seconds. It
+requires a single identified call before starting a recording and checks the
+evidence again when you act on a prompt. Recording uses the selected audio
+devices, recording mode and pending calendar title. A calendar selection is
+optional. Detection requires no Microsoft sign-in.
 
-- `get_teams_detection_config` returns the default detector configuration.
-- `get_teams_detection_status` returns one detection snapshot. It accepts an
-  optional config override and does not itself start or stop recording.
+## When the call ends
 
-Frontend wrappers live in `frontend/src/services/teamsDetectionService.ts`.
-The background auto-record poller lives in `frontend/src/components/TeamsAutoRecord.tsx`.
+**Stop and save when the detected call ends** applies to a recording started
+automatically or through the detector's Record prompt while that switch was
+on. After three consecutive completed checks confirm the tracked meeting
+window closed or shows a rejoin control, ClawScribe runs its usual stop and
+save flow. An active call in the same provider postpones that decision.
 
-On non-Windows platforms the detector returns a clean unsupported state:
-`supported=false`, `enabled=false`, `status=unsupported`, `detected=false`, and
-confidence `0.0`.
+A hidden browser tab or missing toolbar is ambiguous. If the browser window
+stays open on a different tab after a call ends, ClawScribe may keep recording
+until you stop it manually. An unavailable or locked desktop and a failed
+check reset the count. You can stop any recording yourself. Manually started
+recordings stay under manual control. Switching detection or automatic
+stopping off, deselecting the source, or reloading the application relinquishes
+automatic stopping for the current recording.
 
-## Default Config
+## Implementation and diagnostics
 
-```json
-{
-  "enabled": true,
-  "confidenceThreshold": 0.65,
-  "requireMeetingTitleSignal": true,
-  "maxWindowTitleSamples": 100
-}
-```
+`get_call_detection_status` checks the selected providers off the UI thread.
+It returns opaque call/window identifiers, in-call and ended observations,
+and whether the scan completed. The poller binds a detected start to the
+session ID returned by that start. The recorder checks both the detector
+ownership and the ID under its stop guard before stopping capture. The
+usual post-processing listener saves the stopped meeting on any page.
 
-Process evidence alone is not enough when `requireMeetingTitleSignal=true`.
-This avoids treating a background Teams process as an active meeting.
+**Settings → Diagnostics → Teams detection status** remains available for
+troubleshooting Teams window-title and process signals. Its compatibility
+commands are `get_teams_detection_config` and `get_teams_detection_status`.
+**Check for a call** uses the actual automation detector.
 
-## Detection Signals
+## Windows smoke checks
 
-The Windows detector considers:
-
-- Teams desktop processes such as `teams.exe`, `ms-teams.exe`, and
-  `msteams.exe`
-- Edge, Chrome, and WebView2 browser processes
-- visible window titles with Teams and meeting/call/presentation context
-- browser Teams meeting titles
-- foreground Teams meeting-like windows
-
-The detector returns confidence, status, matched signals, bounded matching
-candidates, diagnostics counters, and `nextRecommendedAction`. Settings
-diagnostics explicitly request non-matching window-title samples as well;
-background polling receives matching candidates only.
-
-## Auto-Record Modes
-
-The user-facing setting is stored by `frontend/src/lib/autoRecord.ts`.
-
-Modes:
-
-- `off`: no polling-driven action
-- `prompt`: detect and prompt the user to start recording
-- `auto`: start recording once per detected meeting, then re-arm only after the
-  meeting has been absent for several consecutive polls
-
-The Rust `recordingSafety.automaticRecordingAllowed` field remains conservative
-and currently reports `false`; the frontend auto mode is a user opt-in policy
-layer above the read-only detector.
-
-## Calendar Relationship
-
-Teams detection is local. Calendar integration is separate and uses Microsoft
-Graph `Calendars.Read` after Microsoft sign-in.
-
-When the user selects a calendar event, ClawScribe can:
-
-- use the event title for the next recording
-- carry invited attendees into the meeting summary as a checklist
-
-Teams detection should not require Microsoft sign-in.
-
-## False-Positive Controls
-
-- A visible meeting-like title is required by default.
-- Background Teams/browser processes do not trigger detection alone.
-- Legacy `update.exe` is ignored unless its path/command line points to Teams.
-- Window samples are bounded.
-- The frontend re-arms auto-start only after the meeting disappears for several
-  consecutive polls.
-
-## Windows Smoke Checklist
-
-1. Start a dev build:
-
-   ```powershell
-   cd frontend
-   pnpm run tauri:dev:cpu
-   ```
-
-2. With Teams closed, call the dev helper if available:
-
-   ```js
-   await window.__clawscribeTeamsDetection.printStatus()
-   ```
-
-   Expected: `detected=false`, no Teams processes, action `idle`.
-
-3. Open Teams but do not join a meeting.
-
-   Expected: usually `possible`, not detected; title signal not satisfied.
-
-4. Join a Teams desktop meeting.
-
-   Expected: `detected=true` when a visible meeting-like title is present and
-   confidence crosses threshold.
-
-5. Test browser Teams in Edge or Chrome.
-
-   Expected: browser process plus Teams meeting title can detect.
-
-6. Test `prompt` and `auto` modes from settings.
-
-   Expected: prompt mode asks; auto mode starts once and does not repeatedly
-   restart while the same meeting remains detected.
-
-7. Leave the meeting.
-
-   Expected: status returns to `possible` or `notDetected`; auto mode re-arms
-   only after consecutive not-detected polls.
-
-If recording starts while mode is `off`, treat it as a blocker.
+On the designated self-hosted machine, try a pre-join screen and an active call
+for each selected provider. Check that prompt and automatic modes record once,
+including from another ClawScribe page. Check that switching browser tabs,
+locking the desktop, and hiding call controls keep capture running. Leave
+the call with automatic stopping on, then verify the saved microphone and
+system audio, transcript, and a second recording. Repeat with a manually
+started recording and with automatic stopping disabled.
