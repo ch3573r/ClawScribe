@@ -7,10 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.61.0** is a Windows GPU preview. Settings are reorganised into one page per
-topic, a Privacy page shows what leaves this PC, and call detection recognises
-current Teams call controls. See the
-[0.61.0 preview notes](docs/releases/0.61.0.md) and the
+**0.61.1** is a Windows GPU preview. It keeps the first seconds of a live
+recording and no longer drops quiet speech, on top of the reorganised settings
+and the Privacy page from 0.61.0. See the
+[0.61.1 preview notes](docs/releases/0.61.1.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -330,6 +330,16 @@ checks. You still choose when to install; checking at launch is a separate optio
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.61.1 preview
+
+- With live transcription, audio capture starts while the speech model loads. The
+  first seconds after pressing Record are no longer lost.
+- Quiet speech is raised to a normal level before Parakeet transcribes it, in live
+  recording, retranscription and import.
+
+See the [preview notes](docs/releases/0.61.1.md) for a known issue and pending
+real-device checks.
 
 ## What changed in the 0.61.0 preview
 

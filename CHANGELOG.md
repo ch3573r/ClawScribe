@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.61.1
+
+- With live transcription, audio capture starts while the speech model loads. Loading took 2 to 5 seconds on a test PC, and speech during that time was neither recorded nor transcribed. If the model cannot be loaded, the start is cancelled and the seconds captured so far are deleted.
+- Parakeet dropped speech from quiet audio. Quiet segments are raised to a normal level before they are transcribed. Audio at a normal level is not changed.
+- Known issue: with the Lightning model, a very short first speech segment can still come back empty in retranscription. The cause is not established.
+- The Windows GPU installers and updater use version 0.61.1. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Both changes were checked against recordings on a development PC, not in an installed build.
+
 ## 0.61.0
 
 - Settings is reorganised into one page per topic. Add-ons is split into Microsoft 365, Calendars, Confluence and Assistant access, and the Beta switches moved to Transcription. Links to the old pages open the new ones.
