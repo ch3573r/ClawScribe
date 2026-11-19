@@ -42,7 +42,7 @@ function DeviceRow({ id, title, defaultLabel, placeholder, emptyText, value, opt
     <SettingsRow title={title} htmlFor={id} description={options.length === 0 ? emptyText : undefined}>
       {meter}
       <Select value={value || "default"} onValueChange={onChange} disabled={disabled}>
-        <SelectTrigger id={id} className="w-80 max-w-full">
+        <SelectTrigger id={id} className="w-96 max-w-full">
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
         <SelectContent>

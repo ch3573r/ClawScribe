@@ -47,7 +47,7 @@ export function SettingsRow({ icon, title, description, children, className, htm
   return (
     <div className={cn("flex min-h-16 flex-wrap items-center gap-x-6 gap-y-3 px-5 py-3", className)} {...props}>
       {icon && <span className="shrink-0 text-muted-foreground [&_svg]:h-[18px] [&_svg]:w-[18px]">{icon}</span>}
-      <div className="min-w-0 flex-1 basis-56">
+      <div className="min-w-0 flex-1 basis-40">
         <Title {...(htmlFor ? { htmlFor } : {})} className="block text-sm text-foreground">{title}</Title>
         {description && <p className="mt-0.5 text-[13px] leading-5 text-muted-foreground">{description}</p>}
       </div>

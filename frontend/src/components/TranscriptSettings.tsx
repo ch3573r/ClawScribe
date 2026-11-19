@@ -509,7 +509,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     disabled={isTestingProvider}
                                 >
                                     {isTestingProvider ? (
-                                        <Loader2 className="h-4 w-4" />
+                                        <Loader2 className="h-4 w-4 animate-spin" />
                                     ) : (
                                         <FlaskConical className="h-4 w-4" />
                                     )}

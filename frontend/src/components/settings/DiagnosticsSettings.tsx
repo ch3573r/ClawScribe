@@ -13,6 +13,7 @@ import {
 import { IconAction, NoteRow } from "@/components/settings/settings-parts";
 import { clockTime, describeCallCheck, useCallDetectionCheck } from "@/components/settings/call-detection-check";
 import { cn } from "@/lib/utils";
+import { getModelDisplayName } from "@/lib/parakeet";
 import {
   CALL_PROVIDERS, CALL_SETTINGS_CHANGED, getCallSettings, type CallProvider,
 } from "@/lib/autoRecord";
@@ -149,6 +150,11 @@ const TRANSCRIPT_PROVIDER_LABELS: Record<string, string> = {
   nemotron: "Nemotron",
   api: "API",
 };
+
+/** Runtime identifiers arrive in lower case; show them the way the vendors write them. */
+function runtimeLabel(runtime: string): string {
+  return ({ directml: "DirectML", cpu: "CPU", cuda: "CUDA", coreml: "Core ML" } as Record<string, string>)[runtime.toLowerCase()] ?? runtime;
+}
 
 function providerLabel(provider: string): string {
   return TRANSCRIPT_PROVIDER_LABELS[provider] ?? provider;
@@ -457,7 +463,7 @@ function CallDetectionCard() {
           {providers.length ? providers.map((provider) => CALL_PROVIDERS[provider]).join(", ") : "None selected"}
         </span>
       </SettingsRow>
-      <SettingsRow title="Windows seen">
+      <SettingsRow title="Windows checked">
         <Meta>{state.scan?.supported ? state.scan.openWindows.length : "—"}</Meta>
       </SettingsRow>
       <SettingsRow title="Last check">
@@ -557,7 +563,7 @@ export function DiagnosticsSettings() {
       }
 
       const engine = selectedEngine(snapshot);
-      const modelName = `${providerLabel(snapshot.transcription.selectedProvider)} · ${snapshot.transcription.selectedModel}`;
+      const modelName = `${providerLabel(snapshot.transcription.selectedProvider)} · ${getModelDisplayName(snapshot.transcription.selectedModel)}`;
       list.push({
         id: "model", name: "Selected model", value: modelName,
         tone: !engine ? "ok" : engine.error ? "warning" : engine.selectedModelPresent === false ? "error" : "ok",
@@ -580,7 +586,7 @@ export function DiagnosticsSettings() {
           ? "Running"
           : diarization.directmlSlow ? "DirectML probed slow, using the CPU"
           : diarization.directmlUnavailable ? "DirectML unavailable, using the CPU"
-          : `${diarization.preferredProvider.toUpperCase()} · ${present} of ${diarization.runtimeDlls.length} runtime files`,
+          : `${runtimeLabel(diarization.preferredProvider)} · ${present} of ${diarization.runtimeDlls.length} runtime files`,
         tone: slow ? "warning" : "ok",
         status: slow ? "CPU fallback" : "OK",
       });

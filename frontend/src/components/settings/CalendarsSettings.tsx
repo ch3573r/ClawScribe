@@ -12,6 +12,7 @@ import { useICalendar } from "@/hooks/useICalendar";
 import { useMicrosoftExport } from "@/hooks/useMicrosoftExport";
 import { usePendingCalendar } from "@/hooks/usePendingCalendar";
 import { removeICalendarSource } from "@/services/icalService";
+import { microsoftExportService, type CalendarEvent } from "@/services/microsoftExportService";
 
 const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
 const PAGE_SIZE = 8;
@@ -28,6 +29,8 @@ export function CalendarsSettings() {
   const [removing, setRemoving] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
   const [shown, setShown] = useState(PAGE_SIZE);
+  // The shared hook only loads the next day; this list promises a week.
+  const [weekEvents, setWeekEvents] = useState<CalendarEvent[]>([]);
   const connected = ms.connection.state === "connected";
   const calendarAvailable = connected && !ms.connection.unavailableExports?.includes("Calendar lookup");
   const accountName = ms.connection.userDisplayName ?? ms.connection.userEmail;
@@ -37,7 +40,14 @@ export function CalendarsSettings() {
     if (!calendarAvailable) return;
     let cancelled = false;
     const reload = () => {
-      if (!cancelled) void ms.loadCalendar();
+      if (cancelled) return;
+      void ms.loadCalendar();
+      const now = new Date();
+      const end = new Date(now);
+      end.setDate(now.getDate() + 7);
+      microsoftExportService.listCalendarEvents(now.toISOString(), end.toISOString())
+        .then(list => { if (!cancelled) setWeekEvents(list); })
+        .catch(() => { /* the connection row already reports calendar problems */ });
     };
     reload();
     const interval = window.setInterval(reload, CALENDAR_REFRESH_MS);
@@ -58,7 +68,7 @@ export function CalendarsSettings() {
     const names = new Map(sources.map(source => [source.id, source.name]));
     const items: UpcomingEvent[] = [];
     if (calendarAvailable) {
-      const microsoft = [...ms.calendarEvents];
+      const microsoft = weekEvents.length ? [...weekEvents] : [...ms.calendarEvents];
       if (ms.currentMeeting && !microsoft.some(event => event.id === ms.currentMeeting?.id)) microsoft.unshift(ms.currentMeeting);
       for (const event of microsoft) {
         items.push({
@@ -76,7 +86,7 @@ export function CalendarsSettings() {
       });
     }
     return items.sort((a, b) => sortKey(a) - sortKey(b) || a.key.localeCompare(b.key));
-  }, [calendarAvailable, events, ms.calendarEvents, ms.currentMeeting, sources]);
+  }, [calendarAvailable, events, ms.calendarEvents, ms.currentMeeting, sources, weekEvents]);
 
   async function remove(id: string) {
     setRemoving(id);
