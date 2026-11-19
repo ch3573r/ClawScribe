@@ -30,6 +30,38 @@ pub struct TimestampedResult {
     pub tokens: Vec<String>,
 }
 
+/// Segments quieter than this (about -26 dBFS) are raised before decoding.
+const QUIET_SEGMENT_RMS: f32 = 0.05;
+/// Level a quiet segment is raised to (-20 dBFS).
+const TARGET_SEGMENT_RMS: f32 = 0.1;
+/// Below this (-60 dBFS) a segment is silence or noise and is left alone.
+const SILENT_SEGMENT_RMS: f32 = 0.001;
+/// Never amplify by more than this (about +30 dB).
+const MAX_SEGMENT_GAIN: f32 = 32.0;
+
+/// Raises a quiet segment to a normal speech level.
+///
+/// The models drop speech from quiet audio: on a recording at about -37 dBFS
+/// the same clear sentences came back complete, cut in half or empty depending
+/// on where the segment began, and complete once the level was raised. Audio
+/// at a normal level is not touched, so its results do not change. Peaks that
+/// exceed full scale after the gain are clipped; a clipped click costs less
+/// than lost speech.
+fn raise_quiet_segment(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let rms =
+        (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt();
+    if !(SILENT_SEGMENT_RMS..QUIET_SEGMENT_RMS).contains(&rms) {
+        return;
+    }
+    let gain = (TARGET_SEGMENT_RMS / rms).min(MAX_SEGMENT_GAIN);
+    for sample in samples.iter_mut() {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+}
+
 fn shift_timestamps(timestamps: &mut [f32], padding_seconds: f32) {
     for timestamp in timestamps {
         *timestamp = (*timestamp - padding_seconds).max(0.0);
@@ -636,8 +668,9 @@ impl ParakeetModel {
 
     pub fn transcribe_samples(
         &mut self,
-        samples: Vec<f32>,
+        mut samples: Vec<f32>,
     ) -> Result<TimestampedResult, ParakeetError> {
+        raise_quiet_segment(&mut samples);
         let batch_size = 1;
         let samples_len = samples.len();
 
@@ -665,9 +698,44 @@ impl ParakeetModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        shift_timestamps, transcribe_with_empty_retry, ParakeetError,
+        raise_quiet_segment, shift_timestamps, transcribe_with_empty_retry, ParakeetError,
         TimestampedResult, SAMPLE_RATE,
     };
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn quiet_segments_are_raised_and_normal_or_silent_ones_are_left_alone() {
+        // Quiet speech level (about -37 dBFS) is raised to -20 dBFS.
+        let mut quiet: Vec<f32> = (0..SAMPLE_RATE)
+            .map(|i| 0.02 * (i as f32 * 0.05).sin())
+            .collect();
+        raise_quiet_segment(&mut quiet);
+        assert!((rms(&quiet) - 0.1).abs() < 0.005, "rms {}", rms(&quiet));
+
+        // A normal level and near-silence are returned bit for bit.
+        for amplitude in [0.2f32, 0.0005] {
+            let original: Vec<f32> = (0..SAMPLE_RATE)
+                .map(|i| amplitude * (i as f32 * 0.05).sin())
+                .collect();
+            let mut samples = original.clone();
+            raise_quiet_segment(&mut samples);
+            assert_eq!(samples, original);
+        }
+
+        // A loud click in a quiet segment is clipped, never wrapped or left above full scale.
+        let mut click = vec![0.01f32; SAMPLE_RATE];
+        click[100] = 0.9;
+        raise_quiet_segment(&mut click);
+        assert!(click.iter().all(|sample| sample.abs() <= 1.0));
+        assert_eq!(click[100], 1.0);
+
+        let mut empty: Vec<f32> = Vec::new();
+        raise_quiet_segment(&mut empty);
+        assert!(empty.is_empty());
+    }
 
     fn result(text: &str) -> TimestampedResult {
         TimestampedResult {
