@@ -791,7 +791,8 @@ export function ModelSettingsModal({
       if (data.length > 0 && !modelConfig.model) {
         const firstAvailable = data.find((m: any) => m.status?.type === 'available');
         if (firstAvailable) {
-          setModelConfig((prev: ModelConfig) => ({ ...prev, model: firstAvailable.name }));
+          // The answer can arrive after the user moved to another provider.
+          setModelConfig((prev: ModelConfig) => (prev.provider === 'builtin-ai' && !prev.model ? { ...prev, model: firstAvailable.name } : prev));
         }
       }
     } catch (err) {
@@ -903,7 +904,8 @@ export function ModelSettingsModal({
       if (codex) {
         setCodexConfig(codex);
         if (codex.model && modelConfig.provider === 'codex') {
-          setModelConfig((prev: ModelConfig) => ({ ...prev, model: codex.model }));
+          // The answer can arrive after the user moved to another provider.
+          setModelConfig((prev: ModelConfig) => (prev.provider === 'codex' ? { ...prev, model: codex.model } : prev));
         }
         return codex;
       }
@@ -1409,12 +1411,12 @@ export function ModelSettingsModal({
   // switches with "Use ..." or saves a setting of the new provider.
   const changeProviderAutosave = (value: string) => {
     const provider = value as ModelConfig['provider'];
-    if (provider === modelConfig.provider) return;
     setError('');
     if (provider === sharedModelConfig.provider) {
       setPreview(null);
       return;
     }
+    if (provider === modelConfig.provider) return;
     {
       if (!previewRef.current && sharedModelConfig.model) rememberModel(sharedModelConfig.provider, sharedModelConfig.model);
       const saved = readModelMap()[provider];
@@ -1464,7 +1466,12 @@ export function ModelSettingsModal({
   const useDraftProvider = () => {
     void feedback.run('provider', async () => {
       // Only the key stored for this provider is used, never one typed for another provider.
-      const next: ModelConfig = { ...modelConfig, apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || null) : null };
+      const next: ModelConfig = {
+        ...modelConfig,
+        whisperModel: sharedModelConfig.whisperModel,
+        ollamaEndpoint: modelConfig.provider === 'ollama' ? modelConfig.ollamaEndpoint : sharedModelConfig.ollamaEndpoint,
+        apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || null) : null,
+      };
       await saveConfig(next, 'Could not save the provider', true);
       setError('');
       setModelConfig(next);
@@ -1474,7 +1481,7 @@ export function ModelSettingsModal({
 
   const chooseModelAutosave = (model: string) => {
     void feedback.run('model', async () => {
-      const next: ModelConfig = { ...modelConfig, model, apiKey: needsKey(modelConfig.provider) ? (apiKey?.trim() || null) : null };
+      const next: ModelConfig = { ...modelConfig, model, apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || apiKey?.trim() || null) : null };
       const held = await saveConfig(next, 'Could not save the model');
       rememberModel(modelConfig.provider, model);
       setModelConfig(next);
@@ -1598,7 +1605,7 @@ export function ModelSettingsModal({
   // A switch that fails to save goes back to its saved position.
   const commitOpenClawSwitch = async (over: Partial<ReturnType<typeof openClawValues>>) => {
     const before = openClawValues();
-    try { await commitOpenClaw(over); }
+    try { return await commitOpenClaw(over); }
     catch (failure) {
       setOpenClawEnabled(before.enabled); setOpenClawIncludeAudioPath(before.includeAudioPath); setOpenClawAllowUnencrypted(before.allowUnencrypted);
       throw failure;
@@ -1963,7 +1970,7 @@ export function ModelSettingsModal({
     if (provider === 'openclaw') {
       const missing = openClawMissing(openClawValues());
       rows.push(
-        <SettingsRow key="oc-enabled" title="Enable OpenClaw handoff" htmlFor="openclaw-enabled" description={withError('Submit completed recordings and allow OpenClaw-backed summaries', feedback.states['oc-enabled']?.status === 'error' ? feedback.states['oc-enabled'].message : null)}>
+        <SettingsRow key="oc-enabled" title="Enable OpenClaw handoff" htmlFor="openclaw-enabled" description={withError('Sends every finished recording to the gateway, whichever summary provider is in use. Also needed for OpenClaw summaries', feedback.states['oc-enabled']?.status === 'error' ? feedback.states['oc-enabled'].message : null)}>
           <SaveMark status={feedback.states['oc-enabled']?.status} />
           <Switch id="openclaw-enabled" checked={openClawEnabled} disabled={feedback.busy}
             onCheckedChange={(value) => { void feedback.run('oc-enabled', () => commitOpenClawSwitch({ enabled: value })); }} />

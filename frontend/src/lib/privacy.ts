@@ -357,7 +357,10 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   const textState = blocked(input.summary, input.handoff);
   let textFact: PrivacyFact;
   if (handoffOn) {
-    textFact = { id: "text", label: "Transcript text", value: "Leaves automatically", detail: `To ${handoffTarget} after every recording`, tone: "warning", state: "ready" };
+    const alsoProvider = summaryClass && textLeavesKind
+      ? `, and to ${summaryClass.kind === "unknown" ? "your summary provider" : summaryClass.label} for summaries`
+      : "";
+    textFact = { id: "text", label: "Transcript text", value: "Leaves automatically", detail: `To ${handoffTarget} after every recording${alsoProvider}`, tone: "warning", state: "ready" };
   } else if (textState !== "ready" || !summaryClass) {
     textFact = { id: "text", label: "Transcript text", value: textState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: textState === "ready" ? "unavailable" : textState };
   } else if (summaryClass.kind === "none" || summaryClass.kind === "local") {
