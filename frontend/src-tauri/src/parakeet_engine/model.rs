@@ -49,10 +49,14 @@ const LOUD_PART_CEILING: f32 = 0.9;
 /// segment at a normal average level is not touched, so its results do not
 /// change.
 ///
-/// A segment can be quiet on average and still hold a stretch at a normal
-/// level, such as one loud remark next to a quiet speaker. The gain is limited
-/// so that stretch stays below full scale. Only isolated peaks, at most 0.1% of
-/// the samples, are clipped; a clipped click costs less than lost speech.
+/// A segment can be quiet on average and still hold louder sound, such as one
+/// loud remark next to a quiet speaker. The gain is limited so that at most
+/// 0.1% of the samples reach full scale and are clipped. That bounds the damage
+/// to the louder part without ruling it out: speech peaks well above its
+/// typical level, so the clipped samples can all fall inside one remark. The
+/// same limit lets a click or tone longer than 0.1% of the segment hold the
+/// gain back for the quiet speech around it. Neither effect has been measured
+/// with the model.
 fn raise_quiet_segment(samples: &mut [f32]) {
     if samples.is_empty() {
         return;
@@ -759,8 +763,9 @@ mod tests {
         raise_quiet_segment(&mut faint);
         assert!((faint[0] - 0.064).abs() < 1e-5, "sample {}", faint[0]);
 
-        // Ten seconds, quiet on average, with 0.2 s at a normal level: the
-        // normal stretch must not be clipped, and the quiet part is still raised.
+        // Ten seconds, quiet on average, with 0.2 s at a normal level: at most
+        // 0.1% of the samples may reach full scale (none for this sine, whose
+        // peak is close to its typical level), and the quiet part is still raised.
         let mut mixed: Vec<f32> = (0..SAMPLE_RATE * 10)
             .map(|i| {
                 let amplitude = if i < SAMPLE_RATE / 5 { 0.4 } else { 0.005 };
@@ -771,6 +776,8 @@ mod tests {
         raise_quiet_segment(&mut mixed);
         let loudest = mixed.iter().fold(0.0f32, |max, sample| max.max(sample.abs()));
         assert!(loudest < 1.0, "loudest {loudest}");
+        let clipped = mixed.iter().filter(|sample| sample.abs() >= 1.0).count();
+        assert!(clipped <= mixed.len() / 1000);
         assert!(rms(&mixed[SAMPLE_RATE..]) > quiet_before * 1.5);
 
         // Infinite or NaN input is left alone.
@@ -778,6 +785,8 @@ mod tests {
         raise_quiet_segment(&mut broken);
         assert_eq!(broken[0], 0.01);
         assert!(broken[1].is_nan());
+        assert_eq!(broken[2], f32::INFINITY);
+        assert_eq!(broken[3], 0.01);
     }
 
     fn result(text: &str) -> TimestampedResult {
