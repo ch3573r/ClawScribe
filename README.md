@@ -7,10 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.5.60** is a Windows GPU preview. You can select your next meeting from an
-iCalendar file or subscription, test an installed transcription model on this
-PC, and give a local assistant read-only access to saved meetings. See the
-[0.5.60 preview notes](docs/releases/0.5.60.md) and the
+**0.61.0** is a Windows GPU preview. Settings are reorganised into one page per
+topic, a Privacy page shows what leaves this PC, and call detection recognises
+current Teams call controls. See the
+[0.61.0 preview notes](docs/releases/0.61.0.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -38,7 +38,7 @@ meeting application. Make a short test recording and verify that both your
 voice and the remote participants are audible in playback. Start recording,
 review the live transcript, then stop and allow queued transcription to finish
 before generating notes. You can also enable call detection for selected
-meeting apps under **Settings → Add-ons**.
+meeting apps under **Settings → Recording → Call detection**.
 
 **Test mic** in Recording settings shows the microphone actually tested. If a
 preferred Windows microphone is unavailable, the test identifies its fallback
@@ -256,11 +256,11 @@ link to inspect the text, reveal it in the transcript, or play its saved audio.
 Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
-**Settings → Add-ons → iCalendar** lets you import an `.ics` file or add a
-read-only subscription from a calendar provider. Upcoming meetings appears
-on Home. Choose **Use for next recording** to use an event title and invitees.
-You can review individual invitees in Add-ons. iCalendar works without a
-Microsoft account. See [iCalendar files and subscriptions](docs/integrations/icalendar.md).
+**Settings → Calendars** lets you import an `.ics` file or add a read-only
+subscription from a calendar provider. Upcoming meetings appears on Home, and
+the sidebar shows the next one. Choose **Use for next recording** to use an
+event title and invitees. You can review individual invitees on the Calendars
+page. iCalendar works without a Microsoft account. See [iCalendar files and subscriptions](docs/integrations/icalendar.md).
 
 Microsoft sign-in supports calendar context and exports. Windows call detection
 can prompt or start recording for the Teams, Zoom, Webex and Google Meet
@@ -296,7 +296,7 @@ endpoint, token, or separate server.
 
 ## Library And Data
 
-**Settings → Add-ons → Local assistant access** lets an MCP client read the
+**Settings → Assistant access** lets an MCP client read the
 saved meeting library. Enable the switch, copy the configuration, and add it
 to your assistant. It can search meetings, read their notes and transcripts,
 and locate saved recordings. The connection uses local standard input and
@@ -323,13 +323,29 @@ meetings. See [local library tools](docs/local-library.md#deleting-meetings).
 ## Update Preferences
 
 ClawScribe checks **stable releases** by default. Enable **Include prereleases**
-under **Settings > Preferences > Updates** or **About** to receive preview builds
+under **Settings > General > Updates** or **About** to receive preview builds
 as well. The choice persists across restarts and applies to manual and startup
 checks. You still choose when to install; checking at launch is a separate option.
 
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.61.0 preview
+
+- Settings has one page per topic. Add-ons is split into Microsoft 365, Calendars,
+  Confluence and Assistant access. The Beta switches are on the Transcription page.
+- **Settings → Privacy** lists what stays on this PC and what leaves it, based on
+  your current settings.
+- Call detection is under **Settings → Recording**, with a live microphone level.
+  It recognises Teams calls whose controls read Leave and Mute mic.
+- Parakeet models are listed in a table that keeps the measured speed per model.
+- Summary settings save as you change them. A different provider is used only
+  after you choose **Use**.
+- The sidebar shows the next calendar event and groups meetings by date.
+- Calendar files and subscriptions can be up to 16 MiB.
+
+See the [preview notes](docs/releases/0.61.0.md) for pending real-device checks.
 
 ## What changed in the 0.5.60 preview
 

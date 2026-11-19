@@ -1,6 +1,6 @@
 # iCalendar files and subscriptions
 
-Open **Settings → Add-ons → iCalendar → Add calendar**. Choose **Local file**
+Open **Settings → Calendars → Add calendar**. Choose **Local file**
 to import a UTF-8 `.ics` invitation or calendar export. ClawScribe keeps a copy
 on this device. To pick up later edits to the original file, remove the
 imported calendar and import the updated copy.
@@ -13,13 +13,13 @@ your calendar. The app protects the address with the operating system's
 credential storage.
 
 **Upcoming meetings** on Home shows the next five meetings across your
-configured calendars for the coming week. The iCalendar panel lists more
+configured calendars for the coming week. The Calendars page lists more
 occurrences and lets you review invitees. Choose **Use for next recording**
 to use the event title and attendee selection. An invitation records who was
 invited. You can edit the attendee checklist before generating a summary.
 
-ClawScribe checks for calendar updates while Home or the iCalendar settings
-are open. **Refresh** requests an immediate update. Use the calendar's menu
+ClawScribe checks for calendar updates while Home or the Calendars page is
+open. **Refresh** requests an immediate update. Use the calendar's menu
 to remove it and stop future refreshes. Saved meeting associations can still
 be used after removing the source.
 

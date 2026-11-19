@@ -133,7 +133,7 @@ To Do export is also review-first:
 1. extract action items from the meeting notes
 2. preview candidate personal tasks
 3. let the user edit/deselect tasks and notes
-4. choose the destination To Do list in Settings → Add-ons
+4. choose the destination To Do list in Settings → Microsoft 365
 5. export selected tasks
 6. record local duplicate-protection metadata
 

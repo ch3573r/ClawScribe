@@ -7,7 +7,7 @@ tasks only in the signed-in user's selected To Do list.
 ## Flow
 
 1. User signs in to Microsoft 365.
-2. User chooses a To Do list in Settings → Add-ons.
+2. User chooses a To Do list in Settings → Microsoft 365.
 3. User opens To Do export from a meeting summary.
 4. ClawScribe parses the summary action items into a review dialog.
 5. User edits titles/notes and deselects anything that should not be created.
@@ -23,7 +23,7 @@ scope is required.
 
 ## Destination
 
-To Do export requires a list ID chosen in Settings → Add-ons. The saved list ID
+To Do export requires a list ID chosen in Settings → Microsoft 365. The saved list ID
 and display name are non-sensitive destination metadata stored in localStorage.
 If the list disappears or access changes, Graph will return a destination error
 and the user can pick another list.

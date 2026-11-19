@@ -1,8 +1,8 @@
 # Detecting calls on Windows
 
-In **Settings → Add-ons → Meeting automation**, choose the meeting apps to
+In **Settings → Recording → Call detection**, choose the meeting apps to
 watch and select **Prompt me to record** or **Auto-start recording**. Use
-**Check for a call** during a call to see which selected apps the detector
+**Check now** during a call to see which selected apps the detector
 recognizes. Detection starts off on a new installation. An existing Teams
 preference applies only to Teams until you select more apps. Automatic stopping
 has its own switch and starts off.

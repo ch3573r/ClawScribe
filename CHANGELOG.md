@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.61.0
+
+- Settings is reorganised into one page per topic. Add-ons is split into Microsoft 365, Calendars, Confluence and Assistant access, and the Beta switches moved to Transcription. Links to the old pages open the new ones.
+- A Privacy page lists what stays on this PC and what leaves it, derived from the current settings, including OpenClaw handoff. Unreadable settings are shown as such.
+- Call detection moved to Recording, next to a live microphone level. It recognises Teams calls whose controls are labelled Leave and Mute mic or Unmute mic.
+- Parakeet models are shown in a table. Test this PC keeps its result for the model it measured.
+- Summary settings and shortcuts apply as you change them. Choosing another summary provider only previews it until you choose Use. Live assistance moved to Summary.
+- The sidebar shows the next timed calendar event and groups meetings by date. Diagnostics lists health with problems first.
+- Calendar files and subscriptions can be up to 16 MiB. Descriptions, comments and attachments are dropped before a calendar is stored or shown.
+- The Windows GPU installers and updater use version 0.61.0. Version numbers continue from 0.61.0. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Every settings page in the installed app, call detection in a real Teams call, real calendar subscriptions, the signal check with real devices and updating an existing installation still need real-device acceptance.
+
 ## 0.5.60
 
 - Import local iCalendar files or subscribe to a read-only HTTPS or webcal feed. Upcoming meetings combines these events with Microsoft meetings. Choose an event to prefill the next recording title and review the invitees. iCalendar works while signed out of Microsoft.

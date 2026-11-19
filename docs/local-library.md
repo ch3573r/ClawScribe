@@ -2,7 +2,7 @@
 
 ## Local assistant access
 
-Open **Settings → Add-ons → Local assistant access** and enable **Allow
+Open **Settings → Assistant access** and enable **Allow
 read-only access**. Copy the displayed configuration into your MCP client's
 server settings and reconnect it. For clients with separate fields, use the
 ClawScribe executable as the command and `--mcp-stdio` as the sole argument.
