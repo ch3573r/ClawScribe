@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { PageSection } from "@/components/ui/page-section";
+import { SettingsCard, SettingsRow } from "@/components/ui/settings-layout";
+import { NoteRow } from "@/components/settings/settings-parts";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -66,31 +68,34 @@ export function LocalMcpSettings() {
   }
 
   return (
-    <PageSection title="Local assistant access" description="Connect an MCP-compatible assistant to your saved meeting library.">
-      <div className="space-y-4 p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <Label htmlFor="mcp-access">Allow read-only access</Label>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Local apps running as you can read meeting titles, summaries, transcripts and saved audio paths,
-              even while ClawScribe is closed. A connected assistant may send what it reads to its provider.
-            </p>
-          </div>
+    <>
+      <SettingsCard>
+        <SettingsRow
+          title="Allow read-only access"
+          htmlFor="mcp-access"
+          description="Local apps running as you can read meeting titles, summaries, transcripts and audio paths, also while ClawScribe is closed"
+        >
+          {busy && <span role="status" className="text-[13px] text-muted-foreground">Checking access…</span>}
+          {!access && !busy && <Button size="sm" variant="outline" onClick={() => void refresh()}>Retry</Button>}
           <Switch id="mcp-access" checked={access?.enabled ?? false} disabled={busy || !access}
             onCheckedChange={value => void refresh(value)} />
-        </div>
-        {busy && <p role="status" className="text-sm text-muted-foreground">Checking access…</p>}
-        {config && <div className="space-y-2">
+        </SettingsRow>
+        {config && <div className="grid gap-2 px-5 py-4">
           <Label htmlFor="mcp-client-config">Assistant configuration</Label>
           <Textarea id="mcp-client-config" value={config} readOnly rows={7} className="font-mono text-xs"
             onFocus={event => event.target.select()} />
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => void copy()}>
-            {copied ? "Copied" : "Copy configuration"}
-          </Button>
+          <div>
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => void copy()}>
+              {copied ? "Copied" : "Copy configuration"}
+            </Button>
+          </div>
         </div>}
-        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        {!access && !busy && <Button size="sm" variant="outline" onClick={() => void refresh()}>Retry</Button>}
+        {error && <NoteRow tone="error">{error}</NoteRow>}
+      </SettingsCard>
+      <div className="flex items-start gap-3 rounded-lg bg-warning px-4 py-3.5 text-[13px] leading-5 text-warning-foreground">
+        <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>A connected assistant may send what it reads to its own provider. This is the only setting that lets other apps read your library.</span>
       </div>
-    </PageSection>
+    </>
   );
 }

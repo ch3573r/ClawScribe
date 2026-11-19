@@ -2,21 +2,19 @@
 
 import { CustomVocabularySettings } from "@/components/CustomVocabularySettings";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
-import { TranscriptionPcTest } from "@/components/TranscriptionPcTest";
+import { TranscriptionOptions } from "@/components/settings/TranscriptionOptions";
+import { SettingsColumns, SettingsStack } from "@/components/ui/settings-layout";
 import { useConfig } from "@/contexts/ConfigContext";
 
-// The Transcription settings page. Starts as the previous composition.
+// The Transcription settings page: engine and models on top, options beside custom vocabulary below.
 export function TranscriptionSettingsPage() {
   const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
   return (
-    <div className="space-y-6">
-      <TranscriptSettings transcriptModelConfig={transcriptModelConfig} setTranscriptModelConfig={setTranscriptModelConfig} />
-      <TranscriptionPcTest
-        key={JSON.stringify([transcriptModelConfig.provider, transcriptModelConfig.model])}
-        provider={transcriptModelConfig.provider}
-        model={transcriptModelConfig.model}
-      />
-      <CustomVocabularySettings />
-    </div>
+    <SettingsStack wide>
+      <TranscriptSettings transcriptModelConfig={transcriptModelConfig} setTranscriptModelConfig={setTranscriptModelConfig} pcTest />
+      <SettingsColumns aside={<CustomVocabularySettings />}>
+        <TranscriptionOptions />
+      </SettingsColumns>
+    </SettingsStack>
   );
 }

@@ -1,27 +1,32 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { MoreHorizontal, RefreshCw } from "lucide-react";
-import { useICalendar } from "@/hooks/useICalendar";
-import { usePendingCalendar } from "@/hooks/usePendingCalendar";
+import { Plus } from "lucide-react";
+import { toast } from "sonner";
 import { setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
-import {
-  addICalendarSubscription, importICalendarFile, removeICalendarSource, type ICalendarEvent,
-} from "@/services/icalService";
+import { addICalendarSubscription, importICalendarFile } from "@/services/icalService";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { PageSection } from "@/components/ui/page-section";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-function AddCalendarDialog() {
+/** One upcoming meeting from any calendar source, in the shape the Calendars page lists. */
+export interface UpcomingEvent {
+  key: string;
+  source: "microsoft" | "ical";
+  sourceId?: string;
+  sourceName: string;
+  id: string;
+  subject: string | null;
+  start: string | null;
+  allDay: boolean;
+  attendees: { name: string | null; email: string | null }[];
+}
+
+export function AddCalendarDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -58,7 +63,7 @@ function AddCalendarDialog() {
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogTrigger asChild><Button variant="outline" size="sm">Add calendar</Button></DialogTrigger>
+      <DialogTrigger asChild><Button variant="outline" size="sm"><Plus aria-hidden="true" />Add calendar</Button></DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add calendar</DialogTitle>
@@ -106,32 +111,47 @@ function AddCalendarDialog() {
           </TabsContent>
         </Tabs>
         {busy && <p role="status" className="text-sm text-muted-foreground">Adding calendar…</p>}
-        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {error && <p role="alert" className="text-sm text-error-foreground">{error}</p>}
       </DialogContent>
     </Dialog>
   );
 }
 
-const dateFormat = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" });
-const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-const EVENTS_PER_PAGE = 50;
+const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
+const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+const startOfDay = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 
-function eventTime(event: ICalendarEvent) {
-  if (!event.start) return "";
-  const start = new Date(event.start);
-  if (Number.isNaN(start.getTime())) return "";
-  return [dateFormat.format(start), event.allDay ? "All day" : timeFormat.format(start)].join(" · ");
+/** "Today 13:00", "Tomorrow 09:30", "Mon 23 Nov 10:00" or "Mon 23 Nov All day". */
+export function formatWhen(start: string | null, allDay = false, now = new Date()): string {
+  if (!start) return "Time unknown";
+  const date = new Date(start);
+  if (Number.isNaN(date.getTime())) return "Time unknown";
+  const days = Math.round((startOfDay(date) - startOfDay(now)) / 86_400_000);
+  const day = days === 0 ? "Today" : days === 1 ? "Tomorrow" : dayFormat.format(date).replace(",", "");
+  return `${day} ${allDay ? "All day" : timeFormat.format(date)}`;
 }
 
-function attendeeKey(attendee: ICalendarEvent["attendees"][number]) {
+function attendeeKey(attendee: { name: string | null; email: string | null }) {
   return JSON.stringify([attendee.name, attendee.email]);
 }
 
-function EventReview({ event, pending }: { event: ICalendarEvent; pending: MeetingCalendarLink | null }) {
+function isSavedFor(event: UpcomingEvent, pending: MeetingCalendarLink | null): pending is MeetingCalendarLink {
+  if (!pending || pending.eventId !== event.id) return false;
+  return event.source === "ical"
+    ? pending.source === "ical" && pending.sourceId === event.sourceId
+    : pending.source !== "ical";
+}
+
+/**
+ * "Use" for one upcoming meeting. A meeting with invitees opens a short review
+ * so each invitee can be left out of the summary; a meeting without invitees is
+ * set directly.
+ */
+export function UseEventButton({ event, pending }: { event: UpcomingEvent; pending: MeetingCalendarLink | null }) {
+  const [open, setOpen] = useState(false);
   const [edits, setEdits] = useState<Record<string, boolean>>({});
   const [saveFailed, setSaveFailed] = useState(false);
-  const saved = pending?.source === "ical" && pending.sourceId === event.sourceId && pending.eventId === event.id
-    ? pending : null;
+  const saved = isSavedFor(event, pending) ? pending : null;
   const savedChoices = new Map(saved?.attendees.map(a => [attendeeKey(a), a.included]));
   const attendees = event.attendees.map(attendee => {
     const key = attendeeKey(attendee);
@@ -139,11 +159,40 @@ function EventReview({ event, pending }: { event: ICalendarEvent; pending: Meeti
   });
   const confirmed = !!saved && saved.subject === event.subject && saved.attendees.length === attendees.length
     && attendees.every(a => savedChoices.get(attendeeKey(a)) === a.included);
+  const title = event.subject || "Untitled meeting";
+
+  function save() {
+    const stored = setPendingCalendar({
+      eventId: event.id,
+      ...(event.source === "ical" ? { source: "ical" as const, sourceId: event.sourceId } : {}),
+      subject: event.subject,
+      attendees,
+    });
+    setSaveFailed(!stored);
+    return stored;
+  }
+
+  const label = confirmed ? "Selected" : "Use";
+  if (!attendees.length) {
+    return (
+      <Button type="button" variant="ghost" size="sm" disabled={confirmed} aria-label={`${label} ${title} for next recording`}
+        onClick={() => { if (!save()) toast.error("Could not save the meeting selection on this device."); }}>
+        {label}
+      </Button>
+    );
+  }
 
   return (
-    <div className="space-y-3">
-      {attendees.length > 0 && (
-        <fieldset className="space-y-1">
+    <Dialog open={open} onOpenChange={next => { setOpen(next); if (!next) setSaveFailed(false); }}>
+      <DialogTrigger asChild>
+        <Button type="button" variant="ghost" size="sm" aria-label={`${label} ${title} for next recording`}>{label}</Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Use for next recording</DialogTitle>
+          <DialogDescription>{title} · {formatWhen(event.start, event.allDay)}. Untick invitees to leave them out of the summary.</DialogDescription>
+        </DialogHeader>
+        <fieldset className="max-h-64 space-y-1 overflow-y-auto">
           <legend className="mb-1 text-sm font-medium">Invited attendees</legend>
           {attendees.map((attendee, index) => {
             const key = attendeeKey(attendee);
@@ -156,117 +205,15 @@ function EventReview({ event, pending }: { event: ICalendarEvent; pending: Meeti
             );
           })}
         </fieldset>
-      )}
-      <Button type="button" size="sm" disabled={confirmed}
-        onClick={() => {
-          const stored = setPendingCalendar({ eventId: event.id, source: "ical", sourceId: event.sourceId, subject: event.subject, attendees });
-          setSaveFailed(!stored);
-        }}>
-        {confirmed ? "Set for next recording" : "Use for next recording"}
-      </Button>
-      {saveFailed && !confirmed && <p role="alert" className="text-sm text-destructive">
-        Could not save the meeting selection. Check access to app storage and try again.
-      </p>}
-    </div>
-  );
-}
-
-export function ICalendarSettings() {
-  const { sources, events, issues, loading, error, refresh } = useICalendar();
-  const pending = usePendingCalendar();
-  const [selectedId, setSelectedId] = useState("");
-  const [removing, setRemoving] = useState<string | null>(null);
-  const [actionError, setActionError] = useState("");
-  const selected = events.find(event => event.id === selectedId)
-    ?? events.find(event => pending?.source === "ical" && pending.eventId === event.id)
-    ?? events[0];
-  const pageStart = selected ? Math.floor(events.indexOf(selected) / EVENTS_PER_PAGE) * EVENTS_PER_PAGE : 0;
-  const page = events.slice(pageStart, pageStart + EVENTS_PER_PAGE);
-  const sourceNames = new Map(sources.map(source => [source.id, source.name]));
-
-  async function remove(id: string) {
-    setRemoving(id);
-    setActionError("");
-    try {
-      await removeICalendarSource(id);
-    } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : "Could not remove this calendar.");
-    } finally {
-      setRemoving(null);
-    }
-  }
-
-  return (
-    <PageSection title="iCalendar" description="Choose meetings from .ics files and read-only calendar subscriptions."
-      actions={<AddCalendarDialog />}>
-      <div className="space-y-4 p-5">
-        {sources.length > 0 && (
-          <ul aria-label="Calendars" className="divide-y divide-border">
-            {sources.map(source => (
-              <li key={source.id} className="flex items-center justify-between gap-3 py-2 first:pt-0">
-                <div className="min-w-0">
-                  <p className="break-words text-sm font-medium">{source.name}</p>
-                  <p className="text-xs text-muted-foreground">{source.kind === "subscription" ? "Subscription" : "Imported file"}</p>
-                  {issues[source.id] && <p className="mt-1 text-xs text-destructive">{issues[source.id]}</p>}
-                </div>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button aria-label={`Manage ${source.name}`} variant="ghost" size="icon" disabled={Boolean(removing)}>
-                      <MoreHorizontal aria-hidden="true" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onSelect={() => void remove(source.id)}>Remove calendar</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </li>
-            ))}
-          </ul>
-        )}
-        {(error || actionError) && <p role="alert" className="text-sm text-destructive">{actionError || error}</p>}
-        {(sources.length > 0 || error) && (
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold">Upcoming meetings</h3>
-            <Button size="sm" variant="ghost" disabled={loading || Boolean(removing)}
-              onClick={() => {
-                setActionError("");
-                void refresh().catch(() => setActionError("Could not refresh calendars. Try again."));
-              }}>
-              <RefreshCw aria-hidden="true" className={loading ? "animate-spin" : ""} />Refresh
-            </Button>
-          </div>
-        )}
-        {(loading || removing) && <p role="status" className="text-sm text-muted-foreground">
-          {removing ? "Removing calendar…" : "Loading calendars…"}
+        {saveFailed && !confirmed && <p role="alert" className="text-sm text-error-foreground">
+          Could not save the meeting selection. Check access to app storage and try again.
         </p>}
-        {!loading && !error && !events.length && (!sources.length || sources.some(s => !issues[s.id])) && <p className="text-sm text-muted-foreground">
-          {sources.length ? "No meetings found in the next 7 days." : "No calendars added."}
-        </p>}
-        {selected && (
-          <div className="space-y-3">
-            <Select value={selected.id} onValueChange={setSelectedId}>
-              <SelectTrigger aria-label="Upcoming meeting"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {page.map(event => (
-                  <SelectItem key={event.id} value={event.id}>
-                    {[event.subject || "Untitled meeting", eventTime(event), sourceNames.get(event.sourceId)].filter(Boolean).join(" · ")}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {events.length > EVENTS_PER_PAGE && (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span>Meetings {pageStart + 1}–{pageStart + page.length} of {events.length}</span>
-                <Button type="button" size="sm" variant="ghost" disabled={pageStart === 0}
-                  onClick={() => setSelectedId(events[pageStart - EVENTS_PER_PAGE].id)}>Previous</Button>
-                <Button type="button" size="sm" variant="ghost" disabled={pageStart + page.length >= events.length}
-                  onClick={() => setSelectedId(events[pageStart + page.length].id)}>Next</Button>
-              </div>
-            )}
-            <EventReview key={selected.id} event={selected} pending={pending} />
-          </div>
-        )}
-      </div>
-    </PageSection>
+        <DialogFooter>
+          <Button type="button" disabled={confirmed} onClick={() => { if (save()) setOpen(false); }}>
+            {confirmed ? "Set for next recording" : "Use for next recording"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

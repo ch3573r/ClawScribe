@@ -31,8 +31,10 @@ export interface ParakeetEngineState {
 // User-friendly model display configuration
 export interface ModelDisplayInfo {
   friendlyName: string;
-  icon: string;
-  tagline: string;
+  /** Short "Best for" text shown in the model table. */
+  bestFor: string;
+  /** Quiet tag shown next to the name. */
+  badge?: 'Recommended' | 'Experimental';
   recommended?: boolean;
   tier: 'fastest' | 'balanced' | 'precise';
 }
@@ -40,33 +42,30 @@ export interface ModelDisplayInfo {
 export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
   'parakeet-tdt-0.6b-v3-int8': {
     friendlyName: 'Lightning',
-    icon: '⚡',
-    tagline: 'Fastest • Recommended default',
+    bestFor: 'Everyday meetings, fastest',
+    badge: 'Recommended',
     recommended: true,
     tier: 'fastest'
   },
   'parakeet-tdt-0.6b-v3-smoothquant-int8': {
     friendlyName: 'SmoothQuant',
-    icon: '🔬',
-    tagline: 'Experimental • Long-audio int8 quality',
+    bestFor: 'Long recordings',
+    badge: 'Experimental',
     tier: 'balanced'
   },
   'parakeet-tdt-0.6b-ultra-int8': {
     friendlyName: 'Parakeet Ultra',
-    icon: '🎯',
-    tagline: 'Better German and English accuracy',
+    bestFor: 'German and English accuracy',
     tier: 'precise'
   },
   'parakeet-tdt-0.6b-ultra-fp16': {
-    friendlyName: 'Parakeet Ultra (fp16)',
-    icon: '🎯',
-    tagline: 'Higher precision • Larger download',
+    friendlyName: 'Parakeet Ultra fp16',
+    bestFor: 'Highest precision',
     tier: 'precise'
   },
   'parakeet-tdt-0.6b-v2-int8': {
     friendlyName: 'Compact',
-    icon: '📦',
-    tagline: 'Real time • Smaller size',
+    bestFor: 'Smaller download, good accuracy',
     tier: 'balanced'
   }
 };
@@ -113,22 +112,13 @@ export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> 
 };
 
 // Helper functions
-export function getModelIcon(accuracy: ModelAccuracy): string {
-  switch (accuracy) {
-    case 'High': return '🔥';
-    case 'Good': return '⚡';
-    case 'Decent': return '🚀';
-    default: return '📊';
-  }
-}
-
 // Get user-friendly display name for a model
 export function getModelDisplayName(modelName: string): string {
   const displayInfo = MODEL_DISPLAY_CONFIG[modelName];
   return displayInfo?.friendlyName || modelName;
 }
 
-// Get model display info (icon, tagline, etc.)
+// Get model display info (name, best-for text, badge)
 export function getModelDisplayInfo(modelName: string): ModelDisplayInfo | null {
   return MODEL_DISPLAY_CONFIG[modelName] || null;
 }
@@ -146,6 +136,11 @@ export function formatFileSize(sizeMb: number): string {
     return `${(sizeMb / 1000).toFixed(1)}GB`;
   }
   return `${sizeMb}MB`;
+}
+
+// Download size as shown in the model table, for example "1,276 MB".
+export function formatModelSize(sizeMb: number): string {
+  return `${Math.round(sizeMb).toLocaleString('en-US')} MB`;
 }
 
 // Helper function to check if model is quantized

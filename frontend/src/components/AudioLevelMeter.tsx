@@ -146,3 +146,88 @@ export function CompactAudioLevelMeter({
     </div>
   );
 }
+
+/** Quietest level the segmented meter can show. */
+export const LEVEL_FLOOR_DB = -60;
+
+/** Linear amplitude (0 to 1) as decibels relative to full scale, clamped to the meter range. */
+export function levelToDb(level: number): number {
+  if (!Number.isFinite(level) || level <= 0) return LEVEL_FLOOR_DB;
+  return Math.max(LEVEL_FLOOR_DB, Math.min(0, 20 * Math.log10(level)));
+}
+
+/** Position on the meter, 0 at the floor and 1 at full scale. */
+export function dbToFraction(db: number): number {
+  return Math.max(0, Math.min(1, (db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB));
+}
+
+export const LEVEL_TICKS_DB = [-60, -40, -24, -12, -6, 0] as const;
+
+interface SegmentedLevelMeterProps {
+  /** Current level in dB relative to full scale. `null` draws an empty meter. */
+  db: number | null;
+  /** Held peak in dB, drawn as a single bright segment above the level. */
+  peakDb?: number | null;
+  segments?: number;
+  /** `large` is the signal check meter, `mini` sits inline in a settings row. */
+  size?: 'large' | 'mini';
+  label: string;
+  className?: string;
+}
+
+/**
+ * Segmented level meter. Segments are blue up to -12 dB, amber up to -3 dB and
+ * red above, matching how loud a microphone should be for clean transcription.
+ */
+export function SegmentedLevelMeter({
+  db,
+  peakDb = null,
+  segments,
+  size = 'large',
+  label,
+  className = '',
+}: SegmentedLevelMeterProps) {
+  const count = segments ?? (size === 'large' ? 44 : 24);
+  const lit = db === null ? 0 : Math.round(dbToFraction(db) * count);
+  const peak = peakDb === null || db === null ? 0 : Math.round(dbToFraction(peakDb) * count);
+  const peakIndex = peak > lit ? peak - 1 : -1;
+  return (
+    <div
+      role="meter"
+      aria-label={label}
+      aria-valuemin={LEVEL_FLOOR_DB}
+      aria-valuemax={0}
+      aria-valuenow={db === null ? LEVEL_FLOOR_DB : Math.round(db)}
+      aria-valuetext={db === null ? 'Not measured' : `${Math.round(db)} dB`}
+      className={`grid ${size === 'large' ? 'h-7 gap-0.5' : 'h-3 w-[150px] shrink-0 gap-0.5'} ${className}`}
+      style={{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }}
+    >
+      {Array.from({ length: count }, (_, index) => {
+        const segmentDb = LEVEL_FLOOR_DB + ((index + 1) / count) * -LEVEL_FLOOR_DB;
+        const tone = segmentDb > -3 ? 'bg-error-foreground' : segmentDb > -12 ? 'bg-warning-foreground' : 'bg-primary';
+        const color = index < lit ? tone : index === peakIndex ? 'bg-foreground' : 'bg-muted';
+        return <i key={index} aria-hidden="true" className={`rounded-[1.5px] ${color}`} />;
+      })}
+    </div>
+  );
+}
+
+/** Scale under a large meter, placed at true dB positions. */
+export function LevelTicks() {
+  return (
+    <div aria-hidden="true" className="relative mt-2 h-3 font-mono text-[10px] text-muted-foreground">
+      {LEVEL_TICKS_DB.map((tick, index) => (
+        <span
+          key={tick}
+          className="absolute top-0"
+          style={{
+            left: `${dbToFraction(tick) * 100}%`,
+            transform: `translateX(${index === 0 ? '0' : index === LEVEL_TICKS_DB.length - 1 ? '-100%' : '-50%'})`,
+          }}
+        >
+          {tick}
+        </span>
+      ))}
+    </div>
+  );
+}

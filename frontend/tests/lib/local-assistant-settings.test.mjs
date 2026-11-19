@@ -19,7 +19,7 @@ test('local assistant configuration appears only after a successful opt-in and d
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/label': { Label: 'Label' },
     '@/components/ui/page-section': { PageSection: 'PageSection' }, '@/components/ui/switch': { Switch: 'Switch' },
-    '@/components/ui/textarea': { Textarea: 'Textarea' },
+    '@/components/ui/textarea': { Textarea: 'Textarea' }, '@/components/ui/input': { Input: 'Input' }, 'lucide-react': {},
     '@tauri-apps/api/core': { invoke: async (name, args) => {
       calls.push(name);
       if (name === 'set_mcp_access') {
@@ -33,6 +33,7 @@ test('local assistant configuration appears only after a successful opt-in and d
   assert.equal(find('Switch').props.disabled, true);
   await flush();
   assert.equal(find('Textarea'), undefined);
+  assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => /only setting that lets other apps read your library/.test(String(node.props.children))), 'warning note stays next to the opt-in');
   const enable = find('Switch').props.onCheckedChange;
   enable(true);
   enable(true);

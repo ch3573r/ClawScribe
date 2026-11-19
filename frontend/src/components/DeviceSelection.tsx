@@ -42,6 +42,30 @@ interface DeviceSelectionProps {
   disabled?: boolean;
 }
 
+/** Detects the device category and Bluetooth status used by the selection analytics. */
+export function getDeviceMetadata(deviceName: string) {
+  const nameLower = deviceName.toLowerCase();
+
+  // Detect if it's Bluetooth
+  const isBluetooth = nameLower.includes('airpods')
+    || nameLower.includes('bluetooth')
+    || nameLower.includes('wireless')
+    || nameLower.includes('wh-')  // Sony WH-* series
+    || nameLower.includes('bt ');
+
+  // Categorize device
+  let category = 'wired';
+  if (deviceName === 'default') {
+    category = 'default';
+  } else if (nameLower.includes('airpods')) {
+    category = 'airpods';
+  } else if (isBluetooth) {
+    category = 'bluetooth';
+  }
+
+  return { isBluetooth, category };
+}
+
 export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = false }: DeviceSelectionProps) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -116,30 +140,6 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
   const handleRefresh = async () => {
     setRefreshing(true);
     await fetchDevices();
-  };
-
-  // Helper function to detect device category and Bluetooth status
-  const getDeviceMetadata = (deviceName: string) => {
-    const nameLower = deviceName.toLowerCase();
-
-    // Detect if it's Bluetooth
-    const isBluetooth = nameLower.includes('airpods')
-      || nameLower.includes('bluetooth')
-      || nameLower.includes('wireless')
-      || nameLower.includes('wh-')  // Sony WH-* series
-      || nameLower.includes('bt ');
-
-    // Categorize device
-    let category = 'wired';
-    if (deviceName === 'default') {
-      category = 'default';
-    } else if (nameLower.includes('airpods')) {
-      category = 'airpods';
-    } else if (isBluetooth) {
-      category = 'bluetooth';
-    }
-
-    return { isBluetooth, category };
   };
 
   // Handle microphone device selection
@@ -397,13 +397,13 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
 
       {/* Info text */}
       <div className="text-xs text-muted-foreground space-y-1">
-        <p>• <strong>Microphone:</strong> Records your voice and ambient sound</p>
-        <p>• <strong>System audio:</strong> Records computer audio (music, calls, etc.)</p>
+        <p>· <strong>Microphone:</strong> Records your voice and ambient sound</p>
+        <p>· <strong>System audio:</strong> Records computer audio (music, calls, etc.)</p>
         {isMonitoring && (
-          <p>• <strong>Mic levels:</strong> Green = good, yellow = loud, red = too loud</p>
+          <p>· <strong>Mic levels:</strong> Green = good, yellow = loud, red = too loud</p>
         )}
         {!isMonitoring && inputDevices.length > 0 && (
-          <p>• <strong>Tip:</strong> Click "Test mic" to check if your microphone is working</p>
+          <p>· <strong>Tip:</strong> Click "Test mic" to check if your microphone is working</p>
         )}
       </div>
     </div>

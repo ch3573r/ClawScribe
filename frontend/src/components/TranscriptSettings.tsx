@@ -5,7 +5,9 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
-import { Label } from './ui/label';
+import { SettingsCard, SettingsFooter, SettingsRow } from '@/components/ui/settings-layout';
+import { TranscriptionPcTest } from './TranscriptionPcTest';
+import { TRANSCRIPTION_OPTIONS_ID } from '@/components/settings/transcriptionAnchors';
 import { Eye, EyeOff, FlaskConical, Loader2, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
@@ -39,9 +41,11 @@ export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
     setTranscriptModelConfig: (config: TranscriptModelProps) => void;
     onModelSelect?: () => void;
+    /** Offer "Test this PC". The Transcription page turns it on; modals leave it off. */
+    pcTest?: boolean;
 }
 
-export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
+export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect, pcTest = false }: TranscriptSettingsProps) {
     const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
     const [apiKeyEdited, setApiKeyEdited] = useState(false);
     const [allowUnencrypted, setAllowUnencrypted] = useState(transcriptModelConfig.allowUnencrypted ?? false);
@@ -96,6 +100,29 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             setApiKey(null);
         }
     };
+    const engineDescription = ({
+        parakeet: 'Parakeet runs on this PC in real time',
+        localWhisper: 'Whisper runs on this PC with the highest accuracy',
+        nemotron: 'Nemotron runs on this PC and streams in many languages',
+    } as Record<string, string>)[uiProvider];
+    // Hosted engines transcribe whole files only, so the speed test measures the local model live recording falls back to.
+    const savedUsesParakeet = transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'cloud-whisper' || transcriptModelConfig.provider === 'mai-transcribe';
+    const parakeetTestTarget = savedUsesParakeet
+        ? { provider: transcriptModelConfig.provider as string, model: transcriptModelConfig.model }
+        : { provider: 'parakeet', model: '' };
+
+    // The Options card sits on this page. Elsewhere (a modal) open the settings page instead.
+    const openOptions = () => {
+        const target = typeof document !== 'undefined' ? document.getElementById(TRANSCRIPTION_OPTIONS_ID) : null;
+        if (target) {
+            target.scrollIntoView({ block: 'start' });
+            target.focus({ preventScroll: true });
+            return;
+        }
+        router.push('/settings?tab=transcription');
+        window.dispatchEvent(new CustomEvent('open-settings-tab', { detail: 'transcription' }));
+    };
+
     const modelOptions = {
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
@@ -249,208 +276,189 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
+
+    const isLocalProvider = uiProvider === 'localWhisper' || uiProvider === 'parakeet' || uiProvider === 'nemotron';
     return (
-        <div>
-            <div>
-                {/* <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-lg font-semibold text-foreground">Transcript Settings</h3>
-                </div> */}
-                <div className="space-y-4 pb-6">
-                    <div>
-                        <Label className="block text-sm font-medium text-foreground mb-1">
-                            Engine
-                        </Label>
-                        <div className="flex space-x-2 mx-1">
-                            <Select
-                                value={uiProvider}
-                                onValueChange={(value) => {
-                                    const provider = value as TranscriptModelProps['provider'];
-                                    setUiProvider(provider);
-                                    setAllowUnencrypted(false);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'nemotron') {
-                                        fetchApiKey(provider);
-                                    }
-                                    if (provider === 'cloud-whisper') {
-                                        setCloudModel(transcriptModelConfig.provider === 'cloud-whisper' ? transcriptModelConfig.model : 'whisper-1');
-                                        setCloudWhisperBaseUrl(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
-                                    }
-                                    if (provider === 'mai-transcribe') {
-                                        setCloudModel('mai-transcribe-1.5');
-                                        setMaiEndpoint(transcriptModelConfig.endpoint || '');
-                                        setMaiRegion(transcriptModelConfig.region || '');
-                                    }
-                                }}
-                            >
-                                <SelectTrigger className='focus:ring-1 focus:ring-ring focus:border-primary'>
-                                    <SelectValue placeholder="Select provider" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectGroup>
-                                        <SelectLabel className="normal-case">On your device</SelectLabel>
-                                        <SelectItem value="parakeet">Parakeet &middot; real-time, recommended</SelectItem>
-                                        <SelectItem value="localWhisper">Whisper &middot; highest accuracy</SelectItem>
-                                        <SelectItem value="nemotron">Nemotron &middot; streaming, multilingual (beta)</SelectItem>
-                                    </SelectGroup>
-                                    {(cloudTranscriptionEnabled || isCloudProvider) && (
-                                        <SelectGroup>
-                                            <SelectLabel className="normal-case">Cloud APIs</SelectLabel>
-                                            <SelectItem value="cloud-whisper" disabled={!cloudTranscriptionEnabled}>Hosted Whisper &middot; OpenAI-compatible</SelectItem>
-                                            <SelectItem value="mai-transcribe" disabled={!cloudTranscriptionEnabled}>MAI-Transcribe &middot; Azure Speech</SelectItem>
-                                        </SelectGroup>
-                                    )}
-                                </SelectContent>
-                            </Select>
-
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'nemotron' && !isCloudProvider && (
-                                <Select
-                                    value={transcriptModelConfig.model}
-                                    onValueChange={(value) => {
-                                        const model = value as TranscriptModelProps['model'];
-                                        setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
-                                    }}
-                                >
-                                    <SelectTrigger className='focus:ring-1 focus:ring-ring focus:border-primary'>
-                                        <SelectValue placeholder="Select model" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {modelOptions[uiProvider].map((model) => (
-                                            <SelectItem key={model} value={model}>{model}</SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
+        <div className="grid gap-5">
+            <SettingsCard>
+                <SettingsRow
+                    title="Engine"
+                    htmlFor="transcription-engine"
+                    description={isCloudProvider
+                        ? `Used for Import and Enhance (whole-file). Live recordings always transcribe on this device with ${liveEngineLabel}`
+                        : engineDescription}
+                >
+                    <Select
+                        value={uiProvider}
+                        onValueChange={(value) => {
+                            const provider = value as TranscriptModelProps['provider'];
+                            setUiProvider(provider);
+                            setAllowUnencrypted(false);
+                            if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'nemotron') {
+                                fetchApiKey(provider);
+                            }
+                            if (provider === 'cloud-whisper') {
+                                setCloudModel(transcriptModelConfig.provider === 'cloud-whisper' ? transcriptModelConfig.model : 'whisper-1');
+                                setCloudWhisperBaseUrl(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
+                            }
+                            if (provider === 'mai-transcribe') {
+                                setCloudModel('mai-transcribe-1.5');
+                                setMaiEndpoint(transcriptModelConfig.endpoint || '');
+                                setMaiRegion(transcriptModelConfig.region || '');
+                            }
+                        }}
+                    >
+                        <SelectTrigger id="transcription-engine" className="w-80 max-w-full">
+                            <SelectValue placeholder="Select provider" />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectGroup>
+                                <SelectLabel className="normal-case">On your device</SelectLabel>
+                                <SelectItem value="parakeet">Parakeet &middot; real-time, recommended</SelectItem>
+                                <SelectItem value="localWhisper">Whisper &middot; highest accuracy</SelectItem>
+                                <SelectItem value="nemotron">Nemotron &middot; streaming, multilingual (beta)</SelectItem>
+                            </SelectGroup>
+                            {(cloudTranscriptionEnabled || isCloudProvider) && (
+                                <SelectGroup>
+                                    <SelectLabel className="normal-case">Cloud APIs</SelectLabel>
+                                    <SelectItem value="cloud-whisper" disabled={!cloudTranscriptionEnabled}>Hosted Whisper &middot; OpenAI-compatible</SelectItem>
+                                    <SelectItem value="mai-transcribe" disabled={!cloudTranscriptionEnabled}>MAI-Transcribe &middot; Azure Speech</SelectItem>
+                                </SelectGroup>
                             )}
+                        </SelectContent>
+                    </Select>
 
-                        </div>
-                    </div>
-
-                    {isCloudProvider && <p className="text-sm text-muted-foreground">Used for Import and Enhance (whole-file). Live recordings always transcribe on this device with {liveEngineLabel}.</p>}
-                    {isCloudProvider && cloudTranscriptionLoaded && !cloudTranscriptionEnabled && <div role="status" className="space-y-2 rounded-md border p-3 text-sm">
-                        <p>Cloud transcription is turned off in beta settings, so Import and Enhance use this device&apos;s engine. Your {uiProvider === 'mai-transcribe' ? 'Microsoft AI' : 'Cloud Whisper'} settings are kept.</p>
-                        <Button variant="outline" onClick={() => {
-                            router.push('/settings?tab=beta');
-                            window.dispatchEvent(new CustomEvent('open-settings-tab', { detail: 'beta' }));
-                        }}>Open beta settings</Button>
-                    </div>}
-
-                    {uiProvider === 'localWhisper' && (
-                        <div className="mt-6 space-y-4">
-                            <WhisperAccelerationStatus />
-                            <ModelManager
-                                selectedModel={transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleWhisperModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
+                    {!isLocalProvider && !isCloudProvider && (
+                        <Select
+                            value={transcriptModelConfig.model}
+                            onValueChange={(value) => {
+                                const model = value as TranscriptModelProps['model'];
+                                setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
+                            }}
+                        >
+                            <SelectTrigger aria-label="Model" className="w-56 max-w-full">
+                                <SelectValue placeholder="Select model" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {modelOptions[uiProvider].map((model) => (
+                                    <SelectItem key={model} value={model}>{model}</SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
                     )}
+                </SettingsRow>
+                {isCloudProvider && cloudTranscriptionLoaded && !cloudTranscriptionEnabled && (
+                    <SettingsRow
+                        role="status"
+                        title="Cloud transcription is off"
+                        description={`Import and Enhance use this device's engine. Your ${uiProvider === 'mai-transcribe' ? 'Microsoft AI' : 'Cloud Whisper'} settings are kept`}
+                    >
+                        <Button variant="outline" size="sm" onClick={openOptions}>Open options</Button>
+                    </SettingsRow>
+                )}
+            </SettingsCard>
 
-                    {uiProvider === 'parakeet' && (
-                        <div className="mt-6">
-                            <ParakeetModelManager
-                                selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleParakeetModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
+            {uiProvider === 'localWhisper' && (
+                <div className="grid gap-5">
+                    <WhisperAccelerationStatus />
+                    <ModelManager
+                        selectedModel={transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : undefined}
+                        onModelSelect={handleWhisperModelSelect}
+                        autoSave={true}
+                    />
+                </div>
+            )}
 
-                    {uiProvider === 'nemotron' && (
-                        <div className="mt-6">
-                            <NemotronModelManager
-                                selectedModel={transcriptModelConfig.provider === 'nemotron' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleNemotronModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
+            {uiProvider === 'parakeet' && (
+                <ParakeetModelManager
+                    selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
+                    onModelSelect={handleParakeetModelSelect}
+                    autoSave={true}
+                    pcTest={pcTest ? parakeetTestTarget : undefined}
+                />
+            )}
 
+            {uiProvider === 'nemotron' && (
+                <NemotronModelManager
+                    selectedModel={transcriptModelConfig.provider === 'nemotron' ? transcriptModelConfig.model : undefined}
+                    onModelSelect={handleNemotronModelSelect}
+                    autoSave={true}
+                />
+            )}
+
+            {(isCloudProvider || requiresApiKey) && (
+                <SettingsCard title="Connection">
                     {uiProvider === 'cloud-whisper' && cloudTranscriptionEnabled && (
-                        <div className="mt-6 space-y-4">
-                            <div>
-                                <Label className="block text-sm font-medium text-foreground mb-1">
-                                    Base URL
-                                </Label>
+                        <>
+                            <SettingsRow title="Base URL" htmlFor="cloud-whisper-base-url">
                                 <Input
-                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    id="cloud-whisper-base-url"
+                                    className="w-80 max-w-full"
                                     value={cloudWhisperBaseUrl}
                                     onChange={(e) => setCloudWhisperBaseUrl(e.target.value)}
                                     placeholder="https://api.openai.com/v1"
                                 />
-                            </div>
-                            <div>
-                                <Label className="block text-sm font-medium text-foreground mb-1">
-                                    Model
-                                </Label>
+                            </SettingsRow>
+                            <SettingsRow title="Model" htmlFor="cloud-whisper-model" description="OpenAI file uploads are limited to 25 MB. Larger recordings fall back to local transcription">
                                 <Input
-                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    id="cloud-whisper-model"
+                                    className="w-80 max-w-full"
                                     value={cloudModel}
                                     onChange={(e) => setCloudModel(e.target.value)}
                                     placeholder="whisper-1"
                                 />
-                            </div>
-                            <p className="mx-1 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
-                                OpenAI file transcription uploads are limited to 25 MB.
-                                Larger recordings fall back to local transcription.
-                            </p>
-                        </div>
+                            </SettingsRow>
+                        </>
                     )}
 
                     {uiProvider === 'mai-transcribe' && cloudTranscriptionEnabled && (
-                        <div className="mt-6 space-y-4">
-                            <div>
-                                <Label className="block text-sm font-medium text-foreground mb-1">
-                                    Azure Speech endpoint
-                                </Label>
+                        <>
+                            <SettingsRow title="Azure Speech endpoint" htmlFor="mai-endpoint">
                                 <Input
-                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    id="mai-endpoint"
+                                    className="w-80 max-w-full"
                                     value={maiEndpoint}
                                     onChange={(e) => setMaiEndpoint(e.target.value)}
                                     placeholder="https://your-resource.cognitiveservices.azure.com"
                                 />
-                            </div>
-                            <div>
-                                <Label className="block text-sm font-medium text-foreground mb-1">
-                                    Region
-                                </Label>
+                            </SettingsRow>
+                            <SettingsRow title="Region" htmlFor="mai-region">
                                 <Input
-                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    id="mai-region"
+                                    className="w-80 max-w-full"
                                     value={maiRegion}
                                     onChange={(e) => setMaiRegion(e.target.value)}
                                     placeholder="eastus"
                                 />
-                            </div>
-                            <div>
-                                <Label className="block text-sm font-medium text-foreground mb-1">
-                                    Model
-                                </Label>
+                            </SettingsRow>
+                            <SettingsRow title="Model" htmlFor="mai-model" description="Sentence-level timing only, so speaker splitting is less precise">
                                 <Input
-                                    className="mx-1 focus:ring-1 focus:ring-ring focus:border-primary"
+                                    id="mai-model"
+                                    className="w-80 max-w-full"
                                     value={cloudModel}
                                     onChange={(e) => setCloudModel(e.target.value)}
                                     placeholder="mai-transcribe-1.5"
                                 />
-                            </div>
-                            <p className="mx-1 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
-                                This model provides sentence-level timing only; speaker
-                                splitting will be less precise.
-                            </p>
+                            </SettingsRow>
+                        </>
+                    )}
+
+                    {isCloudProvider && (
+                        <div className="px-5 py-3">
+                            <UnencryptedHttpOptIn
+                                urls={[uiProvider === 'cloud-whisper' ? cloudWhisperBaseUrl : maiEndpoint]}
+                                checked={allowUnencrypted} onChange={setAllowUnencrypted}
+                            />
                         </div>
                     )}
 
-
-                    {isCloudProvider && <UnencryptedHttpOptIn
-                        urls={[uiProvider === 'cloud-whisper' ? cloudWhisperBaseUrl : maiEndpoint]}
-                        checked={allowUnencrypted} onChange={setAllowUnencrypted}
-                    />}
                     {requiresApiKey && (
-                        <div>
-                            <Label className="block text-sm font-medium text-foreground mb-1">
-                                API key
-                            </Label>
-                            <div className="relative mx-1">
+                        <SettingsRow title="API key" htmlFor="transcription-api-key">
+                            <div className="relative w-80 max-w-full">
                                 <Input
+                                    id="transcription-api-key"
                                     type={showApiKey ? "text" : "password"}
-                                    className={`pr-24 focus:ring-1 focus:ring-ring focus:border-primary ${isApiKeyLocked ? 'bg-muted cursor-not-allowed' : ''
-                                        }`}
+                                    className={`pr-20 ${isApiKeyLocked ? 'bg-muted cursor-not-allowed' : ''}`}
                                     value={apiKey || ''}
                                     onChange={(e) => { setApiKey(e.target.value); setApiKeyEdited(true); }}
                                     disabled={isApiKeyLocked}
@@ -460,17 +468,17 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 {isApiKeyLocked && (
                                     <div
                                         onClick={handleInputClick}
-                                        className="absolute inset-0 flex items-center justify-center bg-muted bg-opacity-50 rounded-md cursor-not-allowed"
+                                        className="absolute inset-0 flex items-center justify-center rounded-md cursor-not-allowed"
                                     />
                                 )}
-                                <div className="absolute inset-y-0 right-0 pr-1 flex items-center">
+                                <div className="absolute inset-y-0 right-0 flex items-center pr-1">
                                     <Button
                                         type="button"
                                         variant="ghost"
                                         size="icon"
                                         onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''
-                                            }`}
+                                        className={`h-7 w-7 transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''}`}
+                                        aria-label={isApiKeyLocked ? "Unlock to edit the API key" : "Lock the API key"}
                                         title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
                                     >
                                         {isApiKeyLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
@@ -479,45 +487,48 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         type="button"
                                         variant="ghost"
                                         size="icon"
+                                        className="h-7 w-7"
                                         onClick={() => setShowApiKey(!showApiKey)}
+                                        aria-label={showApiKey ? "Hide the API key" : "Show the API key"}
                                     >
                                         {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                                     </Button>
                                 </div>
                             </div>
-                        </div>
+                        </SettingsRow>
                     )}
 
                     {isCloudProvider && cloudTranscriptionEnabled && (
-                        <div className="flex justify-end gap-2">
-                            <Button
-                                type="button"
-                                variant="gray"
-                                onClick={handleTestCloudProvider}
-                                disabled={isTestingProvider}
-                            >
-                                {isTestingProvider ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                    <FlaskConical className="h-4 w-4" />
-                                )}
-                                Test
-                            </Button>
-                            <Button type="button" onClick={handleSaveCloudProvider} disabled={isTestingProvider}>
-                                Save
-                            </Button>
-                        </div>
+                        <SettingsFooter
+                            actions={<>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={handleTestCloudProvider}
+                                    disabled={isTestingProvider}
+                                >
+                                    {isTestingProvider ? (
+                                        <Loader2 className="h-4 w-4" />
+                                    ) : (
+                                        <FlaskConical className="h-4 w-4" />
+                                    )}
+                                    Test
+                                </Button>
+                                <Button type="button" size="sm" onClick={handleSaveCloudProvider} disabled={isTestingProvider}>
+                                    Save
+                                </Button>
+                            </>}
+                        >
+                            {isTestingProvider ? 'Testing with the audio file you chose' : 'Test uses an audio file you choose'}
+                        </SettingsFooter>
                     )}
-                </div>
-            </div>
-        </div >
+                </SettingsCard>
+            )}
+
+            {pcTest && uiProvider !== 'parakeet' && (
+                <TranscriptionPcTest provider={transcriptModelConfig.provider} model={transcriptModelConfig.model} />
+            )}
+        </div>
     )
 }
-
-
-
-
-
-
-
-

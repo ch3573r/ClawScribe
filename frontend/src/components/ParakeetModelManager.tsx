@@ -1,38 +1,41 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
   ParakeetModelInfo,
   ModelStatus,
   ParakeetAPI,
   getModelDisplayInfo,
-  getModelDisplayName,
-  formatFileSize
 } from '../lib/parakeet';
-import { Button } from '@/components/ui/button';
-
-const MotionButton = motion(Button);
+import { ParakeetModelTable } from '@/components/settings/ParakeetModelTable';
+import { usePcTestResults } from '@/components/settings/pcTestResults';
+import { PcTestAction, PcTestReport, useTranscriptionPcTest } from '@/components/TranscriptionPcTest';
 
 interface ParakeetModelManagerProps {
   selectedModel?: string;
   onModelSelect?: (modelName: string) => void;
   className?: string;
   autoSave?: boolean;
+  /** Engine and model that "Test this PC" measures. Leave out to hide the test control. */
+  pcTest?: { provider: string; model: string };
 }
 
 export function ParakeetModelManager({
   selectedModel,
   onModelSelect,
   className = '',
-  autoSave = false
+  autoSave = false,
+  pcTest
 }: ParakeetModelManagerProps) {
   const [models, setModels] = useState<ParakeetModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [initialized, setInitialized] = useState(false);
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
+
+  const pcResults = usePcTestResults();
+  // Unused (and unsupported, so disabled) when no test target is given.
+  const test = useTranscriptionPcTest(pcTest ?? { provider: 'none', model: '' });
 
   // Refs for stable callbacks
   const onModelSelectRef = useRef(onModelSelect);
@@ -47,32 +50,28 @@ export function ParakeetModelManager({
     autoSaveRef.current = autoSave;
   }, [onModelSelect, autoSave]);
 
-  // Initialize and load models
+  const loadModels = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      await ParakeetAPI.init();
+      setModels(await ParakeetAPI.getAvailableModels());
+    } catch (err) {
+      console.error('Failed to initialize Parakeet:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load models');
+      toast.error('Failed to load transcription models', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+        duration: 5000
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Load the model list when the table is shown
   useEffect(() => {
-    if (initialized) return;
-
-    const initializeModels = async () => {
-      try {
-        setLoading(true);
-        await ParakeetAPI.init();
-        const modelList = await ParakeetAPI.getAvailableModels();
-        setModels(modelList);
-
-        setInitialized(true);
-      } catch (err) {
-        console.error('Failed to initialize Parakeet:', err);
-        setError(err instanceof Error ? err.message : 'Failed to load models');
-        toast.error('Failed to load transcription models', {
-          description: err instanceof Error ? err.message : 'Unknown error',
-          duration: 5000
-        });
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    initializeModels();
-  }, [initialized, selectedModel, onModelSelect]);
+    void loadModels();
+  }, [loadModels]);
 
   // Set up event listeners for download progress
   useEffect(() => {
@@ -136,7 +135,7 @@ export function ParakeetModelManager({
           // Clean up throttle data
           progressThrottleRef.current.delete(modelName);
 
-          toast.success(`${displayInfo?.icon || '✓'} ${displayName} ready!`, {
+          toast.success(`${displayName} is ready`, {
             description: 'Model downloaded and ready to use',
             duration: 4000
           });
@@ -331,313 +330,26 @@ export function ParakeetModelManager({
     }
   };
 
-  if (loading) {
-    return (
-      <div className={`space-y-3 ${className}`}>
-        <div className="animate-pulse space-y-3">
-          <div className="h-20 bg-muted rounded-lg"></div>
-          <div className="h-20 bg-muted rounded-lg"></div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className={`bg-error border border-error-border/30 rounded-lg p-4 ${className}`}>
-        <p className="text-sm text-error-foreground">Failed to load models</p>
-        <p className="text-xs text-error-foreground mt-1">{error}</p>
-      </div>
-    );
-  }
-
-  const recommendedModel = models.find(m =>
-    m.name === 'parakeet-tdt-0.6b-v3-int8'
-  );
-  const otherModels = models.filter(m =>
-    m.name !== 'parakeet-tdt-0.6b-v3-int8'
-  );
-  const selectedModelSupported = selectedModel
-    ? models.some(m => m.name === selectedModel)
-    : false;
-
   return (
-    <div className={`space-y-3 ${className}`}>
-      {/* Recommended Model */}
-      {recommendedModel && (
-        <ModelCard
-          model={recommendedModel}
-          isSelected={selectedModel === recommendedModel.name}
-          isRecommended={true}
-          onSelect={() => {
-            if (recommendedModel.status === 'Available') {
-              selectModel(recommendedModel.name);
-            }
-          }}
-          onDownload={() => downloadModel(recommendedModel.name)}
-          onCancel={() => cancelDownload(recommendedModel.name)}
-          onDelete={() => deleteModel(recommendedModel.name)}
-          isDownloading={downloadingModels.has(recommendedModel.name)}
-        />
-      )}
-
-      {/* Other Models */}
-      {otherModels.length > 0 && (
-        <div className="space-y-3">
-          {otherModels.map(model => (
-            <ModelCard
-              key={model.name}
-              model={model}
-              isSelected={selectedModel === model.name}
-              isRecommended={false}
-              onSelect={() => {
-                if (model.status === 'Available') {
-                  selectModel(model.name);
-                }
-              }}
-              onDownload={() => downloadModel(model.name)}
-              onCancel={() => cancelDownload(model.name)}
-              onDelete={() => deleteModel(model.name)}
-              isDownloading={downloadingModels.has(model.name)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Helper text */}
-      {selectedModel && selectedModelSupported && (
-        <motion.div
-          initial={{ opacity: 0, y: -5 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-xs text-muted-foreground text-center pt-2"
-        >
-          Using {getModelDisplayName(selectedModel)} for transcription
-        </motion.div>
-      )}
-      {selectedModel && !selectedModelSupported && (
-        <motion.div
-          initial={{ opacity: 0, y: -5 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-xs text-warning-foreground text-center pt-2"
-        >
-          Selected Parakeet model is no longer supported. Choose Lightning or SmoothQuant.
-        </motion.div>
-      )}
+    <div className={className}>
+      <ParakeetModelTable
+        models={models}
+        loading={loading}
+        error={error}
+        selectedModel={selectedModel}
+        results={pcResults}
+        testAction={pcTest ? <PcTestAction test={test} /> : undefined}
+        testReport={pcTest ? <PcTestReport test={test} /> : undefined}
+        onSelect={modelName => {
+          if (models.find(model => model.name === modelName)?.status === 'Available') {
+            void selectModel(modelName);
+          }
+        }}
+        onDownload={modelName => void downloadModel(modelName)}
+        onCancel={modelName => void cancelDownload(modelName)}
+        onDelete={modelName => void deleteModel(modelName)}
+        onRetryLoad={() => void loadModels()}
+      />
     </div>
-  );
-}
-
-// Model Card Component
-interface ModelCardProps {
-  model: ParakeetModelInfo;
-  isSelected: boolean;
-  isRecommended: boolean;
-  onSelect: () => void;
-  onDownload: () => void;
-  onCancel: () => void;
-  onDelete: () => void;
-  isDownloading: boolean;
-}
-
-function ModelCard({
-  model,
-  isSelected,
-  isRecommended,
-  onSelect,
-  onDownload,
-  onCancel,
-  onDelete,
-  isDownloading
-}: ModelCardProps) {
-  const [isHovered, setIsHovered] = useState(false);
-  const displayInfo = getModelDisplayInfo(model.name);
-  const displayName = displayInfo?.friendlyName || model.name;
-  const icon = displayInfo?.icon || '📦';
-  const tagline = displayInfo?.tagline || model.description || '';
-
-  const isAvailable = model.status === 'Available';
-  const isMissing = model.status === 'Missing';
-  const isError = typeof model.status === 'object' && 'Error' in model.status;
-  const isCorrupted = typeof model.status === 'object' && 'Corrupted' in model.status;
-  const downloadProgress =
-    typeof model.status === 'object' && 'Downloading' in model.status
-      ? model.status.Downloading
-      : null;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      className={`
-        relative rounded-lg border-2 transition-all cursor-pointer
-        ${isSelected && isAvailable
-          ? 'border-primary bg-primary/10'
-          : isAvailable
-            ? 'border-border hover:border-border bg-card'
-            : 'border-border bg-muted'
-        }
-        ${isAvailable ? '' : 'cursor-default'}
-      `}
-      onClick={() => {
-        if (isAvailable) onSelect();
-      }}
-    >
-      {/* Recommended Badge */}
-      {isRecommended && (
-        <div className="absolute -top-2 -right-2 bg-primary text-primary-foreground text-xs px-2 py-0.5 rounded-full font-medium">
-          Recommended
-        </div>
-      )}
-
-      <div className="p-4">
-        <div className="flex items-start justify-between mb-3">
-          <div className="flex-1">
-            {/* Model Name */}
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-2xl">{icon}</span>
-              <h3 className="font-semibold text-foreground">{displayName}</h3>
-              {isSelected && isAvailable && (
-                <motion.span
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  className="bg-primary text-primary-foreground px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1"
-                >
-                  ✓
-                </motion.span>
-              )}
-            </div>
-
-            {/* Tagline */}
-            <p className="text-sm text-muted-foreground ml-9">{tagline}</p>
-          </div>
-
-          {/* Status/Action */}
-          <div className="ml-4 flex items-center gap-2">
-            {isAvailable && (
-              <>
-                <div className="flex items-center gap-1.5 text-success-foreground">
-                  <div className="w-2 h-2 bg-success-foreground rounded-full"></div>
-                  <span className="text-xs font-medium">Ready</span>
-                </div>
-                <AnimatePresence>
-                  {isHovered && (
-                    <MotionButton variant="ghost"
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      transition={{ duration: 0.15 }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDelete();
-                      }}
-                      className="text-muted-foreground hover:text-error-foreground transition-colors p-1 h-auto hover:bg-transparent"
-                      title="Delete model to free up space"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </MotionButton>
-                  )}
-                </AnimatePresence>
-              </>
-            )}
-
-            {isMissing && (
-              <Button variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownload();
-                }}
-                className="bg-primary text-primary-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors h-auto hover:text-primary-foreground"
-              >
-                Download
-              </Button>
-            )}
-
-            {downloadProgress === null && isError && (
-              <Button variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownload();
-                }}
-                className="bg-destructive text-destructive-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-destructive/90 transition-colors h-auto hover:text-destructive-foreground"
-              >
-                Retry
-              </Button>
-            )}
-
-            {isCorrupted && (
-              <div className="flex gap-2">
-                <Button variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete();
-                  }}
-                  className="bg-warning text-warning-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-warning/80 transition-colors h-auto hover:text-warning-foreground"
-                >
-                  Delete
-                </Button>
-                <Button variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDownload();
-                  }}
-                  className="bg-primary text-primary-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors h-auto hover:text-primary-foreground"
-                >
-                  Re-download
-                </Button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Full-width Download Progress Bar - PROMINENT */}
-        {downloadProgress !== null && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mt-3 pt-3 border-t border-border"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-primary">Downloading...</span>
-                <span className="text-sm font-semibold text-primary">{Math.round(downloadProgress)}%</span>
-              </div>
-              <Button variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCancel();
-                }}
-                className="text-xs text-muted-foreground hover:text-error-foreground font-medium transition-colors px-2 py-1 rounded hover:bg-error h-auto"
-                title="Cancel download"
-              >
-                Cancel
-              </Button>
-            </div>
-            <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
-              <motion.div
-                className="h-full bg-primary rounded-full"
-                initial={{ width: 0 }}
-                animate={{ width: `${downloadProgress}%` }}
-                transition={{ duration: 0.3, ease: 'easeOut' }}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              {model.size_mb ? (
-                <>
-                  {formatFileSize(model.size_mb * downloadProgress / 100)} / {formatFileSize(model.size_mb)}
-                </>
-              ) : (
-                'Downloading...'
-              )}
-            </p>
-          </motion.div>
-        )}
-      </div>
-    </motion.div>
   );
 }

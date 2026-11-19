@@ -3,6 +3,7 @@ import test from 'node:test';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
+const names = value => Object.fromEntries(value.split(' ').map(name => [name, name]));
 const jsx = (type, props) => ({ type, props });
 const nodes = root => Array.isArray(root) ? root.flatMap(nodes) : root && typeof root === 'object'
   ? [root, ...nodes(root.props?.children)] : [];
@@ -14,7 +15,7 @@ function setup(invoke) {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@tauri-apps/api/core': { invoke }, 'lucide-react': { X: 'X' },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/input': { Input: 'Input' },
-    '@/components/ui/label': { Label: 'Label' }, '@/components/ui/page-section': { PageSection: 'PageSection' },
+    '@/components/ui/settings-layout': names('Meta SettingsCard SettingsFooter'),
   });
   const render = () => hooks.render(() => CustomVocabularySettings());
   const find = (type, predicate = () => true) => nodes(render()).find(node => node.type === type && predicate(node));
