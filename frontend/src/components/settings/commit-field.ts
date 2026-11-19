@@ -143,10 +143,14 @@ export function useSaveFeedback() {
   const timers = useRef<Record<string, unknown>>({});
   useEffect(() => () => { Object.values(timers.current).forEach(timer => clearTimeout(timer as never)); }, []);
 
-  const run = async (key: string, work: () => Promise<void>): Promise<boolean> => {
+  const run = async (key: string, work: () => Promise<CommitResult>): Promise<boolean> => {
     setStates(previous => ({ ...previous, [key]: { status: "saving" } }));
     try {
-      await work();
+      // A held value was kept but not saved, so it gets no "saved" confirmation.
+      if ((await work()) === "held") {
+        setStates(previous => ({ ...previous, [key]: undefined as never }));
+        return true;
+      }
       setStates(previous => ({ ...previous, [key]: { status: "saved" } }));
       if (timers.current[key]) clearTimeout(timers.current[key] as never);
       const timer = setTimeout(() => setStates(previous => (previous[key]?.status === "saved" ? { ...previous, [key]: undefined as never } : previous)), SAVED_MS);

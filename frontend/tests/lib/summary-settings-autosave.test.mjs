@@ -223,19 +223,21 @@ function modalHarness({ provider = 'claude', apiKey = null, onSave, autosave = t
 test('choosing another provider only previews it; the saved provider stays in use until the user switches', async () => {
   const app = modalHarness({ provider: 'claude', apiKey: KEY });
   app.render(); await flush(); app.render();
-  const select = () => nodes(app.render()).find(node => node.type === 'select' && node.props.value === app.context.modelConfig.provider);
+  const select = () => nodes(app.render()).find(node => node.type === 'select' && ['claude', 'codex', 'groq'].includes(node.props.value));
   const button = label => nodes(app.render()).find(node => node.type === 'button' && text(node) === label);
   select().props.onValueChange('codex');
   await flush();
   assert.equal(app.saves.length, 0, 'looking at a provider saves nothing');
-  assert.equal(app.context.modelConfig.provider, 'codex');
+  assert.equal(select().props.value, 'codex', 'the page shows the provider being looked at');
+  assert.equal(app.context.modelConfig.provider, 'claude', 'summaries keep using the saved provider: the shared configuration is untouched');
   assert.match(text(app.render()), /Not in use yet/);
   assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
 
   button('Keep Claude').props.onClick();
   await flush();
   assert.equal(app.saves.length, 0);
-  assert.equal(app.context.modelConfig.provider, 'claude', 'going back restores the saved setup');
+  assert.equal(select().props.value, 'claude', 'going back shows the saved setup again');
+  assert.equal(app.context.modelConfig.provider, 'claude');
   assert.doesNotMatch(text(app.render()), /Not in use yet/);
 
   select().props.onValueChange('codex');
@@ -244,6 +246,7 @@ test('choosing another provider only previews it; the saved provider stays in us
   await flush();
   assert.equal(app.saves.length, 1);
   assert.equal(app.saves[0].provider, 'codex');
+  assert.equal(app.context.modelConfig.provider, 'codex', 'the shared configuration changes only after the switch is saved');
   assert.doesNotMatch(text(app.render()), /Not in use yet/);
   assert.equal(nodes(app.render()).some(node => node.type === 'button' && text(node) === 'Save'), false, 'no Save button on the settings page');
   app.hooks.unmount();
@@ -268,8 +271,24 @@ test('a provider that still needs a key cannot be switched to, and a failed swit
   const shown = text(failing.render());
   assert.match(shown, /Could not save the provider/);
   assert.match(shown, /Not in use yet/, 'a failed switch leaves the saved provider in use');
+  assert.equal(failing.context.modelConfig.provider, 'claude');
   assert.doesNotMatch(shown, new RegExp(KEY));
   app.hooks.unmount(); failing.hooks.unmount();
+});
+
+test('a key entered for a provider that is only being looked at is held, not saved', async () => {
+  const app = modalHarness({ provider: 'claude', apiKey: KEY });
+  app.render(); await flush(); app.render();
+  nodes(app.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
+  await flush();
+  const other = 'synthetic-placeholder-key-0002';
+  const held = await nodes(app.render()).find(node => node.type === 'commit-input-row' && node.props.id === 'summary-api-key').props.onCommit(other);
+  assert.equal(held, 'held', 'the field reports that nothing was saved');
+  assert.equal(app.saves.length, 0, 'entering a key does not switch the provider');
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  assert.equal(app.context.modelConfig.apiKey, KEY, 'the saved provider keeps its own key');
+  assert.match(text(app.render()), /Not in use yet/);
+  app.hooks.unmount();
 });
 
 test('an API key is saved by committing the field and a half-typed key is never used to check the provider', async () => {

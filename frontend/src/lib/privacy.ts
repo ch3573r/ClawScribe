@@ -275,7 +275,8 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   const handoffBase = handoffOn
     ? row({
         id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
-        destination: handoffTarget, when: "After every recording", tone: "warning", detail: "The full transcript and meeting details",
+        destination: handoffTarget, when: "After every recording", tone: "warning",
+        detail: "The full transcript and meeting details. Switch it off in the OpenClaw provider settings",
       })
     : row({
         id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
@@ -371,7 +372,11 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   const automaticState = input.autoSummary ? blocked(input.summary, input.handoff) : blocked(input.handoff);
   let automaticFact: PrivacyFact;
   if (handoffOn) {
-    automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: `To ${handoffTarget} after every recording`, tone: "warning", state: "ready" };
+    // Automatic summaries can add a second destination; name both.
+    const alsoSummaries = input.autoSummary && summaryClass && textLeavesKind
+      ? `, and to ${summaryClass.kind === "unknown" ? "your summary provider" : summaryClass.label} for summaries`
+      : "";
+    automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: `To ${handoffTarget} after every recording${alsoSummaries}`, tone: "warning", state: "ready" };
   } else if (automaticState !== "ready") {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: automaticState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: automaticState };
   } else if (input.autoSummary && textLeavesKind) {

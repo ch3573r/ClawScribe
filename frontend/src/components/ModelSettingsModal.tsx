@@ -1,6 +1,6 @@
 import { openExternal } from '@/lib/openExternal';
 import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
-import { useState, useEffect, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
@@ -283,8 +283,23 @@ export function ModelSettingsModal({
 }: ModelSettingsModalProps) {
   // Use ConfigContext if available, fallback to props for backward compatibility
   const configContext = useConfig();
-  const modelConfig = configContext?.modelConfig || propsModelConfig;
-  const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+  const sharedModelConfig = configContext?.modelConfig || propsModelConfig;
+  const setSharedModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+  // Settings page only: a provider the user is looking at but has not switched
+  // to. It is kept here and never written to the shared configuration, because
+  // summaries are generated with whatever the shared configuration holds.
+  const [previewConfig, setPreviewConfig] = useState<ModelConfig | null>(null);
+  const previewRef = useRef<ModelConfig | null>(null);
+  const setPreview = useCallback((next: ModelConfig | null) => {
+    previewRef.current = next;
+    setPreviewConfig(next);
+  }, []);
+  const modelConfig = (autosave && previewConfig) || sharedModelConfig;
+  const setModelConfig = useCallback((next: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => {
+    const preview = previewRef.current;
+    if (preview) setPreview(typeof next === 'function' ? next(preview) : next);
+    else setSharedModelConfig(next);
+  }, [setPreview, setSharedModelConfig]);
   const claudeCode = useClaudeCodeSettings(modelConfig.provider === 'claude-code');
   const providerApiKeys = configContext?.providerApiKeys;
   const updateProviderApiKey = configContext?.updateProviderApiKey;
@@ -374,8 +389,6 @@ export function ModelSettingsModal({
   // Settings page (autosave) state
   const feedback = useSaveFeedback();
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
-  // The saved configuration while a different provider is being looked at.
-  const [providerDraft, setProviderDraft] = useState<ModelConfig | null>(null);
   const [modelListFailed, setModelListFailed] = useState<boolean>(false);
   const [customCheck, setCustomCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; message: string }>({ state: 'idle', message: '' });
   const [claudeRecheck, setClaudeRecheck] = useState<number>(0);
@@ -1380,9 +1393,15 @@ export function ModelSettingsModal({
   // ---------------------------------------------------------------------------
   // Settings page mode: rows for a settings card, every change saved as made.
   // ---------------------------------------------------------------------------
-  const saveConfig = async (next: ModelConfig, failure: string) => {
+  // While another provider is only being looked at, changes stay with the
+  // preview and resolve as "held". Only `switching` (the "Use" button) saves.
+  const saveConfig = async (next: ModelConfig, failure: string, switching = false): Promise<CommitResult> => {
+    if (previewRef.current && !switching) {
+      setPreview(next);
+      return 'held';
+    }
     try { await Promise.resolve(onSave(next)); } catch { throw new SaveError(failure); }
-    setProviderDraft(null);
+    setPreview(null);
   };
 
   // Looking at another provider must not replace a working setup. The select
@@ -1391,26 +1410,23 @@ export function ModelSettingsModal({
   const changeProviderAutosave = (value: string) => {
     const provider = value as ModelConfig['provider'];
     if (provider === modelConfig.provider) return;
-    const inUse = providerDraft ?? modelConfig;
     setError('');
-    if (provider === inUse.provider) {
-      setProviderDraft(null);
-      setModelConfig(inUse);
+    if (provider === sharedModelConfig.provider) {
+      setPreview(null);
       return;
     }
     {
-      if (!providerDraft && modelConfig.model) rememberModel(modelConfig.provider, modelConfig.model);
+      if (!previewRef.current && sharedModelConfig.model) rememberModel(sharedModelConfig.provider, sharedModelConfig.model);
       const saved = readModelMap()[provider];
       const options = modelOptions[provider];
       const model = saved && options?.includes(saved) ? saved : (options?.[0] ?? '');
       const next: ModelConfig = {
-        ...modelConfig,
+        ...sharedModelConfig,
         provider,
         model,
         apiKey: needsKey(provider) ? (providerApiKeys?.[provider as keyof typeof providerApiKeys] ?? null) : null,
       };
-      setProviderDraft(inUse);
-      setModelConfig(next);
+      setPreview(next);
       if (provider === 'openrouter') void loadOpenRouterModels();
       if (provider === 'builtin-ai') void loadBuiltinAiModels();
       if (provider === 'custom-openai') {
@@ -1439,6 +1455,9 @@ export function ModelSettingsModal({
   const draftProviderMissing = (): string | null => {
     if (needsKey(modelConfig.provider) && !modelConfig.apiKey?.trim()) return 'Enter an API key first';
     if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
+    if (modelConfig.provider === 'openclaw' && openClawMissing(openClawValues()).length > 0) return 'Fill in the OpenClaw settings first';
+    if (modelConfig.provider === 'codex' && codexStatus && !codexStatus.found) return 'Install the Codex runtime first';
+    if (modelConfig.provider === 'claude-code' && claudeCode.status && claudeCode.status.state !== 'ready') return 'Claude Code is not ready yet';
     return null;
   };
 
@@ -1446,18 +1465,20 @@ export function ModelSettingsModal({
     void feedback.run('provider', async () => {
       // Only the key stored for this provider is used, never one typed for another provider.
       const next: ModelConfig = { ...modelConfig, apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || null) : null };
-      await saveConfig(next, 'Could not save the provider');
+      await saveConfig(next, 'Could not save the provider', true);
       setError('');
       setModelConfig(next);
+      if (next.apiKey) updateProviderApiKey?.(next.provider, next.apiKey);
     });
   };
 
   const chooseModelAutosave = (model: string) => {
     void feedback.run('model', async () => {
       const next: ModelConfig = { ...modelConfig, model, apiKey: needsKey(modelConfig.provider) ? (apiKey?.trim() || null) : null };
-      await saveConfig(next, 'Could not save the model');
+      const held = await saveConfig(next, 'Could not save the model');
       rememberModel(modelConfig.provider, model);
       setModelConfig(next);
+      return held;
     });
   };
 
@@ -1469,16 +1490,19 @@ export function ModelSettingsModal({
     void feedback.run('model', async () => {
       const saved = await saveCodexSafe({ ...codexConfig, model });
       const next: ModelConfig = { ...modelConfig, model: saved.model, apiKey: null };
-      await saveConfig(next, 'Could not save the model');
+      const held = await saveConfig(next, 'Could not save the model');
       setModelConfig(next);
+      return held;
     });
   };
 
   const commitApiKey = async (value: string): Promise<CommitResult> => {
     const next: ModelConfig = { ...modelConfig, apiKey: value };
-    await saveConfig(next, 'Could not save the API key');
+    const held = await saveConfig(next, 'Could not save the API key');
     setApiKey(value);
     setModelConfig(next);
+    // Kept with the preview. It is stored when the user switches to this provider.
+    if (held) return held;
     updateProviderApiKey?.(modelConfig.provider, value);
     if (modelConfig.provider === 'openai') {
       try {
@@ -1521,20 +1545,22 @@ export function ModelSettingsModal({
       contextWindow: payload.contextWindow, maxTokens: payload.maxTokens, temperature: payload.temperature, topP: payload.topP,
       timeoutSeconds: payload.timeoutSeconds, organization: payload.organization, project: payload.project,
     };
-    await saveConfig(next, 'Could not save the model settings');
+    const held = await saveConfig(next, 'Could not save the model settings');
     rememberModel('custom-openai', payload.model);
     setModelConfig(next);
     setCustomAllowUnencrypted(v.allowUnencrypted);
     setCustomDestinationProblem(null);
     setCustomCheck({ state: 'idle', message: '' });
+    return held;
   };
 
   const commitOllamaEndpoint = async (value: string): Promise<CommitResult> => {
     const next: ModelConfig = { ...modelConfig, apiKey: null, ollamaEndpoint: value || null };
-    await saveConfig(next, 'Could not save the endpoint');
+    const held = await saveConfig(next, 'Could not save the endpoint');
     setModelConfig(next);
     setOllamaEndpoint(value);
     void fetchOllamaModels(true, value);
+    return held;
   };
 
   const openClawValues = () => ({
@@ -2014,13 +2040,13 @@ export function ModelSettingsModal({
             </SelectContent>
           </Select>
         </SettingsRow>
-        {providerDraft && (
+        {previewConfig && (
           <SettingsRow
             title="Not in use yet"
-            description={draftProviderMissing() ?? `${summaryProviderLabel(providerDraft.provider)} stays your summary provider until you switch`}
+            description={draftProviderMissing() ?? `${summaryProviderLabel(sharedModelConfig.provider)} stays your summary provider until you switch`}
           >
-            <Button type="button" variant="ghost" size="sm" disabled={feedback.busy} onClick={() => changeProviderAutosave(providerDraft.provider)}>
-              Keep {summaryProviderLabel(providerDraft.provider)}
+            <Button type="button" variant="ghost" size="sm" disabled={feedback.busy} onClick={() => changeProviderAutosave(sharedModelConfig.provider)}>
+              Keep {summaryProviderLabel(sharedModelConfig.provider)}
             </Button>
             <Button type="button" variant="outline" size="sm" disabled={feedback.busy || draftProviderMissing() !== null} onClick={useDraftProvider}>
               Use {summaryProviderLabel(modelConfig.provider)}
