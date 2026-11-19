@@ -25,5 +25,6 @@ be used after removing the source.
 
 Files and subscriptions support all-day events, times with time zones,
 and recurring meetings, including cancelled or rescheduled occurrences.
-A calendar can be up to 2 MiB. Large recurrence expansions and unsupported
+A calendar can be up to 16 MiB. ClawScribe does not keep event descriptions,
+comments, or attachments. Large recurrence expansions and unsupported
 time zones or recurrence formats produce an error beside the affected source.

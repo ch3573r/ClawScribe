@@ -423,6 +423,10 @@ mod native {
                         &api,
                         &root,
                         &[
+                            // Observed in the Teams meeting window on Windows: a bare
+                            // "Leave" button next to "Mute mic" / "Unmute mic".
+                            "Mute mic",
+                            "Unmute mic",
                             "Mute",
                             "Unmute",
                             "Mute microphone",

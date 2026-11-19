@@ -106,7 +106,7 @@ test('imported meetings are available while subscriptions are still downloading'
 test('oversized or unparsable files are rejected before they reach storage', async () => {
   let writes = 0;
   const api = service(async () => { writes++; }, async () => { throw Error('private file content'); });
-  await assert.rejects(api.importICalendarFile({ name: 'large.ics', size: 2 ** 22 }), /2 MiB/);
+  await assert.rejects(api.importICalendarFile({ name: 'large.ics', size: 2 ** 24 + 1 }), /16 MiB/);
   const bad = new File(['not a calendar'], 'bad.ics');
   await assert.rejects(api.importICalendarFile(bad),
     err => !String(err).includes('private file content'));

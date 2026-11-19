@@ -1,11 +1,13 @@
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use std::{io::Read, time::Duration};
 
-pub(super) const MAX_BYTES: usize = 2 * 1024 * 1024;
+// A published work calendar with full details exceeds 2 MiB within a year,
+// mostly through HTML meeting descriptions.
+pub(super) const MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const INVALID_URL: &str =
     "Use an HTTPS or webcal calendar URL without a username, password, or fragment.";
 pub(super) const INVALID_CALENDAR: &str = "Choose an iCalendar file or feed in UTF-8 format.";
-pub(super) const TOO_LARGE: &str = "Calendar files and feeds must be 2 MiB or smaller.";
+pub(super) const TOO_LARGE: &str = "Calendar files and feeds must be 16 MiB or smaller.";
 const DOWNLOAD_FAILED: &str =
     "Could not download the calendar. Check the subscription link and try again.";
 const REDIRECTED: &str =
@@ -53,6 +55,29 @@ pub(super) fn validate_calendar(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Meeting lookups never read these properties. They hold most of a calendar's
+// bytes and its most private text, so drop them before the calendar is
+// cached, stored, or sent to the webview.
+const UNUSED_TEXT: [&str; 4] = ["DESCRIPTION", "X-ALT-DESC", "ATTACH", "COMMENT"];
+
+pub(super) fn without_unused_text(calendar: &str) -> String {
+    let mut kept = String::with_capacity(calendar.len());
+    let mut dropping = false;
+    for line in calendar.split_inclusive('\n') {
+        // A line that starts with a space or tab continues the previous property.
+        if !line.starts_with([' ', '\t']) {
+            let name = line.split([';', ':']).next().unwrap_or_default().trim_end();
+            dropping = UNUSED_TEXT
+                .iter()
+                .any(|unused| name.eq_ignore_ascii_case(unused));
+        }
+        if !dropping {
+            kept.push_str(line);
+        }
+    }
+    kept
+}
+
 // Only the explicitly subscribed URL is requested. Neither redirects nor
 // URIs embedded in calendar properties trigger follow-up requests.
 pub(super) fn download(url: Url) -> Result<String, String> {
@@ -95,7 +120,7 @@ fn read_response(
     }
     let calendar = String::from_utf8(bytes).map_err(|_| INVALID_CALENDAR)?;
     validate_calendar(&calendar)?;
-    Ok(calendar)
+    Ok(without_unused_text(&calendar))
 }
 
 #[cfg(test)]
@@ -134,7 +159,39 @@ mod tests {
         let sample = "BEGIN:VCALENDAR\nATTACH:https://example.com/attachment\nEND:VCALENDAR";
         assert_eq!(
             read_response(StatusCode::OK, None, sample.as_bytes()).unwrap(),
-            sample
+            "BEGIN:VCALENDAR\nEND:VCALENDAR"
         );
+    }
+
+    #[test]
+    fn unused_text_is_dropped_with_its_folded_lines_and_nothing_else() {
+        let calendar = concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "BEGIN:VEVENT\r\n",
+            "DESCRIPTION;LANGUAGE=en:First line\r\n",
+            " folded line\r\n",
+            "\tSUMMARY:still part of the description\r\n",
+            "SUMMARY:Planning\r\n",
+            " review\r\n",
+            "x-alt-desc;FMTTYPE=text/html:<p>Body</p>\r\n",
+            "DESCRIPTION-NOTE:kept\r\n",
+            "comment:dropped\r\n",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n",
+        );
+        assert_eq!(
+            without_unused_text(calendar),
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "BEGIN:VEVENT\r\n",
+                "SUMMARY:Planning\r\n",
+                " review\r\n",
+                "DESCRIPTION-NOTE:kept\r\n",
+                "END:VEVENT\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+        let untouched = "\u{feff}BEGIN:VCALENDAR\nSUMMARY:Description: none\nEND:VCALENDAR";
+        assert_eq!(without_unused_text(untouched), untouched);
     }
 }

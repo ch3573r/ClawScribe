@@ -1,4 +1,6 @@
-use super::feed::{download, subscription_url, validate_calendar, MAX_BYTES, TOO_LARGE};
+use super::feed::{
+    download, subscription_url, validate_calendar, without_unused_text, MAX_BYTES, TOO_LARGE,
+};
 use crate::{credentials, library::atomic_write};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -204,7 +206,7 @@ impl CalendarStore {
                 fingerprint,
                 protected_url: None,
             },
-            &content,
+            &without_unused_text(&content),
         )?;
         Ok(source)
     }

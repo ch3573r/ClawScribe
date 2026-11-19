@@ -10,7 +10,7 @@ export interface ICalendarEvent extends CalendarEvent {
 const errors = {
   invalid: "The calendar contains invalid iCalendar data.",
   unsupported: "The calendar uses an unsupported time zone or recurrence format.",
-  size: "The calendar exceeds the 2 MiB size limit.",
+  size: "The calendar exceeds the 16 MiB size limit.",
   complexity: "The calendar contains too many events or recurrences to display.",
 } as const;
 
@@ -21,7 +21,7 @@ export class ICalendarParseError extends Error {
   }
 }
 
-const MAX_BYTES = 2 * 1024 * 1024;
+const MAX_BYTES = 16 * 1024 * 1024;
 const DAY = 86_400_000;
 
 // ical.js resolves embedded VTIMEZONEs within this component tree. For feeds

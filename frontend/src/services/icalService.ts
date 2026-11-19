@@ -24,7 +24,7 @@ interface Snapshot {
 }
 
 export const ICAL_REFRESH_MS = 5 * 60_000;
-const FILE_LIMIT = 2 * 1024 * 1024;
+const FILE_LIMIT = 16 * 1024 * 1024;
 const empty: Snapshot = { sources: [], events: [], issues: {}, loading: false, error: null };
 let current = empty;
 let generation = 0;
@@ -47,7 +47,7 @@ const safeErrors = new Set([
   "Enter a calendar name of 1 to 80 characters.",
   "Use an HTTPS or webcal calendar URL without a username, password, or fragment.",
   "Choose an iCalendar file or feed in UTF-8 format.",
-  "Calendar files and feeds must be 2 MiB or smaller.",
+  "Calendar files and feeds must be 16 MiB or smaller.",
   "This calendar source has already been added.",
   "You can add up to 32 calendar sources.",
   "This calendar source no longer exists.",
@@ -143,7 +143,7 @@ async function add(command: string, args: Record<string, string>) {
 }
 
 export async function importICalendarFile(file: File) {
-  if (file.size > FILE_LIMIT) throw new Error("Calendar files and feeds must be 2 MiB or smaller.");
+  if (file.size > FILE_LIMIT) throw new Error("Calendar files and feeds must be 16 MiB or smaller.");
   let text: string;
   try {
     text = new globalThis.TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
