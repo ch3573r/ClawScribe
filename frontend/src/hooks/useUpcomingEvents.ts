@@ -25,7 +25,7 @@ export interface UpcomingEntry {
  * first, for Home and the sidebar. Calendar requests are skipped while Microsoft
  * 365 is not connected or has no calendar permission.
  */
-export function useUpcomingEvents(limit = 5) {
+export function useUpcomingEvents(limit = 5, timedOnly = false) {
   const [microsoftEvents, setMicrosoftEvents] = useState<CalendarEvent[]>([]);
   const ical = useICalendar();
   const pending = usePendingCalendar();
@@ -75,10 +75,12 @@ export function useUpcomingEvents(limit = 5) {
 
   const now = Date.now();
   const upcoming = (event: CalendarEvent) => event.start && Date.parse(event.end ?? event.start) >= now;
-  // Both sources supply chronological lists. Only their first five can appear.
+  // Both sources supply chronological lists, so the first `limit` of each are enough.
+  // All-day entries are dropped before the cut when only timed events are wanted,
+  // or a run of holidays could hide the next real meeting.
   const entries: UpcomingEntry[] = [
-    ...microsoftEvents.filter(upcoming).slice(0, 5).map(event => ({ event, sourceId: null, label: "Microsoft 365", allDay: false })),
-    ...ical.events.filter(upcoming).slice(0, 5).map(event => ({ event, sourceId: event.sourceId, allDay: event.allDay,
+    ...microsoftEvents.filter(upcoming).slice(0, limit).map(event => ({ event, sourceId: null, label: "Microsoft 365", allDay: false })),
+    ...ical.events.filter(event => upcoming(event) && !(timedOnly && event.allDay)).slice(0, limit).map(event => ({ event, sourceId: event.sourceId, allDay: event.allDay,
       label: ical.sources.find(source => source.id === event.sourceId)?.name ?? "iCalendar" })),
   ].sort((a, b) => Date.parse(a.event.start!) - Date.parse(b.event.start!))
     .slice(0, limit);

@@ -220,24 +220,54 @@ function modalHarness({ provider = 'claude', apiKey = null, onSave, autosave = t
   return { hooks, calls, saves, context, render };
 }
 
-test('the provider select saves as soon as it changes, and a failure is shown without moving the selection', async () => {
+test('choosing another provider only previews it; the saved provider stays in use until the user switches', async () => {
   const app = modalHarness({ provider: 'claude', apiKey: KEY });
   app.render(); await flush(); app.render();
   const select = () => nodes(app.render()).find(node => node.type === 'select' && node.props.value === app.context.modelConfig.provider);
-  select().props.onValueChange('groq');
+  const button = label => nodes(app.render()).find(node => node.type === 'button' && text(node) === label);
+  select().props.onValueChange('codex');
+  await flush();
+  assert.equal(app.saves.length, 0, 'looking at a provider saves nothing');
+  assert.equal(app.context.modelConfig.provider, 'codex');
+  assert.match(text(app.render()), /Not in use yet/);
+  assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
+
+  button('Keep Claude').props.onClick();
+  await flush();
+  assert.equal(app.saves.length, 0);
+  assert.equal(app.context.modelConfig.provider, 'claude', 'going back restores the saved setup');
+  assert.doesNotMatch(text(app.render()), /Not in use yet/);
+
+  select().props.onValueChange('codex');
+  await flush();
+  button('Use Codex').props.onClick();
   await flush();
   assert.equal(app.saves.length, 1);
-  assert.equal(app.saves[0].provider, 'groq');
-  assert.equal(app.context.modelConfig.provider, 'groq');
+  assert.equal(app.saves[0].provider, 'codex');
+  assert.doesNotMatch(text(app.render()), /Not in use yet/);
   assert.equal(nodes(app.render()).some(node => node.type === 'button' && text(node) === 'Save'), false, 'no Save button on the settings page');
+  app.hooks.unmount();
+});
+
+test('a provider that still needs a key cannot be switched to, and a failed switch shows no key', async () => {
+  const app = modalHarness({ provider: 'claude', apiKey: KEY });
+  app.render(); await flush(); app.render();
+  nodes(app.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
+  await flush();
+  const use = nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Use Groq');
+  assert.equal(use.props.disabled, true);
+  assert.match(text(app.render()), /Enter an API key first/);
+  assert.equal(app.saves.length, 0);
 
   const failing = modalHarness({ provider: 'claude', apiKey: KEY, onSave: async () => { throw new Error(`database said ${KEY}`); } });
   failing.render(); await flush(); failing.render();
-  nodes(failing.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
+  nodes(failing.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
   await flush();
-  assert.equal(failing.context.modelConfig.provider, 'claude', 'a failed save leaves the saved provider selected');
+  nodes(failing.render()).find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
+  await flush();
   const shown = text(failing.render());
   assert.match(shown, /Could not save the provider/);
+  assert.match(shown, /Not in use yet/, 'a failed switch leaves the saved provider in use');
   assert.doesNotMatch(shown, new RegExp(KEY));
   app.hooks.unmount(); failing.hooks.unmount();
 });

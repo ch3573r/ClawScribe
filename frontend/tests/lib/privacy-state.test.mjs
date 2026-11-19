@@ -18,6 +18,7 @@ const base = () => ({
   assistant: ready(false),
   updateCheck: false,
   semanticSearch: ready(true),
+  handoff: ready({ enabled: false, endpoint: null }),
 });
 const derive = overrides => derivePrivacy({ ...base(), ...overrides });
 const rowOf = (model, id) => model.rows.find(row => row.id === id);
@@ -123,7 +124,7 @@ test('exports, calendars, assistant access and the update check follow their set
 test('every row links to the settings page that controls it', () => {
   const tabs = Object.fromEntries(derive({}).rows.map(row => [row.id, row.tab]));
   assert.deepEqual(tabs, {
-    recording: 'recording', transcription: 'transcription', memory: 'memory', summary: 'summary', live: 'summary',
+    recording: 'recording', transcription: 'transcription', memory: 'memory', summary: 'summary', live: 'summary', handoff: 'summary',
     exports: 'ms365', calendars: 'calendars', assistant: 'assistant', update: 'general',
   });
 });
@@ -143,4 +144,29 @@ test('loading and unreadable state is shown as such, never guessed', () => {
   assert.equal(factOf(autoOnly, 'automatic').value, 'Could not check');
   // Live sharing off does not need the provider.
   assert.equal(rowOf(derive({ summary: { status: 'error' } }), 'live').state, 'ready');
+});
+
+test('OpenClaw handoff sends the transcript after every recording, whatever the summary provider is', () => {
+  const model = derive({ handoff: ready({ enabled: true, endpoint: 'https://openclaw.example.com/hooks/meeting' }) });
+  assert.equal(rowOf(model, 'summary').when, 'Never leaves');
+  assert.equal(rowOf(model, 'handoff').tone, 'warning');
+  assert.equal(rowOf(model, 'handoff').destination, 'OpenClaw on openclaw.example.com');
+  assert.equal(rowOf(model, 'handoff').when, 'After every recording');
+  assert.equal(factOf(model, 'text').value, 'Leaves automatically');
+  assert.equal(factOf(model, 'text').tone, 'warning');
+  assert.equal(factOf(model, 'automatic').value, 'Transcript text');
+  assert.equal(rowOf(derive({}), 'handoff').tone, 'off');
+});
+
+test('an unreadable handoff setting is never reported as staying on this PC', () => {
+  for (const handoff of [{ status: 'loading' }, { status: 'error' }]) {
+    const model = derive({ handoff });
+    assert.notEqual(factOf(model, 'text').value, 'Stays on this PC');
+    assert.notEqual(factOf(model, 'automatic').value, 'None');
+    assert.notEqual(rowOf(model, 'handoff').state, 'ready');
+  }
+});
+
+test('built-in provider aliases count as local', () => {
+  for (const alias of ['local-llama', 'localllama']) assert.equal(classifySummaryProvider(alias).kind, 'local');
 });

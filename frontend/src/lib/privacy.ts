@@ -30,6 +30,11 @@ export interface PrivacyInput {
   /** "Check for updates at startup" on the General page. */
   updateCheck: boolean;
   semanticSearch: Loadable<boolean>;
+  /**
+   * OpenClaw handoff. When enabled, the app posts every finished recording,
+   * including its transcript, to the gateway, whatever the summary provider is.
+   */
+  handoff: Loadable<{ enabled: boolean; endpoint: string | null }>;
 }
 
 export interface PrivacyRow {
@@ -102,6 +107,8 @@ export function classifySummaryProvider(
   if (!provider) return { kind: "none", label: "No provider chosen" };
   switch (provider) {
     case "builtin-ai":
+    case "local-llama":
+    case "localllama":
       return { kind: "local", label: "Built-in AI" };
     case "ollama": {
       const raw = endpoints.ollamaEndpoint;
@@ -261,6 +268,20 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     }
   }
 
+  // Meeting handoff
+  const handoffOn = input.handoff.status === "ready" && input.handoff.value.enabled;
+  const handoffHost = input.handoff.status === "ready" ? endpointHost(input.handoff.value.endpoint) : null;
+  const handoffTarget = handoffHost ? `OpenClaw on ${handoffHost}` : "OpenClaw gateway";
+  const handoffBase = handoffOn
+    ? row({
+        id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
+        destination: handoffTarget, when: "After every recording", tone: "warning", detail: "The full transcript and meeting details",
+      })
+    : row({
+        id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
+        destination: "Off", when: "Off", tone: "off", detail: "Sends finished meetings to an OpenClaw gateway",
+      });
+
   // Exports
   const exportTargets: string[] = [];
   if (input.microsoft.status === "ready" && input.microsoft.value.connected) exportTargets.push("Microsoft 365");
@@ -316,6 +337,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     memoryRow,
     withheld(summaryBase, blocked(input.summary)),
     withheld(liveBase, liveState),
+    withheld(handoffBase, blocked(input.handoff)),
     withheld(exportsBase, exportsState),
     withheld(calendarsBase, calendarsState),
     withheld(assistantBase, blocked(input.assistant)),
@@ -330,9 +352,12 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "audio", label: "Audio", value: "Leaves this PC", detail: `Imports and Enhance use ${outcome.engine}`, tone: "warning", state: "ready" }
       : { id: "audio", label: "Audio", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
 
-  const textState = blocked(input.summary);
+  // An unreadable handoff setting must not be reported as "stays on this PC".
+  const textState = blocked(input.summary, input.handoff);
   let textFact: PrivacyFact;
-  if (textState !== "ready" || !summaryClass) {
+  if (handoffOn) {
+    textFact = { id: "text", label: "Transcript text", value: "Leaves automatically", detail: `To ${handoffTarget} after every recording`, tone: "warning", state: "ready" };
+  } else if (textState !== "ready" || !summaryClass) {
     textFact = { id: "text", label: "Transcript text", value: textState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: textState === "ready" ? "unavailable" : textState };
   } else if (summaryClass.kind === "none" || summaryClass.kind === "local") {
     textFact = { id: "text", label: "Transcript text", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
@@ -343,9 +368,11 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       : { id: "text", label: "Transcript text", value: "Leaves when you ask", detail: where, tone: "active", state: "ready" };
   }
 
-  const automaticState = input.autoSummary ? blocked(input.summary) : "ready";
+  const automaticState = input.autoSummary ? blocked(input.summary, input.handoff) : blocked(input.handoff);
   let automaticFact: PrivacyFact;
-  if (automaticState !== "ready") {
+  if (handoffOn) {
+    automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: `To ${handoffTarget} after every recording`, tone: "warning", state: "ready" };
+  } else if (automaticState !== "ready") {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: automaticState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: automaticState };
   } else if (input.autoSummary && textLeavesKind) {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: summaryClass && summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : `To ${summaryClass?.label ?? ""}`, tone: "warning", state: "ready" };

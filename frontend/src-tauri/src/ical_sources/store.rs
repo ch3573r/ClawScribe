@@ -269,7 +269,8 @@ impl CalendarStore {
                 let content =
                     String::from_utf8(bytes).map_err(|_| super::feed::INVALID_CALENDAR)?;
                 validate_calendar(&content)?;
-                return Ok(content);
+                // Copies imported by earlier versions still hold the unused text.
+                return Ok(without_unused_text(&content));
             }
             (
                 header.protected_url.ok_or(PROTECTED)?,
@@ -349,6 +350,37 @@ mod tests {
             .list(dir.path())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn copies_imported_by_earlier_versions_are_read_without_unused_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let header = Header {
+            source: CalendarSource {
+                id,
+                name: "Imported".into(),
+                kind: SourceKind::File,
+            },
+            fingerprint: "synthetic fingerprint".into(),
+            protected_url: None,
+        };
+        let stored = "BEGIN:VCALENDAR
+DESCRIPTION:Agenda
+ and notes
+SUMMARY:Planning
+END:VCALENDAR
+";
+        persist(dir.path(), &header, stored).unwrap();
+        assert_eq!(
+            CalendarStore::default()
+                .read(dir.path(), id, false)
+                .unwrap(),
+            "BEGIN:VCALENDAR
+SUMMARY:Planning
+END:VCALENDAR
+"
+        );
     }
 
     #[test]

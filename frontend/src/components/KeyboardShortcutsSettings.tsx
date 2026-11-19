@@ -36,14 +36,16 @@ export function KeyboardShortcutsSettings() {
   const bindingsRef = useRef<ShortcutBindings | null>(null);
   bindingsRef.current = bindings;
 
-  useEffect(() => {
+  const load = useCallback(() => {
     invoke<ShortcutBindings>("get_shortcuts")
-      .then(setBindings)
+      .then((saved) => { setReadFailed(false); setBindings(saved); })
       .catch(() => {
         setReadFailed(true);
         setBindings({ ...DEFAULT_BINDINGS });
       });
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   /** Register `next` at once. If it fails, the previous shortcuts stay and the error is shown. */
   const apply = useCallback(async (next: ShortcutBindings, changed: ShortcutAction | "all") => {
@@ -137,7 +139,7 @@ export function KeyboardShortcutsSettings() {
             >
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || readFailed}
                 aria-label={isCapturing ? `${label}: press the new keys, or Escape to cancel` : `${label}: ${keycaps(accelerator).join(" ")}. Click to change`}
                 onClick={() => { setError(null); setNotice(""); setCapturing(isCapturing ? null : key); }}
                 onBlur={() => setCapturing((current) => (current === key ? null : current))}
@@ -154,7 +156,12 @@ export function KeyboardShortcutsSettings() {
             </SettingsRow>
           );
         })}
-        {readFailed && <NoteRow tone="warning">The saved shortcuts could not be read. The defaults are shown and apply when you change one.</NoteRow>}
+        {readFailed && (
+          <NoteRow tone="warning">
+            The saved shortcuts could not be read, so they cannot be changed one at a time. Your shortcuts still work.{" "}
+            <Button type="button" variant="link" size="sm" className="h-auto p-0 align-baseline" onClick={load}>Try again</Button>
+          </NoteRow>
+        )}
         {error && <NoteRow tone="error">{error}</NoteRow>}
         <SettingsFooter
           actions={
@@ -162,7 +169,7 @@ export function KeyboardShortcutsSettings() {
               type="button"
               variant="ghost"
               size="sm"
-              disabled={busy || capturing !== null || isDefaultBindings(bindings)}
+              disabled={busy || capturing !== null || (!readFailed && isDefaultBindings(bindings))}
               onClick={() => { setCapturing(null); void apply({ ...DEFAULT_BINDINGS }, "all"); }}
             >
               {applying === "all" ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}

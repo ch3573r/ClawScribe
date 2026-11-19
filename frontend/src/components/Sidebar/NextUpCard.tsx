@@ -13,7 +13,7 @@ import { describeNextUp, eventDuration, pickNextUp } from "@/lib/sidebarMeetings
  * nothing when no connected calendar has an event in the next 7 days.
  */
 export function NextUpCard() {
-  const { entries, isSelected, select } = useUpcomingEvents(5);
+  const { entries, isSelected, select } = useUpcomingEvents(5, true);
   const [now, setNow] = useState(() => new Date());
 
   // Keep "in 2 h 18 min" current.

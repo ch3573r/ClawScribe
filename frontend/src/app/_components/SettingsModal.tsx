@@ -4,6 +4,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ModelConfig } from "@/components/ModelSettingsModal";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { KnowledgeSettings } from "@/components/KnowledgeSettings";
+import { LiveSharingSetting } from "@/components/LiveTranscriptSharing";
 import { DeviceSelection } from "@/components/DeviceSelection";
 import { LanguageSelection } from "@/components/LanguageSelection";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
@@ -104,6 +105,7 @@ export function SettingsModals({
             {/* General Preferences Section */}
             <PreferenceSettings />
             <KnowledgeSettings />
+            <LiveSharingSetting />
 
             {/* Divider */}
             <div className="border-t pt-8">

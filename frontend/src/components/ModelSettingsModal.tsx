@@ -40,6 +40,7 @@ import { Meta, SettingsFooter, SettingsRow, StatusText, type StatusTone } from '
 import { NoteRow, ROW_SELECT } from '@/components/settings/settings-parts';
 import { SaveError, safeMessage, useSaveFeedback, type CommitResult } from '@/components/settings/commit-field';
 import { CommitInputRow, CopyCommandRow, SaveMark, withError } from '@/components/settings/summary-provider-parts';
+import { providerLabel as summaryProviderLabel } from '@/components/settings/provider-data';
 
 export interface ModelConfig {
   provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
@@ -218,6 +219,8 @@ const GROQ_FALLBACK_MODELS = [
 
 const KEY_PROVIDERS = ['claude', 'groq', 'openai', 'openrouter'];
 const needsKey = (provider: string) => KEY_PROVIDERS.includes(provider);
+/** Providers that cannot summarize until a model is chosen from their list. */
+const MODEL_LIST_PROVIDERS = ['builtin-ai', 'ollama', 'openrouter', 'claude', 'groq', 'openai'];
 
 const PROVIDER_SUMMARY: Record<ModelConfig['provider'], string> = {
   'builtin-ai': 'Runs on this PC, offline, no key',
@@ -371,6 +374,8 @@ export function ModelSettingsModal({
   // Settings page (autosave) state
   const feedback = useSaveFeedback();
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+  // The saved configuration while a different provider is being looked at.
+  const [providerDraft, setProviderDraft] = useState<ModelConfig | null>(null);
   const [modelListFailed, setModelListFailed] = useState<boolean>(false);
   const [customCheck, setCustomCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; message: string }>({ state: 'idle', message: '' });
   const [claudeRecheck, setClaudeRecheck] = useState<number>(0);
@@ -1377,13 +1382,24 @@ export function ModelSettingsModal({
   // ---------------------------------------------------------------------------
   const saveConfig = async (next: ModelConfig, failure: string) => {
     try { await Promise.resolve(onSave(next)); } catch { throw new SaveError(failure); }
+    setProviderDraft(null);
   };
 
+  // Looking at another provider must not replace a working setup. The select
+  // only changes what is shown; the saved provider stays in use until the user
+  // switches with "Use ..." or saves a setting of the new provider.
   const changeProviderAutosave = (value: string) => {
     const provider = value as ModelConfig['provider'];
     if (provider === modelConfig.provider) return;
-    void feedback.run('provider', async () => {
-      if (modelConfig.model) rememberModel(modelConfig.provider, modelConfig.model);
+    const inUse = providerDraft ?? modelConfig;
+    setError('');
+    if (provider === inUse.provider) {
+      setProviderDraft(null);
+      setModelConfig(inUse);
+      return;
+    }
+    {
+      if (!providerDraft && modelConfig.model) rememberModel(modelConfig.provider, modelConfig.model);
       const saved = readModelMap()[provider];
       const options = modelOptions[provider];
       const model = saved && options?.includes(saved) ? saved : (options?.[0] ?? '');
@@ -1393,8 +1409,7 @@ export function ModelSettingsModal({
         model,
         apiKey: needsKey(provider) ? (providerApiKeys?.[provider as keyof typeof providerApiKeys] ?? null) : null,
       };
-      await saveConfig(next, 'Could not save the provider');
-      setError('');
+      setProviderDraft(inUse);
       setModelConfig(next);
       if (provider === 'openrouter') void loadOpenRouterModels();
       if (provider === 'builtin-ai') void loadBuiltinAiModels();
@@ -1417,6 +1432,23 @@ export function ModelSettingsModal({
       }
       if (provider === 'openclaw') void loadOpenClawStatus();
       if (provider === 'codex') void loadCodexConfig().then((loaded) => checkCodexInstallation(loaded || undefined));
+    }
+  };
+
+  /** What still has to be chosen before the provider being looked at can be used. */
+  const draftProviderMissing = (): string | null => {
+    if (needsKey(modelConfig.provider) && !modelConfig.apiKey?.trim()) return 'Enter an API key first';
+    if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
+    return null;
+  };
+
+  const useDraftProvider = () => {
+    void feedback.run('provider', async () => {
+      // Only the key stored for this provider is used, never one typed for another provider.
+      const next: ModelConfig = { ...modelConfig, apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || null) : null };
+      await saveConfig(next, 'Could not save the provider');
+      setError('');
+      setModelConfig(next);
     });
   };
 
@@ -1982,6 +2014,19 @@ export function ModelSettingsModal({
             </SelectContent>
           </Select>
         </SettingsRow>
+        {providerDraft && (
+          <SettingsRow
+            title="Not in use yet"
+            description={draftProviderMissing() ?? `${summaryProviderLabel(providerDraft.provider)} stays your summary provider until you switch`}
+          >
+            <Button type="button" variant="ghost" size="sm" disabled={feedback.busy} onClick={() => changeProviderAutosave(providerDraft.provider)}>
+              Keep {summaryProviderLabel(providerDraft.provider)}
+            </Button>
+            <Button type="button" variant="outline" size="sm" disabled={feedback.busy || draftProviderMissing() !== null} onClick={useDraftProvider}>
+              Use {summaryProviderLabel(modelConfig.provider)}
+            </Button>
+          </SettingsRow>
+        )}
         {rows}
         {advancedOpen && advanced.length > 0 && <div id="summary-provider-advanced" className="divide-y divide-border/60">{advanced}</div>}
         <SettingsFooter

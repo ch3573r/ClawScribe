@@ -1,5 +1,7 @@
 /** What a summary provider receives. Drives the "What this sends" panel from the selected provider. */
 
+import { classifySummaryProvider, endpointHost, isLoopbackHost } from "@/lib/privacy";
+
 export interface ProviderDataItem {
   title: string;
   detail: string;
@@ -18,6 +20,8 @@ const LABELS: Record<string, string> = {
   "builtin-ai": "Built-in AI",
   ollama: "Ollama",
   "custom-openai": "OpenAI or compatible",
+  openai: "OpenAI",
+  gemini: "Gemini",
   claude: "Claude",
   groq: "Groq",
   openrouter: "OpenRouter",
@@ -32,17 +36,16 @@ export const providerLabel = (provider: string) => LABELS[provider] ?? "the prov
 export function isLocalEndpoint(endpoint?: string | null): boolean {
   const text = endpoint?.trim();
   if (!text) return true;
-  const match = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]]+\]|[^:/?#]+)/i.exec(text);
-  if (!match) return false;
-  const host = match[1].replace(/^\[|\]$/g, "").toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  const host = endpointHost(text);
+  return host !== null && isLoopbackHost(host);
 }
 
 const AUDIO: ProviderDataItem = { title: "Audio", detail: "Never leaves this PC", tone: "neutral" };
 
-export function describeProviderData(provider: string, ollamaEndpoint?: string | null): ProviderData {
+// Uses the same classification as the Privacy page, so the two can never disagree.
+export function describeProviderData(provider: string, ollamaEndpoint?: string | null, customEndpoint?: string | null): ProviderData {
   const label = providerLabel(provider);
-  const local = provider === "builtin-ai" || (provider === "ollama" && isLocalEndpoint(ollamaEndpoint));
+  const local = classifySummaryProvider(provider, { ollamaEndpoint, customEndpoint }).kind === "local";
   if (local) {
     return {
       label,

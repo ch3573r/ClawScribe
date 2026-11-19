@@ -101,6 +101,11 @@ export function usePrivacyInput(): PrivacyInput {
 
   const assistant = useLoadable(async () => (await invoke<{ enabled: boolean }>("get_mcp_access")).enabled, tick);
   const semanticSearch = useLoadable(async () => (await knowledgeService.modelStatus()).enabled, tick);
+  // Only whether handoff is on and where it points; the token never leaves the backend.
+  const handoff = useLoadable(async () => {
+    const status = await invoke<{ enabled?: boolean; endpoint?: string | null }>("get_openclaw_config_status");
+    return { enabled: status?.enabled === true, endpoint: status?.endpoint ?? null };
+  }, tick);
 
   return {
     recording,
@@ -115,5 +120,6 @@ export function usePrivacyInput(): PrivacyInput {
     assistant,
     updateCheck,
     semanticSearch,
+    handoff,
   };
 }

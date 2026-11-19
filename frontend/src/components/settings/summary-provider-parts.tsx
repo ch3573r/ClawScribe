@@ -82,8 +82,8 @@ export function CopyCommandRow({ id, title, description, command }: { id: string
 }
 
 /** "What this sends" for the selected summary provider. */
-export function ProviderDataAside({ provider, ollamaEndpoint }: { provider: string; ollamaEndpoint?: string | null }) {
-  const data = describeProviderData(provider, ollamaEndpoint);
+export function ProviderDataAside({ provider, ollamaEndpoint, customEndpoint }: { provider: string; ollamaEndpoint?: string | null; customEndpoint?: string | null }) {
+  const data = describeProviderData(provider, ollamaEndpoint, customEndpoint);
   return (
     <PageSection title="What this sends" description={`With ${data.label} as the provider`}>
       <ul className="grid gap-4 p-5">
