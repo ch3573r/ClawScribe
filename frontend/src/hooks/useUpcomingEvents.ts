@@ -1,0 +1,101 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useICalendar } from "@/hooks/useICalendar";
+import { usePendingCalendar } from "@/hooks/usePendingCalendar";
+import { setPendingCalendar } from "@/lib/meetingCalendar";
+import { toast } from "sonner";
+import {
+  microsoftExportService,
+  type CalendarEvent,
+} from "@/services/microsoftExportService";
+
+const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
+
+export interface UpcomingEntry {
+  event: CalendarEvent;
+  /** Set for iCalendar sources, null for Microsoft 365. */
+  sourceId: string | null;
+  label: string;
+  allDay: boolean;
+}
+
+/**
+ * Upcoming events from Microsoft 365 and imported or subscribed calendars, soonest
+ * first, for Home and the sidebar. Calendar requests are skipped while Microsoft
+ * 365 is not connected or has no calendar permission.
+ */
+export function useUpcomingEvents(limit = 5) {
+  const [microsoftEvents, setMicrosoftEvents] = useState<CalendarEvent[]>([]);
+  const ical = useICalendar();
+  const pending = usePendingCalendar();
+  const readVersion = useRef(0);
+
+  const refresh = useCallback(async (cancelled: () => boolean) => {
+    const version = ++readVersion.current;
+    const expired = () => cancelled() || version !== readVersion.current;
+    try {
+      const connection = await microsoftExportService.connectionStatus();
+      if (expired()) return;
+      if (connection.state !== "connected" || connection.unavailableExports?.includes("Calendar lookup")) {
+        setMicrosoftEvents([]);
+        return;
+      }
+      const now = new Date();
+      const end = new Date(now);
+      end.setDate(now.getDate() + 7);
+      const list = await microsoftExportService.listCalendarEvents(
+        now.toISOString(),
+        end.toISOString(),
+      );
+      if (!expired()) setMicrosoftEvents(list);
+    } catch {
+      if (!expired()) setMicrosoftEvents([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const isCancelled = () => cancelled;
+    const run = () => void refresh(isCancelled);
+    run();
+    const interval = window.setInterval(run, CALENDAR_REFRESH_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") run();
+    };
+    window.addEventListener("focus", run);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", run);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refresh]);
+
+  const now = Date.now();
+  const upcoming = (event: CalendarEvent) => event.start && Date.parse(event.end ?? event.start) >= now;
+  // Both sources supply chronological lists. Only their first five can appear.
+  const entries: UpcomingEntry[] = [
+    ...microsoftEvents.filter(upcoming).slice(0, 5).map(event => ({ event, sourceId: null, label: "Microsoft 365", allDay: false })),
+    ...ical.events.filter(upcoming).slice(0, 5).map(event => ({ event, sourceId: event.sourceId, allDay: event.allDay,
+      label: ical.sources.find(source => source.id === event.sourceId)?.name ?? "iCalendar" })),
+  ].sort((a, b) => Date.parse(a.event.start!) - Date.parse(b.event.start!))
+    .slice(0, limit);
+
+  const isSelected = (entry: UpcomingEntry) =>
+    pending?.eventId === entry.event.id && (pending.source === "ical") === Boolean(entry.sourceId);
+
+  /** Use this event's title and invitees for the next recording. */
+  const select = (entry: UpcomingEntry) => {
+    const { event, sourceId } = entry;
+    const saved = setPendingCalendar({
+      eventId: event.id, subject: event.subject,
+      ...(sourceId ? { source: "ical" as const, sourceId } : {}),
+      attendees: event.attendees.map(person => ({ ...person, included: true })),
+    });
+    if (!saved) toast.error("Could not save the calendar selection on this device.");
+  };
+
+  return { entries, isSelected, select };
+}

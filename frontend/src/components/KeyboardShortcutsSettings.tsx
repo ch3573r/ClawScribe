@@ -1,83 +1,76 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { toast } from "sonner";
-import { AlertTriangle, Keyboard } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Kbd, SettingsCard, SettingsFooter, SettingsRow, SettingsStack } from "@/components/ui/settings-layout";
+import { NoteRow } from "@/components/settings/settings-parts";
+import {
+  captureAccelerator,
+  DEFAULT_BINDINGS,
+  duplicateAction,
+  isDefaultBindings,
+  keycaps,
+  RESERVED_SHORTCUTS,
+  SHORTCUT_ACTIONS,
+  type ShortcutAction,
+  type ShortcutBindings,
+} from "@/lib/shortcuts";
 
-interface ShortcutBindings {
-  startStop: string;
-  pauseResume: string;
-  toggleWindow: string;
-}
 interface ShortcutApplyResult {
   bindings: ShortcutBindings;
   conflicts: string[];
 }
 
-type ActionKey = keyof ShortcutBindings;
-
-const ACTIONS: { key: ActionKey; label: string; description: string }[] = [
-  { key: "startStop", label: "Start / stop recording", description: "Toggles recording from anywhere." },
-  { key: "pauseResume", label: "Pause / resume recording", description: "Pauses or resumes the active recording." },
-  { key: "toggleWindow", label: "Show / hide ClawScribe", description: "Brings the window to the front, or hides it." },
-];
-
-const DEFAULT_BINDINGS: ShortcutBindings = {
-  startStop: "Ctrl+Shift+F9",
-  pauseResume: "Ctrl+Shift+F10",
-  toggleWindow: "Ctrl+Shift+F11",
-};
-
-// Combos Windows or common apps reserve — warn (the OS won't let us own these).
-const RESERVED = new Set([
-  "Alt+F4", "Alt+Tab", "Super+KeyL", "Super+KeyD", "Super+Tab",
-  "Super+Shift+KeyS", "Ctrl+Shift+Escape", "Ctrl+Alt+Delete", "Super+KeyR",
-]);
-
-/** Build a registerable accelerator (e.g. "Ctrl+Shift+F9") from a keydown. */
-function accelFromEvent(e: KeyboardEvent): string | null {
-  const mods: string[] = [];
-  if (e.ctrlKey) mods.push("Ctrl");
-  if (e.shiftKey) mods.push("Shift");
-  if (e.altKey) mods.push("Alt");
-  if (e.metaKey) mods.push("Super");
-  const code = e.code;
-  // Ignore lone modifier presses.
-  if (/^(Control|Shift|Alt|Meta)(Left|Right)$/.test(code)) return null;
-  if (mods.length === 0) return null; // require at least one modifier
-  return [...mods, code].join("+");
-}
-
-/** Human-readable form: KeyR→R, Digit1→1, Super→Win. */
-function prettify(accel: string): string {
-  return accel
-    .split("+")
-    .map((p) =>
-      p === "Super"
-        ? "Win"
-        : p.replace(/^Key/, "").replace(/^Digit/, ""),
-    )
-    .join(" + ");
-}
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export function KeyboardShortcutsSettings() {
   const [bindings, setBindings] = useState<ShortcutBindings | null>(null);
-  const [capturing, setCapturing] = useState<ActionKey | null>(null);
+  const [capturing, setCapturing] = useState<ShortcutAction | null>(null);
   const [conflicts, setConflicts] = useState<string[]>([]);
-  const [saving, setSaving] = useState(false);
+  const [applying, setApplying] = useState<ShortcutAction | "all" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
+  const [readFailed, setReadFailed] = useState(false);
+  const bindingsRef = useRef<ShortcutBindings | null>(null);
+  bindingsRef.current = bindings;
 
   useEffect(() => {
     invoke<ShortcutBindings>("get_shortcuts")
       .then(setBindings)
-      .catch(() => setBindings({ ...DEFAULT_BINDINGS }));
+      .catch(() => {
+        setReadFailed(true);
+        setBindings({ ...DEFAULT_BINDINGS });
+      });
   }, []);
 
-  const resetToDefaults = useCallback(() => {
-    setCapturing(null);
-    setConflicts([]);
-    setBindings({ ...DEFAULT_BINDINGS });
+  /** Register `next` at once. If it fails, the previous shortcuts stay and the error is shown. */
+  const apply = useCallback(async (next: ShortcutBindings, changed: ShortcutAction | "all") => {
+    const previous = bindingsRef.current;
+    setApplying(changed);
+    setError(null);
+    setNotice("");
+    try {
+      const result = await invoke<ShortcutApplyResult>("set_shortcuts", { bindings: next });
+      if (changed !== "all" && result.conflicts.includes(changed) && previous) {
+        // The new combination could not be registered. Put the previous set back.
+        try {
+          const restored = await invoke<ShortcutApplyResult>("set_shortcuts", { bindings: previous });
+          setConflicts(restored.conflicts);
+        } catch { /* the error below already says the previous shortcut is kept */ }
+        const label = SHORTCUT_ACTIONS.find((action) => action.key === changed)?.label ?? "This shortcut";
+        setError(`${label}: that combination is in use by Windows or another app. The previous shortcut is kept.`);
+        return;
+      }
+      setBindings(result.bindings);
+      setConflicts(result.conflicts);
+      setNotice("Shortcut updated");
+    } catch (e) {
+      setError(`Could not apply the shortcut. The previous one is kept. ${errorText(e)}`.trim());
+    } finally {
+      setApplying(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -89,105 +82,98 @@ export function KeyboardShortcutsSettings() {
         setCapturing(null);
         return;
       }
-      const accel = accelFromEvent(e);
-      if (!accel) return;
-      setBindings((prev) => (prev ? { ...prev, [capturing]: accel } : prev));
+      const captured = captureAccelerator(e);
+      if (captured.kind === "ignore") return;
+      if (captured.kind === "needs-modifier") {
+        setError("Press Ctrl, Alt, Shift or Win together with another key.");
+        return;
+      }
+      const current = bindingsRef.current;
+      if (!current) return;
+      const action = capturing;
       setCapturing(null);
+      if (current[action] === captured.accelerator) { setError(null); return; }
+      const duplicate = duplicateAction(current, action, captured.accelerator);
+      if (duplicate) {
+        const other = SHORTCUT_ACTIONS.find((item) => item.key === duplicate)?.label ?? "another action";
+        setError(`That combination is already used for "${other}". Pick a different one.`);
+        return;
+      }
+      void apply({ ...current, [action]: captured.accelerator }, action);
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [capturing]);
+  }, [capturing, apply]);
 
-  const save = useCallback(async () => {
-    if (!bindings) return;
-    setSaving(true);
-    try {
-      const result = await invoke<ShortcutApplyResult>("set_shortcuts", { bindings });
-      setConflicts(result.conflicts);
-      if (result.conflicts.length === 0) {
-        toast.success("Shortcuts saved");
-      } else {
-        toast.warning("Some shortcuts couldn't be registered", {
-          description: "They're in use by Windows or another app. Pick a different combo.",
-        });
-      }
-    } catch (e) {
-      toast.error("Failed to save shortcuts", {
-        description: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      setSaving(false);
-    }
-  }, [bindings]);
+  if (!bindings) {
+    return (
+      <SettingsStack>
+        <SettingsCard>
+          <SettingsFooter><span role="status" className="inline-flex items-center gap-2"><Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />Loading shortcuts…</span></SettingsFooter>
+        </SettingsCard>
+      </SettingsStack>
+    );
+  }
 
-  if (!bindings) return null;
-
+  const busy = applying !== null;
   return (
-    <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
-      <div className="mb-4 flex items-center gap-2">
-        <Keyboard className="h-5 w-5 text-primary" />
-        <div>
-          <h3 className="text-lg font-semibold text-foreground">Keyboard shortcuts</h3>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Global shortcuts — they work even when ClawScribe isn&apos;t focused.
-          </p>
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        {ACTIONS.map(({ key, label, description }) => {
-          const accel = bindings[key];
-          const isReserved = RESERVED.has(accel);
+    <SettingsStack>
+      <SettingsCard>
+        {SHORTCUT_ACTIONS.map(({ key, label }) => {
+          const accelerator = bindings[key];
+          const reserved = RESERVED_SHORTCUTS.has(accelerator);
           const conflicted = conflicts.includes(key);
+          const isCapturing = capturing === key;
           return (
-            <div
+            <SettingsRow
               key={key}
-              className="flex items-center justify-between gap-4 rounded-md border border-border bg-background p-3"
+              title={label}
+              description={(reserved || conflicted) && (
+                <span className="inline-flex items-center gap-1.5 text-warning-foreground">
+                  <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                  {conflicted ? "In use by Windows or another app, so it is not active" : "This is a reserved Windows shortcut"}
+                </span>
+              )}
             >
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground">{label}</p>
-                <p className="text-xs text-muted-foreground">{description}</p>
-                {(isReserved || conflicted) && (
-                  <p className="mt-1 flex items-center gap-1 text-xs text-warning-foreground">
-                    <AlertTriangle className="h-3.5 w-3.5" />
-                    {conflicted
-                      ? "In use by Windows or another app — not active."
-                      : "This is a reserved Windows shortcut."}
-                  </p>
-                )}
-              </div>
-              <Button
+              <button
                 type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setCapturing(key)}
-                className="min-w-[150px] font-mono"
+                disabled={busy}
+                aria-label={isCapturing ? `${label}: press the new keys, or Escape to cancel` : `${label}: ${keycaps(accelerator).join(" ")}. Click to change`}
+                onClick={() => { setError(null); setNotice(""); setCapturing(isCapturing ? null : key); }}
+                onBlur={() => setCapturing((current) => (current === key ? null : current))}
+                className="flex min-h-[34px] items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-60"
               >
-                {capturing === key ? "Press keys… (Esc)" : prettify(accel)}
-              </Button>
-            </div>
+                {isCapturing ? (
+                  <span className="px-1.5 text-[13px] text-primary">Press the new keys · Esc to cancel</span>
+                ) : applying === key ? (
+                  <Loader2 aria-hidden="true" className="mx-3 h-4 w-4 animate-spin text-muted-foreground" />
+                ) : (
+                  keycaps(accelerator).map((cap, index) => <Kbd key={`${cap}-${index}`}>{cap}</Kbd>)
+                )}
+              </button>
+            </SettingsRow>
           );
         })}
-      </div>
-
-      <div className="mt-4 flex justify-end gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={resetToDefaults}
-          disabled={
-            saving ||
-            capturing !== null ||
-            (bindings.startStop === DEFAULT_BINDINGS.startStop &&
-              bindings.pauseResume === DEFAULT_BINDINGS.pauseResume)
+        {readFailed && <NoteRow tone="warning">The saved shortcuts could not be read. The defaults are shown and apply when you change one.</NoteRow>}
+        {error && <NoteRow tone="error">{error}</NoteRow>}
+        <SettingsFooter
+          actions={
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || capturing !== null || isDefaultBindings(bindings)}
+              onClick={() => { setCapturing(null); void apply({ ...DEFAULT_BINDINGS }, "all"); }}
+            >
+              {applying === "all" ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
+              Reset to defaults
+            </Button>
           }
         >
-          Reset
-        </Button>
-        <Button type="button" onClick={save} disabled={saving || capturing !== null}>
-          {saving ? "Saving…" : "Save shortcuts"}
-        </Button>
-      </div>
-    </div>
+          Click a shortcut and press the new keys. Changes apply immediately
+        </SettingsFooter>
+        <span role="status" className="sr-only">{notice}</span>
+      </SettingsCard>
+    </SettingsStack>
   );
 }

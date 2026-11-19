@@ -3,8 +3,8 @@ import test from 'node:test';
 import {loadTsModule} from './load-ts-module.mjs';
 import {createHookHarness,flush} from './hook-harness.mjs';
 const jsx=(type,props)=>({type,props});
-const nodes=node=>!node||typeof node!=='object'?[]:Array.isArray(node)?node.flatMap(nodes):[node,...nodes(node.props?.children),...nodes(node.props?.actions)];
-const text=node=>typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(text).join(''):node?text(node.props?.children):'';
+const nodes=node=>!node||typeof node!=='object'?[]:Array.isArray(node)?node.flatMap(nodes):[node,...nodes(node.props?.children),...nodes(node.props?.actions),...nodes(node.props?.title),...nodes(node.props?.description)];
+const text=node=>typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(text).join(''):node?[node.props?.title,node.props?.description,node.props?.children].map(text).join(''):'';
 const idle={stage:'idle',downloaded_bytes:0,total_bytes:487351240,current_file:null,error:null};
 function settings(t,configuration,service={}) {
   const hooks=createHookHarness(); t.after(() => hooks.unmount());
@@ -23,7 +23,7 @@ test('healthy E5 settings offer verification instead of a repair download',async
   const app=settings(t,{enabled:true,ready:true,installed:true,model:'intfloat/multilingual-e5-small',download:idle});
   app.render();await flush();const tree=app.render();
   assert(!nodes(tree).some(node=>node.type==='button'&&/Download|repair/.test(text(node))));
-  assert(nodes(tree).some(node=>node.type==='menu-item'&&/Verify installed files/.test(text(node))));
+  assert(nodes(tree).some(node=>node.type==='button'&&/Verify installed files/.test(text(node))),'verification is a footer action');
   assert.match(text(tree),/runs on this PC/);app.unmount();
 });
 test('revisited settings show native transfer bytes and cancellation independently of local action state',async(t)=>{

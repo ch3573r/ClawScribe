@@ -5,8 +5,8 @@ import {
   ArrowRight,
   File,
   Settings,
-  ChevronLeftCircle,
   ChevronRightCircle,
+  PanelLeftClose,
   Home,
   Trash2,
   Mic,
@@ -23,7 +23,9 @@ import type { CurrentMeeting } from "@/components/Sidebar/SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
 import { indexedDBService } from "@/services/indexedDBService";
 import Analytics from "@/lib/analytics";
-import { formatSidebarMeetingDate } from "@/lib/meetingDates";
+import { groupMeetings, shortMeetingDate } from "@/lib/sidebarMeetings";
+import { Meta, StatusText } from "@/components/ui/settings-layout";
+import { NextUpCard } from "./NextUpCard";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MIN, MAX, storeSidebarWidth } from "@/lib/sidebarWidth";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -514,7 +516,7 @@ const Sidebar: React.FC = () => {
     return searchResults.find((result) => result.id === itemId);
   };
 
-  const renderItem = (item: SidebarItem, depth = 0) => {
+  const renderItem = (item: SidebarItem) => {
     const isActive = item.type === "file" && currentMeeting?.id === item.id;
     const isMeetingItem =
       item.id.includes("-") && !item.id.startsWith("intro-call");
@@ -523,62 +525,55 @@ const Sidebar: React.FC = () => {
 
     if (isCollapsed || item.type === "folder") return null;
 
+    const open = () => {
+      setCurrentMeeting({ id: item.id, title: item.title });
+      const basePath = item.id.startsWith("intro-call")
+        ? "/"
+        : `/meeting-details?id=${item.id}`;
+      router.push(basePath);
+    };
+
     return (
-      <div
-        key={item.id}
-        onClick={() => {
-          setCurrentMeeting({ id: item.id, title: item.title });
-          const basePath = item.id.startsWith("intro-call")
-            ? "/"
-            : `/meeting-details?id=${item.id}`;
-          router.push(basePath);
-        }}
-        className={`group cursor-pointer rounded-md border px-2.5 py-2.5 transition ${
-          isActive
-            ? "border-primary/25 bg-primary/10 text-sidebar-foreground shadow-sm"
-            : hasTranscriptMatch
-              ? "border-warning-border/30 bg-warning text-sidebar-foreground"
-              : "border-transparent text-sidebar-foreground hover:border-sidebar-border hover:bg-sidebar-hover"
-        }`}
-      >
-        <div className="flex items-start gap-2.5">
-          <div
-            className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-              isActive
-                ? "bg-primary/10 text-primary"
-                : "bg-background/60 text-muted-foreground"
-            }`}
+      <div key={item.id}>
+        <div
+          className={`group relative flex h-9 items-center rounded-md border transition ${
+            isActive
+              ? "border-primary/25 bg-primary/10 text-sidebar-foreground"
+              : hasTranscriptMatch
+                ? "border-warning-border/30 bg-warning text-sidebar-foreground"
+                : "border-transparent text-sidebar-foreground hover:bg-sidebar-hover"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={open}
+            aria-current={isActive ? "page" : undefined}
+            className="flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-md px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <File className="h-4 w-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="line-clamp-2 text-sm font-medium leading-5 text-sidebar-foreground">
-              {item.title}
-            </div>
-            <div className="mt-1 text-xs text-muted-foreground">{formatSidebarMeetingDate(item.created_at)}</div>
-          </div>
+            <File className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : "text-muted-foreground"}`} aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate text-sm text-sidebar-foreground" title={item.title}>{item.title}</span>
+            <Meta className={`shrink-0 ${isMeetingItem ? "group-focus-within:invisible group-hover:invisible" : ""}`}>
+              {shortMeetingDate(item.created_at)}
+            </Meta>
+          </button>
           {isMeetingItem && (
-            <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md bg-sidebar-hover group-focus-within:flex group-hover:flex">
               <Button
                 variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleEditStart(item.id, item.title);
-                }}
+                onClick={() => handleEditStart(item.id, item.title)}
                 className="whitespace-normal h-auto gap-0 [&_svg]:size-3.5 rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
-                aria-label="Edit meeting title"
+                aria-label={`Edit title of ${item.title}`}
               >
                 <Pencil className="h-3.5 w-3.5" />
               </Button>
               <Button
                 variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
+                onClick={() => {
                   setDeleteFiles(true);
                   setDeleteModalState({ isOpen: true, itemId: item.id });
                 }}
                 className="whitespace-normal h-auto gap-0 [&_svg]:size-3.5 rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                aria-label="Delete meeting"
+                aria-label={`Delete ${item.title}`}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </Button>
@@ -587,7 +582,7 @@ const Sidebar: React.FC = () => {
         </div>
 
         {hasTranscriptMatch && (
-          <div className="mt-2 rounded-md border border-warning-border/30 bg-warning p-2 text-xs leading-5 text-warning-foreground">
+          <div className="mt-1 rounded-md border border-warning-border/30 bg-warning p-2 text-xs leading-5 text-warning-foreground">
             <span className="font-medium text-warning-foreground">Match:</span>{" "}
             {matchingResult.matchContext}
           </div>
@@ -624,23 +619,25 @@ const Sidebar: React.FC = () => {
       onClick: goToMeetings,
     },
   ];
+  // Meetings shown in the list: the recent ones, all of them, or the search matches.
+  const visibleMeetings = filteredSidebarItems
+    .filter((item) => item.type === "folder" && item.children)
+    .flatMap((item) => item.children ?? [])
+    .slice(0, searchQuery || showAllMeetings ? undefined : 8);
+  const meetingGroups = groupMeetings(visibleMeetings);
   const idleRecordingButtonClass =
     "border border-primary/40 bg-gradient-to-br from-primary to-primary/70 text-primary-foreground shadow-[0_0_28px_hsl(var(--primary)/0.28)] hover:border-primary/50 hover:shadow-[0_0_36px_hsl(var(--primary)/0.42)]";
 
   return (
     <div className="fixed left-0 top-[var(--titlebar-height)] z-40 h-[calc(100vh-var(--titlebar-height))]">
-      {!onSettings && (
+      {!onSettings && isCollapsed && (
         <Button
           variant="ghost"
           onClick={toggleCollapse}
           className="whitespace-normal gap-0 p-0 [&_svg]:size-5 absolute -right-3 top-24 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-sidebar-border bg-sidebar text-muted-foreground shadow-sm transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
-          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label="Expand sidebar"
         >
-          {isCollapsed ? (
-            <ChevronRightCircle className="h-5 w-5" />
-          ) : (
-            <ChevronLeftCircle className="h-5 w-5" />
-          )}
+          <ChevronRightCircle className="h-5 w-5" />
         </Button>
       )}
 
@@ -694,7 +691,19 @@ const Sidebar: React.FC = () => {
         ) : (
           <>
             <div className="flex-shrink-0 space-y-4 border-b border-sidebar-border px-4 pb-4 pt-5">
-              <Logo isCollapsed={isCollapsed} />
+              <div className="flex items-center justify-between gap-2">
+                <Logo isCollapsed={isCollapsed} />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={toggleCollapse}
+                  className="h-8 w-8 shrink-0 text-muted-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                  aria-label="Collapse sidebar"
+                  title="Collapse sidebar"
+                >
+                  <PanelLeftClose aria-hidden="true" />
+                </Button>
+              </div>
 
               <div className="relative">
                 <InputGroup className="rounded-md border-sidebar-border bg-background/60 text-sidebar-foreground shadow-none">
@@ -710,7 +719,7 @@ const Sidebar: React.FC = () => {
                   </InputGroupAddon>
                   {searchQuery && (
                     <InputGroupAddon align="inline-end">
-                      <InputGroupButton onClick={() => handleSearchChange("")}>
+                      <InputGroupButton aria-label="Clear search" onClick={() => handleSearchChange("")}>
                         <X className="h-4 w-4" />
                       </InputGroupButton>
                     </InputGroupAddon>
@@ -743,26 +752,24 @@ const Sidebar: React.FC = () => {
               })}
             </nav>
 
-            <div className="mt-6 flex min-h-0 flex-1 flex-col px-3">
-              <div className="mb-2 flex items-center justify-between px-1">
-                <div className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground">
-                  {showAllMeetings ? "All meetings" : "Recent meetings"}
+            <NextUpCard />
+
+            <div className="mt-5 flex min-h-0 flex-1 flex-col px-3">
+              {isSearching && (
+                <div className="mb-2 px-1">
+                  <span role="status" className="text-xs text-primary">Searching…</span>
                 </div>
-                {isSearching && (
-                  <span className="text-[11px] text-primary">Searching…</span>
-                )}
-              </div>
+              )}
 
-              <div className="flex-1 space-y-1.5 overflow-y-auto pr-1 custom-scrollbar">
-                {filteredSidebarItems
-                  .filter((item) => item.type === "folder" && item.children)
-                  .flatMap((item) => item.children ?? [])
-                  .slice(0, searchQuery || showAllMeetings ? undefined : 8)
-                  .map((child) => renderItem(child, 1))}
+              <div className="flex-1 space-y-3 overflow-y-auto pr-1 custom-scrollbar">
+                {meetingGroups.map((group) => (
+                  <section key={group.label} aria-label={group.label}>
+                    <div className="mb-1 px-1 text-xs text-muted-foreground">{group.label}</div>
+                    <div className="space-y-0.5">{group.items.map((child) => renderItem(child))}</div>
+                  </section>
+                ))}
 
-                {filteredSidebarItems.every(
-                  (item) => !item.children?.length,
-                ) && (
+                {meetingGroups.length === 0 && (
                   <div className="rounded-md border border-sidebar-border bg-background/60 px-3 py-5 text-center text-sm text-muted-foreground">
                     No meetings found.
                   </div>
@@ -775,7 +782,7 @@ const Sidebar: React.FC = () => {
                   onClick={() => setShowAllMeetings((value) => !value)}
                   className="whitespace-normal h-auto justify-start rounded-none py-0 hover:bg-transparent mt-3 flex items-center gap-2 px-1 text-sm font-medium text-primary hover:text-primary/80"
                 >
-                  {showAllMeetings ? "Show recent" : "View all meetings"}
+                  {showAllMeetings ? "Show recent" : "All meetings"}
                   <ArrowRight className="h-4 w-4" />
                 </Button>
               )}
@@ -783,14 +790,10 @@ const Sidebar: React.FC = () => {
 
             <div className="flex-shrink-0 space-y-2.5 border-t border-sidebar-border bg-sidebar p-3">
               <Button
-                variant="ghost"
+                variant={isRecording ? "destructive" : "default"}
                 onClick={handleRecordingToggle}
                 title={isRecording ? "Click to stop recording" : undefined}
-                className={`whitespace-normal h-auto hover:bg-transparent hover:text-primary-foreground flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold transition ${
-                  isRecording
-                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground"
-                    : idleRecordingButtonClass
-                }`}
+                className="h-10 w-full whitespace-normal text-sm font-semibold"
               >
                 {isRecording ? (
                   <Square className="h-4 w-4" />
@@ -807,50 +810,24 @@ const Sidebar: React.FC = () => {
               </Button>
 
               <div className="grid grid-cols-2 gap-2">
-                <Button
-                  variant="ghost"
-                  onClick={() => openImportDialog()}
-                  className="whitespace-normal h-auto hover:text-sidebar-foreground flex min-w-0 items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-transparent px-2.5 py-2.5 text-sm font-medium text-sidebar-foreground transition hover:bg-sidebar-hover"
-                >
+                <Button variant="outline" onClick={() => openImportDialog()} className="min-w-0">
                   <Upload className="h-4 w-4 shrink-0" />
                   <span className="truncate">Import</span>
                 </Button>
-
-                <Button
-                  variant="ghost"
-                  onClick={() => openSettingsTab("general")}
-                  className={`whitespace-normal h-auto flex min-w-0 items-center justify-center gap-2 rounded-lg border px-2.5 py-2.5 text-sm font-medium transition ${
-                    onSettings
-                      ? "border-primary/20 bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary"
-                      : "border-sidebar-border bg-transparent text-sidebar-foreground hover:bg-sidebar-hover hover:text-sidebar-foreground"
-                  }`}
-                >
+                <Button variant="outline" onClick={() => openSettingsTab("general")} className="min-w-0">
                   <Settings className="h-4 w-4 shrink-0" />
                   <span className="truncate">Settings</span>
                 </Button>
               </div>
 
-              {isRecording ? (
-                isPaused ? (
-                  <div className="flex items-center gap-2 rounded-lg border border-warning-border/20 bg-warning px-3 py-2 text-xs text-warning-foreground">
-                    <span className="h-2 w-2 rounded-full bg-warning-foreground" />
-                    Paused
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 rounded-lg border border-error-border/20 bg-error px-3 py-2 text-xs text-error-foreground">
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-error-foreground" />
-                    Recording
-                  </div>
-                )
-              ) : (
-                <div className="flex items-center gap-2 rounded-lg border border-success-border/20 bg-success px-3 py-2 text-xs text-success-foreground">
-                  <span className="h-2 w-2 rounded-full bg-success-foreground" />
-                  Ready for recording
-                </div>
-              )}
-
-              <div className="px-1 text-center text-xs text-muted-foreground">
-                {appVersion ? `v${appVersion}` : null}
+              <div role="status" className="flex items-center justify-between gap-3 px-1 text-xs">
+                <StatusText
+                  tone={isRecording ? (isPaused ? "warning" : "error") : "ok"}
+                  className={`text-xs ${isRecording && !isPaused ? "font-medium" : ""}`}
+                >
+                  {isRecording ? (isPaused ? "Paused" : "Recording") : "Ready to record"}
+                </StatusText>
+                {appVersion ? <Meta>v{appVersion}</Meta> : null}
               </div>
             </div>
           </>

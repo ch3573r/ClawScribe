@@ -46,3 +46,32 @@ test('manual update errors remain visible and announced',()=>{
   assert.match(html, /role="alert"/);
   assert.match(html, /GitHub limited preview update checks/);
 });
+
+function loadUpdateModule() {
+  return loadTsModule('src/components/UpdateChannelSettings.tsx', {
+    './UpdateCheckProvider': { useUpdateCheckContext: () => ({}) },
+    '@/services/updateService': { updateErrorMessage: String },
+  });
+}
+
+test('the status line says what the update check currently knows', () => {
+  const { describeUpdateStatus } = loadUpdateModule();
+  const idle = { ready: true, currentVersion: '0.5.60', isChecking: false, isInstalling: false, isSavingChannel: false, updateInfo: null };
+  assert.equal(describeUpdateStatus(idle).text, '0.5.60 · not checked yet');
+  assert.equal(describeUpdateStatus({ ...idle, ready: false, currentVersion: '' }).text, 'Loading update settings…');
+  assert.equal(describeUpdateStatus({ ...idle, isChecking: true }).text, 'Checking for updates…');
+  assert.equal(describeUpdateStatus({ ...idle, isInstalling: true }).tone, 'active');
+  assert.equal(describeUpdateStatus({ ...idle, updateInfo: { available: false } }).tone, 'ok');
+  assert.equal(describeUpdateStatus({ ...idle, updateInfo: { available: true, version: '0.5.61', prerelease: false } }).text, 'Stable 0.5.61 available');
+});
+
+test('the check button and status sit in the card footer, with no time invented', () => {
+  const html = settings({ currentVersion: '0.5.60' });
+  assert.match(html, /Check now/);
+  assert.match(html, /role="status"/);
+  assert.doesNotMatch(html, /Checked /);
+  const { checkedLabel } = loadUpdateModule();
+  const at = new Date(2026, 10, 19, 10, 42);
+  assert.match(checkedLabel(at, new Date(2026, 10, 19, 12, 0)), /^Checked today /);
+  assert.doesNotMatch(checkedLabel(at, new Date(2026, 10, 20, 12, 0)), /today/);
+});

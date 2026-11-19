@@ -1,19 +1,9 @@
 "use client";
 
 import { openExternal } from '@/lib/openExternal';
-import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useICalendar } from "@/hooks/useICalendar";
-import { usePendingCalendar } from "@/hooks/usePendingCalendar";
-import { setPendingCalendar } from "@/lib/meetingCalendar";
+import { useUpcomingEvents } from "@/hooks/useUpcomingEvents";
 import { CalendarClock, Video } from "lucide-react";
-import { toast } from "sonner";
-import {
-  microsoftExportService,
-  type CalendarEvent,
-} from "@/services/microsoftExportService";
-
-const CALENDAR_REFRESH_MS = 5 * 60 * 1000;
 
 function formatWhen(iso: string | null, allDay: boolean): string {
   if (!iso) return "";
@@ -29,62 +19,7 @@ function formatWhen(iso: string | null, allDay: boolean): string {
 }
 
 export function UpcomingMeetings() {
-  const [microsoftEvents, setMicrosoftEvents] = useState<CalendarEvent[]>([]);
-  const ical = useICalendar();
-  const pending = usePendingCalendar();
-  const readVersion = useRef(0);
-
-  const refresh = useCallback(async (cancelled: () => boolean) => {
-    const version = ++readVersion.current;
-    const expired = () => cancelled() || version !== readVersion.current;
-    try {
-      const connection = await microsoftExportService.connectionStatus();
-      if (expired()) return;
-      if (connection.state !== "connected" || connection.unavailableExports?.includes("Calendar lookup")) {
-        setMicrosoftEvents([]);
-        return;
-      }
-      const now = new Date();
-      const end = new Date(now);
-      end.setDate(now.getDate() + 7);
-      const list = await microsoftExportService.listCalendarEvents(
-        now.toISOString(),
-        end.toISOString(),
-      );
-      if (!expired()) setMicrosoftEvents(list);
-    } catch {
-      if (!expired()) setMicrosoftEvents([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const isCancelled = () => cancelled;
-    const run = () => void refresh(isCancelled);
-    run();
-    const interval = window.setInterval(run, CALENDAR_REFRESH_MS);
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") run();
-    };
-    window.addEventListener("focus", run);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("focus", run);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [refresh]);
-
-  const now = Date.now();
-  const upcoming = (event: CalendarEvent) => event.start && Date.parse(event.end ?? event.start) >= now;
-  // Both sources supply chronological lists. Only their first five can appear on Home.
-  const events = [
-    ...microsoftEvents.filter(upcoming).slice(0, 5).map(event => ({ event, sourceId: null, label: "Microsoft 365", allDay: false })),
-    ...ical.events.filter(upcoming).slice(0, 5).map(event => ({ event, sourceId: event.sourceId, allDay: event.allDay,
-      label: ical.sources.find(source => source.id === event.sourceId)?.name ?? "iCalendar" })),
-  ].sort((a, b) => Date.parse(a.event.start!) - Date.parse(b.event.start!))
-    .slice(0, 5);
+  const { entries: events, isSelected, select } = useUpcomingEvents(5);
   if (!events.length) return null;
 
   return (
@@ -97,16 +32,9 @@ export function UpcomingMeetings() {
         <span className="text-xs text-muted-foreground">Next 7 days · from your calendar</span>
       </div>
       <div className="divide-y divide-border">
-        {events.map(({ event: ev, sourceId, allDay, label }) => {
-          const selected = pending?.eventId === ev.id && (pending.source === "ical") === Boolean(sourceId);
-          const select = () => {
-            const saved = setPendingCalendar({
-              eventId: ev.id, subject: ev.subject,
-              ...(sourceId ? { source: "ical", sourceId } : {}),
-              attendees: ev.attendees.map(person => ({ ...person, included: true })),
-            });
-            if (!saved) toast.error("Could not save the calendar selection on this device.");
-          };
+        {events.map((entry) => {
+          const { event: ev, sourceId, allDay, label } = entry;
+          const selected = isSelected(entry);
           return (
             <div key={(sourceId ?? "microsoft") + ":" + ev.id} className="flex flex-wrap items-center justify-between gap-4 px-6 py-4">
               <div className="min-w-0">
@@ -116,7 +44,7 @@ export function UpcomingMeetings() {
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <Button size="sm" variant="ghost" onClick={select} disabled={selected}>
+                <Button size="sm" variant="ghost" onClick={() => select(entry)} disabled={selected}>
                   {selected ? "Selected for next recording" : "Use for next recording"}
                 </Button>
                 {ev.joinUrl && (

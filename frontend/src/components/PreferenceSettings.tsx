@@ -1,16 +1,45 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { Switch } from "./ui/switch";
-import { UpdateChannelSettings } from "./UpdateChannelSettings";
-import { FolderOpen, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { FolderOpen, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
+import { Button } from "./ui/button";
+import { Switch } from "./ui/switch";
+import { Meta, SettingsCard, SettingsRow, SettingsStack } from "./ui/settings-layout";
+import { NoteRow } from "./settings/settings-parts";
+import { UpdateChannelSettings } from "./UpdateChannelSettings";
 import Analytics from "@/lib/analytics";
-import { useConfig, NotificationSettings } from "@/contexts/ConfigContext";
-import {
-  getAutoUpdateCheckEnabled,
-  setAutoUpdateCheckEnabled,
-} from "@/lib/updatePreferences";
+import { useConfig, type NotificationSettings } from "@/contexts/ConfigContext";
+import { getAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
+
+type FolderKind = "database" | "models" | "recordings";
+
+interface StorageRow {
+  kind: FolderKind;
+  title: string;
+  path: string | undefined;
+}
+
+const normalizePath = (path: string) => path.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+
+/**
+ * The locations the app really exposes. The recordings folder is the one the
+ * user chose. Models are listed on their own only when they live outside the
+ * database folder.
+ */
+export function storageRows(
+  recordingsPath: string | undefined,
+  locations: { database: string; models: string } | null,
+): StorageRow[] {
+  const rows: StorageRow[] = [{ kind: "recordings", title: "Recordings", path: recordingsPath }];
+  if (!locations) return rows;
+  const modelsInsideDatabase = !!locations.models
+    && normalizePath(locations.models).startsWith(normalizePath(locations.database));
+  rows.push({ kind: "database", title: modelsInsideDatabase ? "Database and models" : "Database", path: locations.database });
+  if (locations.models && !modelsInsideDatabase) rows.push({ kind: "models", title: "Whisper models", path: locations.models });
+  return rows;
+}
 
 export function PreferenceSettings() {
   const {
@@ -21,146 +50,76 @@ export function PreferenceSettings() {
     updateNotificationSettings,
   } = useConfig();
 
-  const [notificationsEnabled, setNotificationsEnabled] = useState<
-    boolean | null
-  >(null);
-  const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [previousNotificationsEnabled, setPreviousNotificationsEnabled] =
-    useState<boolean | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [autoUpdateChecksEnabled, setAutoUpdateChecksEnabled] = useState(true);
+  const [savingNotifications, setSavingNotifications] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
+  const [saveFolder, setSaveFolder] = useState<string | undefined>(undefined);
+  const [openingFolder, setOpeningFolder] = useState<FolderKind | null>(null);
   const hasTrackedViewRef = useRef(false);
 
-  // Lazy load preferences on mount (only loads if not already cached)
+  // Lazy load preferences on mount (only loads if not already cached).
   useEffect(() => {
-    loadPreferences();
+    let active = true;
     setAutoUpdateChecksEnabled(getAutoUpdateCheckEnabled());
-    // Reset tracking ref on mount (every tab visit)
     hasTrackedViewRef.current = false;
+    void loadPreferences().finally(() => { if (active) setLoaded(true); });
+    invoke<{ save_folder?: string }>("get_recording_preferences")
+      .then((preferences) => { if (active && preferences?.save_folder) setSaveFolder(preferences.save_folder); })
+      .catch(() => { /* the default folder from the app is shown instead */ });
+    return () => { active = false; };
   }, [loadPreferences]);
 
-  // Track preferences viewed analytics on every tab visit (once per mount)
+  // Track preferences viewed once per visit, when the settings are known.
   useEffect(() => {
-    if (hasTrackedViewRef.current) return;
+    if (hasTrackedViewRef.current || !loaded) return;
+    hasTrackedViewRef.current = true;
+    void Analytics.track("preferences_viewed", {
+      notifications_enabled: notificationSettings?.notification_preferences.show_recording_started ? "true" : "false",
+    });
+  }, [loaded, notificationSettings]);
 
-    const trackPreferencesViewed = async () => {
-      // Wait for notification settings to be available (either from cache or after loading)
-      if (notificationSettings) {
-        await Analytics.track("preferences_viewed", {
-          notifications_enabled: notificationSettings.notification_preferences
-            .show_recording_started
-            ? "true"
-            : "false",
-        });
-        hasTrackedViewRef.current = true;
-      } else if (!isLoadingPreferences) {
-        // If not loading and no settings available, track with default value
-        await Analytics.track("preferences_viewed", {
-          notifications_enabled: "false",
-        });
-        hasTrackedViewRef.current = true;
-      }
-    };
+  const notificationsEnabled = notificationSettings
+    ? notificationSettings.notification_preferences.show_recording_started
+      && notificationSettings.notification_preferences.show_recording_stopped
+    : false;
+  const notificationsLoading = !loaded || isLoadingPreferences;
 
-    trackPreferencesViewed();
-  }, [notificationSettings, isLoadingPreferences]);
-
-  // Update notificationsEnabled when notificationSettings are loaded from global state
-  useEffect(() => {
-    if (notificationSettings) {
-      // Notification enabled means both started and stopped notifications are enabled
-      const enabled =
-        notificationSettings.notification_preferences.show_recording_started &&
-        notificationSettings.notification_preferences.show_recording_stopped;
-      setNotificationsEnabled(enabled);
-      if (isInitialLoad) {
-        setPreviousNotificationsEnabled(enabled);
-        setIsInitialLoad(false);
-      }
-    } else if (!isLoadingPreferences) {
-      // If not loading and no settings, use default
-      setNotificationsEnabled(true);
-      if (isInitialLoad) {
-        setPreviousNotificationsEnabled(true);
-        setIsInitialLoad(false);
-      }
-    }
-  }, [notificationSettings, isLoadingPreferences, isInitialLoad]);
-
-  useEffect(() => {
-    // Skip update on initial load or if value hasn't actually changed
-    if (
-      isInitialLoad ||
-      notificationsEnabled === null ||
-      notificationsEnabled === previousNotificationsEnabled
-    )
-      return;
-    if (!notificationSettings) return;
-
-    const handleUpdateNotificationSettings = async () => {
-      console.log("Updating notification settings to:", notificationsEnabled);
-
-      try {
-        // Update the notification preferences
-        const updatedSettings: NotificationSettings = {
-          ...notificationSettings,
-          notification_preferences: {
-            ...notificationSettings.notification_preferences,
-            show_recording_started: notificationsEnabled,
-            show_recording_stopped: notificationsEnabled,
-          },
-        };
-
-        console.log(
-          "Calling updateNotificationSettings with:",
-          updatedSettings,
-        );
-        await updateNotificationSettings(updatedSettings);
-        setPreviousNotificationsEnabled(notificationsEnabled);
-        console.log(
-          "Successfully updated notification settings to:",
-          notificationsEnabled,
-        );
-
-        // Track notification preference change - only fires when user manually toggles
-        await Analytics.track("notification_settings_changed", {
-          notifications_enabled: notificationsEnabled.toString(),
-        });
-      } catch (error) {
-        console.error("Failed to update notification settings:", error);
-      }
-    };
-
-    handleUpdateNotificationSettings();
-  }, [
-    notificationsEnabled,
-    notificationSettings,
-    isInitialLoad,
-    previousNotificationsEnabled,
-    updateNotificationSettings,
-  ]);
-
-  const handleOpenFolder = async (
-    folderType: "database" | "models" | "recordings",
-  ) => {
+  const changeNotifications = async (enabled: boolean) => {
+    if (!notificationSettings || savingNotifications) return;
+    setSavingNotifications(true);
+    setNotificationError(null);
     try {
-      switch (folderType) {
-        case "database":
-          await invoke("open_database_folder");
-          break;
-        case "models":
-          await invoke("open_models_folder");
-          break;
-        case "recordings":
-          await invoke("open_recordings_folder");
-          break;
-      }
+      const updated: NotificationSettings = {
+        ...notificationSettings,
+        notification_preferences: {
+          ...notificationSettings.notification_preferences,
+          show_recording_started: enabled,
+          show_recording_stopped: enabled,
+        },
+      };
+      await updateNotificationSettings(updated);
+      Analytics.track("notification_settings_changed", { notifications_enabled: enabled.toString() })
+        .catch((error) => console.error("Failed to track notification change:", error));
+    } catch (error) {
+      console.error("Failed to update notification settings:", error);
+      setNotificationError("Could not save the notification setting. Try again.");
+    } finally {
+      setSavingNotifications(false);
+    }
+  };
 
-      // Track storage folder access
-      await Analytics.track("storage_folder_opened", {
-        folder_type: folderType,
-      });
+  const handleOpenFolder = async (folderType: FolderKind) => {
+    setOpeningFolder(folderType);
+    try {
+      await invoke(`open_${folderType}_folder`);
+      Analytics.track("storage_folder_opened", { folder_type: folderType })
+        .catch((error) => console.error("Failed to track folder open:", error));
     } catch (error) {
       console.error(`Failed to open ${folderType} folder:`, error);
+      toast.error("Could not open the folder.");
+    } finally {
+      setOpeningFolder(null);
     }
   };
 
@@ -174,130 +133,73 @@ export function PreferenceSettings() {
     });
   };
 
-  // Show loading only if we're actually loading and don't have cached data
-  if (isLoadingPreferences && !notificationSettings && !storageLocations) {
-    return <div className="max-w-2xl mx-auto p-6">Loading Preferences...</div>;
-  }
-
-  // Show loading if notificationsEnabled hasn't been determined yet
-  if (notificationsEnabled === null && !isLoadingPreferences) {
-    return <div className="max-w-2xl mx-auto p-6">Loading Preferences...</div>;
-  }
-
-  // Ensure we have a boolean value for the Switch component
-  const notificationsEnabledValue = notificationsEnabled ?? false;
+  const rows = storageRows(saveFolder ?? storageLocations?.recordings, storageLocations);
+  const locationsUnavailable = loaded && !isLoadingPreferences && !storageLocations;
 
   return (
-    // General workspace prefs. Appearance and Shortcuts are their own Settings
-    // sections now, so they aren't duplicated here.
-    <div className="space-y-5">
-      <div className="rounded-md border border-border bg-card p-6 shadow-sm">
-        <div className="flex items-center justify-between gap-6">
-          <div className="flex min-w-0 items-start gap-3">
-            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-              <RefreshCw className="h-4 w-4" />
+    <SettingsStack>
+      <SettingsCard title="Updates">
+        <SettingsRow
+          title="Check for updates at startup"
+          htmlFor="preferences-auto-update"
+          description="Looks for a new ClawScribe release each time the app starts"
+        >
+          <Switch id="preferences-auto-update" checked={autoUpdateChecksEnabled} onCheckedChange={handleAutoUpdateCheckChange} />
+        </SettingsRow>
+        <UpdateChannelSettings id="preferences-prerelease-updates" />
+      </SettingsCard>
+
+      <SettingsCard title="Notifications">
+        <SettingsRow
+          title="Meeting start and end"
+          htmlFor="preferences-notifications"
+          description="Shows a Windows notification when a recording starts and when it ends"
+        >
+          {(notificationsLoading || savingNotifications) && (
+            <span role="status" className="inline-flex items-center gap-2 text-[13px] text-muted-foreground">
+              <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+              {savingNotifications ? "Saving…" : "Loading…"}
             </span>
-            <div>
-              <h3 className="text-lg font-semibold text-foreground">
-                Updates
-              </h3>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Check for new ClawScribe releases when the app starts.
-              </p>
-            </div>
-          </div>
+          )}
           <Switch
-            checked={autoUpdateChecksEnabled}
-            onCheckedChange={handleAutoUpdateCheckChange}
-            aria-label="Check for updates at launch"
+            id="preferences-notifications"
+            checked={notificationsEnabled}
+            disabled={notificationsLoading || savingNotifications || !notificationSettings}
+            onCheckedChange={(enabled) => void changeNotifications(enabled)}
           />
-        </div>
-        <div className="mt-5 border-t border-border pt-5">
-          <UpdateChannelSettings id="preferences-prerelease-updates" />
-        </div>
-      </div>
+        </SettingsRow>
+        {!notificationsLoading && !notificationSettings && (
+          <NoteRow tone="muted">Notification settings could not be read, so they cannot be changed here.</NoteRow>
+        )}
+        {notificationError && <NoteRow tone="error">{notificationError}</NoteRow>}
+      </SettingsCard>
 
-      {/* Notifications Section */}
-      <div className="rounded-md border border-border bg-card p-6 shadow-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-semibold text-foreground mb-2">
-              Notifications
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              Notify me when a meeting starts and ends.
-            </p>
-          </div>
-          <Switch
-            checked={notificationsEnabledValue}
-            onCheckedChange={setNotificationsEnabled}
-          />
-        </div>
-      </div>
-
-      {/* Data Storage Locations Section */}
-      <div className="rounded-md border border-border bg-card p-6 shadow-sm">
-        <h3 className="text-lg font-semibold text-foreground mb-4">
-          Data Storage Locations
-        </h3>
-        <p className="text-sm text-muted-foreground mb-6">
-          View and access where ClawScribe stores your data
-        </p>
-
-        <div className="space-y-4">
-          {/* Database Location */}
-          {/* <div className="p-4 border rounded-lg bg-muted">
-            <div className="font-medium mb-2">Database</div>
-            <div className="text-sm text-muted-foreground mb-3 break-all font-mono text-xs">
-              {storageLocations?.database || 'Loading...'}
-            </div>
-            <button
-              onClick={() => handleOpenFolder('database')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-lg hover:bg-muted transition-colors"
+      <SettingsCard title="Storage">
+        {rows.map((row) => (
+          <SettingsRow
+            key={row.kind}
+            title={row.title}
+            description={
+              row.path
+                ? <Meta className="whitespace-normal break-all" >{row.path}</Meta>
+                : <span role="status">{locationsUnavailable ? "Location unavailable" : "Loading…"}</span>
+            }
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={openingFolder !== null}
+              aria-label={`Open the ${row.title.toLowerCase()} folder`}
+              onClick={() => void handleOpenFolder(row.kind)}
             >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div> */}
-
-          {/* Models Location */}
-          {/* <div className="p-4 border rounded-lg bg-muted">
-            <div className="font-medium mb-2">Whisper Models</div>
-            <div className="text-sm text-muted-foreground mb-3 break-all font-mono text-xs">
-              {storageLocations?.models || 'Loading...'}
-            </div>
-            <button
-              onClick={() => handleOpenFolder('models')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-lg hover:bg-muted transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div> */}
-
-          {/* Recordings Location */}
-          <div className="p-4 border rounded-md bg-muted">
-            <div className="font-medium mb-2">Meeting Recordings</div>
-            <div className="text-sm text-muted-foreground mb-3 break-all font-mono text-xs">
-              {storageLocations?.recordings || "Loading..."}
-            </div>
-            <button
-              onClick={() => handleOpenFolder("recordings")}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-md hover:bg-muted transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-4 rounded-md bg-muted p-3">
-          <p className="text-xs text-foreground">
-            <strong>Note:</strong> Database and models are stored together in
-            your application data directory for unified management.
-          </p>
-        </div>
-      </div>
-    </div>
+              {openingFolder === row.kind ? <Loader2 aria-hidden="true" className="animate-spin" /> : <FolderOpen aria-hidden="true" />}
+              Open folder
+            </Button>
+          </SettingsRow>
+        ))}
+        {locationsUnavailable && <NoteRow tone="muted">The database and model locations could not be read.</NoteRow>}
+      </SettingsCard>
+    </SettingsStack>
   );
 }

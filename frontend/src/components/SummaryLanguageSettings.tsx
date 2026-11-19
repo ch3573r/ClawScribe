@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { Globe, Pin, Plus, X } from 'lucide-react';
+import { Pin, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
+import { SettingsRow } from '@/components/ui/settings-layout';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
 import { labelForCode } from '@/lib/summary-languages';
@@ -17,17 +18,13 @@ export function SummaryLanguageSettings() {
   };
 
   return (
-    <div className="bg-card rounded-lg border border-border p-6 shadow-sm relative">
-      <div className="flex items-center gap-2 mb-2">
-        <Globe size={18} className="text-muted-foreground" />
-        <h3 className="text-lg font-semibold text-foreground">Summary language</h3>
-      </div>
-      <p className="text-sm text-muted-foreground mb-4">
-        Pin one language as the default for new meetings. Unpinned languages remain as
-        quick-switch options in the summary generator. Auto uses the dominant transcript language.
-      </p>
-
-      <div className="flex flex-wrap items-center gap-2">
+    <SettingsRow
+      title="Language"
+      description={pinned
+        ? `Default: ${labelForCode(pinned)}. Click it again to unset. Up to 5 quick-switch languages`
+        : 'Click a language to make it the default. With none pinned, Auto uses the dominant transcript language'}
+    >
+      <div role="group" aria-label="Summary languages" className="flex max-w-full flex-wrap items-center justify-end gap-2">
         {recents.map((code) => {
           const isPinned = pinned === code;
           return (
@@ -73,9 +70,10 @@ export function SummaryLanguageSettings() {
             <Button variant="outline"
               type="button"
               disabled={recents.length >= 5}
+              aria-label="Add language"
               className="h-auto gap-1 rounded-full border-dashed border-border px-3 py-1 text-sm text-muted-foreground"
             >
-              <Plus aria-hidden="true" /> Add language
+              <Plus aria-hidden="true" /> Add
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-auto p-0 border-0 shadow-none bg-transparent">
@@ -91,12 +89,6 @@ export function SummaryLanguageSettings() {
           </PopoverContent>
         </Popover>
       </div>
-
-      <p className="text-xs text-muted-foreground mt-3">
-        {pinned
-          ? `Default: ${labelForCode(pinned)} - click it again to unset. Max 5 quick-switch options.`
-          : 'Click any language to set it as your default. Max 5 quick-switch options.'}
-      </p>
-    </div>
+    </SettingsRow>
   );
 }
