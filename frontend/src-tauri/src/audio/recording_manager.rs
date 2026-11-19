@@ -341,6 +341,21 @@ impl RecordingManager {
         }
     }
 
+    /// Undo a start whose streams are open but which cannot continue, for
+    /// example because the speech model failed to load. Nothing is saved.
+    pub async fn abort_start(&mut self) {
+        if let Some(ref mut monitor) = self.device_monitor {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(3), monitor.stop_monitoring())
+                    .await;
+        }
+        self.state.stop_recording();
+        let _ = self.stream_manager.stop_streams();
+        let _ = self.pipeline_manager.stop().await;
+        self.recording_saver.discard_abandoned_start().await;
+        self.state.cleanup();
+    }
+
     /// Stop recording streams without saving (for use when waiting for transcription)
     pub async fn stop_streams_only(&mut self) -> Result<()> {
         info!("Stopping recording streams only");

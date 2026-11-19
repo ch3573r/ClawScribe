@@ -303,6 +303,30 @@ impl RecordingSaver {
         }));
     }
 
+    /// Discard a start that never became a recording: the streams had opened
+    /// and the start was then abandoned, for example because the speech model
+    /// failed to load. The seconds captured meanwhile were never offered as a
+    /// recording and nothing in the app lists them, so they are deleted with
+    /// the folder this start created. A folder that cannot be removed is kept
+    /// and marked as failed, like any other failed start.
+    pub async fn discard_abandoned_start(&mut self) {
+        if let Some(task) = self.snapshot_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        let removed = self
+            .meeting_folder
+            .as_ref()
+            .is_some_and(|folder| std::fs::remove_dir_all(folder).is_ok());
+        if removed {
+            self.meeting_folder = None;
+            self.metadata = None;
+            self.incremental_saver = None;
+        } else {
+            self.failed_start().await;
+        }
+    }
+
     pub async fn failed_start(&mut self) {
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
@@ -1021,6 +1045,25 @@ mod snapshot_tests {
         drop(sender);
         saver.failed_start().await;
         assert!(!folder.exists());
+        assert!(saver.snapshot_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn abandoned_start_removes_its_folder_with_the_audio_captured_so_far() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let sender = saver
+            .start_accumulation(true, super::super::recording_state::RecordingState::new())
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        drop(sender);
+        let spool = folder.join(".audio-spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::write(spool.join("captured"), b"first seconds").unwrap();
+        saver.discard_abandoned_start().await;
+        assert!(!folder.exists());
+        assert!(saver.meeting_folder.is_none());
         assert!(saver.snapshot_task.is_none());
     }
 

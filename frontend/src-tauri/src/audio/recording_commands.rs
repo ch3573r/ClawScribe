@@ -354,7 +354,61 @@ fn persist_transcript_update(update: TranscriptUpdate) {
         }
     }
 }
-/// Called only after recording admission/validation; both start paths share it.
+type ModelValidation = tokio::task::JoinHandle<Result<(), String>>;
+
+/// How long a start waits for the model check before it opens the streams. A
+/// missing model fails within this time; a model that has to be loaded does not.
+const EARLY_MODEL_VALIDATION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+const MODEL_VALIDATION_STOPPED: &str = "Failed to initialize speech recognition";
+
+/// Starts checking and loading the speech model. Loading takes seconds, and
+/// audio spoken meanwhile used to be lost because capture began only
+/// afterwards. The check now runs beside the stream start. `Ok(None)` means
+/// the model is ready or not needed; `Ok(Some(_))` is a load still in
+/// progress, to be awaited with `finish_model_validation` once the streams
+/// are open; `Err` is a failure found before the microphone was opened.
+async fn begin_model_validation<R: Runtime>(
+    app: &AppHandle<R>,
+    transcribes: bool,
+) -> Result<Option<ModelValidation>, String> {
+    if !transcribes {
+        return Ok(None);
+    }
+    let task_app = app.clone();
+    let mut task =
+        tokio::spawn(
+            async move { transcription::validate_transcription_model_ready(&task_app).await },
+        );
+    match tokio::time::timeout(EARLY_MODEL_VALIDATION_WAIT, &mut task).await {
+        Ok(finished) => finished
+            .map_err(|_| MODEL_VALIDATION_STOPPED.to_string())?
+            .map(|()| None),
+        Err(_) => Ok(Some(task)),
+    }
+}
+
+async fn finish_model_validation(pending: Option<ModelValidation>) -> Result<(), String> {
+    match pending {
+        Some(task) => task
+            .await
+            .map_err(|_| MODEL_VALIDATION_STOPPED.to_string())?,
+        None => Ok(()),
+    }
+}
+
+fn report_model_validation_failure<R: Runtime>(app: &AppHandle<R>, validation_error: &str) {
+    error!("Model validation failed");
+    // actionable: false shows a toast instead of a modal; download progress
+    // already has its own toast.
+    let _ = app.emit("transcription-error", serde_json::json!({
+        "error": validation_error,
+        "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
+        "actionable": false
+    }));
+}
+
+/// Called after recording admission, while the speech model may still be
+/// loading; both start paths share it.
 fn prepare_live_recording(
     runtime: &crate::knowledge::KnowledgeState,
     manager: &mut RecordingManager,
@@ -490,30 +544,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         return Err("Recording already in progress".to_string());
     }
 
-    // Validate that transcription models are available before starting recording
+    // Loading the speech model takes seconds, so it runs while the streams
+    // open. A missing model is still reported before the microphone opens.
     info!("🔍 Validating transcription model availability before starting recording...");
     let validation_timer = Instant::now();
-    if let Err(validation_error) = if mode.transcribes() {
-        transcription::validate_transcription_model_ready(&app).await
-    } else {
-        Ok(())
-    } {
-        error!("Model validation failed");
-
-        // Emit error event for frontend - actionable: false to show toast instead of modal
-        // (download progress is already shown in top-right toast)
-        let _ = app.emit("transcription-error", serde_json::json!({
-            "error": validation_error,
-            "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
-            "actionable": false
-        }));
-
-        return Err(validation_error);
-    }
-    info!(
-        "✅ Transcription model validation passed in {:?}",
-        validation_timer.elapsed()
-    );
+    let model_validation = match begin_model_validation(&app, mode.transcribes()).await {
+        Ok(pending) => pending,
+        Err(validation_error) => {
+            report_model_validation_failure(&app, &validation_error);
+            return Err(validation_error);
+        }
+    };
 
     // Async-first approach - no more blocking operations!
     info!("🚀 Starting async recording initialization");
@@ -694,6 +735,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         )
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
+    // Audio is being captured from here on. Speech during the rest of the
+    // model load waits in the transcription queue.
+    if let Err(validation_error) = finish_model_validation(model_validation).await {
+        manager.abort_start().await;
+        report_model_validation_failure(&app, &validation_error);
+        return Err(validation_error);
+    }
+    info!(
+        "✅ Transcription model validation passed in {:?}",
+        validation_timer.elapsed()
+    );
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     info!(
@@ -717,16 +769,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Start optimized parallel transcription task and store handle
     if mode.transcribes() {
-        let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
-        {
-            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-            *global_task = Some(task_handle);
-        }
-
         // CRITICAL: Listen for transcript-update events and save to recording manager
         // This enables transcript history persistence for page reload sync
         // Store listener ID for cleanup during stop_recording to ensure microphone is released
+        // The listener is registered before the worker starts: speech captured
+        // while the model loaded is already queued and is transcribed at once.
         {
             use tauri::Listener;
             let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
@@ -737,6 +784,13 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
             *global_listener = Some(listener_id);
             info!("✅ Transcript-update event listener registered for history persistence");
+        }
+
+        let task_handle =
+            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
+        {
+            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
+            *global_task = Some(task_handle);
         }
     } // Audio-only sessions have no worker or transcript listener.
 
@@ -801,30 +855,17 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         return Err("Recording already in progress".to_string());
     }
 
-    // Validate that transcription models are available before starting recording
+    // Loading the speech model takes seconds, so it runs while the streams
+    // open. A missing model is still reported before the microphone opens.
     info!("🔍 Validating transcription model availability before starting recording...");
     let validation_timer = Instant::now();
-    if let Err(validation_error) = if mode.transcribes() {
-        transcription::validate_transcription_model_ready(&app).await
-    } else {
-        Ok(())
-    } {
-        error!("Model validation failed");
-
-        // Emit error event for frontend - actionable: false to show toast instead of modal
-        // (download progress is already shown in top-right toast)
-        let _ = app.emit("transcription-error", serde_json::json!({
-            "error": validation_error,
-            "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
-            "actionable": false
-        }));
-
-        return Err(validation_error);
-    }
-    info!(
-        "✅ Transcription model validation passed in {:?}",
-        validation_timer.elapsed()
-    );
+    let model_validation = match begin_model_validation(&app, mode.transcribes()).await {
+        Ok(pending) => pending,
+        Err(validation_error) => {
+            report_model_validation_failure(&app, &validation_error);
+            return Err(validation_error);
+        }
+    };
 
     // Parse devices
     let mic_device = if let Some(ref name) = mic_device_name {
@@ -916,6 +957,17 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         .start_recording(mic_device, system_device, mode.saves_audio(auto_save))
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
+    // Audio is being captured from here on. Speech during the rest of the
+    // model load waits in the transcription queue.
+    if let Err(validation_error) = finish_model_validation(model_validation).await {
+        manager.abort_start().await;
+        report_model_validation_failure(&app, &validation_error);
+        return Err(validation_error);
+    }
+    info!(
+        "✅ Transcription model validation passed in {:?}",
+        validation_timer.elapsed()
+    );
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     info!(
@@ -939,16 +991,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Start optimized parallel transcription task and store handle
     if mode.transcribes() {
-        let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
-        {
-            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-            *global_task = Some(task_handle);
-        }
-
         // CRITICAL: Listen for transcript-update events and save to recording manager
         // This enables transcript history persistence for page reload sync
         // Store listener ID for cleanup during stop_recording to ensure microphone is released
+        // The listener is registered before the worker starts: speech captured
+        // while the model loaded is already queued and is transcribed at once.
         {
             use tauri::Listener;
             let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
@@ -959,6 +1006,13 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
             *global_listener = Some(listener_id);
             info!("✅ Transcript-update event listener registered for history persistence");
+        }
+
+        let task_handle =
+            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
+        {
+            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
+            *global_task = Some(task_handle);
         }
     } // Audio-only sessions have no worker or transcript listener.
 
