@@ -38,25 +38,40 @@ const TARGET_SEGMENT_RMS: f32 = 0.1;
 const SILENT_SEGMENT_RMS: f32 = 0.001;
 /// Never amplify by more than this (about +30 dB).
 const MAX_SEGMENT_GAIN: f32 = 32.0;
+/// The gain keeps all but the loudest 0.1% of samples at or below this level.
+const LOUD_PART_CEILING: f32 = 0.9;
 
 /// Raises a quiet segment to a normal speech level.
 ///
 /// The models drop speech from quiet audio: on a recording at about -37 dBFS
 /// the same clear sentences came back complete, cut in half or empty depending
-/// on where the segment began, and complete once the level was raised. Audio
-/// at a normal level is not touched, so its results do not change. Peaks that
-/// exceed full scale after the gain are clipped; a clipped click costs less
-/// than lost speech.
+/// on where the segment began, and complete once the level was raised. A
+/// segment at a normal average level is not touched, so its results do not
+/// change.
+///
+/// A segment can be quiet on average and still hold a stretch at a normal
+/// level, such as one loud remark next to a quiet speaker. The gain is limited
+/// so that stretch stays below full scale. Only isolated peaks, at most 0.1% of
+/// the samples, are clipped; a clipped click costs less than lost speech.
 fn raise_quiet_segment(samples: &mut [f32]) {
     if samples.is_empty() {
         return;
     }
     let rms =
         (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt();
+    // A NaN or infinite level fails this check too, so every sample below is finite.
     if !(SILENT_SEGMENT_RMS..QUIET_SEGMENT_RMS).contains(&rms) {
         return;
     }
-    let gain = (TARGET_SEGMENT_RMS / rms).min(MAX_SEGMENT_GAIN);
+    let mut magnitudes: Vec<f32> = samples.iter().map(|sample| sample.abs()).collect();
+    let loud_index = (magnitudes.len() * 999 / 1000).min(magnitudes.len() - 1);
+    let (_, loud_part, _) = magnitudes.select_nth_unstable_by(loud_index, f32::total_cmp);
+    let gain = (TARGET_SEGMENT_RMS / rms)
+        .min(MAX_SEGMENT_GAIN)
+        .min(LOUD_PART_CEILING / *loud_part);
+    if gain <= 1.0 {
+        return;
+    }
     for sample in samples.iter_mut() {
         *sample = (*sample * gain).clamp(-1.0, 1.0);
     }
@@ -735,6 +750,34 @@ mod tests {
         let mut empty: Vec<f32> = Vec::new();
         raise_quiet_segment(&mut empty);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn quiet_segment_gain_is_capped_and_spares_a_normal_level_stretch() {
+        // Very quiet audio (-54 dBFS) would need a gain of 50; it gets 32.
+        let mut faint = vec![0.002f32; SAMPLE_RATE];
+        raise_quiet_segment(&mut faint);
+        assert!((faint[0] - 0.064).abs() < 1e-5, "sample {}", faint[0]);
+
+        // Ten seconds, quiet on average, with 0.2 s at a normal level: the
+        // normal stretch must not be clipped, and the quiet part is still raised.
+        let mut mixed: Vec<f32> = (0..SAMPLE_RATE * 10)
+            .map(|i| {
+                let amplitude = if i < SAMPLE_RATE / 5 { 0.4 } else { 0.005 };
+                amplitude * (i as f32 * 0.05).sin()
+            })
+            .collect();
+        let quiet_before = rms(&mixed[SAMPLE_RATE..]);
+        raise_quiet_segment(&mut mixed);
+        let loudest = mixed.iter().fold(0.0f32, |max, sample| max.max(sample.abs()));
+        assert!(loudest < 1.0, "loudest {loudest}");
+        assert!(rms(&mixed[SAMPLE_RATE..]) > quiet_before * 1.5);
+
+        // Infinite or NaN input is left alone.
+        let mut broken = vec![0.01f32, f32::NAN, f32::INFINITY, 0.01];
+        raise_quiet_segment(&mut broken);
+        assert_eq!(broken[0], 0.01);
+        assert!(broken[1].is_nan());
     }
 
     fn result(text: &str) -> TimestampedResult {
