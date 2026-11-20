@@ -165,10 +165,18 @@ async fn snapshot_impl(
     with_documents: bool,
 ) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     super::attach_bookmarks(pool).await.map_err(failure)?;
+    snapshot_tables(pool, TABLES, with_documents).await
+}
+
+async fn snapshot_tables(
+    pool: &SqlitePool,
+    meeting_tables: &[&str],
+    with_documents: bool,
+) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut tables = BTreeMap::new();
     let mut budget = MAX_MANIFEST;
-    for table in TABLES
+    for table in meeting_tables
         .iter()
         .chain(archive_documents::TABLES.iter().filter(|_| with_documents))
     {
@@ -2356,7 +2364,17 @@ mod tests {
         let before_counts = counts(&source).await;
         let before_schema = schema(&source).await;
         assert!(before_schema.len() > 10);
-        let (old_backup, _) = snapshot(&source).await.unwrap();
+        // Export exactly the archive tables available before the evidence upgrade.
+        // The current writer also attaches recording-ID bookmarks, introduced later.
+        const HISTORICAL_TABLES: &[&str] = &[
+            "meetings", "transcripts", "summary_processes", "transcript_chunks",
+            "meeting_notes", "ai_chat_messages", "recording_outcomes", "transcript_revisions",
+            "transcript_edit_batches", "transcript_file_sync", "meeting_tags", "meeting_bookmarks",
+            "knowledge_owners", "knowledge_requests", "knowledge_messages",
+            "knowledge_request_evidence", "knowledge_request_sources",
+        ];
+        let (old_backup, _) = snapshot_tables(&source, HISTORICAL_TABLES, false).await.unwrap();
+        assert!(!old_backup.tables.contains_key("meeting_summary_bookmarks"));
         let mut histories = Vec::new();
         for owner in &owners {
             histories.push(conversations::history(&source, owner).await.unwrap());
