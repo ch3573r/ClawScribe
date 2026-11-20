@@ -16,7 +16,6 @@ use sherpa_onnx::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -1723,88 +1722,6 @@ fn ensure_model_file(path: &Path, model_name: &str) -> Result<()> {
             path.display()
         ))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ModelFileValidation {
-    actual_sha256: String,
-    actual_bytes: u64,
-    sha256_matches: bool,
-    bytes_match: bool,
-}
-
-impl ModelFileValidation {
-    fn is_valid(&self) -> bool {
-        self.sha256_matches && self.bytes_match
-    }
-
-    fn error_message(&self, descriptor: &DiarizationModelDescriptor, path: &Path) -> String {
-        let mut errors = Vec::new();
-        if !self.sha256_matches {
-            errors.push(format!(
-                "expected sha256 {}, got {}",
-                descriptor.expected_sha256.unwrap_or("<not pinned>"),
-                self.actual_sha256
-            ));
-        }
-        if !self.bytes_match {
-            errors.push(format!(
-                "expected {} bytes, got {}",
-                descriptor
-                    .expected_bytes
-                    .map(|bytes| bytes.to_string())
-                    .unwrap_or_else(|| "<not pinned>".to_string()),
-                self.actual_bytes
-            ));
-        }
-
-        format!(
-            "{} diarization model failed validation at {} ({})",
-            descriptor.kind.as_str(),
-            path.display(),
-            errors.join("; ")
-        )
-    }
-}
-
-fn validate_model_file(
-    path: &Path,
-    descriptor: &DiarizationModelDescriptor,
-) -> Result<ModelFileValidation> {
-    ensure_model_file(path, descriptor.kind.as_str())?;
-    let actual_bytes = fs::metadata(path)?.len();
-    let actual_sha256 = sha256_file(path)?;
-    let sha256_matches = descriptor
-        .expected_sha256
-        .map(|expected| actual_sha256.eq_ignore_ascii_case(expected))
-        .unwrap_or(true);
-    let bytes_match = descriptor
-        .expected_bytes
-        .map(|expected| actual_bytes == expected)
-        .unwrap_or(true);
-
-    Ok(ModelFileValidation {
-        actual_sha256,
-        actual_bytes,
-        sha256_matches,
-        bytes_match,
-    })
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn quarantine_invalid_default_model(path: &Path) -> Result<Option<PathBuf>> {
@@ -4699,70 +4616,6 @@ mod tests {
         DIARIZATION_SAMPLE_RATE as usize * seconds
     }
 
-    fn test_model_descriptor(
-        expected_sha256: Option<&'static str>,
-        expected_bytes: Option<u64>,
-    ) -> DiarizationModelDescriptor {
-        DiarizationModelDescriptor {
-            kind: DiarizationModelKind::Embedding,
-            id: "test-model",
-            display_name: "Test model",
-            family: "test",
-            language: Some("en"),
-            cache_dir: "test-model",
-            cache_file: "model.onnx",
-            source_file: "test-model.onnx",
-            download_url: "https://example.invalid/test-model.onnx",
-            expected_sha256,
-            expected_bytes,
-            default_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-            is_default: false,
-            legacy_flat_file: None,
-        }
-    }
-
-    #[test]
-    fn sha256_file_hashes_known_bytes() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("model.onnx");
-        std::fs::write(&path, b"clawscribe").unwrap();
-
-        assert_eq!(
-            sha256_file(&path).unwrap(),
-            "9c497a187dfd743f242cfd7508a95f41ca8c943d08e8cd51a018822f18e89068"
-        );
-    }
-
-    #[test]
-    fn validates_model_sha256_and_expected_bytes() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("model.onnx");
-        std::fs::write(&path, b"clawscribe").unwrap();
-        let descriptor = test_model_descriptor(
-            Some("9c497a187dfd743f242cfd7508a95f41ca8c943d08e8cd51a018822f18e89068"),
-            Some(10),
-        );
-
-        let validation = validate_model_file(&path, &descriptor).unwrap();
-        assert!(validation.is_valid());
-
-        let bad_sha = test_model_descriptor(
-            Some("0000000000000000000000000000000000000000000000000000000000000000"),
-            Some(10),
-        );
-        let validation = validate_model_file(&path, &bad_sha).unwrap();
-        assert!(!validation.sha256_matches);
-        assert!(validation.bytes_match);
-
-        let bad_bytes = test_model_descriptor(
-            Some("9c497a187dfd743f242cfd7508a95f41ca8c943d08e8cd51a018822f18e89068"),
-            Some(11),
-        );
-        let validation = validate_model_file(&path, &bad_bytes).unwrap();
-        assert!(validation.sha256_matches);
-        assert!(!validation.bytes_match);
-    }
-
     #[test]
     fn diarization_catalog_defaults_to_english_embedding() {
         let descriptor = resolve_embedding_model_descriptor(None).unwrap();
@@ -5088,16 +4941,18 @@ mod tests {
         assert!(!paths.can_download_embedding);
     }
 
-    #[test]
-    fn invalid_default_cache_file_can_be_quarantined() {
+    #[tokio::test]
+    async fn invalid_default_cache_file_can_be_quarantined() {
         let temp_dir = tempfile::tempdir().unwrap();
         let model_dir = temp_dir.path().join(DEFAULT_EMBEDDING_MODEL_DIR);
         std::fs::create_dir_all(&model_dir).unwrap();
         let model_path = model_dir.join("model.onnx");
         std::fs::write(&model_path, b"bad model").unwrap();
         let descriptor = resolve_embedding_model_descriptor(None).unwrap();
-        let validation = validate_model_file(&model_path, descriptor).unwrap();
-        assert!(!validation.is_valid());
+        let error = crate::model_download::verify_pinned_file(&model_path, descriptor.download_url)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("size does not match"));
 
         let quarantine_path = quarantine_invalid_default_model(&model_path)
             .unwrap()

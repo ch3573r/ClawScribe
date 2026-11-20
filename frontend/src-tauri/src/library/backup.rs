@@ -156,6 +156,7 @@ fn allowed_file(name: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 async fn snapshot(pool: &SqlitePool) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     snapshot_impl(pool, false).await
 }
@@ -259,6 +260,7 @@ async fn snapshot_tables(
     ))
 }
 
+#[cfg(test)]
 fn write_archive(
     path: &Path,
     manifest: Manifest,
@@ -1169,6 +1171,7 @@ async fn import_conversations(
     Ok(())
 }
 
+#[cfg(test)]
 async fn import_manifest(
     pool: &SqlitePool,
     manifest: Manifest,
@@ -1497,7 +1500,7 @@ async fn import_manifest_impl(
         originals.keep();
         history.keep();
         if folders > 0 {
-            stage.keep();
+            let _ = stage.keep();
         }
         Ok::<_, String>(())
     })
@@ -1527,6 +1530,7 @@ fn write_archive_with_documents(
     write_archive_impl(path, manifest, folders, Some(reference_root))
 }
 
+#[cfg(test)]
 async fn import_manifest_with_documents(
     pool: &SqlitePool,
     manifest: Manifest,

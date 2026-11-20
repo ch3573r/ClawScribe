@@ -21,6 +21,5 @@ pub use parakeet_provider::ParakeetProvider;
 pub use provider::{TranscriptResult, TranscriptionError, TranscriptionProvider};
 pub use whisper_provider::WhisperProvider;
 pub use worker::{
-    current_transcription_metrics, reset_speech_detected_flag, start_transcription_task,
-    TranscriptUpdate, TranscriptionTask,
+    current_transcription_metrics, start_transcription_task, TranscriptUpdate, TranscriptionTask,
 };

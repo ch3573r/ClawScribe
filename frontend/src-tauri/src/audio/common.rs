@@ -267,31 +267,6 @@ fn choose_timing_grid_word_boundary(
     best.map(|(candidate, _)| candidate).unwrap_or(target)
 }
 
-#[cfg(test)]
-pub(crate) fn speech_segments_to_timing_grid(
-    speech_segments: &[crate::audio::vad::SpeechSegment],
-    max_segment_samples: usize,
-) -> Vec<(f64, f64)> {
-    const MIN_TRANSCRIPT_SEGMENT_SAMPLES: usize = 1_600;
-
-    let mut timing_grid = Vec::new();
-    for segment in speech_segments {
-        let segments = if segment.samples.len() > max_segment_samples {
-            split_segment_at_silence(segment, max_segment_samples)
-        } else {
-            vec![segment.clone()]
-        };
-
-        timing_grid.extend(segments.into_iter().filter_map(|segment| {
-            (segment.samples.len() >= MIN_TRANSCRIPT_SEGMENT_SAMPLES
-                && segment.end_timestamp_ms > segment.start_timestamp_ms)
-                .then_some((segment.start_timestamp_ms, segment.end_timestamp_ms))
-        }));
-    }
-
-    timing_grid
-}
-
 fn stitch_transcript_fragments(transcripts: &[TranscribedSegment]) -> Vec<TranscribedSegment> {
     const MAX_STITCH_GAP_MS: f64 = 1_500.0;
     const MAX_STITCHED_DURATION_MS: f64 = 30_000.0;

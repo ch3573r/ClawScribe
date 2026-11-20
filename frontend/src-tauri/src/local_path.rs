@@ -170,28 +170,6 @@ pub(crate) fn open_in_explorer(folder: &Path) -> Result<(), String> {
 /// What a refused path says. It never contains the path.
 pub(crate) const LOCAL_ONLY: &str = "Choose a file or folder on a local drive.";
 
-/// For a command that takes a path from the webview: refuse anything that is
-/// not a plain local absolute path, before the first filesystem call.
-pub(crate) fn check_local(text: &str) -> Result<(), String> {
-    if is_local_path_text(text) {
-        Ok(())
-    } else {
-        Err(LOCAL_ONLY.into())
-    }
-}
-
-/// `check_local`, then resolve the path and require the result to be on a local
-/// disk too (a mapped network drive resolves to a UNC path and is refused).
-pub(crate) fn resolve_local(text: &str) -> Result<std::path::PathBuf, String> {
-    check_local(text)?;
-    let resolved = Path::new(text).canonicalize().map_err(|_| LOCAL_ONLY.to_string())?;
-    if is_local_canonical(&resolved) {
-        Ok(resolved)
-    } else {
-        Err(LOCAL_ONLY.into())
-    }
-}
-
 /// Whether a canonicalised path is on a local disk (`\\?\C:\...` on Windows).
 pub(crate) fn is_local_canonical(path: &Path) -> bool {
     if marked_remote(&path.to_string_lossy()) {

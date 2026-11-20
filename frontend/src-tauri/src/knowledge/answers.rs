@@ -167,6 +167,7 @@ async fn settle_error(mut lease: RequestLease, error: String) -> Result<Assistan
             conversations::fail(&lease.pool, &lease.id).await
         };
         lease.settled = true;
+        drop(lease);
         result
     });
     // Detaching on timeout retains the lease/registry admission until the actual
@@ -1455,6 +1456,46 @@ mod tests {
             serde_json::json!([{"kind":"preceding_question","cited_tag":2,"context_tag":1}])
         );
     }
+    #[tokio::test]
+    async fn saved_answer_failure_stays_failed_after_lease_release() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (pool, request, _) = answer_fixture().await;
+        let runtime = super::super::KnowledgeState::default();
+        let lease = runtime.answers.claim(&pool, &request).unwrap();
+        assert!(
+            conversations::reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(
+            settle_error(lease, "Synthetic provider failure".into())
+                .await
+                .unwrap_err(),
+            "Synthetic provider failure"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime
+                .answers
+                .active
+                .lock()
+                .unwrap()
+                .contains_key(&request.request_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM knowledge_requests WHERE id=?")
+            .bind(&request.request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "failed");
+    }
+
     #[tokio::test]
     async fn saved_ask_terminal_status_wait_respects_overall_cleanup_deadline() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;

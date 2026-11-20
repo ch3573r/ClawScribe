@@ -257,11 +257,6 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/onboarding/shared/StatusIndicator.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/onboarding/steps/DownloadProgressStep.tsx": {
       "paletteColors": 0,
       "hexColors": 0,

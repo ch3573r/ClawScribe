@@ -107,7 +107,7 @@ const summaryProps = {
   aiSummary: { markdown: 'Meeting notes' }, summaryStatus: 'completed', transcripts: [{ id: 'one', text: 'Example' }],
   modelConfig: { provider: 'example', model: 'example' }, setModelConfig() {}, onSaveModelConfig: async () => {}, onGenerateSummary: async () => {}, onStopGeneration() {},
   customPrompt: '', contextLoading: false, onPromptChange() {}, onSaveSummary: async () => {}, onSummaryChange() {}, onDirtyChange() {}, summaryError: null,
-  onRegenerateSummary: async () => {}, getSummaryStatusMessage: () => '', availableTemplates: [], selectedTemplate: '', onTemplateSelect() {},
+  getSummaryStatusMessage: () => '', availableTemplates: [], selectedTemplate: '', onTemplateSelect() {},
 };
 
 test('Find retains input focus after summary overflow closes and resets the suppression', () => {

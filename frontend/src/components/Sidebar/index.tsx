@@ -70,16 +70,6 @@ interface SidebarItem {
 const Sidebar: React.FC = () => {
   const router = useRouter();
   const pathname = usePathname();
-  // Track the active Settings tab without useSearchParams (which breaks static
-  // prerender). Read it on path change and set it optimistically on click.
-  const [settingsTab, setSettingsTab] = useState<string | null>(null);
-  useEffect(() => {
-    if (pathname === "/settings" && typeof window !== "undefined") {
-      setSettingsTab(new URLSearchParams(window.location.search).get("tab"));
-    } else {
-      setSettingsTab(null);
-    }
-  }, [pathname]);
   const {
     currentMeeting,
     setCurrentMeeting,
@@ -161,9 +151,6 @@ const Sidebar: React.FC = () => {
     if (deletingMeeting.current) return;
     deletingMeeting.current = true;
     console.log("Deleting item:", itemId);
-    const payload = {
-      meetingId: itemId,
-    };
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -529,7 +516,6 @@ const Sidebar: React.FC = () => {
     router.push("/meetings");
   };
   const openSettingsTab = (tab: string) => {
-    setSettingsTab(tab); // optimistic so the highlight swaps on query-only nav
     router.push(`/settings?tab=${tab}`);
     // If the settings page is already mounted, query-only nav won't remount it,
     // so signal the tab switch directly too.

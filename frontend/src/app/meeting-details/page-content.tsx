@@ -3,7 +3,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getMeetingContext, setMeetingContext } from '@/lib/meetingContext';
 import { motion } from 'framer-motion';
 import { Summary, TranscriptSegmentData } from '@/types';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -142,7 +141,6 @@ export default function PageContent({
   const openModelSettingsRef = useRef<(() => void) | null>(null);
 
   // Sidebar context
-  const { serverAddress } = useSidebar();
 
   // Get model config from ConfigContext
   const { modelConfig, setModelConfig } = useConfig();
@@ -234,7 +232,6 @@ export default function PageContent({
 
   const copyOperations = useCopyOperations({
     meeting,
-    transcripts: meetingData.transcripts,
     meetingTitle: meetingData.meetingTitle,
     aiSummary: meetingData.aiSummary,
     blockNoteSummaryRef: meetingData.blockNoteSummaryRef,
@@ -435,7 +432,6 @@ export default function PageContent({
           onRestorePrevious={meetingData.restorePreviousSummary}
           summaryError={summaryGeneration.summaryError}
           jobSnapshot={summaryGeneration.jobUpdate ?? summaryJob}
-          onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
           getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
           availableTemplates={templates.availableTemplates}
           selectedTemplate={templates.selectedTemplate}

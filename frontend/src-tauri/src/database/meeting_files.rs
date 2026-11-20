@@ -43,14 +43,6 @@ const REFUSED: &str = "This folder is not one of your recordings.";
 const MAX_MARKER_BYTES: u64 = 1024 * 1024;
 const MAX_CORE_FOLDERS: usize = 64;
 
-/// Anything that is not a plain local absolute path: UNC, device and verbatim
-/// paths in any slash mix, drive-relative and relative text (see `local_path`).
-/// Such input is refused before any filesystem call, because even asking
-/// whether it exists can reach a remote machine.
-pub(crate) fn is_network_or_device_path(path: &str) -> bool {
-    !crate::local_path::is_local_path_text(path)
-}
-
 fn folder_key(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]
@@ -502,18 +494,20 @@ mod tests {
     #[test]
     fn unc_device_and_extended_length_text_is_refused_before_any_filesystem_call() {
         for refused in [r"\\server\share\x", r"\\?\C:\x", r"\\.\pipe\x", "//host/share/x", r"  \\server\x"] {
-            assert!(is_network_or_device_path(refused), "{refused}");
+            assert!(!crate::local_path::is_local_path_text(refused), "{refused}");
             assert!(authorize_folder_to_open(refused, &[PathBuf::from("C:/")]).is_err());
             assert!(authorize_new_meeting_folder(refused, &[PathBuf::from("C:/")]).is_err());
             assert!(remove_recording_folder(Path::new(refused), "meeting-1", &[], &[])
                 .unwrap_err()
                 .contains("not a recording location"));
         }
-        assert!(!is_network_or_device_path(r"C:\Users\x"));
         #[cfg(not(windows))]
-        assert!(!is_network_or_device_path("/home/x"));
+        assert!(crate::local_path::is_local_path_text("/home/x"));
         #[cfg(windows)]
-        assert!(is_network_or_device_path("/home/x"), "not a drive path");
+        {
+            assert!(crate::local_path::is_local_path_text(r"C:\Users\x"));
+            assert!(!crate::local_path::is_local_path_text("/home/x"));
+        }
     }
 
     #[test]

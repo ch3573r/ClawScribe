@@ -2174,7 +2174,7 @@ mod secret_tests {
 
         // One fake key per place a key can be stored.
         let mut keys = Vec::new();
-        let mut next_key = |keys: &mut Vec<String>| {
+        let next_key = |keys: &mut Vec<String>| {
             let key = format!("zzfakeQ{:02}x7kL9mV4wR8tB5nC1d", keys.len());
             keys.push(key.clone());
             key

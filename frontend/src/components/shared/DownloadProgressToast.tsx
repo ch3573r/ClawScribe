@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
-import { X, Download, Check, Loader2, ArrowBigDownDash } from 'lucide-react';
+import { X, Check, ArrowBigDownDash } from 'lucide-react';
 import { getDownloadTotalMb } from '@/lib/onboarding-summary-model';
 
 interface DownloadProgress {
@@ -48,13 +48,7 @@ function categorizeError(error: string): string {
 }
 
 // Custom toast component for download progress
-function DownloadToastContent({
-  download,
-  onDismiss,
-}: {
-  download: DownloadProgress;
-  onDismiss?: () => void;
-}) {
+function DownloadToastContent({ download }: { download: DownloadProgress }) {
   const isComplete = download.status === 'completed';
   const hasError = download.status === 'error';
   const isCancelled = download.status === 'cancelled';
@@ -125,7 +119,6 @@ function DownloadToastContent({
 // Hook to manage download progress toasts
 export function useDownloadProgressToast() {
   const [downloads, setDownloads] = useState<Map<string, DownloadProgress>>(new Map());
-  const [dismissedModels, setDismissedModels] = useState<Set<string>>(new Set());
 
   const updateDownload = useCallback((modelName: string, data: Partial<DownloadProgress>) => {
     setDownloads((prev) => {
@@ -169,23 +162,8 @@ export function useDownloadProgressToast() {
       }
     };
 
-    // Dismiss handler
-    const dismissToast = () => {
-      toast.dismiss(toastId);
-      setDismissedModels(prev => {
-        const next = new Set(prev);
-        next.add(download.modelName);
-        return next;
-      });
-    };
-
     toast.custom(
-      (t) => (
-        <DownloadToastContent
-          download={download}
-          onDismiss={dismissToast}
-        />
-      ),
+      () => <DownloadToastContent download={download} />,
       {
         position: 'top-right',
         id: toastId,
@@ -194,30 +172,9 @@ export function useDownloadProgressToast() {
     );
   }, []);
 
-  // Effect to handle toast visibility based on dismissed state
   useEffect(() => {
-    downloads.forEach((download) => {
-      // If model was dismissed and is still downloading, don't show it
-      if (dismissedModels.has(download.modelName) && download.status === 'downloading') {
-        return;
-      }
-
-      // If status changed to completed or error, we might want to show it even if dismissed previously
-      // (Optional: remove from dismissed set if you want to force show completion)
-      if (download.status === 'completed' || download.status === 'error') {
-        if (dismissedModels.has(download.modelName)) {
-          // Remove from dismissed so we can show the completion/error toast
-          setDismissedModels(prev => {
-            const next = new Set(prev);
-            next.delete(download.modelName);
-            return next;
-          });
-        }
-      }
-
-      showDownloadToast(download);
-    });
-  }, [downloads, dismissedModels, showDownloadToast]);
+    downloads.forEach(showDownloadToast);
+  }, [downloads, showDownloadToast]);
 
   // Listen to Parakeet download events
   useEffect(() => {

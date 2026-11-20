@@ -206,11 +206,6 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             return (a.sequence_id || 0) - (b.sequence_id || 0);
           });
         });
-
-        // Log the processing summary
-        const logMessage = forceFlush
-          ? `Force flush processed ${allNewTranscripts.length} transcripts (${sortedTranscripts.length} sequential, ${forceFlushTranscripts.length} forced)`
-          : `Processed ${allNewTranscripts.length} transcripts (${sortedTranscripts.length} sequential, ${recentTranscripts.length} recent, ${staleTranscripts.length} stale)`;
       }
     };
 
@@ -248,7 +243,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
           // Save to IndexedDB (non-blocking)
           if (currentMeetingId) {
             indexedDBService.saveTranscript(currentMeetingId, update)
-              .catch(err => console.warn("IndexedDB save failed:"));
+              .catch(() => console.warn("IndexedDB save failed:"));
           }
 
           // Clear any existing timer and set a new one

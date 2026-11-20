@@ -595,22 +595,6 @@ pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Unloads a loaded Parakeet model so the next load uses changed settings, when
-/// no other job holds the slot. Otherwise the change applies at the next load.
-pub(crate) async fn unload_for_new_settings() {
-    let Ok(_job) = crate::audio::inference::claim_job() else {
-        log::warn!("Parakeet settings changed while a job was running; they apply at the next model load");
-        return;
-    };
-    let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
-        guard.as_ref().cloned()
-    };
-    if let Some(engine) = engine {
-        engine.unload_model().await;
-    }
-}
-
 #[command]
 pub async fn get_parakeet_use_directml() -> Result<bool, String> {
     Ok(

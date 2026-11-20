@@ -107,7 +107,6 @@ export function AudioLevelMeter({
 
 interface CompactAudioLevelMeterProps {
   rmsLevel: number;
-  peakLevel: number;
   isActive: boolean;
   className?: string;
 }
@@ -115,7 +114,6 @@ interface CompactAudioLevelMeterProps {
 // Compact version for inline display in dropdowns
 export function CompactAudioLevelMeter({
   rmsLevel,
-  peakLevel,
   isActive,
   className = ''
 }: CompactAudioLevelMeterProps) {

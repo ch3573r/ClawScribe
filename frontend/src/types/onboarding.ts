@@ -32,8 +32,3 @@ export interface PermissionRowProps {
   isPending?: boolean;
   onAction: () => void;
 }
-
-export interface StatusIndicatorProps {
-  status: 'idle' | 'checking' | 'success' | 'error';
-  size?: 'sm' | 'md' | 'lg';
-}

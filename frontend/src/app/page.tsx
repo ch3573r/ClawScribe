@@ -54,8 +54,6 @@ export default function Home() {
   // Recovery hook
   const {
     recoverableMeetings,
-    isLoading: isLoadingRecovery,
-    isRecovering,
     checkForRecoverableTranscripts,
     keepRecoverableMeeting,
     recoverMeeting,
@@ -252,7 +250,6 @@ export default function Home() {
                         variant="floating"
                         isRecording={recordingState.isRecording}
                         onRecordingStart={handleRecordingStart}
-                        onTranscriptReceived={() => {}}
                         onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
                         onTranscriptionError={(message) => showModal('errorAlert', message)}
                         isRecordingDisabled={isRecordingDisabled}

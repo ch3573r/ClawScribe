@@ -67,7 +67,6 @@ interface SummaryPanelProps {
   onDirtyChange: (isDirty: boolean) => void;
   summaryError: string | null;
   jobSnapshot: SummaryJobSnapshot | null;
-  onRegenerateSummary: (customPrompt?: string) => Promise<void>;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
   availableTemplates: Array<{ id: string, name: string, description: string }>;
   selectedTemplate: string;
@@ -108,7 +107,6 @@ export function SummaryPanel({
   onDirtyChange,
   summaryError,
   jobSnapshot,
-  onRegenerateSummary,
   getSummaryStatusMessage,
   availableTemplates,
   selectedTemplate,
@@ -480,7 +478,6 @@ export function SummaryPanel({
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
                 <SummarySurface><BlockNoteSummaryView key={`${meeting.id}:${summaryRevision}`} saveState={saveState} onDraftChange={onSummaryDraft} ref={summaryRef}
                   summaryData={aiSummary} onSave={onSaveSummary} onSummaryChange={onSummaryChange} onDirtyChange={onDirtyChange} status={summaryStatus} error={summaryError}
-                  onRegenerateSummary={() => { Analytics.trackButtonClick('regenerate_summary', 'meeting_details'); void onRegenerateSummary(customPrompt); }}
                   meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
               </SummarySources>
             </div>}

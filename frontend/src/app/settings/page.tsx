@@ -89,7 +89,7 @@ type NavDot = { tone: StatusTone; label: string };
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
+  const { setTranscriptModelConfig } = useConfig();
   const [activeTab, setActiveTab] = useState("general");
   const microsoft = useMicrosoftExport();
   const calendars = useSyncExternalStore(subscribeToICalendars, getICalendarSnapshot, getICalendarServerSnapshot);

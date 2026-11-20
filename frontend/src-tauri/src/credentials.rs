@@ -376,6 +376,7 @@ mod tests {
             name: "provider".into(),
             api_key: Some("fake-secret-value-4242".into()),
         };
+        assert!(holder.api_key.is_some());
         let text = format!("{holder:?} {:#?}", holder.clone());
         assert!(!text.contains("fake-secret-value-4242"));
         assert!(text.contains("provider") && text.contains("[redacted]"));

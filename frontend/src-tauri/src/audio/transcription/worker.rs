@@ -26,9 +26,6 @@ use tokio_util::sync::CancellationToken;
 // Sequence counter for transcript updates
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// Speech detection flag - reset per recording session
-static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
-
 /// Beta (opt-in, default off): energy-based "Me"/"Participants" source
 /// attribution. Set via `set_source_attribution_enabled`. When off, segments
 /// carry no speaker label so nothing mislabels who spoke.
@@ -141,15 +138,6 @@ impl Drop for ProcessingMetricsGuard {
             self.metrics.mark_processing_stopped();
         }
     }
-}
-
-/// Reset the speech detected flag for a new recording session
-pub fn reset_speech_detected_flag() {
-    SPEECH_DETECTED_EMITTED.store(false, Ordering::SeqCst);
-    info!(
-        "🔍 SPEECH_DETECTED_EMITTED reset to: {}",
-        SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst)
-    );
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -397,22 +385,6 @@ pub fn start_transcription_task<R: Runtime>(
                                         }
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         debug!("Recognized speech retained");
-
-                                        // Emit speech-detected event for frontend UX (only on first detection per session)
-                                        // This is lightweight and provides better user feedback
-                                        let current_flag =
-                                            SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
-                                        debug!("Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
-
-                                        if !current_flag {
-                                            SPEECH_DETECTED_EMITTED.store(true, Ordering::SeqCst);
-                                            match app_clone.emit("speech-detected", serde_json::json!({
-                                                "message": "Speech activity detected"
-                                            })) {
-                                                Ok(_) => info!("🎤 ✅ First speech detected - successfully emitted speech-detected event"),
-                                                Err(_e) => error!("🎤 ❌ Failed to emit speech-detected event"),
-                                            }
-                                        }
 
                                         // Generate sequence ID and calculate timestamps FIRST
                                         let sequence_id =

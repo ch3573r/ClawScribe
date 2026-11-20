@@ -3,7 +3,7 @@
 import { Section as SectionType, Block } from '@/types';
 import { BlockComponent } from './Block';
 import { EditableTitle } from '../EditableTitle';
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 
 interface SectionProps {
@@ -15,7 +15,7 @@ interface SectionProps {
   onBlockMouseDown: (blockId: string, e: React.MouseEvent<HTMLDivElement>) => void;
   onBlockMouseEnter: (blockId: string) => void;
   onBlockMouseUp: (blockId: string, e: React.MouseEvent<HTMLDivElement>) => void;
-  onKeyDown: (e: React.KeyboardEvent, blockId: string, newBlockContent?: string) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
   onTitleChange?: (sectionKey: string, title: string) => void;
   onSectionDelete?: (sectionKey: string) => void;
   onBlockDelete: (blockId: string, mergeContent?: string) => void;
@@ -42,17 +42,10 @@ export const Section: React.FC<SectionProps> = ({
   onCreateNewBlock,
 }) => {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const titleInputRef = useRef<HTMLInputElement>(null);
 
   const handleTitleChange = (newTitle: string) => {
     if (onTitleChange) {
       onTitleChange(sectionKey, newTitle);
-    }
-  };
-
-  const handleTitleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      setIsEditingTitle(false);
     }
   };
 
@@ -101,10 +94,7 @@ export const Section: React.FC<SectionProps> = ({
               onMouseDown={(e) => onBlockMouseDown(block.id, e)}
               onMouseEnter={() => onBlockMouseEnter(block.id)}
               onMouseUp={(e) => onBlockMouseUp(block.id, e)}
-              onKeyDown={(e) => {
-                const newBlockContent = (e.currentTarget as HTMLTextAreaElement).dataset.newBlockContent;
-                onKeyDown(e, block.id, newBlockContent);
-              }}
+              onKeyDown={onKeyDown}
               onDelete={() => {
                 const textarea = document.querySelector(`[data-block-id="${block.id}"]`) as HTMLTextAreaElement;
                 const mergeContent = textarea?.dataset.mergeContent;

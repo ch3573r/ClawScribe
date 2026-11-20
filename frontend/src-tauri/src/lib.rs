@@ -16,24 +16,10 @@ macro_rules! perf_debug {
     ($($arg:tt)*) => {};
 }
 
-#[cfg(debug_assertions)]
-macro_rules! perf_trace {
-    ($($arg:tt)*) => {
-        log::trace!($($arg)*)
-    };
-}
-
-#[cfg(not(debug_assertions))]
-macro_rules! perf_trace {
-    ($($arg:tt)*) => {};
-}
-
-// Make these macros available to other modules. The re-exports are consumed
+// Make this macro available to other modules. The re-export is consumed
 // from submodules, which Rust's unused import lint does not track here.
 #[allow(unused_imports)]
 pub(crate) use perf_debug;
-#[allow(unused_imports)]
-pub(crate) use perf_trace;
 
 // Re-export async logging macros for external use (removed due to macro conflicts)
 
@@ -963,7 +949,6 @@ pub fn run() {
             audio::interrupted::repair_saved_recording,
             ollama::get_ollama_models,
             ollama::pull_ollama_model,
-            ollama::delete_ollama_model,
             openai::auth::api_get_openai_auth_status,
             openai::auth::api_save_openai_auth_config,
             openai::auth::api_clear_openai_auth_config,

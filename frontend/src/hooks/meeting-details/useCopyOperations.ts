@@ -9,7 +9,6 @@ import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 
 interface UseCopyOperationsProps {
   meeting: any;
-  transcripts: Transcript[];
   meetingTitle: string;
   aiSummary: Summary | null;
   blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef | null>;
@@ -18,7 +17,6 @@ interface UseCopyOperationsProps {
 
 export function useCopyOperations({
   meeting,
-  transcripts,
   meetingTitle,
   aiSummary,
   blockNoteSummaryRef,

@@ -269,7 +269,8 @@ pub(crate) fn set_kept(backing: &dyn Backing, folder: &Path, keep: bool) -> Resu
     write(backing, &trust)
 }
 
-pub(crate) fn is_kept(trust: &Trust, folder: &Path) -> bool {
+#[cfg(test)]
+fn is_kept(trust: &Trust, folder: &Path) -> bool {
     let wanted = crate::local_path::comparable_text(&folder.to_string_lossy());
     trust.kept.iter().any(|known| crate::local_path::comparable_text(known) == wanted)
 }

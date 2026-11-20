@@ -24,7 +24,7 @@ use super::{
 };
 
 // Import transcription modules
-use super::transcription::{self, reset_speech_detected_flag};
+use super::transcription;
 
 // Re-export TranscriptUpdate for backward compatibility
 pub use super::transcription::TranscriptUpdate;
@@ -520,17 +520,7 @@ pub(crate) fn stop_live_assistance(
 }
 
 fn store_recording_manager(manager: RecordingManager) {
-    let mut manager_guard = RECORDING_MANAGER.lock().unwrap();
-    *manager_guard = Some(manager);
-
-    // A detected-call marking that arrived while the manager was out.
-    if let (Some(manager), Ok(mut pending)) =
-        (manager_guard.as_mut(), PENDING_DETECTED_CALL.lock())
-    {
-        if let Some(session) = pending.take() {
-            manager.mark_detected_call(&session);
-        }
-    }
+    *RECORDING_MANAGER.lock().unwrap() = Some(manager);
 }
 
 /// Publish the active state and worker together so Stop cannot miss the task.
@@ -541,7 +531,6 @@ fn activate_recording<R: Runtime>(
     sink: super::recording_manager::LiveTranscriptSink,
 ) {
     LIVE_TRANSCRIPTION.store(transcribes, Ordering::SeqCst);
-    reset_speech_detected_flag();
     let mut task = TRANSCRIPTION_TASK.lock().unwrap();
     RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
     IS_RECORDING.store(true, Ordering::SeqCst);
@@ -1222,26 +1211,6 @@ pub(crate) async fn stop_after_windows_suspend<R: Runtime>(app: AppHandle<R>, at
                 "message": "Windows sleep may have interrupted the audio. Press Stop again to save the available recording."
             }),
         );
-    }
-}
-
-/// A detected-call marking that arrived while a reconnection had the recording
-/// manager out. It is applied when the manager is put back.
-static PENDING_DETECTED_CALL: Mutex<Option<String>> = Mutex::new(None);
-
-pub(crate) fn mark_detected_call(session: &str) {
-    if let Ok(mut manager) = RECORDING_MANAGER.lock() {
-        if let Some(manager) = manager.as_mut() {
-            manager.mark_detected_call(session);
-            return;
-        }
-        // No manager: if a reconnection has it out, queue the marking so it is
-        // not lost; otherwise there is no recording to mark.
-        if RECONNECT_OWNER.try_lock().is_err() {
-            if let Ok(mut pending) = PENDING_DETECTED_CALL.lock() {
-                *pending = Some(session.to_string());
-            }
-        }
     }
 }
 
@@ -2601,48 +2570,6 @@ mod reconnect_tests {
         release.send(()).unwrap();
         reconnect.await.unwrap().unwrap();
         assert!(waiter.await.unwrap(), "the manager was restored before the waiter ran");
-    }
-
-    #[tokio::test]
-    async fn a_detected_call_marked_while_the_manager_is_out_is_applied_when_it_is_back() {
-        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
-        let _admission = crate::audio::inference::claim_job().unwrap();
-        let _restore = Restore(RECORDING_MANAGER.lock().unwrap().take());
-        // A manager bound to a live session, as a recording has.
-        let runtime = crate::knowledge::KnowledgeState::default();
-        let mut manager = RecordingManager::new();
-        let (startup, _sink) = prepare_live_recording(&runtime, &mut manager, true).unwrap();
-        let session = startup.commit();
-        *RECORDING_MANAGER.lock().unwrap() = Some(manager);
-        *PENDING_DETECTED_CALL.lock().unwrap() = None;
-        let (release, wait) = mpsc::channel::<()>();
-        let reconnect = tokio::spawn(with_recording_manager_out(Duration::from_secs(5), move |_| {
-            wait.recv().unwrap();
-        }));
-        until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
-        mark_detected_call(&session);
-        assert!(
-            PENDING_DETECTED_CALL.lock().unwrap().is_some(),
-            "queued while the manager is out"
-        );
-        release.send(()).unwrap();
-        reconnect.await.unwrap().unwrap();
-        assert!(PENDING_DETECTED_CALL.lock().unwrap().is_none());
-        assert!(RECORDING_MANAGER
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .owns_detected_call(&session));
-    }
-
-    #[tokio::test]
-    async fn without_a_recording_or_a_reconnection_a_detected_call_is_not_queued() {
-        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
-        let _restore = Restore(RECORDING_MANAGER.lock().unwrap().take());
-        *PENDING_DETECTED_CALL.lock().unwrap() = None;
-        mark_detected_call("call-session-2");
-        assert!(PENDING_DETECTED_CALL.lock().unwrap().is_none());
     }
 
     #[tokio::test]

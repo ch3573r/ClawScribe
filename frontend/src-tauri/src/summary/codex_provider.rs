@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -3044,16 +3044,6 @@ fn hide_tokio_child_console(command: &mut TokioCommand) {
 
 #[cfg(not(windows))]
 fn hide_tokio_child_console(_command: &mut TokioCommand) {}
-
-#[cfg(windows)]
-fn hide_std_child_console(command: &mut StdCommand) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_std_child_console(_command: &mut StdCommand) {}
 
 fn build_app_server_turn_text(
     transcript: &str,

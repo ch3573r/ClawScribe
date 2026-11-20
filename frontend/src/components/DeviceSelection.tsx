@@ -326,7 +326,6 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
                       {levelData && (
                         <CompactAudioLevelMeter
                           rmsLevel={levelData.rms_level}
-                          peakLevel={levelData.peak_level}
                           isActive={levelData.is_active}
                         />
                       )}

@@ -1,7 +1,6 @@
 import { openExternal } from '@/lib/openExternal';
 import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
-import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { useOllamaDownload } from '@/contexts/OllamaDownloadContext';
@@ -323,7 +322,6 @@ export function ModelSettingsModal({
   const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
   const keyStatus: SecretStatus =
     providerKeyStatus?.[modelConfig.provider as KeyProvider] ?? modelConfig.apiKeyStatus ?? NO_SECRET;
-  const { serverAddress } = useSidebar();
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
   const [openRouterError, setOpenRouterError] = useState<string>('');
   const [isLoadingOpenRouter, setIsLoadingOpenRouter] = useState<boolean>(false);
@@ -1347,24 +1345,6 @@ export function ModelSettingsModal({
         setOllamaNotInstalled(true);
       }
       // Other errors are handled by the context
-    }
-  };
-
-  // Function to delete Ollama model
-  const deleteOllamaModel = async (modelName: string) => {
-    try {
-      const endpoint = ollamaEndpoint.trim() || null;
-      await invoke('delete_ollama_model', {
-        modelName,
-        endpoint
-      });
-
-      toast.success(`Model ${modelName} deleted`);
-      await fetchOllamaModels(true); // Refresh list
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to delete model';
-      toast.error(errorMsg);
-      console.error('Error deleting model:', err);
     }
   };
 

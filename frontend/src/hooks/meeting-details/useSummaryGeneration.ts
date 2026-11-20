@@ -5,7 +5,7 @@ import { openExternal } from '@/lib/openExternal';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Summary } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';

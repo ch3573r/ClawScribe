@@ -24,10 +24,12 @@ pub async fn check_first_launch(app: AppHandle) -> Result<bool, String> {
 /// in the app's own data folder and, on macOS, the Homebrew one. Chosen by the
 /// core; nothing here comes from the webview.
 fn legacy_database_candidates(app_data_dir: &std::path::Path) -> Vec<PathBuf> {
-    let mut candidates = vec![app_data_dir.join("meeting_minutes.db")];
-    #[cfg(target_os = "macos")]
-    candidates.push(PathBuf::from("/usr/local/var/meetily/meeting_minutes.db"));
-    candidates
+    [
+        app_data_dir.join("meeting_minutes.db"),
+        #[cfg(target_os = "macos")]
+        PathBuf::from("/usr/local/var/meetily/meeting_minutes.db"),
+    ]
+    .into()
 }
 
 /// The first of the candidates that is a non-empty regular file.

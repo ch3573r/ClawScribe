@@ -516,11 +516,8 @@ impl OpenAICompatibleProcessingProvider {
         )
     }
 
-    pub(crate) async fn send_text_prompt(
-        &self,
-        system: &str,
-        user: &str,
-    ) -> Result<String, String> {
+    #[cfg(test)]
+    async fn send_text_prompt(&self, system: &str, user: &str) -> Result<String, String> {
         self.send_chat(system, user, None, None).await
     }
 

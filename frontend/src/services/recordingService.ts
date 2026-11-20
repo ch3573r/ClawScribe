@@ -81,14 +81,6 @@ export interface ReconnectResult {
  */
 export class RecordingService {
   /**
-   * Check if recording is currently active
-   * @returns Promise<boolean>
-   */
-  async isRecording(): Promise<boolean> {
-    return invoke<boolean>('is_recording');
-  }
-
-  /**
    * Get comprehensive recording state (includes durations)
    * @returns Promise with full recording state
    */
@@ -235,15 +227,6 @@ export class RecordingService {
     return listen<string>('chunk-drop-warning', (event) => {
       callback(event.payload);
     });
-  }
-
-  /**
-   * Listen for speech-detected event (VAD)
-   * @param callback - Function to call when speech is detected
-   * @returns Promise that resolves to unlisten function
-   */
-  async onSpeechDetected(callback: () => void): Promise<UnlistenFn> {
-    return listen('speech-detected', callback);
   }
 }
 

@@ -265,7 +265,6 @@ export function HomeDashboard({
                     variant="dashboard"
                     isRecording={recordingState.isRecording}
                     onRecordingStart={onRecordingStart}
-                    onTranscriptReceived={() => {}}
                     onStopInitiated={onStopInitiated}
                     onTranscriptionError={onTranscriptionError}
                     isRecordingDisabled={isRecordingDisabled || !canStart}

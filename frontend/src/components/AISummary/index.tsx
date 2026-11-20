@@ -3,25 +3,18 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Summary, Block } from '@/types';
 import { Section } from './Section';
-import { EditableTitle } from '../EditableTitle';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { ExclamationTriangleIcon, CheckCircleIcon, ClipboardDocumentCheckIcon } from '@heroicons/react/24/outline';
+import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 
 interface Props {
   summary: Summary | null;
   status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   error: string | null;
   onSummaryChange: (summary: Summary) => void;
-  onRegenerateSummary: () => void;
-  meeting?: {
-    id: string;
-    title: string;
-    created_at: string;
-  };
 }
 
-export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerateSummary, meeting }: Props) => {
+export const AISummary = ({ summary, status, error, onSummaryChange }: Props) => {
   const generateUniqueId = (sectionKey: string) => {
     return `${sectionKey}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   };
@@ -114,16 +107,6 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     return allBlocks;
   };
 
-  const findBlockAndSection = (blockId: string) => {
-    for (const [sectionKey, section] of Object.entries(currentSummary)) {
-      const block = section.blocks.find(b => b.id === blockId);
-      if (block) {
-        return { block, sectionKey };
-      }
-    }
-    return null;
-  };
-
   const handleBlockNavigate = (blockId: string, direction: 'up' | 'down') => {
     const allBlocks = getAllBlocks();
     const currentIndex = allBlocks.findIndex(b => b.id === blockId);
@@ -157,7 +140,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     return allBlocks.slice(start, end + 1).map(b => b.id);
   };
 
-  const handleBlockMouseDown = (blockId: string, sectionKey: keyof Summary, e: React.MouseEvent<HTMLDivElement>) => {
+  const handleBlockMouseDown = (blockId: string, e: React.MouseEvent<HTMLDivElement>) => {
     if (!e.shiftKey) {
       setDragStartBlock(blockId);
       setLastSelectedBlock(blockId);
@@ -166,14 +149,14 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     setIsDragging(true);
   };
 
-  const handleBlockMouseEnter = (blockId: string, sectionKey: keyof Summary) => {
+  const handleBlockMouseEnter = (blockId: string) => {
     if (isDragging && dragStartBlock) {
       const range = getBlockRange(dragStartBlock, blockId);
       setSelectedBlocks(range);
     }
   };
 
-  const handleBlockMouseUp = (blockId: string, sectionKey: keyof Summary, e: React.MouseEvent<HTMLDivElement>) => {
+  const handleBlockMouseUp = (blockId: string, e: React.MouseEvent<HTMLDivElement>) => {
     if (e.shiftKey && lastSelectedBlock) {
       const range = getBlockRange(lastSelectedBlock, blockId);
       setSelectedBlocks(range);
@@ -229,7 +212,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     onSummaryChange(updatedSummary);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent, blockId: string) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBlocks.length > 1) {
       // Handle multi-block deletion
       e.preventDefault();
@@ -380,7 +363,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
   const getSelectedBlocksContent = useCallback(() => {
     return selectedBlocks
       .map(blockId => {
-        for (const [sectionKey, section] of Object.entries(currentSummary)) {
+        for (const section of Object.values(currentSummary)) {
           const block = section.blocks.find(b => b.id === blockId);
           if (block) {
             return block.content;
@@ -416,7 +399,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
           }
         } else if (e.key === 'c') {
           const blockContents = selectedBlocks.map(blockId => {
-            for (const [sectionKey, section] of Object.entries(currentSummary)) {
+            for (const section of Object.values(currentSummary)) {
               const block = section.blocks.find(b => b.id === blockId);
               if (block) {
                 return block.content;
@@ -537,76 +520,6 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     onSummaryChange(newSummary);
   };
 
-  const handleAddSection = () => {
-    const newSectionKey = `section${Object.keys(currentSummary).length + 1}`;
-    const newBlockId = Date.now().toString();
-    const newSummary: Summary = {
-      ...currentSummary,
-      [newSectionKey]: {
-        title: 'New Section',
-        blocks: [{
-          id: newBlockId,
-          type: 'text' as const,
-          content: '',
-          color: 'default' as const
-        }]
-      }
-    };
-    onSummaryChange(newSummary);
-    
-    // Select the new block
-    setSelectedBlocks([newBlockId]);
-    setLastSelectedBlock(newBlockId);
-  };
-
-  const convertToMarkdown = () => {
-    let markdown = `# AI Generated Summary of Meeting: ${meeting?.id || 'Unknown'} - ${meeting?.title || 'Untitled Meeting'}\n\n`;
-    markdown += `## Date: ${meeting?.created_at ? new Date(meeting.created_at).toLocaleDateString() : new Date().toLocaleDateString()}\n\n`;
-    
-    Object.entries(currentSummary).forEach(([key, section]) => {
-      if (key === 'title') {
-        markdown = `# ${section.title || 'AI Enhanced Summary'}\n\n`;
-      } else {
-        markdown += `## ${section.title || key}\n\n`;
-        section.blocks.forEach(block => {
-          switch (block.type) {
-            case 'heading1':
-              markdown += `### ${block.content}\n\n`;
-              break;
-            case 'heading2':
-              markdown += `#### ${block.content}\n\n`;
-              break;
-            case 'bullet':
-              markdown += `- ${block.content}\n`;
-              break;
-            case 'text':
-            default:
-              markdown += `${block.content}\n\n`;
-          }
-        });
-        // Add an extra newline after bullet lists
-        if (section.blocks.some(block => block.type === 'bullet')) {
-          markdown += '\n';
-        }
-      }
-    });
-    
-    return markdown;
-  };
-
-  const handleExport = () => {
-    const markdown = convertToMarkdown();
-    const blob = new Blob([markdown], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${currentSummary.title || 'ai-summary'}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
   const renderErrorState = () => (
     <div className="w-full p-4 bg-error border border-error-border/30 rounded-lg">
       <div className="flex items-center mb-2">
@@ -699,99 +612,6 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
         </div>
       )}
 
-      {/* <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center space-x-2">
-          <span className="text-2xl">✨</span>
-          <h2 className="text-2xl font-semibold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-            AI enhanced summary
-          </h2>
-        </div>
-        <div className="flex items-center space-x-2">
-          <Button variant="ghost"
-            onClick={handleUndo}
-            disabled={currentHistoryIndex === 0}
-            className="h-auto gap-0 font-normal text-base hover:text-foreground p-2 hover:bg-muted rounded disabled:opacity-50"
-            title="Undo"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M3 7v6h6" />
-              <path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13" />
-            </svg>
-          </Button>
-          <Button variant="ghost"
-            onClick={handleRedo}
-            disabled={currentHistoryIndex === history.length - 1}
-            className="h-auto gap-0 font-normal text-base hover:text-foreground p-2 hover:bg-muted rounded disabled:opacity-50"
-            title="Redo"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 7v6h-6" />
-              <path d="M3 17a9 9 0 019-9 9 9 0 016 2.3l3 2.7" />
-            </svg>
-          </Button>
-          <Button variant="ghost"
-            onClick={handleAddSection}
-            className="h-auto gap-0 font-normal text-base hover:text-foreground p-2 hover:bg-muted rounded"
-            title="Add new section"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M12 5v14" />
-              <path d="M5 12h14" />
-            </svg>
-          </Button>
-          <Button variant="ghost"
-            onClick={() => {
-              const markdown = convertToMarkdown();
-              navigator.clipboard.writeText(markdown);
-            }}
-            className="h-auto gap-0 font-normal hover:text-foreground px-2 py-1 text-sm bg-muted hover:bg-secondary rounded-md flex items-center space-x-1"
-          >
-            <span>📋</span>
-            <span>Copy</span>
-          </Button>
-          <Button variant="ghost"
-            onClick={onRegenerateSummary}
-            className="h-auto gap-0 font-normal hover:text-foreground px-2 py-1 text-sm bg-muted hover:bg-secondary rounded-md flex items-center space-x-1"
-            title="Regenerate summary"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            <span className="ml-1">Regenerate</span>
-          </Button>
-        </div>
-      </div> */}
-
       {Object.keys(currentSummary)
         .filter(key => currentSummary[key]?.blocks?.length > 0)
         .map(key => {
@@ -804,9 +624,9 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
               selectedBlocks={selectedBlocks}
               onBlockTypeChange={handleBlockTypeChange}
               onBlockChange={(blockId, content) => handleBlockChange(key, blockId, content)}
-              onBlockMouseDown={(blockId, e) => handleBlockMouseDown(blockId, key, e)}
-              onBlockMouseEnter={(blockId) => handleBlockMouseEnter(blockId, key)}
-              onBlockMouseUp={(blockId, e) => handleBlockMouseUp(blockId, key, e)}
+              onBlockMouseDown={handleBlockMouseDown}
+              onBlockMouseEnter={handleBlockMouseEnter}
+              onBlockMouseUp={handleBlockMouseUp}
               onKeyDown={handleKeyDown}
               onTitleChange={handleTitleChange}
               onSectionDelete={handleSectionDelete}

@@ -330,10 +330,6 @@ mod tests {
     }
     #[tokio::test]
     async fn abandoned_import_waiter_retains_lease_until_staging_is_cleaned() {
-        struct Lease(tokio::sync::oneshot::Sender<()>);
-        impl Drop for Lease {
-            fn drop(&mut self) {}
-        }
         // A cancellation-aware fake replaces only parsing; production staging, supervision and DB publication run.
         let pool = pool().await;
         let temp = tempfile::tempdir().unwrap();
@@ -349,7 +345,7 @@ mod tests {
             selected,
             CancellationToken::new(),
             Arc::new(AtomicBool::new(false)),
-            Lease(released_tx),
+            released_tx,
             |_, _, cancel, _| async move {
                 started_tx.send(()).unwrap();
                 cancel.cancelled().await;

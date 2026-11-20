@@ -9,7 +9,6 @@ const DEFAULT_PAGE_SIZE = 100;
 interface UsePaginatedTranscriptsProps {
     meetingId: string | null;
     /** Optional initial timestamp (in seconds) from URL for loading the correct page */
-    initialTimestamp?: number;
 }
 
 interface UsePaginatedTranscriptsReturn {
@@ -57,7 +56,6 @@ function normalizeSpeaker(speaker: string | null | undefined): string | null {
 
 export function usePaginatedTranscripts({
     meetingId,
-    initialTimestamp,
 }: UsePaginatedTranscriptsProps): UsePaginatedTranscriptsReturn {
     const [metadata, setMetadata] = useState<MeetingMetadata | null>(null);
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);

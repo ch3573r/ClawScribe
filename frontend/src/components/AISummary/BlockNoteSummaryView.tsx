@@ -26,7 +26,6 @@ interface BlockNoteSummaryViewProps {
   onSummaryChange?: (summary: Summary) => void;
   status?: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   error?: string | null;
-  onRegenerateSummary?: () => void;
   meeting?: {
     id: string;
     title: string;
@@ -80,7 +79,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   onSummaryChange,
   status = 'idle',
   error = null,
-  onRegenerateSummary,
   meeting,
   onDirtyChange,
   onDraftChange,
@@ -260,8 +258,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         status={status}
         error={error}
         onSummaryChange={onSummaryChange || (() => { })}
-        onRegenerateSummary={onRegenerateSummary || (() => { })}
-        meeting={meeting}
       />
     );
   }
