@@ -5,10 +5,13 @@ import './globals.css'
 import {
   Atkinson_Hyperlegible,
   Fira_Sans,
+  Geist,
   IBM_Plex_Mono,
   IBM_Plex_Sans,
+  Inter,
   Lexend,
   Source_Sans_3,
+  Source_Serif_4,
 } from 'next/font/google'
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
@@ -74,6 +77,21 @@ const ibmPlexSans = IBM_Plex_Sans({
   variable: '--font-ibm-plex-sans',
 })
 
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+})
+
+const geist = Geist({
+  subsets: ['latin'],
+  variable: '--font-geist',
+})
+
+const sourceSerif4 = Source_Serif_4({
+  subsets: ['latin'],
+  variable: '--font-source-serif-4',
+})
+
 // Utility/data face: timestamps, durations, speaker labels, model ids, paths,
 // shortcuts. Transcription is data, so its values read as data.
 const plexMono = IBM_Plex_Mono({
@@ -81,6 +99,11 @@ const plexMono = IBM_Plex_Mono({
   weight: ['400', '500', '600'],
   variable: '--font-plex-mono',
 })
+
+// On <html>, so the font tokens set on the root element can resolve them.
+const fontVariables = [sourceSans3, atkinson, lexend, firaSans, ibmPlexSans, inter, geist, sourceSerif4, plexMono]
+  .map((font) => font.variable)
+  .join(' ')
 
 function AppImportDialog({
   showImportDialog,
@@ -371,8 +394,8 @@ export default function RootLayout({
   }
 
   return (
-    <html lang="en">
-      <body className={`${sourceSans3.variable} ${atkinson.variable} ${lexend.variable} ${firaSans.variable} ${ibmPlexSans.variable} ${plexMono.variable} font-sans antialiased`}>
+    <html lang="en" className={fontVariables}>
+      <body className="font-sans antialiased">
         <ThemeInitializer />
         <AppShortcuts />
         <AppTitlebar />

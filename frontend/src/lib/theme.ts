@@ -2,41 +2,35 @@
 
 export type ThemePreference = "light" | "dark" | "system"
 export type ResolvedTheme = "light" | "dark"
-export type FontPreference = "source-sans" | "atkinson" | "lexend" | "fira" | "plex" | "system"
 
 export const THEME_STORAGE_KEY = "clawscribe.theme"
-export const FONT_STORAGE_KEY = "clawscribe.font"
 
 export const themePreferences: ThemePreference[] = ["light", "dark", "system"]
-export const fontPreferences: FontPreference[] = [
-  "source-sans",
-  "atkinson",
-  "lexend",
-  "fira",
-  "plex",
-  "system",
-]
 
 const isThemePreference = (value: string | null): value is ThemePreference =>
   value === "light" || value === "dark" || value === "system"
 
-const isFontPreference = (value: string | null): value is FontPreference =>
-  value === "source-sans" ||
-  value === "atkinson" ||
-  value === "lexend" ||
-  value === "fira" ||
-  value === "plex" ||
-  value === "system"
+function readStored(key: string): string | null {
+  if (typeof window === "undefined") return null
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // The change still applies for this session when storage is unavailable.
+  }
+}
 
 export function getStoredThemePreference(): ThemePreference {
-  if (typeof window === "undefined") return "system"
-
-  try {
-    const stored = window.localStorage.getItem(THEME_STORAGE_KEY)
-    return isThemePreference(stored) ? stored : "system"
-  } catch {
-    return "system"
-  }
+  const stored = readStored(THEME_STORAGE_KEY)
+  return isThemePreference(stored) ? stored : "system"
 }
 
 export function getSystemTheme(): ResolvedTheme {
@@ -75,66 +69,147 @@ export async function applyNativeThemePreference(preference: ThemePreference): P
 }
 
 export function setThemePreference(preference: ThemePreference): ResolvedTheme {
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, preference)
-    } catch {
-      // Theme changes should still apply even if storage is unavailable.
-    }
-  }
-
+  writeStored(THEME_STORAGE_KEY, preference)
   return applyThemePreference(preference)
 }
 
-// ── Interface font ─────────────────────────────────────────────────────────
+// ── Fonts ──────────────────────────────────────────────────────────────────
+// The interface font applies everywhere. The reading font applies to transcript
+// and summary text and follows the interface font unless one is chosen. Either
+// can be a bundled family, the Windows interface font, or any family installed
+// on this PC, given by name.
 
-export const fontStacks: Record<FontPreference, string> = {
-  "source-sans": "var(--font-source-sans-3), ui-sans-serif, system-ui, sans-serif",
-  atkinson: "var(--font-atkinson), ui-sans-serif, system-ui, sans-serif",
-  lexend: "var(--font-lexend), ui-sans-serif, system-ui, sans-serif",
-  fira: "var(--font-fira-sans), ui-sans-serif, system-ui, sans-serif",
-  plex: "var(--font-ibm-plex-sans), ui-sans-serif, system-ui, sans-serif",
-  system: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+const SANS_FALLBACK = "ui-sans-serif, system-ui, sans-serif"
+const SERIF_FALLBACK = 'ui-serif, Georgia, Cambria, "Times New Roman", serif'
+
+export const bundledFonts = [
+  { id: "source-sans", label: "Source Sans 3", description: "Default. Compact and readable for dense notes.", stack: `var(--font-source-sans-3), ${SANS_FALLBACK}` },
+  { id: "inter", label: "Inter", description: "Neutral, with tall lowercase letters", stack: `var(--font-inter), ${SANS_FALLBACK}` },
+  { id: "geist", label: "Geist", description: "Geometric and tight", stack: `var(--font-geist), ${SANS_FALLBACK}` },
+  { id: "atkinson", label: "Atkinson Hyperlegible", description: "Highly legible, wider and more open", stack: `var(--font-atkinson), ${SANS_FALLBACK}` },
+  { id: "lexend", label: "Lexend", description: "Rounder and more spacious", stack: `var(--font-lexend), ${SANS_FALLBACK}` },
+  { id: "fira", label: "Fira Sans", description: "Narrower, with a technical tone", stack: `var(--font-fira-sans), ${SANS_FALLBACK}` },
+  { id: "plex", label: "IBM Plex Sans", description: "Structured and editorial", stack: `var(--font-ibm-plex-sans), ${SANS_FALLBACK}` },
+  { id: "source-serif", label: "Source Serif 4", description: "Serif, suited to long reading", stack: `var(--font-source-serif-4), ${SERIF_FALLBACK}` },
+  { id: "system", label: "System", description: "Uses the Windows interface font", stack: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' },
+] as const
+
+export type FontPreference = (typeof bundledFonts)[number]["id"] | "custom"
+export type ReadingFontPreference = FontPreference | "interface"
+
+export const FONT_STORAGE_KEY = "clawscribe.font"
+export const CUSTOM_FONT_STORAGE_KEY = "clawscribe.font.custom"
+export const READING_FONT_STORAGE_KEY = "clawscribe.readingFont"
+export const CUSTOM_READING_FONT_STORAGE_KEY = "clawscribe.readingFont.custom"
+
+export const DEFAULT_FONT: FontPreference = "source-sans"
+export const fontPreferences: FontPreference[] = [...bundledFonts.map((font) => font.id), "custom"]
+
+const isFontPreference = (value: string | null): value is FontPreference =>
+  fontPreferences.includes(value as FontPreference)
+
+/** A family name safe to place inside a quoted CSS string. */
+export function cleanFontName(name: string): string {
+  return name.replace(/["'\\;{}()<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 80)
 }
 
-const FONT_CLASSES = fontPreferences.map((preference) => `font-pref-${preference}`)
+/** The CSS font stack for a choice. An empty custom name falls back to the default font. */
+export function fontStack(preference: FontPreference, customName = ""): string {
+  if (preference === "custom") {
+    const name = cleanFontName(customName)
+    return name ? `"${name}", ${SANS_FALLBACK}` : bundledFonts[0].stack
+  }
+  return (bundledFonts.find((font) => font.id === preference) ?? bundledFonts[0]).stack
+}
 
-export function getStoredFontPreference(): FontPreference {
-  if (typeof window === "undefined") return "source-sans"
+/**
+ * Whether a family is installed on this PC. A missing family renders in the
+ * generic fallback, so its text is exactly as wide as the fallback alone.
+ */
+export function isFontInstalled(name: string): boolean {
+  const family = cleanFontName(name)
+  if (!family || typeof document === "undefined") return false
+  const context = document.createElement("canvas").getContext("2d")
+  if (!context) return true
+  const sample = "mmmmmmmmmmlli WQ@ 0123456789"
+  const width = (font: string) => {
+    context.font = `72px ${font}`
+    return context.measureText(sample).width
+  }
+  return ["monospace", "serif", "sans-serif"].some((generic) => width(`"${family}", ${generic}`) !== width(generic))
+}
 
-  try {
-    const stored = window.localStorage.getItem(FONT_STORAGE_KEY)
-    return isFontPreference(stored) ? stored : "source-sans"
-  } catch {
-    return "source-sans"
+export interface FontSettings {
+  font: FontPreference
+  customFont: string
+  readingFont: ReadingFontPreference
+  customReadingFont: string
+}
+
+export function getStoredFontSettings(): FontSettings {
+  const font = readStored(FONT_STORAGE_KEY)
+  const readingFont = readStored(READING_FONT_STORAGE_KEY)
+  return {
+    font: isFontPreference(font) ? font : DEFAULT_FONT,
+    customFont: readStored(CUSTOM_FONT_STORAGE_KEY) ?? "",
+    readingFont: isFontPreference(readingFont) ? readingFont : "interface",
+    customReadingFont: readStored(CUSTOM_READING_FONT_STORAGE_KEY) ?? "",
   }
 }
 
-export function applyFontPreference(preference: FontPreference): void {
+export function applyFontSettings(settings: FontSettings): void {
   if (typeof document === "undefined") return
 
   const root = document.documentElement
-  root.dataset.fontPreference = preference
-  root.classList.remove(...FONT_CLASSES)
-  root.classList.add(`font-pref-${preference}`)
-  root.style.setProperty("--font-app-sans", fontStacks[preference])
+  root.dataset.fontPreference = settings.font
+  root.style.setProperty("--font-app-sans", fontStack(settings.font, settings.customFont))
+  if (settings.readingFont === "interface") root.style.removeProperty("--font-reading")
+  else root.style.setProperty("--font-reading", fontStack(settings.readingFont, settings.customReadingFont))
+}
 
-  if (document.body) {
-    document.body.classList.remove(...FONT_CLASSES)
-    document.body.classList.add(`font-pref-${preference}`)
-    document.body.style.setProperty("--font-app-sans", fontStacks[preference])
+export function setFontSettings(settings: FontSettings): void {
+  writeStored(FONT_STORAGE_KEY, settings.font)
+  writeStored(CUSTOM_FONT_STORAGE_KEY, cleanFontName(settings.customFont))
+  writeStored(READING_FONT_STORAGE_KEY, settings.readingFont)
+  writeStored(CUSTOM_READING_FONT_STORAGE_KEY, cleanFontName(settings.customReadingFont))
+  applyFontSettings(settings)
+}
+
+// ── Text size ──────────────────────────────────────────────────────────────
+// Scales the whole webview, like browser zoom, so text, controls and spacing
+// stay in proportion.
+
+export const TEXT_SIZE_STORAGE_KEY = "clawscribe.textSize"
+
+export const textSizes = [
+  { id: "small", label: "Small", zoom: 0.9 },
+  { id: "default", label: "Default", zoom: 1 },
+  { id: "large", label: "Large", zoom: 1.1 },
+  { id: "larger", label: "Larger", zoom: 1.25 },
+] as const
+
+export type TextSize = (typeof textSizes)[number]["id"]
+
+export function getStoredTextSize(): TextSize {
+  const stored = readStored(TEXT_SIZE_STORAGE_KEY)
+  return textSizes.some((size) => size.id === stored) ? (stored as TextSize) : "default"
+}
+
+export async function applyTextSize(size: TextSize): Promise<void> {
+  if (typeof window === "undefined") return
+
+  const zoom = textSizes.find((option) => option.id === size)?.zoom ?? 1
+  try {
+    const { getCurrentWebview } = await import("@tauri-apps/api/webview")
+    await getCurrentWebview().setZoom(zoom)
+  } catch {
+    // Browser previews do not have Tauri's webview API.
   }
 }
 
-export function setFontPreference(preference: FontPreference): void {
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(FONT_STORAGE_KEY, preference)
-    } catch {
-      // Apply even if storage is unavailable.
-    }
-  }
-  applyFontPreference(preference)
+export function setTextSize(size: TextSize): void {
+  writeStored(TEXT_SIZE_STORAGE_KEY, size)
+  void applyTextSize(size)
 }
 
 // ── Accent color ───────────────────────────────────────────────────────────
@@ -176,12 +251,7 @@ export const accentColors: AccentColor[] = [
 ]
 
 export function getStoredAccentId(): string {
-  if (typeof window === "undefined") return DEFAULT_ACCENT_ID
-  try {
-    return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT_ID
-  } catch {
-    return DEFAULT_ACCENT_ID
-  }
+  return readStored(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT_ID
 }
 
 export function applyAccent(id: string): void {
@@ -196,13 +266,7 @@ export function applyAccent(id: string): void {
 }
 
 export function setAccent(id: string): void {
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(ACCENT_STORAGE_KEY, id)
-    } catch {
-      // Apply even if storage is unavailable.
-    }
-  }
+  writeStored(ACCENT_STORAGE_KEY, id)
   applyAccent(id)
 }
 

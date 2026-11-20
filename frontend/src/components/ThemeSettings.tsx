@@ -3,25 +3,37 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import { Monitor, Moon, Sparkles, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Meta, SettingsCard, SettingsColumns, SettingsRow } from "@/components/ui/settings-layout";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Meta, SettingsCard, SettingsColumns, SettingsRow, StatusText } from "@/components/ui/settings-layout";
 import { cn } from "@/lib/utils";
 import {
   accentColors,
   applyAccent,
-  applyFontPreference,
+  applyFontSettings,
   applyNativeThemePreference,
+  applyTextSize,
   applyThemePreference,
+  bundledFonts,
+  cleanFontName,
+  DEFAULT_FONT,
   fontPreferences,
-  fontStacks,
+  fontStack,
   getStoredAccentId,
-  getStoredFontPreference,
+  getStoredFontSettings,
+  getStoredTextSize,
   getStoredThemePreference,
+  isFontInstalled,
   setAccent,
-  setFontPreference,
+  setFontSettings,
+  setTextSize,
   setThemePreference,
   subscribeToSystemTheme,
+  textSizes,
   themePreferences,
-  type FontPreference,
+  type FontSettings,
+  type ReadingFontPreference,
+  type TextSize,
   type ThemePreference,
 } from "@/lib/theme";
 
@@ -31,14 +43,9 @@ const themeOptions: Record<ThemePreference, { label: string; description: string
   system: { label: "System", description: "System follows Windows", Icon: Monitor },
 };
 
-const fontOptions: Record<FontPreference, { label: string; description: string }> = {
-  "source-sans": { label: "Source Sans 3", description: "Default. Compact and readable for dense notes." },
-  atkinson: { label: "Atkinson Hyperlegible", description: "Highly legible, wider and more open" },
-  lexend: { label: "Lexend", description: "Rounder and more spacious" },
-  fira: { label: "Fira Sans", description: "Narrower, with a technical tone" },
-  plex: { label: "IBM Plex Sans", description: "Structured and editorial" },
-  system: { label: "System", description: "Uses the Windows interface font" },
-};
+const CUSTOM_FONT = { label: "Installed font", description: "Any font installed on this PC, by name" };
+
+const DEFAULT_FONT_SETTINGS: FontSettings = { font: DEFAULT_FONT, customFont: "", readingFont: "interface", customReadingFont: "" };
 
 const PREVIEW_LINES = [
   { time: "00:14", text: "Let's start with the rollout status for the Vienna site." },
@@ -57,10 +64,11 @@ export function ThemeInitializer() {
       applyThemePreference(storedPreference);
       void applyNativeThemePreference(storedPreference);
       applyAccent(getStoredAccentId());
-      applyFontPreference(getStoredFontPreference());
+      applyFontSettings(getStoredFontSettings());
     };
 
     applyStoredAppearance();
+    void applyTextSize(getStoredTextSize());
 
     const unsubscribeSystemTheme = subscribeToSystemTheme(applyStoredAppearance);
     window.addEventListener("storage", applyStoredAppearance);
@@ -85,14 +93,43 @@ function moveRadio(event: KeyboardEvent<HTMLElement>, current: number, count: nu
   radios?.[next]?.focus();
 }
 
+const segmentClasses = (selected: boolean) => cn(
+  "inline-flex h-8 items-center gap-1.5 rounded px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+  selected ? "bg-muted text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+);
+
+/** Name field for a font installed on this PC, with a note when Windows does not have it. */
+function InstalledFontField({ value, onChange, className }: { value: string; onChange: (name: string) => void; className?: string }) {
+  const name = cleanFontName(value);
+  const missing = name !== "" && !isFontInstalled(name);
+  return (
+    <div className={cn("grid gap-2", className)}>
+      <Input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label="Font name"
+        placeholder="For example Calibri"
+        spellCheck={false}
+        autoComplete="off"
+        maxLength={80}
+        className="max-w-sm"
+      />
+      {missing
+        ? <StatusText tone="warning" className="whitespace-normal text-[13px]">Not found on this PC. The Windows font is used instead.</StatusText>
+        : !name && <p className="text-[13px] leading-5 text-muted-foreground">Type the name as Windows shows it under Settings, Personalisation, Fonts.</p>}
+    </div>
+  );
+}
+
 export function ThemeSettings() {
   const [preference, setPreference] = useState<ThemePreference>("system");
   const [accentId, setAccentId] = useState<string>("default");
-  const [fontId, setFontId] = useState<FontPreference>("source-sans");
+  const [fonts, setFonts] = useState<FontSettings>(DEFAULT_FONT_SETTINGS);
+  const [textSize, setTextSizeState] = useState<TextSize>("default");
 
   useEffect(() => {
     setAccentId(getStoredAccentId());
-    setFontId(getStoredFontPreference());
+    setTextSizeState(getStoredTextSize());
   }, []);
 
   useEffect(() => {
@@ -100,8 +137,9 @@ export function ThemeSettings() {
       const storedPreference = getStoredThemePreference();
       setPreference(storedPreference);
       applyThemePreference(storedPreference);
-      setFontId(getStoredFontPreference());
-      applyFontPreference(getStoredFontPreference());
+      const storedFonts = getStoredFontSettings();
+      setFonts(storedFonts);
+      applyFontSettings(storedFonts);
     };
 
     syncThemePreference();
@@ -126,22 +164,31 @@ export function ThemeSettings() {
     void applyNativeThemePreference(nextPreference);
   };
 
-  const handleFontChange = (nextFont: FontPreference) => {
-    setFontId(nextFont);
-    setFontPreference(nextFont);
+  const handleFontsChange = (change: Partial<FontSettings>) => {
+    const next = { ...fonts, ...change };
+    setFonts(next);
+    setFontSettings(next);
+  };
+
+  const handleTextSizeChange = (nextSize: TextSize) => {
+    setTextSizeState(nextSize);
+    setTextSize(nextSize);
   };
 
   const selectedAccent = accentColors.find((accent) => accent.id === accentId);
   const themeIndex = themePreferences.indexOf(preference);
   const accentIndex = Math.max(0, accentColors.findIndex((accent) => accent.id === accentId));
-  const fontIndex = fontPreferences.indexOf(fontId);
+  const fontIndex = fontPreferences.indexOf(fonts.font);
+  const textSizeIndex = textSizes.findIndex((size) => size.id === textSize);
+  const interfaceStack = fontStack(fonts.font, fonts.customFont);
+  const readingStack = fonts.readingFont === "interface" ? interfaceStack : fontStack(fonts.readingFont, fonts.customReadingFont);
 
   return (
     <SettingsColumns
       aside={
         <SettingsCard title="Preview" description="A transcript and its summary in your settings">
-          <div className="grid gap-4 p-5 text-sm" style={{ fontFamily: fontStacks[fontId] }}>
-            <div className="grid gap-3">
+          <div className="grid gap-4 p-5 text-sm" style={{ fontFamily: interfaceStack }}>
+            <div className="grid gap-3" style={{ fontFamily: readingStack }}>
               {PREVIEW_LINES.map((line) => (
                 <div key={line.time} className="grid grid-cols-[2.75rem_1fr] gap-3">
                   <span className="font-mono text-xs leading-5 tabular-nums text-primary">{line.time}</span>
@@ -149,7 +196,7 @@ export function ThemeSettings() {
                 </div>
               ))}
             </div>
-            <div className="grid gap-2">
+            <div className="grid gap-2" style={{ fontFamily: readingStack }}>
               <h4 className="text-sm font-semibold text-foreground">Action items</h4>
               <ul className="grid list-disc gap-1.5 pl-5 text-[13px] leading-5 text-foreground marker:text-muted-foreground">
                 {PREVIEW_ACTIONS.map((item) => <li key={item}>{item}</li>)}
@@ -168,7 +215,7 @@ export function ThemeSettings() {
       <SettingsCard>
         <SettingsRow title="Theme" description={themeOptions[preference].description}>
           <div role="radiogroup" aria-label="Theme" className="inline-flex gap-0.5 rounded-md border border-border bg-background p-0.5">
-            {themePreferences.map((option, index) => {
+            {themePreferences.map((option) => {
               const { label, Icon } = themeOptions[option];
               const selected = option === preference;
               return (
@@ -180,10 +227,7 @@ export function ThemeSettings() {
                   tabIndex={selected ? 0 : -1}
                   onClick={() => handlePreferenceChange(option)}
                   onKeyDown={(event) => moveRadio(event, themeIndex, themePreferences.length, (i) => handlePreferenceChange(themePreferences[i]))}
-                  className={cn(
-                    "inline-flex h-8 items-center gap-1.5 rounded px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    selected ? "bg-muted text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                  )}
+                  className={segmentClasses(selected)}
                 >
                   <Icon aria-hidden="true" className="h-3.5 w-3.5" />
                   {label}
@@ -220,42 +264,96 @@ export function ThemeSettings() {
             })}
           </div>
         </SettingsRow>
+        <SettingsRow title="Text size" description="Scales text and controls together">
+          <div role="radiogroup" aria-label="Text size" className="inline-flex gap-0.5 rounded-md border border-border bg-background p-0.5">
+            {textSizes.map((size) => {
+              const selected = size.id === textSize;
+              return (
+                <button
+                  key={size.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => handleTextSizeChange(size.id)}
+                  onKeyDown={(event) => moveRadio(event, textSizeIndex, textSizes.length, (i) => handleTextSizeChange(textSizes[i].id))}
+                  className={segmentClasses(selected)}
+                >
+                  {size.label}
+                </button>
+              );
+            })}
+          </div>
+        </SettingsRow>
       </SettingsCard>
 
-      <SettingsCard title="Interface font" description="Applies to navigation, settings, transcripts and summaries">
+      <SettingsCard title="Interface font" description="Used across the app">
         <div role="radiogroup" aria-label="Interface font" className="divide-y divide-border/60">
           {fontPreferences.map((font) => {
-            const selected = font === fontId;
-            const option = fontOptions[font];
+            const selected = font === fonts.font;
+            const option = bundledFonts.find((bundled) => bundled.id === font) ?? CUSTOM_FONT;
             return (
-              <button
-                key={font}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                tabIndex={selected ? 0 : -1}
-                onClick={() => handleFontChange(font)}
-                onKeyDown={(event) => moveRadio(event, fontIndex, fontPreferences.length, (i) => handleFontChange(fontPreferences[i]))}
-                className="flex min-h-16 w-full items-center gap-4 px-5 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-              >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "grid h-4 w-4 shrink-0 place-items-center rounded-full border",
-                    selected ? "border-primary" : "border-muted-foreground/60",
-                  )}
+              <div key={font}>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => handleFontsChange({ font })}
+                  onKeyDown={(event) => moveRadio(event, fontIndex, fontPreferences.length, (i) => handleFontsChange({ font: fontPreferences[i] }))}
+                  className="flex min-h-16 w-full items-center gap-4 px-5 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 >
-                  {selected && <span className="h-2 w-2 rounded-full bg-primary" />}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm text-foreground">{option.label}</span>
-                  <span className="mt-0.5 block text-[13px] leading-5 text-muted-foreground">{option.description}</span>
-                </span>
-                {selected && <Meta>In use</Meta>}
-              </button>
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "grid h-4 w-4 shrink-0 place-items-center rounded-full border",
+                      selected ? "border-primary" : "border-muted-foreground/60",
+                    )}
+                  >
+                    {selected && <span className="h-2 w-2 rounded-full bg-primary" />}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    {/* Each name is set in its own font, so the list doubles as a specimen. */}
+                    <span className="block text-[15px] text-foreground" style={{ fontFamily: fontStack(font, fonts.customFont) }}>{option.label}</span>
+                    <span className="mt-0.5 block text-[13px] leading-5 text-muted-foreground">{option.description}</span>
+                  </span>
+                  {selected && <Meta>In use</Meta>}
+                </button>
+                {font === "custom" && selected && (
+                  <InstalledFontField
+                    value={fonts.customFont}
+                    onChange={(customFont) => handleFontsChange({ customFont })}
+                    className="pb-4 pl-[3.25rem] pr-5"
+                  />
+                )}
+              </div>
             );
           })}
         </div>
+      </SettingsCard>
+
+      <SettingsCard>
+        <SettingsRow title="Transcript and summary font" description="Long text can use its own font, such as a serif">
+          <Select value={fonts.readingFont} onValueChange={(value) => handleFontsChange({ readingFont: value as ReadingFontPreference })}>
+            <SelectTrigger aria-label="Transcript and summary font" className="w-60">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="interface">Same as interface</SelectItem>
+              {bundledFonts.map((font) => (
+                <SelectItem key={font.id} value={font.id} style={{ fontFamily: font.stack }}>{font.label}</SelectItem>
+              ))}
+              <SelectItem value="custom">{CUSTOM_FONT.label}</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        {fonts.readingFont === "custom" && (
+          <InstalledFontField
+            value={fonts.customReadingFont}
+            onChange={(customReadingFont) => handleFontsChange({ customReadingFont })}
+            className="px-5 py-4"
+          />
+        )}
       </SettingsCard>
     </SettingsColumns>
   );
