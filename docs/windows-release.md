@@ -37,6 +37,20 @@ Set `LIBCLANG_PATH` to the
 LLVM `bin` directory when needed. Use the versions declared by the checked-out
 workflow rather than silently changing the native toolchain during a release.
 
+The persistent runner keeps its toolchain. **Native library tests** therefore
+verifies it with `frontend/scripts/ensure-native-toolchain.ps1` (the Rust channel
+from `rust-toolchain.toml` with the MSVC target, LLVM 20.1.8, a Vulkan SDK folder
+named 1.4.309.0 that `VULKAN_SDK` points to, and a loadable `vulkan-1.dll`) and
+fails with what is missing. Pull requests and pushes never install, replace or
+downgrade anything. Provision the runner once (install the SDK system-wide so
+`VULKAN_SDK` is set), or start the workflow manually with `provision-toolchain`,
+which installs only what is missing: Rust with rustup, LLVM with Chocolatey
+(replacing a different version), 7-Zip when the Vulkan SDK must be extracted, and
+the SDK's signed runtime only when the loader cannot be loaded. A manually
+installed SDK lasts only for that run; the system-wide install is what lets
+pull requests pass. Node.js and pnpm come from the runner's tool cache through
+`actions/setup-node` and `pnpm/action-setup`.
+
 ```powershell
 rustup target add x86_64-pc-windows-msvc
 cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
@@ -142,17 +156,32 @@ the native workflow run these groups automatically in **Native library tests**
 (`native-library-tests.yml`). The job uses the release preflight's own staging
 and test entry point, `build-windows-release.ps1 -Feature windows-gpu -CheckOnly
 -NativeOnly`: locked cargo check, sidecar and runtime staging, then every
-required group above. `-NativeOnly` skips frontend install, typecheck and tests,
-which **Validation Check** already covers. A reused Codex runtime is
-re-verified against its pinned hash instead of being downloaded again
-(`stage-codex-runtime.ps1 -SkipIfCurrent`).
+required group above. `-NativeOnly` skips the frontend typecheck and tests,
+which **Validation Check** already covers. It still installs the frontend
+dependencies from the lockfile and rebuilds the exported frontend assets
+(`frontend/out`, which the native build embeds) from the checked-out commit,
+after deleting the old folder, so a stale build left on the runner is never
+compiled in. A reused Codex runtime is re-verified against its pinned hash
+instead of being downloaded again (`stage-codex-runtime.ps1 -SkipIfCurrent`).
+
+`self_test::tests` is part of the required groups. Besides unit tests of the
+command line, the profile isolation checks, the bundled-template list and the
+package-layout checks, it runs the same code as the packaged self-test on a
+temporary profile, with no encoder and no packaged executable: it builds a
+database from the older migrations (once from the legacy schema and once from a
+recent schema seeded with non-secret rows), upgrades it through the production
+open path, imports a synthetic WAV and transcript, produces a summary through the
+provider path against a loopback stub, closes the database and reopens it. The
+package layout, packaged encoder and interrupted-recording recovery need the
+packaged executable and are covered only by the release-time acceptance below.
 
 The runner keeps Cargo output between runs, so the job also bounds it.
 `limit-native-test-cache.ps1` keeps the two newest `app_lib-*` test executables
 in the release dependency folder, deletes only older ones (and their `.pdb` and
 `.d` files) after checking that no link is involved, and fails early with a plain
-message when the workspace volume has less than 12 GiB free. Libraries, models,
-sidecars, installers and source are not touched. Nothing is uploaded to Actions
+message when the volume that holds the Cargo target folder, or the checkout's
+volume, has less than 12 GiB free (network and removable volumes are refused).
+Libraries, models, sidecars, installers and source are not touched. Nothing is uploaded to Actions
 storage or cache. Manual dispatch requires an immutable commit SHA, like the
 other manual validation.
 
@@ -168,12 +197,30 @@ on the designated runner (it checks `CLAWSCRIBE_BUILD_RUNNER` first) and:
    installation is touched;
 2. runs the packaged executable twice, in two separate processes, as
    `--self-test run <profile>` and `--self-test verify <profile>`. The profile is
-   a new folder inside the temporary folder. The program refuses a profile that
-   is not new or empty, is a link, is not absolute, or overlaps the application's
-   own data folders, and the script checks that a non-empty folder is refused
-   untouched and that a malformed command line exits with code 2;
-3. deletes everything it created, only after checking the folder name and that it
-   holds no links. `-KeepWork` keeps it for inspection.
+   a new folder inside the temporary folder. The run phase refuses a profile that
+   is not new or empty (so a stale marker or planted file is never reused), is a
+   link, is not absolute, or overlaps the application's own data folders, and
+   marks the folder with a random run id. The verify phase refuses a folder
+   without that exact marker, a folder that contains any link, and saved state
+   with another run id or a path outside the profile; it never creates a missing
+   database. Reports and state are written only as new files. The database is
+   opened through an isolated path that skips the credential-store step;
+3. runs the executable against unsafe input and requires the exact exit code and
+   an untouched folder: a command line without a phase or profile, an unknown
+   phase, an extra argument (all exit code 2), a relative path, a non-empty
+   folder, a folder with only a stale marker, an unmarked folder for verify, a
+   forged marker and a profile that contains a junction (all exit code 4, with
+   nothing written through the junction). Exit codes are 0 passed, 1 a check
+   failed, 2 unusable command line, 3 runtime or report setup failed, 4 profile
+   folder refused;
+4. deletes everything it created, only after checking the folder name and that it
+   holds no links. `-KeepWork` keeps it for inspection. A cleanup failure is
+   reported after, and never replaces, the first failure.
+
+The Actions log and summary hold only fixed check names, pass or fail, exit codes
+(a crash such as a missing runtime library shows its hexadecimal code, even with
+no report) and a few counts. Error text, paths and the application's own output
+are never printed. The work folder must be on a fixed local drive with 3 GiB free.
 
 The self-test is a headless mode of the shipped executable (`self_test.rs`). It
 starts before any window, plugin, single-instance guard or logger, so it never
@@ -186,12 +233,13 @@ What it checks (all against synthetic data):
 
 | Check | What is exercised |
 | --- | --- |
-| `package_layout`, `packaged_encoder` | Sidecars and runtime libraries sit next to the executable, and the packaged encoder runs. The check never falls back to a PATH or downloaded encoder. |
-| `migration_upgrade` | A database built from the older migrations with synthetic meetings, one migration stamped with the other line-ending checksum, then opened through the production path: pre-migration backup written, drift repaired, every embedded migration applied, legacy rows intact, integrity check passes. |
+| `package_layout`, `packaged_encoder` | Sidecars, runtime libraries (DirectML in DirectML and Windows GPU builds), every bundled summary template (equal to this build's copy and parseable), the Codex runtime manifest and runtime folder sit where the installer puts them, and the packaged encoder runs. The check never falls back to a PATH or downloaded encoder. The resource locations follow `tauri.conf.json`; the first acceptance run on the runner confirms them against a real unpacked installer. |
+| `migration_upgrade` | A database built from the older migrations with synthetic meetings, one migration stamped with the other line-ending checksum, then opened through the production path without the credential-store step: pre-migration backup written, drift repaired, every embedded migration applied, the newest tables and columns present, legacy rows intact, integrity check passes. |
 | `recording_recovery` | A synthetic interrupted recording (capture chunks, marker, snapshot) is found by the recovery scan and recovered to compressed audio by the packaged encoder, then decoded and checked for length and level. |
 | `import_fixture` | A synthetic WAV and the recovered compressed audio are validated and decoded; an imported meeting with transcript lines is saved. |
 | `summary_stub` | The production summary path (provider call, prompt assembly, output checks) runs against an offline loopback stub, and the result is saved. |
-| `persistence_reopen`, `database_integrity`, `recovered_audio_persisted` | In a second process: the legacy meeting, imported transcript and summary survived, migrations are complete, the integrity check passes and the recovered audio still decodes. |
+| `state_saved` | The state the second process reopens was written as a new file. |
+| `persistence_reopen`, `database_integrity`, `recovered_audio_persisted` | In a second process: the legacy meeting, imported transcript and summary survived, migrations are complete, the integrity check passes and the recovered audio (a path inside the profile) still decodes. |
 
 What it does not check, and what therefore remains manual (see the acceptance
 list below): microphone and system-audio capture, device changes and sleep/wake,

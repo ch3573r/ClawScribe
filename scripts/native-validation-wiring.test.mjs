@@ -15,7 +15,16 @@ const read = relative => readFileSync(path.join(root, relative), 'utf8').replace
 const nativeWorkflow = read('.github/workflows/native-library-tests.yml');
 const releaseWorkflow = read('.github/workflows/clawscribe-windows-release.yml');
 const acceptanceScript = read('frontend/scripts/test-packaged-acceptance.ps1');
+const toolchainScript = read('frontend/scripts/ensure-native-toolchain.ps1');
+const cacheScript = read('frontend/scripts/limit-native-test-cache.ps1');
+const buildScript = read('frontend/scripts/build-windows-release.ps1');
 const selfTest = read('frontend/src-tauri/src/self_test.rs');
+// Production code only: everything before the unit-test module.
+const selfTestProduction = selfTest
+  .slice(0, selfTest.indexOf('#[cfg(test)]\nmod tests'))
+  .split('\n')
+  .filter(line => !line.trim().startsWith('//'))
+  .join('\n');
 
 test('native library tests run for trusted pull requests and main pushes on the local runner', () => {
   assert.deepEqual(workflowPolicyErrors('native-library-tests.yml', nativeWorkflow), []);
@@ -75,11 +84,7 @@ test('the self-test entry point is wired before the desktop app starts', () => {
 });
 
 test('the self-test cannot reach the real profile, credentials or providers', () => {
-  const production = selfTest
-    .slice(0, selfTest.indexOf('#[cfg(test)]'))
-    .split('\n')
-    .filter(line => !line.trim().startsWith('//'))
-    .join('\n');
+  const production = selfTestProduction;
   // Data stays inside the explicit profile folder, which must pass the isolation check.
   assert.match(production, /fn reject_application_folders/);
   assert.match(production, /fn prepare_profile/);
@@ -97,4 +102,188 @@ test('the self-test cannot reach the real profile, credentials or providers', ()
   // The shared lookup may download an encoder; the check requires the packaged one first.
   assert.match(production, /fn packaged_encoder/);
   assert.ok(production.indexOf('packaged_encoder()') < production.indexOf('recording_recovery(profile)'));
+});
+
+// ---- native workflow: toolchain, frontend assets, permissions -------------------------
+
+const stepBlock = (source, name) => {
+  const start = source.indexOf(`- name: ${name}`);
+  assert.ok(start >= 0, `missing step: ${name}`);
+  const next = source.indexOf('\n      - name:', start + 1);
+  return source.slice(start, next < 0 ? undefined : next);
+};
+
+test('the native workflow verifies the pinned toolchain instead of installing it on every run', () => {
+  assert.ok(!/choco\s+install/i.test(nativeWorkflow), 'no package installs in the workflow');
+  assert.ok(!nativeWorkflow.includes('dtolnay/rust-toolchain'), 'no per-run Rust install');
+  assert.ok(!/--allow-downgrade/.test(nativeWorkflow));
+  const toolchain = stepBlock(nativeWorkflow, 'Verify the pinned native toolchain');
+  assert.match(toolchain, /id: toolchain/);
+  assert.match(toolchain, /PROVISION: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\['provision-toolchain'\] \}\}/);
+  assert.match(toolchain, /if \(\$env:PROVISION -eq 'true'\) \{\n\s+\.\/frontend\/scripts\/ensure-native-toolchain\.ps1 -Provision -AllowMissingVulkanSdk\n\s+\} else \{\n\s+\.\/frontend\/scripts\/ensure-native-toolchain\.ps1\n\s+\}/);
+  // The only way to install anything is the manual input, which defaults to off.
+  assert.match(nativeWorkflow, /provision-toolchain:\n\s+description: [^\n]+\n\s+type: boolean\n\s+default: false/);
+  assert.equal([...nativeWorkflow.matchAll(/-Provision\b/g)].length, 1);
+  // The Vulkan SDK action runs only when the check found none (manual provisioning).
+  for (const name of ['Install the Vulkan SDK', 'Configure the freshly installed Vulkan SDK']) {
+    assert.match(stepBlock(nativeWorkflow, name), /if: \$\{\{ steps\.toolchain\.outputs\.vulkan_sdk == 'missing' \}\}/);
+  }
+  // The runtime installer is reachable only through the manual branch.
+  const loader = stepBlock(nativeWorkflow, 'Verify the Vulkan loader');
+  assert.equal([...loader.matchAll(/-InstallFromSdk/g)].length, 1);
+  assert.match(loader, /if \(\$env:PROVISION -eq 'true'\) \{\n\s+\.\/frontend\/scripts\/ensure-windows-vulkan-runtime\.ps1 -InstallFromSdk/);
+  // Verification happens before anything is compiled.
+  assert.ok(nativeWorkflow.indexOf('ensure-native-toolchain.ps1') < nativeWorkflow.indexOf('Build llama-helper sidecar'));
+  assert.ok(nativeWorkflow.indexOf('Verify the Vulkan loader') < nativeWorkflow.indexOf('Build llama-helper sidecar'));
+});
+
+test('the native workflow stays read-only and never publishes, tags or uploads', () => {
+  assert.match(nativeWorkflow, /^permissions:\n  contents: read\n/m);
+  assert.ok(!/contents:\s*write|packages:|id-token:|pull-requests:\s*write/.test(nativeWorkflow));
+  assert.ok(!/gh release|git (tag|push)|action-gh-release|upload-artifact|actions\/cache|gh api|--publish/i.test(nativeWorkflow));
+  assert.match(nativeWorkflow, /persist-credentials: false/);
+  // Triggers are the trusted ones only.
+  assert.ok(!/workflow_run|issue_comment|schedule:/.test(nativeWorkflow));
+});
+
+test('the toolchain script installs nothing unless provisioning was requested', () => {
+  const lines = toolchainScript.split('\n');
+  const installs = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /^\s*&\s*(choco|rustup)\s+(toolchain\s+)?install\b/.test(line));
+  assert.equal(installs.length, 3, 'rustup, LLVM and 7-Zip are the only installs');
+  for (const { index } of installs) {
+    const before = lines.slice(Math.max(0, index - 8), index).join('\n');
+    assert.match(before, /if \(\$Provision/, `install at line ${index + 1} must be guarded by -Provision`);
+  }
+  assert.match(toolchainScript, /--allow-downgrade replaces a newer LLVM, which is why this runs only here/);
+  assert.match(toolchainScript, /\$LlvmVersion = "20\.1\.8"/);
+  assert.match(toolchainScript, /\$VulkanSdkVersion = "1\.4\.309\.0"/);
+  assert.match(toolchainScript, /rust-toolchain\.toml/);
+  // The same pins as the release workflow.
+  assert.match(releaseWorkflow, /choco install llvm --version=20\.1\.8/);
+  assert.match(releaseWorkflow, /version: 1\.4\.309\.0/);
+});
+
+test('the native-only preflight rebuilds the embedded frontend assets from a clean folder', () => {
+  assert.match(buildScript, /if \(-not \$SkipInstall\) \{\n    pnpm install --frozen-lockfile/);
+  assert.ok(!/-not \$SkipInstall -and -not \$NativeOnly/.test(buildScript));
+  assert.match(buildScript, /function Build-FrontendAssets \{\n    Remove-GeneratedFrontendFolder "out"\n    pnpm build\n/);
+  assert.match(buildScript, /Assert-File \(Join-Path \$frontendRoot "out\/index\.html"\)/);
+  assert.match(buildScript, /if \(\$CheckOnly\) \{\n    Build-FrontendAssets\n    Push-Location \$tauriRoot\n    try \{\n        cargo check/);
+  assert.match(buildScript, /Build-FrontendAssets\n\n\$cargoMetadata/);
+  // The folder is removed only inside the frontend workspace and only without links.
+  const remover = buildScript.slice(buildScript.indexOf('function Remove-GeneratedFrontendFolder'), buildScript.indexOf('function Build-FrontendAssets'));
+  assert.match(remover, /StartsWith\(\$frontendPrefix/);
+  assert.match(remover, /ReparsePoint/);
+  // No skip or stand-in distributable.
+  assert.ok(!/mkdir.*out|New-Item.*\bout\b|index\.html"? -Value|Set-Content.*index\.html/i.test(buildScript));
+});
+
+test('the native workflow checks the volume that holds the Cargo target folder', () => {
+  assert.match(cacheScript, /"Cargo target volume" = \$targetDirectory/);
+  assert.match(cacheScript, /"Checkout volume" = \$repoRoot/);
+  assert.match(cacheScript, /DriveType -ne \[System\.IO\.DriveType\]::Fixed/);
+  assert.match(cacheScript, /\[A-Za-z\]:\\\\\$/);
+  assert.ok(!/DriveInfo\]::new\(\$root\)\s*\n\s*\$freeGiB/.test(cacheScript));
+});
+
+// ---- packaged acceptance: isolation, failure reporting, cleanup -------------------------
+
+test('packaged acceptance reports only safe categories and keeps the first failure', () => {
+  // Exit codes are always shown; a missing report is a categorised failure, not a crash.
+  assert.match(acceptanceScript, /function Format-ExitCode/);
+  assert.match(acceptanceScript, /Write-Host "\[\$Phase\] exit code: \$\(Format-ExitCode \$result\.ExitCode\)"/);
+  assert.match(acceptanceScript, /no readable report; exit code/);
+  assert.match(acceptanceScript, /\$knownChecks = @\(/);
+  // The application's own output and error text are never kept or printed.
+  assert.ok(!/\.Output\b|\.Errors\b|\$output\.Result|\$errors\.Result/.test(acceptanceScript));
+  assert.ok(!/\$check\.detail\)?"|\$\(\$check\.detail\)/.test(acceptanceScript), 'failure detail text is not printed');
+  assert.match(acceptanceScript, /function Get-SafeDetail/);
+  // Only deliberate messages reach the log; anything else is reduced to its type name.
+  assert.match(acceptanceScript, /class AcceptanceFailure : System\.Exception/);
+  assert.match(acceptanceScript, /stopped unexpectedly \(\$\(\$_\.Exception\.GetType\(\)\.Name\)\)/);
+  // Cleanup cannot replace the first failure.
+  assert.match(acceptanceScript, /\} catch \{\n    # The first failure is kept\./);
+  assert.match(acceptanceScript, /try \{ Remove-OwnedWorkFolder -Folder \$work -Base \$workBase \} catch \{ \$cleanupFailure = /);
+  assert.ok(acceptanceScript.indexOf('if ($firstFailure) {') > acceptanceScript.indexOf('} finally {'));
+  assert.match(acceptanceScript, /Also: \$cleanupFailure/);
+  // The work folder is on a fixed local drive with enough room.
+  assert.match(acceptanceScript, /DriveType -ne \[System\.IO\.DriveType\]::Fixed -or \$volume\.AvailableFreeSpace -lt 3GB/);
+});
+
+test('packaged acceptance checks real refusals with exact exit codes and untouched folders', () => {
+  for (const [label, code] of [
+    ['no phase', 2], ['no profile folder', 2], ['unknown phase', 2], ['extra argument', 2],
+    ['relative profile folder', 4], ['non-empty profile folder', 4], ['profile folder with only a stale marker', 4],
+    ['verify on an unmarked folder', 4], ['verify with a forged marker and state', 4],
+  ]) {
+    assert.match(acceptanceScript, new RegExp(`Test-Refusal "${label}" @\\([^\\n]*\\) ${code}\\b`), label);
+  }
+  assert.match(acceptanceScript, /\$ok = \(-not \$result\.TimedOut\) -and \(\$result\.ExitCode -eq \$ExpectedExit\) -and \(\$before -ceq \$after\)/);
+  assert.match(acceptanceScript, /New-Item -ItemType Junction -Path \$link -Target \$outside/);
+  assert.match(acceptanceScript, /nothing was written through the link/);
+  assert.match(acceptanceScript, /\[System\.IO\.Directory\]::Delete\(\$Path\)/);
+  // The child process gets a disposable temporary folder.
+  assert.match(acceptanceScript, /\$info\.Environment\["TEMP"\] = \$TempFolder/);
+});
+
+test('the self-test cannot write outside an owned profile or touch a credential store', () => {
+  // Credential store: only the isolated open path, never the production one.
+  assert.ok(selfTestProduction.includes('DatabaseManager::new_isolated('));
+  assert.ok(!selfTestProduction.includes('DatabaseManager::new('));
+  const manager = read('frontend/src-tauri/src/database/manager.rs');
+  assert.equal([...manager.matchAll(/migrate_provider_credentials/g)].length, 1);
+  assert.match(manager, /if migrate_credentials \{\n\s+crate::database::repositories::setting::migrate_provider_credentials\(&pool\)\.await;\n\s+\}/);
+  assert.match(manager, /Self::open\(tauri_db_path, backend_db_path, true\)/);
+  assert.match(manager, /Self::open\(tauri_db_path, backend_db_path, false\)/);
+  // The profile: marker, state and report are created, never overwritten or followed.
+  assert.match(selfTestProduction, /write_new\(&plain\.join\(PROFILE_MARKER\)/);
+  assert.match(selfTestProduction, /write_new\(&profile\.join\(STATE_FILE\)/);
+  assert.match(selfTestProduction, /write_new\(&path, &bytes\)/);
+  assert.ok(!/fs::write\(\s*(plain|profile)\.join\((PROFILE_MARKER|STATE_FILE)/.test(selfTestProduction));
+  assert.match(selfTestProduction, /\.create_new\(true\)/);
+  // Verify trusts only a marked, link-free folder and relative state paths inside it.
+  assert.match(selfTestProduction, /let run_id = read_marker\(&plain\)\?;\n\s+reject_links\(&plain\)\?;/);
+  assert.match(selfTestProduction, /profile_file\(profile, relative\)/);
+  assert.ok(!/PathBuf::from\(path\)/.test(selfTestProduction), 'state paths are never used as absolute paths');
+  assert.match(selfTestProduction, /The saved state does not belong to this profile/);
+  assert.match(selfTestProduction, /The profile holds no database from a run phase/);
+  // Recording and import folders are inside the profile, never the application's.
+  assert.match(selfTestProduction, /let root = profile\.join\("recordings"\)/);
+  assert.match(selfTestProduction, /Recovery wrote audio outside the profile folder/);
+  assert.match(selfTestProduction, /\.no_proxy\(\)/);
+});
+
+test('the self-test tests exercise real behaviour, not constants', () => {
+  const tests = selfTest.slice(selfTest.indexOf('#[cfg(test)]\nmod tests'));
+  assert.ok(!tests.includes('Phase::Run.name() != Phase::Verify.name()'), 'the vacuous usage test is gone');
+  for (const name of [
+    'malformed_self_test_command_lines_are_usage_errors', 'a_non_empty_profile_folder_is_refused_untouched',
+    'verify_refuses_a_profile_that_contains_a_link', 'verify_refuses_unmarked_and_forged_markers',
+    'saved_state_paths_stay_inside_the_profile', 'saved_state_must_belong_to_this_run',
+    'a_refused_run_reports_the_refusal_exit_code_and_changes_nothing', 'each_missing_or_wrong_package_element_is_named',
+    'legacy_database_upgrades_imports_summarizes_and_reopens', 'recent_schema_with_seeded_rows_upgrades_imports_summarizes_and_reopens',
+    'bundled_template_list_matches_the_source_folder_and_the_bundle_config',
+  ]) assert.ok(tests.includes(`fn ${name}`), name);
+  // The migrate/import/summary/reopen fixture runs in the required PR test group.
+  assert.match(read('frontend/scripts/test-windows-native.ps1'), /"self_test::tests"/);
+  assert.match(tests, /summary_stub\(manager\.pool\(\), &meeting_id\)/);
+  assert.match(tests, /DatabaseManager::new_isolated\(/);
+  // The seeded recent-schema fixture leaves the newest migrations to apply and checks them.
+  assert.match(selfTest, /const RECENT_SCHEMA_VERSION: i64 = 20261010000000;/);
+  assert.match(selfTestProduction, /column_exists\(pool, "meetings", "calendar_link"\)/);
+  assert.match(selfTestProduction, /column_exists\(pool, "transcript_file_sync", "retranscription_json"\)/);
+});
+
+test('the docs describe the toolchain, frontend and acceptance behaviour accurately', () => {
+  const docs = read('docs/windows-release.md');
+  assert.ok(docs.includes('ensure-native-toolchain.ps1'));
+  assert.ok(docs.includes('provision-toolchain'));
+  assert.ok(!docs.includes('`-NativeOnly` skips frontend install'), 'NativeOnly now installs and builds the frontend assets');
+  assert.ok(docs.includes('rebuilds the exported frontend assets'));
+  assert.ok(docs.includes('volume that holds the Cargo target folder'));
+  assert.ok(docs.includes('forged marker'));
+  assert.ok(docs.includes('exit code'));
+  assert.ok(read('.github/workflows/WORKFLOWS_OVERVIEW.md').includes('provision-toolchain'));
 });

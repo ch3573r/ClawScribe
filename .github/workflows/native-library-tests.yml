@@ -1,9 +1,16 @@
 name: Native library tests
 
-# Runs the real Rust library test suite (the same required groups and the same
-# staging as the release preflight) for trusted pull requests and for pushes to
-# main. Everything runs on the designated local runner with its persistent,
+# Runs the real Rust library test suite through the release preflight's native
+# half (build-windows-release.ps1 -CheckOnly -NativeOnly: the same staging and the
+# same required test groups) for trusted pull requests and for pushes to main.
+# Everything runs on the designated local runner with its persistent,
 # size-bounded build caches; there are no hosted runners and no Actions caches.
+#
+# The runner's pinned toolchain (Rust, LLVM, Vulkan SDK and loader) is verified,
+# never installed or replaced by a pull request or push. Only a manual run with
+# provision-toolchain may install what is missing. The frontend assets that the
+# native build embeds are rebuilt from the checked-out commit on every run. The
+# job holds read-only repository access and publishes, tags and uploads nothing.
 on:
   pull_request:
     paths:
@@ -33,6 +40,10 @@ on:
         description: 'Exact reviewed commit SHA to test'
         type: string
         default: ''
+      provision-toolchain:
+        description: 'Install a missing or different pinned toolchain on the runner (owner-started provisioning only)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -96,35 +107,30 @@ jobs:
       - name: Reject private paths and committed secrets
         run: node scripts/verify-public-repo-safety.mjs
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99.0
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install LLVM
+      # Rust, LLVM and the Vulkan SDK are the pins of the release workflow. A
+      # missing or different one fails here with what to provision.
+      - name: Verify the pinned native toolchain
+        id: toolchain
+        env:
+          PROVISION: ${{ github.event_name == 'workflow_dispatch' && inputs['provision-toolchain'] }}
         run: |
           $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          # Same pin as the release workflow: bindgen 0.69 mis-parses whisper
-          # structs with clang 21 and newer.
-          choco install llvm --version=20.1.8 -y --no-progress --allow-downgrade
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PATH=$llvmBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($env:PROVISION -eq 'true') {
+            ./frontend/scripts/ensure-native-toolchain.ps1 -Provision -AllowMissingVulkanSdk
+          } else {
+            ./frontend/scripts/ensure-native-toolchain.ps1
+          }
 
-      - name: Install Vulkan SDK prerequisites
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          choco install 7zip -y --no-progress
-
-      - name: Install Vulkan SDK
+      # Reached only by a manual provisioning run on a runner without the SDK.
+      - name: Install the Vulkan SDK
+        if: ${{ steps.toolchain.outputs.vulkan_sdk == 'missing' }}
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
           version: 1.4.309.0
           cache: false
 
-      - name: Verify and configure Vulkan SDK
+      - name: Configure the freshly installed Vulkan SDK
+        if: ${{ steps.toolchain.outputs.vulkan_sdk == 'missing' }}
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
@@ -142,8 +148,18 @@ jobs:
           "Vulkan_LIBRARY=$libDir\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Vulkan_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install and verify Vulkan runtime
-        run: ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+      # Probes for a loadable vulkan-1.dll. Only a manual provisioning run may
+      # install the SDK's signed runtime, and only when the loader is missing.
+      - name: Verify the Vulkan loader
+        env:
+          PROVISION: ${{ github.event_name == 'workflow_dispatch' && inputs['provision-toolchain'] }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:PROVISION -eq 'true') {
+            ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+          } else {
+            ./frontend/scripts/ensure-windows-vulkan-runtime.ps1
+          }
 
       - name: Remove host-tuned Whisper build caches
         run: |
@@ -165,8 +181,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path frontend\src-tauri\binaries | Out-Null
           Copy-Item target\x86_64-pc-windows-msvc\release\llama-helper.exe frontend\src-tauri\binaries\llama-helper-x86_64-pc-windows-msvc.exe -Force
 
-      # The release preflight's native half: locked cargo check, sidecar and
-      # runtime staging, then every required native group in the release profile
+      # The release preflight's native half: a clean rebuild of the embedded
+      # frontend assets, locked cargo check, sidecar and runtime staging, then
+      # every required native group in the release profile
       # (test-windows-native.ps1 fails on a missing, empty or failing group).
       - name: Run the required native library test groups
         run: |
@@ -187,6 +204,8 @@ jobs:
             "**Commit:** $(git rev-parse HEAD)",
             '',
             '- Designated local runner identity verified',
-            '- Locked native check and the required release-profile library test groups passed',
-            '- Live capture, speech models, real providers, the interface and the installer were not exercised; see docs/windows-release.md'
+            '- Pinned toolchain verified (Rust, LLVM, Vulkan SDK and loader)',
+            '- Frontend assets rebuilt from this commit before the native build',
+            '- Locked native check and the required release-profile library test groups passed, including the self-test fixtures (migrate, import, loopback summary, reopen)',
+            '- Not exercised: the packaged executable and installer, live capture, speech models, real providers and the interface; see docs/windows-release.md'
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

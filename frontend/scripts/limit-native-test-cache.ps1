@@ -12,10 +12,12 @@
        deletes only older `app_lib-<16 hex>.exe|pdb|d` files from the release
        dependency folder, after checking that the folder and its parents are
        not links and that each file is a regular file;
-    2. reports the workspace volume's free space and, unless
-       -NoFailOnLowSpace, fails when it is below -MinimumFreeGiB, so a full
-       disk is reported plainly before a long build instead of as an installer
-       error.
+    2. reports the free space of the volume that holds the Cargo target folder
+       (which can differ from the checkout's volume) and of the checkout's
+       volume and, unless -NoFailOnLowSpace, fails when either is below
+       -MinimumFreeGiB, so a full disk is reported plainly before a long build
+       instead of as an installer error. Network and removable volumes are
+       refused.
 
   Libraries, build scripts, models, sidecars, installers and source are never
   touched; later builds recreate anything removed here.
@@ -24,7 +26,7 @@
   How many of the newest library test executables to keep. Default 2.
 
 .PARAMETER MinimumFreeGiB
-  Free space the workspace volume must have. Default 12.
+  Free space each checked volume must have. Default 12.
 
 .PARAMETER NoFailOnLowSpace
   Report free space but do not fail when it is low (used for the after-run step).
@@ -79,13 +81,30 @@ if (-not $targetDirectory -or -not (Test-Path -LiteralPath $targetDirectory -Pat
     }
 }
 
-$root = [System.IO.Path]::GetPathRoot($repoRoot)
-$volume = [System.IO.DriveInfo]::new($root)
-$freeGiB = [Math]::Round($volume.AvailableFreeSpace / 1GB, 1)
-Write-Host "Workspace volume free space: $freeGiB GiB (minimum $MinimumFreeGiB GiB)"
-if ($env:GITHUB_STEP_SUMMARY) {
-    "- Workspace volume free space after trimming: $freeGiB GiB" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+# Free space of the volume that really receives the files: the nearest existing
+# ancestor of the path, so a target folder that does not exist yet still counts.
+function Get-VolumeFreeGiB {
+    param([string]$Path)
+    $existing = $Path
+    while ($existing -and -not (Test-Path -LiteralPath $existing)) { $existing = Split-Path -Parent $existing }
+    if (-not $existing) { throw "No existing parent folder was found for a path that needs free space." }
+    $root = [System.IO.Path]::GetPathRoot((Resolve-Path -LiteralPath $existing).Path)
+    if ($root -notmatch '^[A-Za-z]:\\$') { throw "Free space can be checked only on a local drive with a drive letter." }
+    $volume = [System.IO.DriveInfo]::new($root)
+    if (-not $volume.IsReady -or $volume.DriveType -ne [System.IO.DriveType]::Fixed) { throw "A build volume is not a ready fixed local drive." }
+    return [pscustomobject]@{ FreeGiB = [Math]::Round($volume.AvailableFreeSpace / 1GB, 1) }
 }
-if (-not $NoFailOnLowSpace -and $freeGiB -lt $MinimumFreeGiB) {
-    throw "The workspace volume has $freeGiB GiB free; at least $MinimumFreeGiB GiB are needed. Free space on the runner (see docs/windows-release.md, GitHub Actions) before building."
+
+$volumes = [ordered]@{ "Cargo target volume" = $targetDirectory; "Checkout volume" = $repoRoot }
+$tooLow = [System.Collections.Generic.List[string]]::new()
+foreach ($label in $volumes.Keys) {
+    $info = Get-VolumeFreeGiB -Path $volumes[$label]
+    Write-Host "${label} free space: $($info.FreeGiB) GiB (minimum $MinimumFreeGiB GiB)"
+    if ($env:GITHUB_STEP_SUMMARY) {
+        "- ${label} free space after trimming: $($info.FreeGiB) GiB" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+    }
+    if ($info.FreeGiB -lt $MinimumFreeGiB) { $tooLow.Add($label) }
+}
+if (-not $NoFailOnLowSpace -and $tooLow.Count -gt 0) {
+    throw "Not enough free space on: $($tooLow -join ', '). At least $MinimumFreeGiB GiB are needed on each. Free space on the runner (see docs/windows-release.md, GitHub Actions) before building."
 }

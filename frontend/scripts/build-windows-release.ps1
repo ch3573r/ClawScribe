@@ -6,7 +6,8 @@ param(
     [switch]$SkipInstall,
 
     # With -CheckOnly: run only the native Rust validation and native tests.
-    # Frontend installation, typecheck and tests are covered by their own job.
+    # Frontend typecheck and tests are covered by their own job. The frontend
+    # assets the native build embeds are still rebuilt from the reviewed sources.
     [switch]$NativeOnly
 )
 
@@ -98,7 +99,7 @@ if ($LASTEXITCODE -ne 0) { throw "Bundled Codex runtime smoke failed." }
 $env:NEXT_TELEMETRY_DISABLED = "1"
 $env:TAURI_BUNDLE_TARGETS = "msi,nsis"
 
-if (-not $SkipInstall -and -not $NativeOnly) {
+if (-not $SkipInstall) {
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed." }
 }
@@ -108,18 +109,45 @@ if ($Feature -ne "cpu") {
     $featureArgs = @("--features", $Feature)
 }
 
-# Reused runner checkouts may retain generated types for deleted routes.
-$generatedRouteTypes = Join-Path $frontendRoot ".next/types"
-if (Test-Path -LiteralPath $generatedRouteTypes) {
-    $resolvedRouteTypes = (Resolve-Path -LiteralPath $generatedRouteTypes).Path
+# Reused runner checkouts keep generated output between runs. Remove only folders
+# inside the frontend workspace that hold no link.
+function Remove-GeneratedFrontendFolder {
+    param([Parameter(Mandatory=$true)][ValidateSet(".next/types", "out")][string]$RelativePath)
+    $folder = Join-Path $frontendRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $folder)) { return }
+    $resolved = (Resolve-Path -LiteralPath $folder).Path
     $frontendPrefix = $frontendRoot.Path.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $resolvedRouteTypes.StartsWith($frontendPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Generated route types are outside the frontend workspace."
+    if (-not $resolved.StartsWith($frontendPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Generated frontend output '$RelativePath' is outside the frontend workspace."
     }
-    Remove-Item -LiteralPath $resolvedRouteTypes -Recurse -Force
+    $directory = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    while ($directory) {
+        if ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Generated frontend output '$RelativePath' is inside a linked path."
+        }
+        $directory = $directory.Parent
+    }
+    if (Get-ChildItem -LiteralPath $resolved -Recurse -Force -Attributes ReparsePoint -ErrorAction Stop | Select-Object -First 1) {
+        throw "Generated frontend output '$RelativePath' contains a link."
+    }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+
+# Generated types for deleted routes would break the typecheck.
+Remove-GeneratedFrontendFolder ".next/types"
+
+# The native build embeds the exported frontend (frontend/out). Rebuild it from
+# the reviewed sources every time, so a stale folder left on the persistent
+# runner is never compiled into the tested or shipped application.
+function Build-FrontendAssets {
+    Remove-GeneratedFrontendFolder "out"
+    pnpm build
+    if ($LASTEXITCODE -ne 0) { throw "Frontend production build failed." }
+    Assert-File (Join-Path $frontendRoot "out/index.html") "The frontend build produced no exported assets."
 }
 
 if ($CheckOnly) {
+    Build-FrontendAssets
     Push-Location $tauriRoot
     try {
         cargo check --locked @featureArgs
@@ -143,8 +171,7 @@ pnpm exec tsc --noEmit
 if ($LASTEXITCODE -ne 0) { throw "Frontend typecheck failed." }
 pnpm test
 if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
-pnpm build
-if ($LASTEXITCODE -ne 0) { throw "Frontend production build failed." }
+Build-FrontendAssets
 
 $cargoMetadata = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $tauriRoot "Cargo.toml") |
     ConvertFrom-Json

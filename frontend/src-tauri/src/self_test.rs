@@ -8,12 +8,19 @@
 //! It runs before any desktop plugin, single-instance guard or logger starts, so
 //! it never opens a window, never forwards to a running copy and never reads the
 //! user's real profile, credential store, settings, templates or providers. The
-//! profile folder must be new or empty and must not overlap the application's
-//! own data folders. Everything the check creates lives inside that folder.
+//! database is opened through the isolated path that skips the credential-store
+//! step. The profile folder must be new or empty and must not overlap the
+//! application's own data folders. The verify phase accepts only a folder that
+//! the run phase marked, whose tree holds no link, and only state paths that stay
+//! inside it. Everything the check creates lives inside that folder.
 //!
-//! What it covers: the packaged sidecars and runtime libraries next to the
-//! executable, upgrade of a synthetic legacy database through this build's
-//! embedded migrations (including the known line-ending checksum drift),
+//! Exit codes: 0 passed, 1 a check failed, 2 unusable command line, 3 the runtime
+//! or the report could not be set up, 4 the profile folder was refused untouched.
+//!
+//! What it covers: the packaged sidecars, runtime libraries, bundled templates and
+//! Codex runtime next to the executable, upgrade of a synthetic legacy database
+//! through this build's embedded migrations (including the known line-ending
+//! checksum drift),
 //! interrupted-recording discovery and recovery through the packaged encoder,
 //! decoding and validating fixture audio, persisting an imported meeting, and
 //! a summary produced through the production provider path against a loopback
@@ -39,18 +46,58 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+const EXIT_FAILED: i32 = 1;
 const USAGE_EXIT: i32 = 2;
+const EXIT_RUNTIME: i32 = 3;
+const EXIT_REFUSED: i32 = 4;
 const PROFILE_MARKER: &str = ".clawscribe-self-test";
+const MARKER_HEADER: &str = "ClawScribe self-test profile. Safe to delete.";
 const STATE_FILE: &str = "self-test-state.json";
+const STATE_SCHEMA: i64 = 1;
+const MAX_STATE_BYTES: u64 = 64 * 1024;
+const MAX_PROFILE_ENTRIES: usize = 20_000;
 /// The synthetic legacy database is built from every migration up to this one.
 const LEGACY_SCHEMA_VERSION: i64 = 20251006000000;
+/// A recent schema: everything before the calendar-link migration. Upgrading it
+/// applies the newest migrations on top of seeded, non-secret rows.
+#[cfg(test)]
+const RECENT_SCHEMA_VERSION: i64 = 20261010000000;
+/// Templates the installer places in `templates/` beside the executable. A unit
+/// test keeps this list equal to the files in the source folder.
+const BUNDLED_TEMPLATES: [(&str, &str); 6] = [
+    (
+        "daily_standup.json",
+        include_str!("../templates/daily_standup.json"),
+    ),
+    (
+        "project_sync.json",
+        include_str!("../templates/project_sync.json"),
+    ),
+    (
+        "psychatric_session.json",
+        include_str!("../templates/psychatric_session.json"),
+    ),
+    (
+        "retrospective.json",
+        include_str!("../templates/retrospective.json"),
+    ),
+    (
+        "sales_marketing_client_call.json",
+        include_str!("../templates/sales_marketing_client_call.json"),
+    ),
+    (
+        "standard_meeting.json",
+        include_str!("../templates/standard_meeting.json"),
+    ),
+];
 const LEGACY_MEETING_ID: &str = "synthetic-legacy-meeting";
 const LEGACY_MEETING_TITLE: &str = "Synthetic legacy planning meeting";
 const LEGACY_LINES: [(&str, &str); 2] = [
@@ -68,7 +115,7 @@ const IMPORT_LINES: [&str; 2] = [
 const STUB_SUMMARY: &str = "## Summary\nThe loopback stub answered the packaged summary path.\n\n## Action items\n- Nobody: nothing real was decided.";
 const STUB_MARKER: &str = "loopback stub answered";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Run,
     Verify,
@@ -83,36 +130,53 @@ impl Phase {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    /// Not a self-test invocation: the application starts normally.
+    Ignore,
+    /// A self-test invocation whose command line is unusable.
+    Usage,
+    Execute(Phase, PathBuf),
+}
+
+/// `--self-test <run|verify> <absolute profile folder>`, nothing else.
+fn parse_command<I: IntoIterator<Item = OsString>>(args: I) -> Command {
+    let mut args = args.into_iter();
+    if args.next().as_deref() != Some(OsStr::new("--self-test")) {
+        return Command::Ignore;
+    }
+    let (Some(phase), Some(profile), None) = (args.next(), args.next(), args.next()) else {
+        return Command::Usage;
+    };
+    if profile.is_empty() {
+        return Command::Usage;
+    }
+    match phase.to_str() {
+        Some("run") => Command::Execute(Phase::Run, PathBuf::from(profile)),
+        Some("verify") => Command::Execute(Phase::Verify, PathBuf::from(profile)),
+        _ => Command::Usage,
+    }
+}
+
 /// Dispatch before any desktop plugin, single-instance guard or logger starts.
 pub fn dispatch() -> Option<i32> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() != Some(OsStr::new("--self-test")) {
-        return None;
+    match parse_command(std::env::args_os().skip(1)) {
+        Command::Ignore => None,
+        Command::Usage => Some(USAGE_EXIT),
+        Command::Execute(phase, profile) => {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return Some(EXIT_RUNTIME),
+            };
+            let code = runtime.block_on(execute(phase, profile));
+            runtime.shutdown_background();
+            Some(code)
+        }
     }
-    let phase = args.next();
-    let profile = args.next();
-    if args.next().is_some() {
-        return Some(USAGE_EXIT);
-    }
-    let (Some(phase), Some(profile)) = (phase, profile) else {
-        return Some(USAGE_EXIT);
-    };
-    let phase = match phase.to_str() {
-        Some("run") => Phase::Run,
-        Some("verify") => Phase::Verify,
-        _ => return Some(USAGE_EXIT),
-    };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return Some(3),
-    };
-    let code = runtime.block_on(execute(phase, PathBuf::from(profile)));
-    runtime.shutdown_background();
-    Some(code)
 }
 
 struct Report {
@@ -149,6 +213,15 @@ fn failed<E: std::fmt::Display>(step: &'static str) -> impl FnOnce(E) -> String 
     move |error| format!("{step}: {error}")
 }
 
+/// A profile folder that passed the isolation checks.
+#[derive(Debug)]
+struct Profile {
+    path: PathBuf,
+    /// Written to the marker by the run phase and repeated in the saved state, so
+    /// the verify phase only trusts state that belongs to this folder.
+    run_id: String,
+}
+
 async fn execute(phase: Phase, requested: PathBuf) -> i32 {
     let mut report = Report::new(phase);
     let profile = match prepare_profile(phase, &requested) {
@@ -156,18 +229,19 @@ async fn execute(phase: Phase, requested: PathBuf) -> i32 {
         Err(error) => {
             // Nothing may be written to a folder that failed the isolation check.
             report.record("profile_isolation", Err(error));
-            let _ = writeln!(std::io::stdout(), "SELF_TEST_RESULT failed");
-            return 1;
+            let _ = writeln!(std::io::stdout(), "SELF_TEST_RESULT refused");
+            return EXIT_REFUSED;
         }
     };
     report.record(
         "profile_isolation",
-        Ok("New or empty folder outside the application's data folders".to_string()),
+        Ok("Marked folder outside the application's data folders, without links".to_string()),
     );
     match phase {
         Phase::Run => run_phase(&profile, &mut report).await,
         Phase::Verify => verify_phase(&profile, &mut report).await,
     }
+    let profile = profile.path;
     let passed = report.passed();
     let document = json!({
         "schema": 1,
@@ -177,24 +251,121 @@ async fn execute(phase: Phase, requested: PathBuf) -> i32 {
         "checks": report.checks,
     });
     let path = profile.join(format!("self-test-report-{}.json", report.phase.name()));
-    if let Ok(bytes) = serde_json::to_vec_pretty(&document) {
-        let _ = std::fs::write(path, bytes);
-    }
+    // A report that already exists (or is a link) is never written through.
+    let written = serde_json::to_vec_pretty(&document)
+        .ok()
+        .map(|bytes| write_new(&path, &bytes).is_ok())
+        .unwrap_or(false);
     let _ = writeln!(
         std::io::stdout(),
         "SELF_TEST_RESULT {}",
         if passed { "passed" } else { "failed" }
     );
-    if passed {
-        0
+    if !passed {
+        EXIT_FAILED
+    } else if !written {
+        EXIT_RUNTIME
     } else {
-        1
+        0
     }
 }
 
-/// The folder must be absolute, not a link, new or empty (run) or created by an
-/// earlier run (verify), and must not overlap the application's data folders.
-fn prepare_profile(phase: Phase, requested: &Path) -> Result<PathBuf, String> {
+/// Creates a new file and refuses to touch one that exists, so nothing planted in
+/// the profile can redirect a write.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn is_link(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Rejects any link (symbolic link, junction or other reparse point) anywhere in
+/// the folder, so no path inside the profile can lead outside it.
+fn reject_links(root: &Path) -> Result<(), String> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(folder) = pending.pop() {
+        let entries = std::fs::read_dir(&folder)
+            .map_err(|_| "The profile folder cannot be read".to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|_| "The profile folder cannot be read".to_string())?;
+            seen += 1;
+            if seen > MAX_PROFILE_ENTRIES {
+                return Err("The profile folder holds too many entries".into());
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| "The profile folder cannot be read".to_string())?;
+            if is_link(&metadata) {
+                return Err("The profile folder must not contain links".into());
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn marker_text(run_id: &str) -> String {
+    format!("{MARKER_HEADER}\nrun-id: {run_id}\n")
+}
+
+/// The run id of a marker this program wrote; anything else is refused.
+fn read_marker(profile: &Path) -> Result<String, String> {
+    const NOT_MARKED: &str = "The folder was not created by a self-test run";
+    let path = profile.join(PROFILE_MARKER);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| NOT_MARKED.to_string())?;
+    if is_link(&metadata) || !metadata.is_file() || metadata.len() > 256 {
+        return Err(NOT_MARKED.into());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|_| NOT_MARKED.to_string())?;
+    let mut lines = text.lines();
+    let run_id = match (lines.next(), lines.next(), lines.next()) {
+        (Some(MARKER_HEADER), Some(second), None) => second
+            .strip_prefix("run-id: ")
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+        _ => None,
+    };
+    run_id.map(str::to_string).ok_or_else(|| NOT_MARKED.into())
+}
+
+/// A relative path from the saved state, resolved only if it names an existing
+/// regular file inside the profile.
+fn profile_file(profile: &Path, relative: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err("The saved state names a path outside the profile".into());
+    }
+    let path = profile.join(relative);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !is_link(&metadata) => Ok(path),
+        _ => Err("The saved state names a file that is not in the profile".into()),
+    }
+}
+
+/// The folder must be absolute, not a link, new or empty (run) or marked by an
+/// earlier run and free of links (verify), and must not overlap the application's
+/// data folders.
+fn prepare_profile(phase: Phase, requested: &Path) -> Result<Profile, String> {
     if !requested.is_absolute() {
         return Err("The profile folder must be an absolute path".into());
     }
@@ -202,7 +373,7 @@ fn prepare_profile(phase: Phase, requested: &Path) -> Result<PathBuf, String> {
     // exist yet, so a refused path is never touched.
     reject_application_folders(&resolved_for_check(requested))?;
     match std::fs::symlink_metadata(requested) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+        Ok(metadata) if is_link(&metadata) => {
             return Err("The profile folder must not be a link".into());
         }
         Ok(metadata) if !metadata.is_dir() => {
@@ -219,11 +390,9 @@ fn prepare_profile(phase: Phase, requested: &Path) -> Result<PathBuf, String> {
                     );
                 }
             }
-            Phase::Verify => {
-                if !requested.join(PROFILE_MARKER).is_file() {
-                    return Err("The folder was not created by a self-test run".into());
-                }
-            }
+            // The marker and the absence of links are checked once the folder is
+            // resolved, below.
+            Phase::Verify => {}
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && phase == Phase::Run => {
             std::fs::create_dir_all(requested)
@@ -235,14 +404,23 @@ fn prepare_profile(phase: Phase, requested: &Path) -> Result<PathBuf, String> {
         .map_err(|_| "The profile folder cannot be resolved".to_string())?;
     let plain = crate::database::meeting_files::plain_path(&canonical);
     reject_application_folders(&plain)?;
-    if phase == Phase::Run {
-        std::fs::write(
-            plain.join(PROFILE_MARKER),
-            b"ClawScribe self-test profile. Safe to delete.\n",
-        )
-        .map_err(|_| "The profile folder cannot be written".to_string())?;
-    }
-    Ok(plain)
+    let run_id = match phase {
+        Phase::Run => {
+            let run_id = uuid::Uuid::new_v4().to_string();
+            write_new(&plain.join(PROFILE_MARKER), marker_text(&run_id).as_bytes())
+                .map_err(|_| "The profile folder cannot be written".to_string())?;
+            run_id
+        }
+        Phase::Verify => {
+            let run_id = read_marker(&plain)?;
+            reject_links(&plain)?;
+            run_id
+        }
+    };
+    Ok(Profile {
+        path: plain,
+        run_id,
+    })
 }
 
 /// The path with its nearest existing ancestor resolved (links followed), so a
@@ -304,14 +482,16 @@ fn overlaps_any(profile: &Path, protected: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_phase(profile: &Path, report: &mut Report) {
-    let mut state = json!({});
+async fn run_phase(profile: &Profile, report: &mut Report) {
+    let run_id = profile.run_id.as_str();
+    let profile = profile.path.as_path();
+    let mut state = json!({"schema": STATE_SCHEMA, "run_id": run_id});
 
     report.record("package_layout", package_layout());
     let encoder = packaged_encoder();
     let encoder_ready = report.record("packaged_encoder", encoder);
 
-    let manager = match migration_upgrade(profile).await {
+    let manager = match migration_upgrade(profile, LEGACY_SCHEMA_VERSION).await {
         Ok((manager, detail)) => {
             report.record("migration_upgrade", Ok(detail));
             state["legacy_meeting_id"] = json!(LEGACY_MEETING_ID);
@@ -329,7 +509,10 @@ async fn run_phase(profile: &Path, report: &mut Report) {
         match recording_recovery(profile).await {
             Ok((detail, audio)) => {
                 report.record("recording_recovery", Ok(detail));
-                state["recovered_audio"] = json!(audio.to_string_lossy());
+                // Saved relative to the profile; verify refuses anything else.
+                if let Ok(relative) = audio.strip_prefix(profile) {
+                    state["recovered_audio"] = json!(relative.to_string_lossy());
+                }
                 Some(audio)
             }
             Err(error) => {
@@ -382,16 +565,37 @@ async fn run_phase(profile: &Path, report: &mut Report) {
     if let Some(manager) = manager {
         let _ = manager.cleanup().await;
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(&state) {
-        let _ = std::fs::write(profile.join(STATE_FILE), bytes);
-    }
+    let saved = serde_json::to_vec_pretty(&state)
+        .map_err(failed("encode the saved state"))
+        .and_then(|bytes| {
+            write_new(&profile.join(STATE_FILE), &bytes).map_err(failed("write the saved state"))
+        });
+    report.record(
+        "state_saved",
+        saved.map(|_| "Saved the state that the verify phase reopens".to_string()),
+    );
 }
 
-async fn verify_phase(profile: &Path, report: &mut Report) {
-    let state: Value = match std::fs::read(profile.join(STATE_FILE))
-        .map_err(failed("read the saved state"))
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(failed("parse the saved state")))
-    {
+/// The state the run phase saved, accepted only if it is a regular file of a
+/// sensible size that carries this folder's schema and run id.
+fn read_state(profile: &Path, run_id: &str) -> Result<Value, String> {
+    let path = profile.join(STATE_FILE);
+    let metadata = std::fs::symlink_metadata(&path).map_err(failed("read the saved state"))?;
+    if is_link(&metadata) || !metadata.is_file() || metadata.len() > MAX_STATE_BYTES {
+        return Err("The saved state is not a regular file of a sensible size".into());
+    }
+    let bytes = std::fs::read(&path).map_err(failed("read the saved state"))?;
+    let state: Value = serde_json::from_slice(&bytes).map_err(failed("parse the saved state"))?;
+    if state["schema"] != STATE_SCHEMA || state["run_id"].as_str() != Some(run_id) {
+        return Err("The saved state does not belong to this profile".into());
+    }
+    Ok(state)
+}
+
+async fn verify_phase(profile: &Profile, report: &mut Report) {
+    let run_id = profile.run_id.as_str();
+    let profile = profile.path.as_path();
+    let state = match read_state(profile, run_id) {
         Ok(state) => state,
         Err(error) => {
             report.record("persistence_reopen", Err(error));
@@ -399,8 +603,16 @@ async fn verify_phase(profile: &Path, report: &mut Report) {
         }
     };
     let (database, legacy) = database_paths(profile);
+    if !database.is_file() {
+        // Opening would create an empty database, so a missing one is a failure.
+        report.record(
+            "persistence_reopen",
+            Err("The profile holds no database from a run phase".into()),
+        );
+        return;
+    }
     let manager = match (database.to_str(), legacy.to_str()) {
-        (Some(database), Some(legacy)) => DatabaseManager::new(database, legacy)
+        (Some(database), Some(legacy)) => DatabaseManager::new_isolated(database, legacy)
             .await
             .map_err(failed("reopen the database in a new process")),
         _ => Err("The profile path is not valid text".to_string()),
@@ -423,7 +635,10 @@ async fn verify_phase(profile: &Path, report: &mut Report) {
     report.record(
         "recovered_audio_persisted",
         match state["recovered_audio"].as_str() {
-            Some(path) => decode_check(PathBuf::from(path), 3.0, 0.35).await,
+            Some(relative) => match profile_file(profile, relative) {
+                Ok(path) => decode_check(path, 3.0, 0.35).await,
+                Err(error) => Err(error),
+            },
             None => Err("The first run saved no recovered audio".to_string()),
         },
     );
@@ -446,31 +661,103 @@ fn executable_folder() -> Result<PathBuf, String> {
         .ok_or_else(|| "The executable has no folder".to_string())
 }
 
-/// Sidecars and runtime libraries the installer places next to the executable.
-fn package_layout() -> Result<String, String> {
-    let folder = executable_folder()?;
-    let required = [
-        "ffmpeg.exe",
-        "llama-helper.exe",
-        "codex-app-server.exe",
-        "onnxruntime.dll",
-        "sherpa-onnx-c-api.dll",
-    ];
-    let mut missing = Vec::new();
-    for name in required {
-        match std::fs::metadata(folder.join(name)) {
-            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
-            _ => missing.push(name),
+const PACKAGED_FILES: [&str; 5] = [
+    "ffmpeg.exe",
+    "llama-helper.exe",
+    "codex-app-server.exe",
+    "onnxruntime.dll",
+    "sherpa-onnx-c-api.dll",
+];
+
+fn non_empty_file(path: &Path) -> bool {
+    matches!(std::fs::metadata(path), Ok(metadata) if metadata.is_file() && metadata.len() > 0)
+}
+
+/// A bundled template must exist, match the copy compiled into this build (line
+/// endings aside) and parse with at least one section.
+fn template_problem(folder: &Path, name: &str, embedded: &str) -> Option<String> {
+    let Ok(text) = std::fs::read_to_string(folder.join("templates").join(name)) else {
+        return Some(format!("templates/{name}"));
+    };
+    let same = text.replace("\r\n", "\n") == embedded.replace("\r\n", "\n");
+    let usable = serde_json::from_str::<Template>(&text)
+        .map(|template| !template.sections.is_empty())
+        .unwrap_or(false);
+    if same && usable {
+        None
+    } else {
+        Some(format!("templates/{name} (not this build's copy)"))
+    }
+}
+
+/// The pinned Codex runtime: its manifest and a populated runtime folder, in the
+/// places the provider looks for them.
+fn codex_runtime_problem(folder: &Path) -> Option<String> {
+    let manifest = folder
+        .join("binaries")
+        .join("codex-app-server-runtime.json");
+    let pinned = std::fs::read(&manifest)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value["runtime_sha256"].as_str().map(|sum| sum.len() == 64))
+        .unwrap_or(false);
+    if !pinned {
+        return Some("binaries/codex-app-server-runtime.json".to_string());
+    }
+    let populated = [
+        folder.join("codex-app-server-runtime"),
+        folder.join("binaries").join("codex-app-server-runtime"),
+    ]
+    .iter()
+    .any(|runtime| {
+        std::fs::read_dir(runtime)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
+    });
+    if populated {
+        None
+    } else {
+        Some("codex-app-server-runtime".to_string())
+    }
+}
+
+/// Everything the installer should have placed beside the executable that is
+/// absent or unusable.
+fn layout_problems(folder: &Path, directml_expected: bool) -> Vec<String> {
+    let mut problems: Vec<String> = Vec::new();
+    for name in PACKAGED_FILES {
+        if !non_empty_file(&folder.join(name)) {
+            problems.push(name.to_string());
         }
     }
-    if !missing.is_empty() {
-        return Err(format!("Missing from the package: {}", missing.join(", ")));
+    if directml_expected && !non_empty_file(&folder.join("DirectML.dll")) {
+        problems.push("DirectML.dll".to_string());
     }
-    let directml = folder.join("DirectML.dll").is_file();
+    for (name, embedded) in BUNDLED_TEMPLATES {
+        problems.extend(template_problem(folder, name, embedded));
+    }
+    problems.extend(codex_runtime_problem(folder));
+    problems
+}
+
+/// Sidecars, runtime libraries, bundled templates and the Codex runtime the
+/// installer places next to the executable.
+fn package_layout() -> Result<String, String> {
+    let folder = executable_folder()?;
+    // The DirectML runtime ships with the DirectML and windows-gpu builds only.
+    let directml = cfg!(feature = "directml");
+    let problems = layout_problems(&folder, directml);
+    if !problems.is_empty() {
+        return Err(format!(
+            "Missing or unusable in the package: {}",
+            problems.join(", ")
+        ));
+    }
     Ok(format!(
-        "{} required files present; DirectML runtime {}",
-        required.len(),
-        if directml { "present" } else { "absent" }
+        "{} required files, {} templates, the runtime manifest and the Codex runtime present; DirectML runtime {}",
+        PACKAGED_FILES.len(),
+        BUNDLED_TEMPLATES.len(),
+        if directml { "required and present" } else { "not required" }
     ))
 }
 
@@ -508,12 +795,40 @@ fn embedded_migration_count() -> i64 {
     sqlx::migrate!("./migrations").iter().count() as i64
 }
 
-async fn migration_upgrade(profile: &Path) -> Result<(DatabaseManager, String), String> {
+async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool, String> {
+    let found: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .map_err(failed("inspect the schema"))?;
+    Ok(found == 1)
+}
+
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, String> {
+    let found: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .map_err(failed("inspect the schema"))?;
+    Ok(found == 1)
+}
+
+/// Builds a database as an older build left it (only the migrations up to
+/// `cutoff` applied, seeded with non-secret rows, one checksum stamped with the
+/// other line-ending variant), then opens it through the production path that
+/// backs it up, repairs the checksum and applies the remaining migrations. The
+/// isolated open path is used so no credential store is read or written.
+async fn migration_upgrade(
+    profile: &Path,
+    cutoff: i64,
+) -> Result<(DatabaseManager, String), String> {
     let (database, legacy_backend) = database_paths(profile);
     let full = sqlx::migrate!("./migrations");
     let older: Vec<Migration> = full
         .iter()
-        .filter(|migration| migration.version <= LEGACY_SCHEMA_VERSION)
+        .filter(|migration| migration.version <= cutoff)
         .cloned()
         .collect();
     let total = full.iter().count();
@@ -563,6 +878,15 @@ async fn migration_upgrade(profile: &Path) -> Result<(DatabaseManager, String), 
         .await
         .map_err(failed("insert a legacy transcript line"))?;
     }
+    // A recent schema also has the file-sync table, which a later migration extends.
+    let seeded_sync = table_exists(&pool, "transcript_file_sync").await?;
+    if seeded_sync {
+        sqlx::query("INSERT INTO transcript_file_sync (meeting_id) VALUES (?)")
+            .bind(LEGACY_MEETING_ID)
+            .execute(&pool)
+            .await
+            .map_err(failed("seed the file-sync row"))?;
+    }
 
     // Line-ending checksum drift: stamp one applied migration with the checksum
     // of the other line-ending variant, as an older CRLF checkout did.
@@ -594,7 +918,7 @@ async fn migration_upgrade(profile: &Path) -> Result<(DatabaseManager, String), 
     else {
         return Err("The profile path is not valid text".into());
     };
-    let manager = DatabaseManager::new(database_text, legacy_text)
+    let manager = DatabaseManager::new_isolated(database_text, legacy_text)
         .await
         .map_err(failed("open the upgraded database"))?;
     let pool = manager.pool();
@@ -616,14 +940,26 @@ async fn migration_upgrade(profile: &Path) -> Result<(DatabaseManager, String), 
     if stored.as_slice() != drift.checksum.as_ref() {
         return Err("The line-ending checksum drift was not repaired".into());
     }
-    let recording_outcomes: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'recording_outcomes'",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(failed("inspect the upgraded schema"))?;
-    if recording_outcomes != 1 {
-        return Err("A table added by a later migration is missing".into());
+    // Additions of the newest migrations must exist after the upgrade.
+    let latest = [
+        table_exists(pool, "recording_outcomes").await?,
+        table_exists(pool, "calendar_series_templates").await?,
+        column_exists(pool, "meetings", "calendar_link").await?,
+        column_exists(pool, "transcript_file_sync", "retranscription_json").await?,
+    ];
+    if latest.iter().any(|present| !present) {
+        return Err("A table or column added by a later migration is missing".into());
+    }
+    if seeded_sync {
+        let kept: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync WHERE meeting_id = ?")
+                .bind(LEGACY_MEETING_ID)
+                .fetch_one(pool)
+                .await
+                .map_err(failed("read the seeded file-sync row"))?;
+        if kept != 1 {
+            return Err("The seeded file-sync row did not survive the upgrade".into());
+        }
     }
     legacy_data_intact(pool).await?;
     database_integrity(pool).await?;
@@ -645,7 +981,7 @@ async fn migration_upgrade(profile: &Path) -> Result<(DatabaseManager, String), 
     Ok((
         manager,
         format!(
-            "{} legacy migrations upgraded to {total}; checksum drift repaired; backup written; legacy meeting and lines intact",
+            "{} older migrations upgraded to {total}; checksum drift repaired; backup written; seeded meeting and lines intact",
             older.len()
         ),
     ))
@@ -854,6 +1190,9 @@ async fn recording_recovery(profile: &Path) -> Result<(String, PathBuf), String>
             .audio_file_path
             .ok_or_else(|| "Recovery produced no audio file".to_string())?,
     );
+    if !audio.starts_with(profile) {
+        return Err("Recovery wrote audio outside the profile folder".into());
+    }
     // The compressed result proves the packaged encoder ran; the encoder-free
     // fallback writes WAV.
     if audio
@@ -1076,7 +1415,11 @@ async fn summary_against(
         }],
     };
     let endpoint = format!("http://{}/v1", stub.address);
-    let client = reqwest::Client::new();
+    // No proxy: the request must reach the loopback stub and nothing else.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(failed("create the loopback client"))?;
     let transcript = IMPORT_LINES.join("\n");
     let (markdown, _english, chunks) = generate_meeting_summary(
         &client,
@@ -1160,9 +1503,409 @@ mod tests {
         assert!(prepare_profile(Phase::Run, Path::new("relative/profile")).is_err());
     }
 
+    fn args(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
     #[test]
-    fn usage_errors_do_not_run_anything() {
-        assert!(Phase::Run.name() != Phase::Verify.name());
+    fn only_self_test_invocations_are_handled() {
+        assert_eq!(parse_command(args(&[])), Command::Ignore);
+        assert_eq!(parse_command(args(&["run", "D:/x"])), Command::Ignore);
+        assert_eq!(
+            parse_command(args(&["--other", "run", "D:/x"])),
+            Command::Ignore
+        );
+    }
+
+    #[test]
+    fn malformed_self_test_command_lines_are_usage_errors() {
+        let cases: [&[&str]; 8] = [
+            &["--self-test"],
+            &["--self-test", "run"],
+            &["--self-test", "verify"],
+            &["--self-test", "run", "D:/x", "extra"],
+            &["--self-test", "unknown", "D:/x"],
+            &["--self-test", "RUN", "D:/x"],
+            &["--self-test", "run", ""],
+            &["--self-test", "", "D:/x"],
+        ];
+        for case in cases {
+            assert_eq!(parse_command(args(case)), Command::Usage, "{case:?}");
+        }
+    }
+
+    #[test]
+    fn well_formed_command_lines_select_the_phase_and_folder() {
+        assert_eq!(
+            parse_command(args(&["--self-test", "run", "D:/x"])),
+            Command::Execute(Phase::Run, PathBuf::from("D:/x"))
+        );
+        assert_eq!(
+            parse_command(args(&["--self-test", "verify", "D:/x"])),
+            Command::Execute(Phase::Verify, PathBuf::from("D:/x"))
+        );
+    }
+
+    fn folder_names(path: &Path) -> Vec<OsString> {
+        let mut names: Vec<OsString> = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_non_empty_profile_folder_is_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "untouched").unwrap();
+        assert!(prepare_profile(Phase::Run, dir.path()).is_err());
+        assert_eq!(folder_names(dir.path()), vec![OsString::from("keep.txt")]);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn a_run_marks_the_folder_and_verify_reads_the_same_run_id_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = prepare_profile(Phase::Run, dir.path()).unwrap();
+        let verify = prepare_profile(Phase::Verify, dir.path()).unwrap();
+        assert_eq!(run.run_id, verify.run_id);
+        assert!(uuid::Uuid::parse_str(&run.run_id).is_ok());
+        // The folder is no longer empty, so a second run is refused.
+        assert!(prepare_profile(Phase::Run, dir.path()).is_err());
+    }
+
+    #[test]
+    fn verify_refuses_unmarked_and_forged_markers() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let forged = [
+            "something else\n".to_string(),
+            format!("{MARKER_HEADER}\nrun-id: not-an-id\n"),
+            format!("{MARKER_HEADER}\nrun-id: {id}\nextra\n"),
+            format!("{MARKER_HEADER}\n"),
+            String::new(),
+        ];
+        let unmarked = tempfile::tempdir().unwrap();
+        assert!(prepare_profile(Phase::Verify, unmarked.path()).is_err());
+        for text in forged {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(PROFILE_MARKER), &text).unwrap();
+            assert!(
+                prepare_profile(Phase::Verify, dir.path()).is_err(),
+                "{text:?}"
+            );
+        }
+        let folder_marker = tempfile::tempdir().unwrap();
+        std::fs::create_dir(folder_marker.path().join(PROFILE_MARKER)).unwrap();
+        assert!(prepare_profile(Phase::Verify, folder_marker.path()).is_err());
+        // A well-formed marker is accepted.
+        let valid = tempfile::tempdir().unwrap();
+        std::fs::write(valid.path().join(PROFILE_MARKER), marker_text(&id)).unwrap();
+        assert_eq!(
+            prepare_profile(Phase::Verify, valid.path()).unwrap().run_id,
+            id
+        );
+    }
+
+    #[cfg(windows)]
+    fn make_dir_link(link: &Path, target: &Path) {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return;
+        }
+        // A junction needs no special privilege.
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the test link could not be created");
+    }
+
+    #[cfg(unix)]
+    fn make_dir_link(link: &Path, target: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn verify_refuses_a_profile_that_contains_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        prepare_profile(Phase::Run, dir.path()).unwrap();
+        assert!(prepare_profile(Phase::Verify, dir.path()).is_ok());
+        let link = dir.path().join("recordings");
+        make_dir_link(&link, outside.path());
+        let error = prepare_profile(Phase::Verify, dir.path()).unwrap_err();
+        assert!(error.contains("links"), "{error}");
+        std::fs::remove_dir(&link).unwrap();
+        assert!(prepare_profile(Phase::Verify, dir.path()).is_ok());
+    }
+
+    #[test]
+    fn a_profile_folder_that_is_a_link_is_refused_untouched() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let link = parent.path().join("profile");
+        make_dir_link(&link, target.path());
+        for phase in [Phase::Run, Phase::Verify] {
+            assert!(prepare_profile(phase, &link).is_err());
+        }
+        assert!(folder_names(target.path()).is_empty());
+        std::fs::remove_dir(&link).unwrap();
+    }
+
+    #[test]
+    fn writes_never_replace_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        write_new(&path, b"first").unwrap();
+        assert!(write_new(&path, b"second").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    }
+
+    #[test]
+    fn saved_state_paths_stay_inside_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("recordings")).unwrap();
+        std::fs::write(dir.path().join("recordings").join("audio.mp4"), b"x").unwrap();
+        assert!(profile_file(dir.path(), "recordings/audio.mp4").is_ok());
+        for bad in [
+            "",
+            "../audio.mp4",
+            "recordings/../../x",
+            "C:/Windows/notepad.exe",
+            "/etc/passwd",
+            "\\\\server\\share\\x",
+            "recordings",
+            "missing.mp4",
+        ] {
+            assert!(profile_file(dir.path(), bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn saved_state_must_belong_to_this_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let write = |text: &str| std::fs::write(&path, text).unwrap();
+        write(r#"{"schema": 1, "run_id": "a"}"#);
+        assert!(read_state(dir.path(), "a").is_ok());
+        assert!(read_state(dir.path(), "b").is_err());
+        write(r#"{"schema": 2, "run_id": "a"}"#);
+        assert!(read_state(dir.path(), "a").is_err());
+        write("not json");
+        assert!(read_state(dir.path(), "a").is_err());
+        write(&" ".repeat(MAX_STATE_BYTES as usize + 1));
+        assert!(read_state(dir.path(), "a").is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_state(dir.path(), "a").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_refused_run_reports_the_refusal_exit_code_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "untouched").unwrap();
+        let code = execute(Phase::Run, dir.path().to_path_buf()).await;
+        assert_eq!(code, EXIT_REFUSED);
+        assert_eq!(folder_names(dir.path()), vec![OsString::from("keep.txt")]);
+        let relative = execute(Phase::Run, PathBuf::from("relative/profile")).await;
+        assert_eq!(relative, EXIT_REFUSED);
+    }
+
+    #[tokio::test]
+    async fn a_refused_verify_reports_the_refusal_exit_code_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = execute(Phase::Verify, dir.path().to_path_buf()).await;
+        assert_eq!(code, EXIT_REFUSED);
+        assert!(folder_names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn exit_codes_are_distinct() {
+        let codes = [0, EXIT_FAILED, USAGE_EXIT, EXIT_RUNTIME, EXIT_REFUSED];
+        for (index, code) in codes.iter().enumerate() {
+            assert!(!codes[index + 1..].contains(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn bundled_template_list_matches_the_source_folder_and_the_bundle_config() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let mut on_disk: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".json"))
+            .collect();
+        on_disk.sort();
+        let mut listed: Vec<String> = BUNDLED_TEMPLATES
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        listed.sort();
+        assert_eq!(on_disk, listed);
+        for (name, text) in BUNDLED_TEMPLATES {
+            let template: Template = serde_json::from_str(text).unwrap();
+            assert!(!template.sections.is_empty(), "{name}");
+        }
+        // The layout check looks where the bundle configuration puts resources.
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let resources = &config["bundle"]["resources"];
+        assert_eq!(resources["templates/"], "templates/");
+        assert_eq!(
+            resources["binaries/codex-app-server-runtime.json"],
+            "binaries/codex-app-server-runtime.json"
+        );
+        assert!(resources["binaries/codex-app-server-runtime/"].is_string());
+        let sidecars: Vec<&str> = config["bundle"]["externalBin"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for name in ["llama-helper", "codex-app-server", "ffmpeg"] {
+            assert!(
+                sidecars.contains(&format!("binaries/{name}").as_str()),
+                "{name}"
+            );
+        }
+    }
+
+    fn complete_package(folder: &Path, directml: bool) {
+        for name in PACKAGED_FILES {
+            std::fs::write(folder.join(name), b"binary").unwrap();
+        }
+        if directml {
+            std::fs::write(folder.join("DirectML.dll"), b"binary").unwrap();
+        }
+        std::fs::create_dir(folder.join("templates")).unwrap();
+        for (name, text) in BUNDLED_TEMPLATES {
+            // Installers may have changed the line endings; that is accepted.
+            std::fs::write(
+                folder.join("templates").join(name),
+                text.replace("\r\n", "\n").replace('\n', "\r\n"),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(folder.join("binaries").join("codex-app-server-runtime")).unwrap();
+        std::fs::write(
+            folder
+                .join("binaries")
+                .join("codex-app-server-runtime")
+                .join("package.json"),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::write(
+            folder
+                .join("binaries")
+                .join("codex-app-server-runtime.json"),
+            format!(r#"{{"runtime_sha256": "{}"}}"#, "a".repeat(64)),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_complete_package_has_no_layout_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        complete_package(dir.path(), true);
+        assert!(layout_problems(dir.path(), true).is_empty());
+        assert!(layout_problems(dir.path(), false).is_empty());
+    }
+
+    #[test]
+    fn each_missing_or_wrong_package_element_is_named() {
+        let expectations: [(&str, &str); 6] = [
+            ("ffmpeg.exe", "ffmpeg.exe"),
+            ("onnxruntime.dll", "onnxruntime.dll"),
+            ("DirectML.dll", "DirectML.dll"),
+            (
+                "templates/standard_meeting.json",
+                "templates/standard_meeting.json",
+            ),
+            (
+                "binaries/codex-app-server-runtime.json",
+                "binaries/codex-app-server-runtime.json",
+            ),
+            (
+                "binaries/codex-app-server-runtime/package.json",
+                "codex-app-server-runtime",
+            ),
+        ];
+        for (removed, reported) in expectations {
+            let dir = tempfile::tempdir().unwrap();
+            complete_package(dir.path(), true);
+            std::fs::remove_file(dir.path().join(removed)).unwrap();
+            let problems = layout_problems(dir.path(), true);
+            assert!(
+                problems.iter().any(|problem| problem.starts_with(reported)),
+                "{removed}: {problems:?}"
+            );
+        }
+        // An empty sidecar, a changed template and an unparsable one are all unusable.
+        let dir = tempfile::tempdir().unwrap();
+        complete_package(dir.path(), false);
+        std::fs::write(dir.path().join("llama-helper.exe"), b"").unwrap();
+        std::fs::write(
+            dir.path().join("templates").join("retrospective.json"),
+            "{}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("templates").join("project_sync.json"),
+            "nope",
+        )
+        .unwrap();
+        let problems = layout_problems(dir.path(), false);
+        assert_eq!(problems.len(), 3, "{problems:?}");
+    }
+
+    async fn upgrade_import_summarize_and_reopen(cutoff: i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path();
+        let (manager, upgrade) = migration_upgrade(profile, cutoff).await.unwrap();
+        assert!(upgrade.contains("upgraded"), "{upgrade}");
+        let (_, meeting_id) = import_fixture(profile, manager.pool(), None).await.unwrap();
+        summary_stub(manager.pool(), &meeting_id).await.unwrap();
+        manager.cleanup().await.unwrap();
+
+        // A fresh open of the same files, as the verify phase does in a new process.
+        let (database, legacy) = database_paths(profile);
+        let reopened =
+            DatabaseManager::new_isolated(database.to_str().unwrap(), legacy.to_str().unwrap())
+                .await
+                .unwrap();
+        let state = json!({ "import_meeting_id": meeting_id });
+        persisted_data(reopened.pool(), &state).await.unwrap();
+        database_integrity(reopened.pool()).await.unwrap();
+        reopened.cleanup().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_database_upgrades_imports_summarizes_and_reopens() {
+        upgrade_import_summarize_and_reopen(LEGACY_SCHEMA_VERSION).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recent_schema_with_seeded_rows_upgrades_imports_summarizes_and_reopens() {
+        upgrade_import_summarize_and_reopen(RECENT_SCHEMA_VERSION).await;
+    }
+
+    #[test]
+    fn recent_cutoff_leaves_the_newest_migrations_to_apply() {
+        let migrator = sqlx::migrate!("./migrations");
+        let newer: Vec<i64> = migrator
+            .iter()
+            .map(|migration| migration.version)
+            .filter(|version| *version > RECENT_SCHEMA_VERSION)
+            .collect();
+        assert!(!newer.is_empty());
+        assert!(migrator
+            .iter()
+            .any(|migration| migration.version == RECENT_SCHEMA_VERSION));
     }
 
     #[test]

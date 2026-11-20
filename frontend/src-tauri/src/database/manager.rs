@@ -12,6 +12,22 @@ pub struct DatabaseManager {
 
 impl DatabaseManager {
     pub async fn new(tauri_db_path: &str, backend_db_path: &str) -> Result<Self> {
+        Self::open(tauri_db_path, backend_db_path, true).await
+    }
+
+    /// The same backup, repair and migration path as [`Self::new`], without the
+    /// step that reads or seals provider credentials through the platform
+    /// credential store. The packaged self-test opens its disposable profile this
+    /// way so it can never read or write the real credential store.
+    pub(crate) async fn new_isolated(tauri_db_path: &str, backend_db_path: &str) -> Result<Self> {
+        Self::open(tauri_db_path, backend_db_path, false).await
+    }
+
+    async fn open(
+        tauri_db_path: &str,
+        backend_db_path: &str,
+        migrate_credentials: bool,
+    ) -> Result<Self> {
         if let Some(parent_dir) = Path::new(tauri_db_path).parent() {
             if !parent_dir.exists() {
                 fs::create_dir_all(parent_dir).map_err(|e| sqlx::Error::Io(e))?;
@@ -56,7 +72,9 @@ impl DatabaseManager {
             log::warn!("Could not remove expired pre-migration database backups");
         }
         crate::database::repositories::summary::SummaryProcessesRepository::fail_interrupted_processes(&pool).await?;
-        crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
+        if migrate_credentials {
+            crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
+        }
         // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&pool)
