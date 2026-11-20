@@ -420,6 +420,27 @@ function panel(initial = {}) {
   return { rows, reveals, render, find, view, set: next => { props = { ...props, ...next }; }, hooks };
 }
 
+test('playback follows a late passage without fetching transcript pages the timeline already contains', () => {
+  const rows = Array.from({ length: 206 }, (_, index) => ({
+    id: String(index), text: 'Passage ' + index, timestamp: index, endTime: index + 0.9,
+  }));
+  const ui = panel({
+    usePagination: true, segments: rows.slice(0, 100), totalCount: rows.length, loadedCount: 100,
+    hasMore: true, speakerSegments: rows, timelineComplete: false, followPlayback: true, activeTime: 205.2,
+  });
+  assert.equal(ui.view(ui.render()).segments.length, 100);
+  assert.equal(ui.view(ui.render()).hasMore, true);
+  ui.set({ timelineComplete: true });
+  const props = ui.view(ui.render());
+  const view = transcriptView(props);
+  view.render();
+  assert.deepEqual(JSON.parse(JSON.stringify(view.scrolls)), [[205, { align: 'auto' }]]);
+  assert.equal(props.hasMore, false);
+  assert.equal(props.loadedCount, 206);
+  view.unmount();
+  ui.hooks.unmount();
+});
+
 test('Ctrl+F opens the find bar; typing goes to the first match; stepping wraps and loads the page first', async () => {
   const ui = panel();
   ui.render();

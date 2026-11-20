@@ -123,9 +123,11 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
-  // Search the complete transcript, not only the pages loaded so far.
-  const searchable = timelineComplete ? (speakerSegments ?? convertedSegments) :
-    (speakerSegments?.length ? speakerSegments : convertedSegments);
+  // The speaker timeline contains the same saved rows as the paged transcript.
+  // Once it is complete, playhead seeks can reach every row in the virtual list.
+  const completeTimeline = timelineComplete ? speakerSegments : undefined;
+  const displayedSegments = completeTimeline ?? convertedSegments;
+  const searchable = completeTimeline ?? (speakerSegments?.length ? speakerSegments : convertedSegments);
   const searchComplete = !usePagination || timelineComplete === true ||
     (totalCount !== undefined && searchable.length === totalCount);
   const findMatches = useMemo(() => findOpen ? findTranscriptMatches(searchable, findQuery) : [], [findOpen, searchable, findQuery]);
@@ -133,7 +135,7 @@ export function TranscriptPanel({
   matchesRef.current = findMatches;
   // The page's reveal function changes whenever pages load; searching must not restart because of that.
   const revealRef = useRef(onRevealSegment);
-  revealRef.current = onRevealSegment;
+  revealRef.current = completeTimeline ? undefined : onRevealSegment;
   const currentMatchId = useRef<string | null>(null);
   const goToMatch = useCallback(async (index: number) => {
     const step = ++findStep.current;
@@ -215,7 +217,7 @@ export function TranscriptPanel({
           speakerSegments={speakerSegments}
           sourceAttributionEnabled={sourceAttributionEnabled}
           onEditSegment={meetingId && !isRecording ? setEditing : undefined}
-          segments={convertedSegments}
+          segments={displayedSegments}
           emptyState={emptyState}
           isRecording={isRecording}
           isPaused={false}
@@ -224,10 +226,10 @@ export function TranscriptPanel({
           enableStreaming={false}
           showConfidence={true}
           disableAutoScroll={disableAutoScroll}
-          hasMore={hasMore}
-          isLoadingMore={isLoadingMore}
+          hasMore={!completeTimeline && hasMore}
+          isLoadingMore={!completeTimeline && isLoadingMore}
           totalCount={totalCount}
-          loadedCount={loadedCount}
+          loadedCount={completeTimeline?.length ?? loadedCount}
           onLoadMore={onLoadMore}
           showSpeakerLabels={showSpeakerAttribution}
           activeTime={activeTime}
