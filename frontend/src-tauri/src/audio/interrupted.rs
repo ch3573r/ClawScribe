@@ -22,6 +22,7 @@
 //! folder of a recording that is running now, and any folder when a recording
 //! is running but its folder cannot be told, is never listed. Nothing is
 //! deleted here.
+use super::provenance::RecordingProvenance;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
