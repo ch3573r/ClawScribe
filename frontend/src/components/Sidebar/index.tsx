@@ -37,6 +37,8 @@ import {
 import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
+import { useLibrarySearch } from "@/hooks/useLibrarySearch";
+import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
 
 import {
   Dialog,
@@ -90,9 +92,6 @@ const Sidebar: React.FC = () => {
     setIsSidebarResizing,
     toggleCollapse,
     handleRecordingToggle,
-    searchTranscripts,
-    searchResults,
-    isSearching,
     meetings,
     meetingsError,
     meetingsLoading,
@@ -124,7 +123,9 @@ const Sidebar: React.FC = () => {
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording, isPaused } = useRecordingState();
   const { openImportDialog } = useImportDialog();
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchQuery, handleSearchChange] = useState("");
+  const { results: searchResults, searching: isSearching, error: searchError } = useLibrarySearch(searchQuery, !isCollapsed && pathname !== "/settings", undefined, true, meetings);
+  const passageMatches = useMemo(() => new Map(searchResults?.passages.map(hit => [hit.meeting_id, hit])), [searchResults]);
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
@@ -145,84 +146,15 @@ const Sidebar: React.FC = () => {
     currentTitle: "",
   });
   const [editingTitle, setEditingTitle] = useState<string>("");
-  // Handle search input changes
-  const handleSearchChange = useCallback(
-    async (value: string) => {
-      setSearchQuery(value);
-
-      // An empty query also cancels a search that is still waiting or running.
-      await searchTranscripts(value);
-    },
-    [searchTranscripts],
-  );
-
-  // Combine search results with sidebar items
   const filteredSidebarItems = useMemo(() => {
     if (!searchQuery.trim()) return sidebarItems;
-
-    // If we have search results, highlight matching meetings
-    if (searchResults.length > 0) {
-      // Get the IDs of meetings that matched in transcripts
-      const matchedMeetingIds = new Set(
-        searchResults.map((result) => result.id),
-      );
-
-      return sidebarItems
-        .map((folder) => {
-          // Always include folders in the results
-          if (folder.type === "folder") {
-            if (!folder.children) return folder;
-
-            // Filter children based on search results or title match
-            const filteredChildren = folder.children.filter((item) => {
-              // Include if the meeting ID is in our search results
-              if (matchedMeetingIds.has(item.id)) return true;
-
-              // Or if the title matches the search query
-              return item.title
-                .toLowerCase()
-                .includes(searchQuery.toLowerCase());
-            });
-
-            return {
-              ...folder,
-              children: filteredChildren,
-            };
-          }
-
-          // For non-folder items, check if they match the search
-          return matchedMeetingIds.has(folder.id) ||
-            folder.title.toLowerCase().includes(searchQuery.toLowerCase())
-            ? folder
-            : undefined;
-        })
-        .filter((item): item is SidebarItem => item !== undefined); // Type-safe filter
-    } else {
-      // Fall back to title-only filtering if no transcript results
-      return sidebarItems
-        .map((folder) => {
-          // Always include folders in the results
-          if (folder.type === "folder") {
-            if (!folder.children) return folder;
-
-            // Filter children based on search query
-            const filteredChildren = folder.children.filter((item) =>
-              item.title.toLowerCase().includes(searchQuery.toLowerCase()),
-            );
-
-            return {
-              ...folder,
-              children: filteredChildren,
-            };
-          }
-
-          // For non-folder items, check if they match the search
-          return folder.title.toLowerCase().includes(searchQuery.toLowerCase())
-            ? folder
-            : undefined;
-        })
-        .filter((item): item is SidebarItem => item !== undefined); // Type-safe filter
-    }
+    const ids = new Set([
+      ...(searchResults?.titles.map(hit => hit.id) ?? []),
+      ...(searchResults?.passages.map(hit => hit.meeting_id) ?? []),
+    ]);
+    return sidebarItems.flatMap(item => item.type === "folder"
+      ? [{ ...item, children: item.children?.filter(child => ids.has(child.id)) }]
+      : ids.has(item.id) ? [item] : []);
   }, [sidebarItems, searchQuery, searchResults]);
 
   const handleDelete = async (itemId: string) => {
@@ -510,17 +442,11 @@ const Sidebar: React.FC = () => {
     );
   };
 
-  // Find matching transcript snippet for a meeting item
-  const findMatchingSnippet = (itemId: string) => {
-    if (!searchQuery.trim() || !searchResults.length) return null;
-    return searchResults.find((result) => result.id === itemId);
-  };
-
   const renderItem = (item: SidebarItem) => {
     const isActive = item.type === "file" && currentMeeting?.id === item.id;
     const isMeetingItem =
       item.id.includes("-") && !item.id.startsWith("intro-call");
-    const matchingResult = isMeetingItem ? findMatchingSnippet(item.id) : null;
+    const matchingResult = passageMatches.get(item.id);
     const hasTranscriptMatch = !!matchingResult;
 
     if (isCollapsed || item.type === "folder") return null;
@@ -529,7 +455,7 @@ const Sidebar: React.FC = () => {
       setCurrentMeeting({ id: item.id, title: item.title });
       const basePath = item.id.startsWith("intro-call")
         ? "/"
-        : `/meeting-details?id=${item.id}`;
+        : `/meeting-details?id=${encodeURIComponent(item.id)}`;
       router.push(basePath);
     };
 
@@ -581,11 +507,16 @@ const Sidebar: React.FC = () => {
           )}
         </div>
 
-        {hasTranscriptMatch && (
-          <div className="mt-1 rounded-md border border-warning-border/30 bg-warning p-2 text-xs leading-5 text-warning-foreground">
-            <span className="font-medium text-warning-foreground">Match:</span>{" "}
-            {matchingResult.matchContext}
-          </div>
+        {matchingResult && (
+          <Button variant="ghost" className="mt-1 block h-auto w-full whitespace-normal p-2 text-left text-xs leading-5"
+            aria-label={`Open transcript match in ${item.title}`} onClick={() => {
+              const url = transcriptPassageUrl(matchingResult.evidence);
+              if (!url) return;
+              setCurrentMeeting({ id: item.id, title: item.title });
+              router.push(url);
+            }}>
+            <span className="line-clamp-3 break-words">{matchingResult.text}</span>
+          </Button>
         )}
       </div>
     );
@@ -709,7 +640,8 @@ const Sidebar: React.FC = () => {
                 <InputGroup className="rounded-md border-sidebar-border bg-background/60 text-sidebar-foreground shadow-none">
                   <InputGroupInput
                     id="meeting-search"
-                    placeholder="Search meetings..."
+                    aria-label="Search titles and transcripts"
+                    placeholder="Search titles and transcripts"
                     value={searchQuery}
                     onChange={(e) => handleSearchChange(e.target.value)}
                     className="placeholder:text-muted-foreground"
@@ -760,6 +692,8 @@ const Sidebar: React.FC = () => {
                   <span role="status" className="text-xs text-primary">Searching…</span>
                 </div>
               )}
+              {searchError && <p role="alert" className="mb-2 px-1 text-xs text-destructive">{searchError}</p>}
+              {searchResults?.limited && <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">Limited results. Try more specific text.</p>}
 
               <div className="flex-1 space-y-3 overflow-y-auto pr-1 custom-scrollbar">
                 {meetingGroups.map((group) => (
@@ -776,7 +710,7 @@ const Sidebar: React.FC = () => {
                   </div>
                 )}
 
-                {meetingGroups.length === 0 && !(meetingsError && meetings.length === 0) && (
+                {meetingGroups.length === 0 && !isSearching && !searchError && !searchResults?.limited && !(meetingsError && meetings.length === 0) && (
                   <div className="rounded-md border border-sidebar-border bg-background/60 px-3 py-5 text-center text-sm text-muted-foreground">
                     No meetings found.
                   </div>

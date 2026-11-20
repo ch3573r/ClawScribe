@@ -30,6 +30,7 @@ function MeetingDetailsContent() {
   const meetingId = searchParams.get('id');
   const source = searchParams.get('source'); // Check if navigated from recording
   const evidenceToken = searchParams.get('evidence');
+  const fromArchive = searchParams.get('from') === 'archive';
   const { setCurrentMeeting, refetchMeetings, stopSummaryPolling } = useSidebar();
   const { isAutoSummary } = useConfig(); // Get auto-summary toggle state
   const router = useRouter();
@@ -370,6 +371,7 @@ function MeetingDetailsContent() {
     key={meetingDetails.id}
     meeting={meetingDetails}
     evidenceToken={evidenceToken}
+    fromArchive={fromArchive}
     summaryData={meetingSummary}
     summaryRunning={summaryRunning}
     shouldAutoGenerate={shouldAutoGenerate}

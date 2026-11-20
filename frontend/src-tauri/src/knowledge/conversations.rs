@@ -42,6 +42,31 @@ pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<ConversationOwner>,
         })
         .collect())
 }
+
+pub async fn library_scope(
+    pool: &SqlitePool,
+    owner: &ConversationOwner,
+) -> Result<Option<MeetingFilter>, String> {
+    if !matches!(owner, ConversationOwner::Library(_)) {
+        return Err("Choose a saved library conversation".into());
+    }
+    let scope: Option<String> = sqlx::query_scalar(
+        "SELECT scope_json FROM knowledge_requests WHERE owner_id=? ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(owner_key(owner)?)
+    .fetch_optional(pool)
+    .await
+    .map_err(failure)?;
+    match scope {
+        None => Ok(None),
+        // Backup restore redacts scopes that refer to unavailable sources.
+        Some(json) if json == "{}" => Ok(None),
+        Some(json) => match serde_json::from_str(&json) {
+            Ok(KnowledgeScope::Library { filter }) => Ok(Some(filter)),
+            _ => Err("Could not read this conversation's saved scope".into()),
+        },
+    }
+}
 pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
     if request.live_reference_scope.is_some()
         || uuid::Uuid::parse_str(&request.request_id)
@@ -61,7 +86,13 @@ pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
         {
             Ok(())
         }
-        (ConversationOwner::Library(_), KnowledgeScope::Library { .. }) => Ok(()),
+        (ConversationOwner::Library(_), KnowledgeScope::Library { filter }) => {
+            if filter.all_meetings || !filter.meeting_ids.is_empty() {
+                Ok(())
+            } else {
+                Err("Choose saved meetings or explicitly allow all saved meetings".into())
+            }
+        }
         _ => Err("Conversation owner and scope do not match".into()),
     }
 }
@@ -649,6 +680,13 @@ pub(crate) mod tests {
             validate_request(&input).is_err(),
             "library owner cannot use meeting scope"
         );
+        input.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                tags: vec!["Fixture".into()],
+                ..Default::default()
+            },
+        };
+        assert!(validate_request(&input).is_err());
         input.search.scope = KnowledgeScope::Library {
             filter: MeetingFilter {
                 all_meetings: true,

@@ -1,5 +1,9 @@
 //! Read-only access to the saved meeting library. Never run application startup or recovery here.
 use crate::audio::{constants::AUDIO_EXTENSIONS, recording_preferences};
+use crate::knowledge::{
+    store::literal,
+    types::{KnowledgeError, KnowledgeScope, MeetingFilter, TagMatch},
+};
 use crate::summary::{processor::validate_saved_summary, sources::strip_source_links};
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -76,11 +80,100 @@ pub(super) async fn call(
                 .ok_or("Invalid search text.")?;
             list_meetings(&mut conn, Some(query), limit, offset).await
         }
+        "search_passages" => {
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty() && s.chars().count() <= literal::MAX_QUERY_CHARS)
+                .ok_or("Invalid search text.")?
+                .to_owned();
+            let scope = passage_scope(args)?;
+            let permit = literal::search_permit()
+                .await
+                .map_err(|_| "A passage search is still in progress. Try again shortly.")?;
+            let runtime = tokio::runtime::Handle::current();
+            let matches = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                runtime.block_on(literal::search(
+                    &mut conn,
+                    &query,
+                    scope.as_ref(),
+                    25,
+                    false,
+                    false,
+                ))
+            })
+            .await
+            .map_err(|_| DB_ERROR)?
+            .map_err(|error| match error {
+                KnowledgeError::InvalidInput => "Invalid passage search filters.",
+                _ => DB_ERROR,
+            })?;
+            Ok(json!({ "passages": matches.passages, "limited": matches.limited }))
+        }
         "get_meeting" => meeting(&mut conn, identifier()?, text_offset as usize).await,
         "get_transcript" => transcript(&mut conn, identifier()?, limit, offset, text_offset).await,
         "get_audio" => audio(&mut conn, app_data, identifier()?).await,
         _ => Err("Unknown meeting tool."),
     }
+}
+
+fn passage_scope(args: &Map<String, Value>) -> Result<Option<KnowledgeScope>, &'static str> {
+    const INVALID: &str = "Invalid passage search filters.";
+    let date = |key| {
+        args.get(key)
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|date| date.len() == 10)
+                    .map(str::to_owned)
+                    .ok_or(INVALID)
+            })
+            .transpose()
+    };
+    let (from, to) = (date("from")?, date("to")?);
+    let tags = match args.get("tags") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .filter(|tags| tags.len() <= 20)
+            .ok_or(INVALID)?
+            .iter()
+            .map(|tag| {
+                tag.as_str()
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty() && tag.chars().count() <= 60)
+                    .map(str::to_owned)
+                    .ok_or(INVALID)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    let tag_mode = match args.get("tag_mode") {
+        None => TagMatch::Any,
+        Some(value) if value.as_str() == Some("any") => TagMatch::Any,
+        Some(value) if value.as_str() == Some("all") => TagMatch::All,
+        _ => return Err(INVALID),
+    };
+    let untagged = args
+        .get("untagged")
+        .map(|v| v.as_bool().ok_or(INVALID))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(
+        (untagged || !tags.is_empty() || from.is_some() || to.is_some()).then_some(
+            KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    all_meetings: true,
+                    tags,
+                    tag_mode,
+                    untagged,
+                    from,
+                    to,
+                    ..Default::default()
+                },
+            },
+        ),
+    )
 }
 
 #[derive(FromRow, Serialize)]
@@ -486,6 +579,8 @@ mod tests {
                   timestamp TEXT, speaker TEXT, audio_start_time REAL, audio_end_time REAL);
              CREATE TABLE meeting_notes (meeting_id TEXT PRIMARY KEY, notes_markdown TEXT, notes_json TEXT);
              CREATE TABLE summary_processes (meeting_id TEXT PRIMARY KEY, result TEXT);
+             CREATE TABLE meeting_tags (meeting_id TEXT, tag TEXT);
+             CREATE TABLE knowledge_sources (meeting_id TEXT, revision INTEGER, generation INTEGER);
              CREATE TABLE knowledge_document_blocks (text TEXT);
              INSERT INTO meetings VALUES ('a','Planning','2024-02-01','2024-02-02',NULL),('b','Review','2024-02-01','2024-02-01',NULL);
              INSERT INTO transcripts VALUES ('second','a','Corrected 10%','Superseded','00:01','Alex',1.0,2.0),
@@ -553,6 +648,47 @@ mod tests {
                 .await
                 .unwrap_err(),
             NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn literal_passages_use_inclusive_dates_and_unicode_project_tags() {
+        let (root, mut writer) = fixture().await;
+        sqlx::raw_sql(
+            "INSERT INTO meeting_tags VALUES ('a','Öffnung'),('a','Fixture');
+             UPDATE transcripts SET transcript='📘 ÄPFEL 50%_ da', original_transcript='obsolete' WHERE id='second';
+             INSERT INTO transcripts VALUES ('other','b','Äpfel 50%_ elsewhere',NULL,'00:00',NULL,0.0,1.0);",
+        ).execute(&mut writer).await.unwrap();
+        let hits = run(
+            root.path(),
+            "search_passages",
+            json!({
+                "query": "äpfel 50%_", "from": "2024-02-01", "to": "2024-02-01",
+                "tags": ["ÖFFNUNG", "Fixture"], "tag_mode": "all"
+            }),
+        )
+        .await;
+        assert_eq!(hits["passages"].as_array().unwrap().len(), 1);
+        assert_eq!(hits["passages"][0]["meeting_id"], "a");
+        assert_eq!(hits["passages"][0]["transcript_id"], "second");
+        assert_eq!(hits["passages"][0]["text"], "📘 ÄPFEL 50%_ da");
+        assert_eq!(hits["limited"], false);
+        for args in [
+            json!({"query":"obsolete"}),
+            json!({"query":"Äpfel", "tags":["Fixture","Missing"], "tag_mode":"all"}),
+            json!({"query":"Äpfel", "from":"2024-02-02"}),
+        ] {
+            assert_eq!(
+                run(root.path(), "search_passages", args).await["passages"],
+                json!([])
+            );
+        }
+        let invalid = json!({"query":"Äpfel", "from":"2024-02-30"});
+        assert_eq!(
+            call(root.path(), "search_passages", invalid.as_object().unwrap())
+                .await
+                .unwrap_err(),
+            "Invalid passage search filters."
         );
     }
 

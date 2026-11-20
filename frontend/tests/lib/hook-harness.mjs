@@ -39,6 +39,10 @@ export function createHookHarness() {
       return value;
     },
     unmount() { slots.forEach(slot => slot.cleanup?.()); },
+    reset() {
+      slots.forEach(slot => slot.cleanup?.());
+      slots.length = 0;
+    },
   };
 }
 

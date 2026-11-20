@@ -2,7 +2,8 @@
 import { Children, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Info, MoreHorizontal } from "lucide-react";
+import { Copy, Info, MoreHorizontal } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -102,7 +103,17 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const ready = !inputDisabled && !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
   // Draft keystrokes must not rebuild the Markdown/citation tree for the entire history.
   const messages = useMemo(() => state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
-    <p className="mb-1 text-xs font-medium text-muted-foreground">{message.role === "user" ? "You" : "Assistant"}{message.status !== "completed" ? ` · ${message.status === "failed" ? "Failed" : message.status === "cancelled" ? "Cancelled" : "Pending"}` : ""}</p>
+    <div className="mb-1 flex items-center justify-between gap-2">
+      <p className="text-xs font-medium text-muted-foreground">{message.role === "user" ? "You" : "Assistant"}{message.status !== "completed" ? ` · ${message.status === "failed" ? "Failed" : message.status === "cancelled" ? "Cancelled" : "Pending"}` : ""}</p>
+      {message.role === "assistant" && (message.status === "completed" || message.legacy) && message.content.trim() && <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="Copy answer" title="Copy answer" onClick={async () => {
+        try {
+          await globalThis.navigator.clipboard.writeText(message.content);
+          toast.success("Answer copied");
+        } catch {
+          toast.error("Could not copy the answer");
+        }
+      }}><Copy /></Button>}
+    </div>
     {message.reply ? <CitedAnswer reply={message.reply} state={{inspect:state.inspect}} /> : <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>}
   </article>), [state.messages, state.inspect]);
   useEffect(() => { end.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [state.messages, state.sending]);

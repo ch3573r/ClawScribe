@@ -242,6 +242,13 @@ pub async fn knowledge_list_library_conversations(
     conversations::list_libraries(state.db_manager.pool()).await
 }
 #[tauri::command]
+pub async fn knowledge_library_conversation_scope(
+    state: State<'_, AppState>,
+    owner: ConversationOwner,
+) -> Result<Option<MeetingFilter>, String> {
+    conversations::library_scope(state.db_manager.pool(), &owner).await
+}
+#[tauri::command]
 pub async fn knowledge_clear_history(
     state: State<'_, AppState>,
     runtime: State<'_, KnowledgeState>,

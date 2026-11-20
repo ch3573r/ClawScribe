@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AskRequest, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, LiveAskRequest, LiveReply, LiveSnapshot, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
+import type { AskRequest, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, LiveAskRequest, LiveReply, LiveSnapshot, MeetingFilter, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
 
 /** The single native boundary for meeting memory. No provider credentials enter the UI request. */
 export const knowledgeService = {
@@ -13,6 +13,7 @@ export const knowledgeService = {
   clear: (owner:ConversationOwner) => invoke<number>('knowledge_clear_history',{owner}),
   createConversation: () => invoke<ConversationOwner>('knowledge_create_library_conversation'),
   conversations: () => invoke<ConversationOwner[]>('knowledge_list_library_conversations'),
+  conversationScope: (owner:ConversationOwner) => invoke<MeetingFilter | null>('knowledge_library_conversation_scope',{owner}),
   resolve: (reference:EvidenceRef) => invoke<ResolvedEvidence>('knowledge_resolve_evidence',{reference}),
   indexStatus: () => invoke<IndexStatus>('knowledge_index_status'),
   modelStatus: () => invoke<ModelStatus>('knowledge_model_status'),

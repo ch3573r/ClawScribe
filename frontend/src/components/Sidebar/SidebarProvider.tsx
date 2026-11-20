@@ -9,7 +9,6 @@ import { MeetingTag } from '@/lib/library';
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MAX, readStoredSidebarWidth } from '@/lib/sidebarWidth';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSummaryPolling } from '@/hooks/useSummaryPolling';
-import { createLatestSearch } from '@/lib/latest-search';
 
 
 interface SidebarItem {
@@ -26,14 +25,6 @@ export interface CurrentMeeting {
   created_at?: string;
   updated_at?: string;
 }
-
-// Search result type for transcript search
-interface TranscriptSearchResult {
-  id: string;
-  title: string;
-  matchContext: string;
-  timestamp: string;
-};
 
 interface SidebarContextType {
   projectTags: MeetingTag[];
@@ -60,9 +51,6 @@ interface SidebarContextType {
   isMeetingActive: boolean;
   setIsMeetingActive: (active: boolean) => void;
   handleRecordingToggle: () => void;
-  searchTranscripts: (query: string) => Promise<void>;
-  searchResults: TranscriptSearchResult[];
-  isSearching: boolean;
   setServerAddress: (address: string) => void;
   serverAddress: string;
   transcriptServerAddress: string;
@@ -136,8 +124,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const meetingLoads = React.useRef(0);
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
   const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSummaryPolling();
@@ -258,18 +244,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     // Starting is handled by the Home component; stopping by the provider.
   };
 
-  // Function to search through meeting transcripts
-  // Waits for a 200 ms pause in typing and shows only the answer to the latest query.
-  const searcher = React.useMemo(() => createLatestSearch<TranscriptSearchResult>({
-    delayMs: 200,
-    run: query => invoke<TranscriptSearchResult[]>('api_search_transcripts', { query }),
-    onResults: setSearchResults,
-    onSearching: setIsSearching,
-    onError: error => console.error('Error searching transcripts:', error),
-  }), []);
-  useEffect(() => () => searcher.cancel(), [searcher]);
-  const searchTranscripts = React.useCallback((query: string) => searcher.search(query), [searcher]);
-
   return (
     <SidebarContext.Provider value={{
       projectTags,
@@ -294,9 +268,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       isMeetingActive,
       setIsMeetingActive,
       handleRecordingToggle,
-      searchTranscripts,
-      searchResults,
-      isSearching,
       setServerAddress,
       serverAddress,
       transcriptServerAddress,

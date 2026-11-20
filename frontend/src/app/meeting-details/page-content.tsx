@@ -26,10 +26,14 @@ import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
 import { useSpeakerLabelVisibility } from '@/hooks/useSpeakerLabelVisibility';
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+import { ChevronLeft } from 'lucide-react';
 
 export default function PageContent({
   meeting,
   evidenceToken,
+  fromArchive,
   summaryData,
   summaryRunning = false,
   shouldAutoGenerate = false,
@@ -50,6 +54,7 @@ export default function PageContent({
 }: {
   meeting: any;
   evidenceToken?: string | null;
+  fromArchive?: boolean;
   summaryData: Summary | null;
   summaryRunning?: boolean;
   shouldAutoGenerate?: boolean;
@@ -312,6 +317,9 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex h-full flex-col bg-background"
     >
+      {fromArchive && <div className="shrink-0 px-4 pt-2">
+        <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />Back to archive</Link></Button>
+      </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
       <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}

@@ -19,10 +19,10 @@ import { EvidencePreview } from "./EvidencePreview";
 import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
 import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferenceButton";
 import type { ProjectFilter } from "@/lib/library";
-import type { IndexStatus, SearchMode } from "@/types/knowledge";
+import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
 
-export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFilter, projectControl }: {
-  meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; projectControl?: ReactNode;
+export function KnowledgeArchive({ active = true, meetings, meetingTitles = meetings, projectFilter, setProjectFilter, projectControl }: {
+  active?: boolean; meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; setProjectFilter?: (filter: ProjectFilter) => void; projectControl?: ReactNode;
 }) {
   const { modelConfig } = useConfig();
   const [query, setQuery] = useState("");
@@ -39,22 +39,41 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
   const [toolsOpen, setToolsOpen] = useState(false);
   const [referenceReveal, setReferenceReveal] = useState(0);
   useEffect(() => {
-    let active = true, reading = false;
+    if (!active) return;
+    let visible = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = async () => {
-      if (reading) return;
-      reading = true;
-      try { const value = await knowledgeService.indexStatus(); if (active) { setIndex(value); setIndexError(false); } }
-      catch { if (active) setIndexError(true); }
-      finally { reading = false; }
+      try {
+        const value = await knowledgeService.indexStatus();
+        if (!visible) return;
+        setIndex(value);
+        setIndexError(false);
+        if (value.semantic_enabled && value.pending > 0 && value.reason !== "paused") {
+          timer = setTimeout(refresh, 15_000);
+        }
+      } catch {
+        if (!visible) return;
+        setIndexError(true);
+        timer = setTimeout(refresh, 15_000);
+      }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), 1000);
-    return () => { active = false; clearInterval(timer); };
-  }, []);
+    return () => { visible = false; clearTimeout(timer); };
+  }, [active]);
   const semanticReady = !!index?.semantic_enabled && index.semantic_ready > 0 && !indexError;
   const mode = semanticReady ? chosenMode ?? "hybrid" : "keyword";
   const scope = useMemo(() => libraryScope(selected, all, projectFilter, from, to), [selected, all, projectFilter, from, to]);
-  const state = useKnowledgeSearch(scope, null, { provider: modelConfig?.provider, model: modelConfig?.model });
+  const state = useKnowledgeSearch(scope, null, { provider: modelConfig?.provider, model: modelConfig?.model }, {
+    active,
+    draftMeetingIds: selected,
+    restoreScope: (filter: MeetingFilter | null) => {
+      setAll(filter?.all_meetings ?? false);
+      setSelected(filter?.meeting_ids ?? []);
+      setFrom(filter?.from ?? "");
+      setTo(filter?.to ?? "");
+      setProjectFilter?.({ tags: filter?.tags ?? [], untagged: filter?.untagged ?? false, mode: filter?.tag_mode ?? "any" });
+    },
+  });
   const matchingMeetings = meetings.filter(meeting => meeting.title.toLocaleLowerCase().includes(meetingQuery.trim().toLocaleLowerCase()));
   const invalidDates = !!from && !!to && from > to;
   const sourcesReady = (all || selected.length > 0) && !invalidDates;
@@ -137,12 +156,12 @@ export function KnowledgeArchive({ meetings, meetingTitles = meetings, projectFi
     </fieldset>
     <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
       inputDisabled={!sourcesReady}
-      emptyState={!all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
+      emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
         <h3 className="text-lg font-semibold">Choose meetings to ask about</h3>
         <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>
         <Button className="mt-4" onClick={() => setPickerOpen(true)}>Choose meetings</Button>
       </div> : undefined}
     /></div>
-    <EvidencePreview state={state} />
+    {active && <EvidencePreview state={state} />}
   </section>;
 }

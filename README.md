@@ -150,6 +150,11 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 
 ## Meeting Notes And Exports
 
+Search saved meeting titles and transcript passages from the sidebar or
+**Meetings → Archive**. Archive search supports project and date filters and
+opens passage matches at their verified transcript position, including later
+pages. Return to Archive to keep the current search and filters.
+
 The meeting-memory preview in this source branch adds **Meetings → Meeting
 memory** in a separate tab: use the searchable picker to select saved meetings
 explicitly, or choose all saved meetings, then
@@ -159,7 +164,8 @@ works without downloading a model; optional local semantic retrieval uses the
 embedding model under **Settings → Meeting memory**. Installed files are
 verified when first needed after startup or enabling semantic search. Results show the mode
 actually used, and answers show the configured and executed summary provider.
-The first question starts a saved conversation automatically. Model settings
+The first question starts a saved conversation automatically. Conversations
+restore their last submitted meeting scope, and answers can be copied. Model settings
 show download bytes and integrity verification separately from indexing. The
 pinned multilingual E5 model and tokenizer use ONNX Runtime locally on CPU;
 healthy files can be verified without downloading them again.

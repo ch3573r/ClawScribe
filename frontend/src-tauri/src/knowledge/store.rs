@@ -2,6 +2,7 @@
 use super::{scheduler::VerificationStatus, types::*};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
+pub(crate) mod literal;
 pub const READ_BYTES: usize = 16 * 1024;
 pub const DISPLAY_BYTES: usize = 1024;
 
@@ -75,6 +76,7 @@ impl Drop for CancelRead {
 struct ReadContext {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     background: bool,
+    literal_budget: Option<literal::Budget>,
 }
 impl ReadContext {
     /// Setup has no application-owned raw SQLite resource yet. Dropping its
@@ -132,6 +134,7 @@ async fn read_snapshot<T: Send + 'static>(
     let context = ReadContext {
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         background,
+        literal_budget: None,
     };
     let waiter = CancelRead(context.cancelled.clone());
     let runtime = tokio::runtime::Handle::current();
@@ -238,6 +241,9 @@ impl<'a> TextBlob<'a> {
             return Err(KnowledgeError::InvalidInput);
         }
         let mut bytes = vec![0u8; max.min(self.len - start)];
+        if let Some(budget) = &context.literal_budget {
+            budget.charge(bytes.len())?;
+        }
         if !bytes.is_empty() {
             let status = unsafe {
                 libsqlite3_sys::sqlite3_blob_read(
@@ -414,8 +420,25 @@ fn scan(
 ) -> Result<Option<(usize, usize)>, KnowledgeError> {
     let mut terms = terms.to_vec();
     terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
-    let mut patterns = vec![query.trim().to_lowercase()];
-    patterns.extend(terms.into_iter().map(|term| term.to_lowercase()));
+    let mut patterns = vec![literal_fold(query.trim())];
+    patterns.extend(terms.into_iter().map(|term| literal_fold(&term)));
+    scan_patterns(blob, &patterns, context)
+}
+
+fn folded_char(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase()
+        .map(|lower| if lower == 'ς' { 'σ' } else { lower })
+}
+
+fn literal_fold(text: &str) -> String {
+    text.chars().flat_map(folded_char).collect()
+}
+
+fn scan_patterns(
+    blob: &TextBlob<'_>,
+    patterns: &[String],
+    context: &ReadContext,
+) -> Result<Option<(usize, usize)>, KnowledgeError> {
     let mut best: Option<(usize, usize, usize)> = None;
     let mut start = 0;
     while start < blob.len {
@@ -426,7 +449,7 @@ fn scan(
         let mut folded = String::with_capacity(text.len() * 3);
         let mut map = Vec::with_capacity(text.len() * 3);
         for (offset, ch) in text.char_indices() {
-            for lower in ch.to_lowercase() {
+            for lower in folded_char(ch) {
                 folded.push(lower);
                 for _ in 0..lower.len_utf8() {
                     map.push((start + offset, start + offset + ch.len_utf8()));

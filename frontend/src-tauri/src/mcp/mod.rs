@@ -60,7 +60,7 @@ struct Tool {
     text_offset: bool,
 }
 
-static TOOLS: [Tool; 5] = [
+static TOOLS: [Tool; 6] = [
     Tool {
         name: "list_meetings",
         description: "List saved meetings, newest first. Use next_offset for the next page.",
@@ -73,6 +73,13 @@ static TOOLS: [Tool; 5] = [
         description: "Search saved meeting titles and transcripts for literal text. Use next_offset for the next page.",
         required_text: Some("query"),
         paged: true,
+        text_offset: false,
+    },
+    Tool {
+        name: "search_passages",
+        description: "Find up to 25 literal matches in current saved transcripts, optionally limited by inclusive dates and project tags. Results include meeting and segment IDs, speaker and available recording time.",
+        required_text: Some("query"),
+        paged: false,
         text_offset: false,
     },
     Tool {
@@ -118,6 +125,17 @@ impl Tool {
         if self.text_offset {
             properties.insert("text_offset".into(), offset);
         }
+        if self.name == "search_passages" {
+            for key in ["from", "to"] {
+                properties.insert(key.into(), json!({"type":"string","format":"date","description":"Inclusive date (YYYY-MM-DD)."}));
+            }
+            properties.insert("tags".into(), json!({"type":"array","maxItems":20,"items":{"type":"string","minLength":1,"maxLength":60,"pattern":"\\S"}}));
+            properties.insert(
+                "tag_mode".into(),
+                json!({"type":"string","enum":["any","all"],"default":"any"}),
+            );
+            properties.insert("untagged".into(), json!({"type":"boolean","default":false,"description":"Only meetings without project tags."}));
+        }
         json!({
             "name":self.name, "description":self.description,
             "inputSchema":{"type":"object","properties":properties,"required":self.required_text.iter().collect::<Vec<_>>(),"additionalProperties":false},
@@ -147,6 +165,13 @@ impl Tool {
                         .ok_or("Use a limit from 1 to 100 and nonnegative integer offsets up to 2147483647.")?,
                 };
                 args.insert(key.into(), Value::from(n));
+            }
+        }
+        if self.name == "search_passages" {
+            for key in ["from", "to", "tags", "tag_mode", "untagged"] {
+                if let Some(value) = supplied.get(key) {
+                    args.insert(key.into(), value.clone());
+                }
             }
         }
         if supplied.keys().any(|key| !args.contains_key(key)) {
@@ -471,7 +496,7 @@ mod tests {
         ready(&mut server);
         let listed = server.handle(request(4, "tools/list", json!({}))).unwrap();
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
         assert!(tools
             .iter()
             .all(|t| t["annotations"]["readOnlyHint"] == true));

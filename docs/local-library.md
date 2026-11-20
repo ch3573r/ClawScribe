@@ -13,12 +13,15 @@ is closed.
 | --- | --- |
 | `list_meetings` | Saved meeting IDs, titles and dates, newest first. |
 | `search_meetings` | Meetings matching literal text in their title or current transcript. |
+| `search_passages` | Up to 25 literal matches in current transcripts, with meeting and segment IDs, speaker and available recording time. Accepts inclusive `from` and `to` dates, `tags`, `tag_mode` (`any` or `all`), and `untagged`. |
 | `get_meeting` | Saved meeting details, summary and notes. |
 | `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
 | `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
 
-Use the meeting ID from a list or search result. Follow the returned offsets
-for long transcripts and notes. Calendar invitations stored in the desktop
+Use the meeting ID from a list or search result. For passage matches, use
+the segment ID when reading the transcript. If passage search reports
+`limited`, narrow the query or date and project filters. Follow the returned
+offsets for long transcripts and notes. Calendar invitations stored in the desktop
 calendar picker and attached reference documents are outside this interface.
 
 Enabling this setting grants access to local clients running under your user
@@ -26,21 +29,39 @@ account. A client may send retrieved content to its own provider. Turning the
 switch off blocks new reads, including from clients already connected. Copies
 already read are under the client's control.
 
+## Archive search
+
+Open **Meetings → Archive** to browse saved meetings or search titles and
+transcripts together. Search ignores letter case and treats punctuation like
+`%` and `_` literally. Choose a Project filter or inclusive date range to
+narrow both kinds of results. Select **Show in transcript** to open the
+verified segment, including segments on later transcript pages. **Back to
+archive** restores the search text, project filters, dates, and sort order
+for the current app session. The sidebar offers the same search with one
+passage preview per matching meeting.
+
+Queries accept up to 256 characters. The desktop shows up to 50 title matches
+and 50 passage matches. Searches stop at a scan or time limit and tell you
+when results are limited. Browse or narrow the query and filters to search
+a smaller set. Literal search needs no index download or answer provider.
+
 ## Meeting memory
 
-The **Meetings** tab opens the saved archive. Switch to **Meeting memory** for
-transcript search and cited questions. Its searchable picker lets you select
-meetings and remove selected chips, or check **Search
-all saved meetings**. The shared Project filter applies Any/All/Untagged
-semantics to title browsing and retrieval; **From** and **To** dates are
-inclusive. All-meetings mode searches every meeting eligible under those filters;
+Switch to **Meeting memory** for ranked source search and cited questions. Its
+searchable picker lets you select meetings and remove selected chips, or check
+**Search all saved meetings**. Project filters and inclusive dates constrain
+that conversation's sources. All-meetings mode searches every meeting eligible under those filters;
 turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
 search. Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
 
 The first question creates a saved library conversation automatically. You can
-also create a new conversation or choose an existing one.
+also create a new conversation or choose an existing one. Opening an existing
+conversation restores its last submitted meeting scope, including the project
+and date filters. Changes made since the last question are remembered while the
+app is open. Select reference files for the current conversation before asking
+with them. Use **Copy answer** to copy an assistant response as Markdown.
 Questions use the summary provider configured in Settings. That provider may
 be local or cloud; retrieval and embedding inference remain local. Answers
 show the executed provider/model and retrieval mode. Cancel and scope changes

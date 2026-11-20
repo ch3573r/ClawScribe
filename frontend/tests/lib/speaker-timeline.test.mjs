@@ -203,6 +203,7 @@ async function page(attribution, segments, updatedSegments) {
     '@/components/MeetingDetails/MeetingHeader': { MeetingHeader: 'MeetingHeader' },
     '@/components/MeetingAttendance': { SavedMeetingAttendance: 'SavedMeetingAttendance' },
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
+    '@/components/ui/button': { Button: 'button' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
   });
   const props = { meeting: { id: 'synthetic-meeting', folder_path: 'synthetic-folder' }, summaryData: null, segments: segments.slice(0, 100), timelineSegments: segments, totalCount: segments.length };

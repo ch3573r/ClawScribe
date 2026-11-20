@@ -20,7 +20,7 @@ import { AttachReferenceButton } from "./AttachReferenceButton";
 import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
 import { libraryScope } from "@/lib/knowledge-state";
 import type { ProjectFilter } from "@/lib/library";
-import type { KnowledgeScope, SearchMode } from "@/types/knowledge";
+import type { KnowledgeScope, MeetingFilter, SearchMode } from "@/types/knowledge";
 
 export function MeetingChat({
   meetingId,
@@ -105,6 +105,8 @@ export function MeetingChat({
     untagged: false,
     mode: "any",
   });
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [mode, setMode] = useState<SearchMode>("keyword");
   const { meetings, projectTags, projectTagsError, projectTagsLoading } =
     useSidebar();
@@ -112,14 +114,24 @@ export function MeetingChat({
   const scope = useMemo<KnowledgeScope>(
     () =>
       expanded
-        ? libraryScope(selected, all, project)
+        ? libraryScope(selected, all, project, from, to)
         : { kind: "meeting", meeting_id: meetingId },
-    [expanded, selected, all, project, meetingId],
+    [expanded, selected, all, project, meetingId, from, to],
   );
   const state = useKnowledgeSearch(
     scope,
     expanded ? null : { kind: "meeting", id: meetingId },
     { provider, model },
+    {
+      draftMeetingIds: selected,
+      restoreScope: (filter: MeetingFilter | null) => {
+        setAll(filter?.all_meetings ?? false);
+        setSelected(filter?.meeting_ids ?? []);
+        setProject({ tags: filter?.tags ?? [], untagged: filter?.untagged ?? false, mode: filter?.tag_mode ?? "any" });
+        setFrom(filter?.from ?? "");
+        setTo(filter?.to ?? "");
+      },
+    },
   );
   const currentState = useRef(state);
   currentState.current = state;
@@ -157,6 +169,11 @@ export function MeetingChat({
             <ChevronDown className={filtersOpen ? "rotate-180" : ""} />Filters
           </Button>
           {filtersOpen && <div id={`meeting-chat-filters-${meetingId}`} className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1 text-xs">From<Input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label>
+              <label className="space-y-1 text-xs">To<Input type="date" value={to} onChange={event => setTo(event.target.value)} /></label>
+            </div>
+            {from && to && from > to && <p role="alert" className="text-xs text-destructive">The start date must be on or before the end date.</p>}
             <label className="block text-xs">Projects (Ctrl or Command selects several)
               <MultiSelect multiple aria-label="Question project filters" disabled={projectTagsLoading || !!projectTagsError || project.untagged} value={project.tags}
                 className="mt-1 block w-full rounded border border-input bg-background p-2 text-sm"

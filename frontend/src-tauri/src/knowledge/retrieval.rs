@@ -45,6 +45,14 @@ pub async fn freeze_scope_in_connection(
     connection: &mut sqlx::SqliteConnection,
     scope: &KnowledgeScope,
 ) -> Result<FrozenScope, KnowledgeError> {
+    freeze_scope_rows(connection, scope, None).await
+}
+
+pub(super) async fn freeze_scope_rows(
+    connection: &mut sqlx::SqliteConnection,
+    scope: &KnowledgeScope,
+    row_limit: Option<i64>,
+) -> Result<FrozenScope, KnowledgeError> {
     let filter = match scope {
         KnowledgeScope::Meeting { meeting_id } => MeetingFilter {
             meeting_ids: vec![meeting_id.clone()],
@@ -71,7 +79,20 @@ pub async fn freeze_scope_in_connection(
         return Err(KnowledgeError::InvalidInput);
     }
     let mut ids = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
-    let rows=sqlx::query("SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id ORDER BY m.id").fetch_all(&mut *connection).await?;
+    let rows = sqlx::query(
+        "SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id
+         WHERE (?1 IS NULL OR substr(m.created_at,1,10)>=?1) AND (?2 IS NULL OR substr(m.created_at,1,10)<=?2)
+         ORDER BY m.id LIMIT ?3",
+    )
+    // Leave saved-answer scope semantics intact for older date formats.
+    .bind(row_limit.and(filter.from.as_deref()))
+    .bind(row_limit.and(filter.to.as_deref()))
+    .bind(row_limit.map_or(-1, |limit| limit + 1))
+    .fetch_all(&mut *connection)
+    .await?;
+    if row_limit.is_some_and(|limit| rows.len() > limit as usize) {
+        return Err(KnowledgeError::Busy);
+    }
     for row in rows {
         let id: String = row.try_get("id")?;
         let date: String = row.try_get("created_at")?;

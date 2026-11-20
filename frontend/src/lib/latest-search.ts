@@ -5,8 +5,9 @@
  */
 export interface LatestSearchOptions<T> {
   delayMs?: number;
-  run: (query: string) => Promise<T[]>;
-  onResults: (results: T[]) => void;
+  run: (query: string) => Promise<T>;
+  empty: T;
+  onResults: (results: T) => void;
   onSearching: (searching: boolean) => void;
   onError?: (error: unknown) => void;
 }
@@ -18,7 +19,7 @@ export interface LatestSearch {
   cancel: () => void;
 }
 
-export function createLatestSearch<T>({ delayMs = 200, run, onResults, onSearching, onError }: LatestSearchOptions<T>): LatestSearch {
+export function createLatestSearch<T>({ delayMs = 200, run, empty, onResults, onSearching, onError }: LatestSearchOptions<T>): LatestSearch {
   let latest = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let settlePending: (() => void) | undefined;
@@ -38,7 +39,7 @@ export function createLatestSearch<T>({ delayMs = 200, run, onResults, onSearchi
       const mine = latest;
       if (!query.trim()) {
         onSearching(false);
-        onResults([]);
+        onResults(empty);
         return Promise.resolve();
       }
       onSearching(true);
@@ -52,7 +53,7 @@ export function createLatestSearch<T>({ delayMs = 200, run, onResults, onSearchi
           } catch (error) {
             if (mine === latest) {
               onError?.(error);
-              onResults([]);
+              onResults(empty);
             }
           } finally {
             if (mine === latest) {

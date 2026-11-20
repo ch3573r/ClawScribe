@@ -12,7 +12,7 @@ const stateFor=answer=>({scope,owner:{kind:'library',id:'saved'},messages:answer
 const element=tag=>({children,asChild,node,...props})=>React.createElement(tag,props,children);
 const mocks={
   '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
-  'lucide-react':{Info:element('span'),MoreHorizontal:element('span')},
+  'lucide-react':{Copy:element('span'),Info:element('span'),MoreHorizontal:element('span')},
   '@/services/knowledgeService':{knowledgeService:{history:async()=>[]}},
   '@/components/ui/button':{Button:element('button')},
   '@/components/ui/textarea':{Textarea:element('textarea')},
@@ -140,6 +140,27 @@ test('compact layout isolates configuration from the single conversation scroll 
   const full=chatSurface({secondary});
   assert.ok(nodes(nodes(full.render()).find(node=>node.type==='scroll-area')).includes(secondary),'full-page secondary stays in its original position');
   full.unmount();
+});
+
+test('copy answer writes only the chosen assistant response to the clipboard', async () => {
+  const app = chatSurface();
+  let copied;
+  const previous = Object.getOwnPropertyDescriptor(globalThis.navigator, 'clipboard');
+  Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value: { writeText: async text => { copied = text; } } });
+  try {
+    app.state.messages = [
+      { id: 'question', role: 'user', content: 'Fixture question', status: 'completed' },
+      { id: 'answer', role: 'assistant', content: '**Fixture answer**', status: 'completed' },
+    ];
+    const buttons = nodes(app.render()).filter(node => node.props?.['aria-label'] === 'Copy answer');
+    assert.equal(buttons.length, 1);
+    await buttons[0].props.onClick();
+    assert.equal(copied, '**Fixture answer**');
+  } finally {
+    if (previous) Object.defineProperty(globalThis.navigator, 'clipboard', previous);
+    else delete globalThis.navigator.clipboard;
+    app.unmount();
+  }
 });
 
 test('compact suggestions fill and focus the draft without submitting or granting sharing',()=>{

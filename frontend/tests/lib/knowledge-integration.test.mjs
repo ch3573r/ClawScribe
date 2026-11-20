@@ -23,6 +23,50 @@ const meetings = [
   { id: "a", title: "Meeting A" },
   { id: "b", title: "Meeting B" },
 ];
+
+test("hidden Meeting memory makes zero index status calls", async () => {
+  let calls = 0;
+  const props = { meetings, projectFilter: project, active: false };
+  const timers = new Map();
+  const { setTimeout, clearTimeout } = globalThis;
+  globalThis.setTimeout = (callback, delay) => {
+    const id = Symbol();
+    timers.set(id, { callback, delay });
+    return id;
+  };
+  globalThis.clearTimeout = id => timers.delete(id);
+  const app = component("src/components/Knowledge/KnowledgeArchive.tsx", "KnowledgeArchive", props, async command => {
+    if (command === "knowledge_index_status") {
+      calls++;
+      return { semantic_enabled: true, semantic_ready: 0, pending: calls === 1 ? 1 : 0 };
+    }
+    return [];
+  });
+  try {
+    app.render();
+    await flush();
+    assert.equal(calls, 0);
+    assert.equal(timers.size, 0);
+    props.active = true;
+    app.render();
+    await flush();
+    assert.equal(calls, 1);
+    assert.deepEqual([...timers.values()].map(timer => timer.delay), [15000]);
+    props.active = false;
+    app.render();
+    await flush();
+    assert.equal(calls, 1);
+    assert.equal(timers.size, 0);
+    props.active = true;
+    app.render();
+    await flush();
+    assert.equal(calls, 2);
+    assert.equal(timers.size, 0, "settled indexing needs no polling");
+  } finally {
+    app.unmount();
+    Object.assign(globalThis, { setTimeout, clearTimeout });
+  }
+});
 function component(file, name, props, invoke) {
   const hooks = createHookHarness();
   const exports = loadTsModule(file, {
@@ -246,6 +290,50 @@ test("archive selected-to-all transition removes ID restriction for search and a
     await flush();
     await app.state().search("decision", "keyword");
     assert.deepEqual(requests[3].scope.filter.meeting_ids, ["a"]);
+  } finally {
+    app.unmount();
+  }
+});
+
+test("each saved library conversation restores its own explicit scope and clears the previous file selection", async () => {
+  const owners = [{kind:"library",id:"selected"}, {kind:"library",id:"all"}];
+  const scopes = {
+    selected: {all_meetings:true,meeting_ids:["a"],tags:[],tag_mode:"any",untagged:false,from:"2026-01-01",to:null},
+    all: {all_meetings:true,meeting_ids:[],tags:[],tag_mode:"any",untagged:false,from:null,to:null},
+  };
+  const requests = [];
+  const app = component("src/components/Knowledge/KnowledgeArchive.tsx", "KnowledgeArchive",
+    { meetings, projectFilter: { tags: [], mode: "any", untagged: false } },
+    async (command, args) => {
+      if (command === "knowledge_library_conversation_scope") return scopes[args.owner.id];
+      if (command === "knowledge_list_scope_documents") return [{attachment:{id:"fixture-file"},meeting_ids:["a"]}];
+      if (command === "knowledge_document_sharing") return true;
+      if (command === "knowledge_list_library_conversations") return owners;
+      if (command === "knowledge_index_status") return {semantic_enabled:false,pending:0};
+      if (command === "knowledge_history") return [];
+      if (command === "knowledge_ask") { requests.push(args.request); return {}; }
+      throw new Error(`Unexpected command ${command}`);
+    });
+  const select = async owner => {
+    await app.state().selectConversation(owner);
+    app.render();
+    await flush();
+  };
+  try {
+    await select(owners[0]);
+    assert.equal(app.state().scope.filter.all_meetings, false, "legacy IDs still constrain the scope");
+    app.state().selectDocument("fixture-file", true);
+    app.render();
+    await flush();
+    assert.equal(app.state().selectedDocumentIds[0], "fixture-file");
+    await select(owners[1]);
+    assert.equal(app.state().scope.filter.all_meetings, true);
+    await app.state().ask("Fixture question", "keyword");
+    assert.deepEqual([...requests[0].search.document_ids], []);
+    await select(owners[0]);
+    assert.deepEqual([...app.state().scope.filter.meeting_ids], ["a"]);
+    assert.equal(app.state().scope.filter.from, "2026-01-01");
+    assert.equal(app.state().selectedDocumentIds.length, 0);
   } finally {
     app.unmount();
   }

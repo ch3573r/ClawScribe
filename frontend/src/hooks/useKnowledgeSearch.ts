@@ -9,11 +9,16 @@ import type {
   EvidenceRef,
   HistoryMessage,
   KnowledgeScope,
+  MeetingFilter,
   ResolvedEvidence,
   SearchMode,
   SearchResponse,
   ScopedDocument,
 } from "@/types/knowledge";
+
+// Draft scope is private to this app session. The last submitted scope is saved
+// with its request and can be restored after restart without another store.
+const conversationDrafts = new Map<string, MeetingFilter>();
 
 const errorText = (error: unknown) =>
   typeof error === "string"
@@ -25,7 +30,9 @@ export function useKnowledgeSearch(
   scope: KnowledgeScope,
   initialOwner: ConversationOwner | null = null,
   answerConfiguration?: { provider?: string; model?: string },
+  options?: { active?: boolean; draftMeetingIds?: string[]; restoreScope?: (filter: MeetingFilter | null) => void },
 ) {
+  const surfaceActive = options?.active ?? true;
   const [controller] = useState(() =>
     createKnowledgeController((id, current) => {
       void knowledgeService.cancel(id).catch((e) => {
@@ -52,7 +59,7 @@ export function useKnowledgeSearch(
   const [libraryRevision, setLibraryRevision] = useState(0);
   const [documentRevision, setDocumentRevision] = useState(0);
   const [documentRows, setDocumentRows] = useState<{scope: string; rows: ScopedDocument[]}>({scope:'',rows:[]});
-  const [chosenDocuments, setChosenDocuments] = useState<string[]>([]);
+  const [chosenDocuments, setChosenDocuments] = useState<{ owner: string; ids: string[] }>({ owner: "", ids: [] });
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState('');
   const [sharing, setSharing] = useState<{owner:string;enabled:boolean}>({owner:'',enabled:false});
@@ -65,12 +72,15 @@ export function useKnowledgeSearch(
   const documentScope = JSON.stringify({scope,libraryRevision});
   const ownerIdentity = JSON.stringify(owner);
   const documents = documentRows.scope === documentScope ? documentRows.rows : [];
-  const selectedDocumentIds = chosenDocuments.filter(id => documents.some(row => row.attachment.id === id));
+  const selectedDocumentIds = chosenDocuments.owner === ownerIdentity
+    ? chosenDocuments.ids.filter(id => documents.some(row => row.attachment.id === id))
+    : [];
   const sharingEnabled = sharing.owner === ownerIdentity && sharing.enabled;
   const [creating, setCreating] = useState(false);
   const createPending = useRef(false);
   const adoptionError = useRef<{ ownerId: string; error: string } | null>(null);
   const adoptedRetry = useRef<{ identity: string; question: string; id: string } | null>(null);
+  const scopeSwitchPending = useRef(false);
   const [preview, setPreview] = useState<{
     reference: EvidenceRef;
     metadata: EvidenceDisplay;
@@ -90,6 +100,22 @@ export function useKnowledgeSearch(
   if (adoptedRetry.current && adoptedRetry.current.identity !== identity) adoptedRetry.current = null;
   controller.configure({ scope, owner, libraryRevision, answerConfiguration, selectedDocumentIds });
   const [visibleFor, setVisibleFor] = useState(identity);
+  const draftScope = scope.kind === "library" && owner?.kind === "library" && options?.restoreScope
+    ? JSON.stringify({ ...scope.filter, meeting_ids: options.draftMeetingIds ?? scope.filter.meeting_ids })
+    : null;
+  useEffect(() => {
+    if (!draftScope || !owner) return;
+    conversationDrafts.delete(owner.id);
+    conversationDrafts.set(owner.id, JSON.parse(draftScope) as MeetingFilter);
+    if (conversationDrafts.size > 64) conversationDrafts.delete(conversationDrafts.keys().next().value!);
+    // ownerIdentity is stable across equal owner objects.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftScope, ownerIdentity]);
+
+  const adoptOwner = (value: ConversationOwner) => {
+    setChosenDocuments({ owner: JSON.stringify(value), ids: [...selectedDocumentIds] });
+    setOwner(value);
+  };
   const reset = () => {
     controller.invalidate();
     adoptedRetry.current = null;
@@ -113,7 +139,7 @@ export function useKnowledgeSearch(
     setCreating(false);
     setError(adoptionError.current && adoptionError.current.ownerId === owner?.id ? adoptionError.current.error : "");
     adoptionError.current = null;
-    if (!owner) {
+    if (!surfaceActive || !owner) {
       setHistoryLoading(false);
       return () => controller.invalidate();
     }
@@ -137,18 +163,17 @@ export function useKnowledgeSearch(
     return () => controller.invalidate();
     // JSON identity keeps equal scope objects from restarting history on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [identity, controller]);
+  }, [identity, controller, surfaceActive]);
   useEffect(() => {
-    if (scope.kind !== "library" || owner?.kind === "meeting") return;
-    const current = controller.ticket("threads-operation");
-    void controller
-      .run("threads", knowledgeService.conversations, setThreads)
-      .catch((e) => {
-        if (current()) setError(errorText(e));
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [identity, controller]);
+    if (!surfaceActive || scope.kind !== "library") return;
+    let current = true;
+    void knowledgeService.conversations().then(value => {
+      if (current) setThreads(rows => [...rows.filter(row => !value.some(thread => thread.id === row.id)), ...value]);
+    }).catch(e => { if (current) setError(errorText(e)); });
+    return () => { current = false; };
+  }, [scope.kind, surfaceActive]);
   useEffect(() => {
+    if (!surfaceActive) return;
     let active = true;
     const subscription = listen("library-changed", () => {
       if (active) {
@@ -166,15 +191,16 @@ export function useKnowledgeSearch(
       active = false;
       void subscription.then((unlisten) => unlisten()).catch(() => {});
     };
-  }, [controller]);
+  }, [controller, surfaceActive]);
   // Scope reads have their own lifetime: changing a selected document must not
   // cancel a still-needed list or consent read and leave its loading state stuck.
   useEffect(() => {
+    if (!surfaceActive) return;
     let active = true;
     setDocumentsError('');
     if (!scopeReady(scope)) {
       setDocumentRows({scope:documentScope,rows:[]});
-      setChosenDocuments([]);
+      setChosenDocuments(current => ({ owner: current.owner, ids: [] }));
       setDocumentsLoading(false);
       return () => { active = false; };
     }
@@ -182,18 +208,19 @@ export function useKnowledgeSearch(
     void knowledgeService.scopeDocuments(scope).then(rows => {
       if (!active) return;
       setDocumentRows({scope:documentScope,rows});
-      setChosenDocuments(ids => ids.filter(id => rows.some(row => row.attachment.id === id)));
+      setChosenDocuments(current => ({ owner: current.owner, ids: current.ids.filter(id => rows.some(row => row.attachment.id === id)) }));
     }).catch(() => {
       if (active) {
         setDocumentRows({scope:documentScope,rows:[]});
-        setChosenDocuments([]);
+        setChosenDocuments(current => ({ owner: current.owner, ids: [] }));
         setDocumentsError('Reference documents could not be loaded. Retry loading references.');
       }
     }).finally(() => { if (active) setDocumentsLoading(false); });
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentScope, documentRevision]);
+  }, [documentScope, documentRevision, surfaceActive]);
   useEffect(() => {
+    if (!surfaceActive) return;
     let active = true;
     const read = ++sharingRead.current;
     setSharingError(sharingAdoptionError.current && sharingAdoptionError.current.ownerId === owner?.id ? sharingAdoptionError.current.error : '');
@@ -207,9 +234,9 @@ export function useKnowledgeSearch(
     }).finally(() => { if (active && read === sharingRead.current) setSharingLoading(false); });
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ownerIdentity]);
+  }, [ownerIdentity, surfaceActive]);
   async function setDocumentSharing(enabled: boolean) {
-    if (sharingPending.current || createPending.current || controller.pendingRequest()) return;
+    if (!surfaceActive || scopeSwitchPending.current || sharingPending.current || createPending.current || controller.pendingRequest()) return;
     if (!owner && (scope.kind !== 'library' || !scopeReady(scope))) return;
     sharingPending.current = true;
     sharingRead.current++;
@@ -248,12 +275,13 @@ export function useKnowledgeSearch(
         setCreating(false);
         if (createdOwner) {
           setThreads(rows => [createdOwner!, ...rows.filter(row => row.id !== createdOwner!.id)]);
-          setOwner(createdOwner);
+          adoptOwner(createdOwner);
         }
       }
     }
   }
   async function search(query: string, mode: SearchMode) {
+    if (!surfaceActive || scopeSwitchPending.current) return;
     reset();
     setResponse(null);
     if (!query.trim()) return;
@@ -288,7 +316,7 @@ export function useKnowledgeSearch(
     }
   }
   async function newConversation() {
-    if (createPending.current) return;
+    if (!surfaceActive || scopeSwitchPending.current || createPending.current) return;
     createPending.current = true;
     reset();
     setCreating(true);
@@ -297,6 +325,7 @@ export function useKnowledgeSearch(
       const value = await knowledgeService.createConversation();
       if (!current()) return;
       setThreads((rows) => [value, ...rows]);
+      setChosenDocuments({ owner: JSON.stringify(value), ids: [] });
       setOwner(value);
     } catch (e) {
       if (current()) setError(errorText(e));
@@ -306,7 +335,7 @@ export function useKnowledgeSearch(
     }
   }
   async function ask(question: string, mode: SearchMode) {
-    if (!question.trim() || historyLoading) return;
+    if (!surfaceActive || scopeSwitchPending.current || !question.trim() || historyLoading) return;
     if (controller.pendingRequest() || createPending.current || sharingPending.current) return;
     if (!scopeReady(scope)) {
       setError(
@@ -378,7 +407,7 @@ export function useKnowledgeSearch(
             };
           }
           setThreads((rows) => [value, ...rows.filter((row) => row.id !== value.id)]);
-          setOwner(value);
+          adoptOwner(value);
         }
       }
     }
@@ -467,7 +496,35 @@ export function useKnowledgeSearch(
       if (current()) setPreviewBusy(false);
     }
   }
-  const visible = visibleFor === identity;
+  async function selectConversation(value: ConversationOwner) {
+    if (!surfaceActive || scopeSwitchPending.current || owner?.id === value.id) return;
+    reset();
+    if (!options?.restoreScope) {
+      setChosenDocuments({ owner: JSON.stringify(value), ids: [] });
+      setOwner(value);
+      return;
+    }
+    scopeSwitchPending.current = true;
+    setHistoryLoading(true);
+    const current = controller.ticket("select-conversation");
+    try {
+      const draft = conversationDrafts.get(value.id);
+      const saved = draft ? null : await knowledgeService.conversationScope(value);
+      // Older IPC clients could combine all-meetings permission with IDs.
+      // Preserve their active ID restriction when restoring that request.
+      const filter = draft ?? (saved?.all_meetings && saved.meeting_ids.length ? { ...saved, all_meetings: false } : saved);
+      if (!current()) return;
+      options.restoreScope(filter);
+      setChosenDocuments({ owner: JSON.stringify(value), ids: [] });
+      setOwner(value);
+    } catch (e) {
+      if (current()) setError(errorText(e));
+    } finally {
+      scopeSwitchPending.current = false;
+      if (current()) setHistoryLoading(false);
+    }
+  }
+  const visible = surfaceActive && visibleFor === identity;
   return {
     scope,
     documents,
@@ -483,7 +540,10 @@ export function useKnowledgeSearch(
     selectDocument: (id: string, enabled: boolean) => {
       if (!documents.some(row => row.attachment.id === id)) return;
       reset();
-      setChosenDocuments(ids => enabled ? [...new Set([...ids,id])] : ids.filter(value => value !== id));
+      setChosenDocuments(current => {
+        const ids = current.owner === ownerIdentity ? current.ids : [];
+        return { owner: ownerIdentity, ids: enabled ? [...new Set([...ids,id])] : ids.filter(value => value !== id) };
+      });
     },
     owner,
     threads,
@@ -511,10 +571,7 @@ export function useKnowledgeSearch(
       setPreview(null);
       setPreviewBusy(false);
     },
-    selectConversation: (value: ConversationOwner) => {
-      reset();
-      setOwner(value);
-    },
+    selectConversation,
   };
 }
 export type KnowledgeSearchState = ReturnType<typeof useKnowledgeSearch>;
