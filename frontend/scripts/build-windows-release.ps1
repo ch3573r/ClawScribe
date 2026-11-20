@@ -3,10 +3,17 @@ param(
     [string]$Feature = "windows-gpu",
 
     [switch]$CheckOnly,
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+
+    # With -CheckOnly: run only the native Rust validation and native tests.
+    # Frontend installation, typecheck and tests are covered by their own job.
+    [switch]$NativeOnly
 )
 
 $ErrorActionPreference = "Stop"
+if ($NativeOnly -and -not $CheckOnly) {
+    throw "-NativeOnly applies only to -CheckOnly validation."
+}
 
 $frontendRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $tauriRoot = Join-Path $frontendRoot "src-tauri"
@@ -83,7 +90,7 @@ $windowsTarget = "x86_64-pc-windows-msvc"
 $llamaHelperBinary = Join-Path $tauriRoot "binaries\llama-helper-$windowsTarget.exe"
 Assert-File $llamaHelperBinary "Build it from the repository root with 'cargo build -p llama-helper --release --target $windowsTarget', then copy 'target\$windowsTarget\release\llama-helper.exe' to this path."
 $codexRuntimeBinary = Join-Path $tauriRoot "binaries\codex-app-server-$windowsTarget.exe"
-& (Join-Path $PSScriptRoot "stage-codex-runtime.ps1") -TauriRoot $tauriRoot
+& (Join-Path $PSScriptRoot "stage-codex-runtime.ps1") -TauriRoot $tauriRoot -SkipIfCurrent:$CheckOnly
 Assert-File $codexRuntimeBinary "Run 'frontend\scripts\stage-codex-runtime.ps1' before bundling the Windows installers."
 node (Join-Path $PSScriptRoot "test-codex-runtime.mjs")
 if ($LASTEXITCODE -ne 0) { throw "Bundled Codex runtime smoke failed." }
@@ -91,7 +98,7 @@ if ($LASTEXITCODE -ne 0) { throw "Bundled Codex runtime smoke failed." }
 $env:NEXT_TELEMETRY_DISABLED = "1"
 $env:TAURI_BUNDLE_TARGETS = "msi,nsis"
 
-if (-not $SkipInstall) {
+if (-not $SkipInstall -and -not $NativeOnly) {
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed." }
 }
@@ -121,11 +128,13 @@ if ($CheckOnly) {
         Pop-Location
     }
 
-    pnpm exec tsc --noEmit
-    if ($LASTEXITCODE -ne 0) { throw "Frontend typecheck failed." }
-    pnpm test
-    if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
-    $nativeFeatures = if ($Feature -eq "cpu") { "" } else { $Feature }
+    if (-not $NativeOnly) {
+        pnpm exec tsc --noEmit
+        if ($LASTEXITCODE -ne 0) { throw "Frontend typecheck failed." }
+        pnpm test
+        if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
+    }
+    $nativeFeatures =if ($Feature -eq "cpu") { "" } else { $Feature }
     & (Join-Path $PSScriptRoot "test-windows-native.ps1") -Features $nativeFeatures
     exit 0
 }

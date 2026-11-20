@@ -137,7 +137,82 @@ The unfiltered library suite can also run in the runner's service session.
 Tests that require a real audio output device are explicitly ignored; run those
 with `--ignored --exact` in an interactive session with the required hardware.
 
+Trusted pull requests and pushes to `main` that touch native code, scripts or
+the native workflow run these groups automatically in **Native library tests**
+(`native-library-tests.yml`). The job uses the release preflight's own staging
+and test entry point, `build-windows-release.ps1 -Feature windows-gpu -CheckOnly
+-NativeOnly`: locked cargo check, sidecar and runtime staging, then every
+required group above. `-NativeOnly` skips frontend install, typecheck and tests,
+which **Validation Check** already covers. A reused Codex runtime is
+re-verified against its pinned hash instead of being downloaded again
+(`stage-codex-runtime.ps1 -SkipIfCurrent`).
+
+The runner keeps Cargo output between runs, so the job also bounds it.
+`limit-native-test-cache.ps1` keeps the two newest `app_lib-*` test executables
+in the release dependency folder, deletes only older ones (and their `.pdb` and
+`.d` files) after checking that no link is involved, and fails early with a plain
+message when the workspace volume has less than 12 GiB free. Libraries, models,
+sidecars, installers and source are not touched. Nothing is uploaded to Actions
+storage or cache. Manual dispatch requires an immutable commit SHA, like the
+other manual validation.
+
+## Packaged-Binary Acceptance
+
+Unit tests run the library test executable, not the shipped program. Release
+builds therefore also run `frontend/scripts/test-packaged-acceptance.ps1` after
+the installers and native tests, before build metadata is written. It runs only
+on the designated runner (it checks `CLAWSCRIBE_BUILD_RUNNER` first) and:
+
+1. unpacks the NSIS installer just built into a new temporary folder with
+   7-Zip. Nothing is installed: no registry entry, shortcut or existing
+   installation is touched;
+2. runs the packaged executable twice, in two separate processes, as
+   `--self-test run <profile>` and `--self-test verify <profile>`. The profile is
+   a new folder inside the temporary folder. The program refuses a profile that
+   is not new or empty, is a link, is not absolute, or overlaps the application's
+   own data folders, and the script checks that a non-empty folder is refused
+   untouched and that a malformed command line exits with code 2;
+3. deletes everything it created, only after checking the folder name and that it
+   holds no links. `-KeepWork` keeps it for inspection.
+
+The self-test is a headless mode of the shipped executable (`self_test.rs`). It
+starts before any window, plugin, single-instance guard or logger, so it never
+opens the interface, forwards to a running copy, or reads the user's own
+profile, credential store, settings, templates or providers. It needs no
+network. A failed check fails the release build; each check is printed and
+recorded in `self-test-report-<phase>.json` inside the profile.
+
+What it checks (all against synthetic data):
+
+| Check | What is exercised |
+| --- | --- |
+| `package_layout`, `packaged_encoder` | Sidecars and runtime libraries sit next to the executable, and the packaged encoder runs. The check never falls back to a PATH or downloaded encoder. |
+| `migration_upgrade` | A database built from the older migrations with synthetic meetings, one migration stamped with the other line-ending checksum, then opened through the production path: pre-migration backup written, drift repaired, every embedded migration applied, legacy rows intact, integrity check passes. |
+| `recording_recovery` | A synthetic interrupted recording (capture chunks, marker, snapshot) is found by the recovery scan and recovered to compressed audio by the packaged encoder, then decoded and checked for length and level. |
+| `import_fixture` | A synthetic WAV and the recovered compressed audio are validated and decoded; an imported meeting with transcript lines is saved. |
+| `summary_stub` | The production summary path (provider call, prompt assembly, output checks) runs against an offline loopback stub, and the result is saved. |
+| `persistence_reopen`, `database_integrity`, `recovered_audio_persisted` | In a second process: the legacy meeting, imported transcript and summary survived, migrations are complete, the integrity check passes and the recovered audio still decodes. |
+
+What it does not check, and what therefore remains manual (see the acceptance
+list below): microphone and system-audio capture, device changes and sleep/wake,
+speech models and transcription quality (no model is installed on the runner),
+import through a transcription engine, real summary providers and note quality,
+the graphical interface and keyboard behaviour, running the installer
+(interaction, upgrade over an existing installation, Windows security prompts),
+the updater, and long sessions on the target notebook. Passing it does not
+establish stable readiness.
+
+To rerun it against an existing installer on the runner (set
+`EXPECTED_BUILD_RUNNER` to the configured name first):
+
+```powershell
+.\frontend\scripts\test-packaged-acceptance.ps1 -Installer <path to ClawScribe_<version>_x64-setup.exe>
+```
+
 ## GitHub Actions
+
+**Native library tests** runs the real Rust library suite for trusted pull
+requests and `main` pushes (see Native Windows Unit Tests above).
 
 **ClawScribe Windows Release** is the manual/reusable build workflow. All CI
 validation, installer builds, and native Windows diagnostics run exclusively on
@@ -205,8 +280,8 @@ does not compress models, executables, installers, or source. Use another local
 volume for large evaluation model caches when available.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
-installers, and then runs the required native regression suites before staging
-release assets. A check-only run exercises those suites before packaging is
+installers, and then runs the required native regression suites and the
+packaged-binary acceptance before staging release assets. A check-only run exercises those suites before packaging is
 attempted, so compile or behavioral failures can be resolved first.
 
 **Stage Windows release candidate** runs on `release/**` pushes and can be run
@@ -375,6 +450,11 @@ public prerelease may be distributed for manual evaluation after the native
 build/tests and artifact integrity checks pass, without advancing the stable
 updater. Its notes must state the missing real-device acceptance. Publishing a
 preview must not assert `capture-smoke-confirmed` or claim stable readiness.
+
+None of the items below is covered by the scripted packaged-binary acceptance or
+the native library tests; they need a person, real devices and the target
+notebook. Record each as passed, failed or not run for the exact build. Item 4
+and the two-hour comparison in item 6 are separate, long checks.
 
 Use a separate test profile or a backed-up installation; do not delete meeting
 data to test installation. Record the application commit, engine/model, Windows

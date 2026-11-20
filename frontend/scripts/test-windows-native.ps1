@@ -132,7 +132,8 @@ try {
         "audio::common::tests",
         "audio::inference::tests",
         "audio::transcription::nemotron_provider::tests",
-        "audio::transcription::cloud::"
+        "audio::transcription::cloud::",
+        "self_test::tests"
     )) {
         $listing = & $testExecutable $filter --list
         if ($LASTEXITCODE -ne 0) { throw "Native test discovery failed for '$filter'." }

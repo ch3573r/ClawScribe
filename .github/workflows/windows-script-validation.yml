@@ -38,7 +38,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($path in @('frontend/scripts/test-windows-native.ps1', 'frontend/scripts/build-windows-release.ps1', 'frontend/scripts/ensure-windows-vulkan-runtime.ps1')) {
+          foreach ($path in @('frontend/scripts/test-windows-native.ps1', 'frontend/scripts/build-windows-release.ps1', 'frontend/scripts/ensure-windows-vulkan-runtime.ps1', 'frontend/scripts/stage-codex-runtime.ps1', 'frontend/scripts/test-packaged-acceptance.ps1', 'frontend/scripts/limit-native-test-cache.ps1')) {
             $tokens = $null
             $parseErrors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$parseErrors)

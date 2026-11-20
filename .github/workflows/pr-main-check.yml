@@ -85,6 +85,9 @@ jobs:
       - name: Test the release asset verifier
         run: node --test scripts/verify-release-assets.test.mjs
 
+      - name: Test the native validation wiring
+        run: node --test scripts/native-validation-wiring.test.mjs
+
       - name: Test the diarization evaluation set builder
         run: node --test scripts/build-diarization-eval-set.test.mjs
 

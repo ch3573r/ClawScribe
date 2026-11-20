@@ -67,6 +67,7 @@ pub mod openai;
 pub mod openclaw;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod self_test;
 pub mod shortcuts;
 pub mod state;
 pub mod summary;

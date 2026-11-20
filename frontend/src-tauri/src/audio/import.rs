@@ -995,7 +995,7 @@ fn emit_progress<R: Runtime>(app: &AppHandle<R>, stage: &str, progress: u32, mes
 }
 
 /// Create a new meeting with transcripts in the database
-async fn create_meeting_with_transcripts(
+pub(crate) async fn create_meeting_with_transcripts(
     pool: &sqlx::SqlitePool,
     title: &str,
     segments: &[TranscriptSegment],

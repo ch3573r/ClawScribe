@@ -11,6 +11,11 @@ fn main() {
     if let Some(code) = app_lib::mcp::dispatch() {
         std::process::exit(code);
     }
+    // Headless packaged-binary acceptance on a synthetic profile; never opens a
+    // window or touches the user's own data (see self_test.rs).
+    if let Some(code) = app_lib::self_test::dispatch() {
+        std::process::exit(code);
+    }
     if let Some(code) = app_lib::knowledge::documents::worker::dispatch() {
         std::process::exit(code);
     }

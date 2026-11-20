@@ -1,0 +1,190 @@
+name: Native library tests
+
+# Runs the real Rust library test suite (the same required groups and the same
+# staging as the release preflight) for trusted pull requests and for pushes to
+# main. Everything runs on the designated local runner with its persistent,
+# size-bounded build caches; there are no hosted runners and no Actions caches.
+on:
+  pull_request:
+    paths:
+      - 'frontend/src-tauri/**'
+      - 'llama-helper/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'frontend/scripts/*.ps1'
+      - 'frontend/scripts/*.mjs'
+      - '.github/workflows/native-library-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/src-tauri/**'
+      - 'llama-helper/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'frontend/scripts/*.ps1'
+      - 'frontend/scripts/*.mjs'
+      - '.github/workflows/native-library-tests.yml'
+  workflow_dispatch:
+    inputs:
+      build-ref:
+        description: 'Exact reviewed commit SHA to test'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+concurrency:
+  group: native-library-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  native-library-tests:
+    name: Native library tests
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
+    runs-on: [self-hosted, Windows, X64, clawscribe]
+    timeout-minutes: 90
+    steps:
+      - name: Require the designated local build machine
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BUILD_REF: ${{ inputs['build-ref'] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'self-hosted' -or
+              [string]::IsNullOrWhiteSpace($env:EXPECTED_BUILD_RUNNER) -or
+              $env:RUNNER_NAME -ine $env:EXPECTED_BUILD_RUNNER -or
+              $env:COMPUTERNAME -ine $env:EXPECTED_BUILD_RUNNER) {
+            throw 'Builds require the local machine configured in CLAWSCRIBE_BUILD_RUNNER.'
+          }
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch' -and $env:BUILD_REF -notmatch '^[0-9a-f]{40}$') {
+            throw 'Manual native tests require an immutable reviewed commit SHA.'
+          }
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs['build-ref'] || github.sha }}
+          clean: false
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+
+      - name: Reject private paths and committed secrets
+        run: node scripts/verify-public-repo-safety.mjs
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install LLVM
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # Same pin as the release workflow: bindgen 0.69 mis-parses whisper
+          # structs with clang 21 and newer.
+          choco install llvm --version=20.1.8 -y --no-progress --allow-downgrade
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PATH=$llvmBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Vulkan SDK prerequisites
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install 7zip -y --no-progress
+
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: false
+
+      - name: Verify and configure Vulkan SDK
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $vulkanSdk = $env:VULKAN_SDK
+          if (-not $vulkanSdk -or -not (Test-Path $vulkanSdk)) {
+            throw "VULKAN_SDK not set or path does not exist"
+          }
+          $binDir = Join-Path $vulkanSdk "Bin"
+          $libDir = Join-Path $vulkanSdk "Lib"
+          $includeDir = Join-Path $vulkanSdk "Include"
+          foreach ($path in @($binDir, $libDir, $includeDir)) {
+            if (-not (Test-Path $path)) { throw "Required Vulkan SDK path missing: $path" }
+          }
+          "PATH=$binDir;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Vulkan_LIBRARY=$libDir\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Vulkan_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install and verify Vulkan runtime
+        run: ./frontend/scripts/ensure-windows-vulkan-runtime.ps1 -InstallFromSdk
+
+      - name: Remove host-tuned Whisper build caches
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          node frontend/scripts/verify-windows-portability.mjs --remove-stale
+
+      - name: Bound the local build cache and require free space
+        run: ./frontend/scripts/limit-native-test-cache.ps1
+
+      - name: Build llama-helper sidecar
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          . ./frontend/scripts/configure-windows-portability.ps1
+          "RUSTFLAGS=$env:RUSTFLAGS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CMAKE_PROJECT_INCLUDE=$env:CMAKE_PROJECT_INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Force -Path frontend\src-tauri\binaries | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\llama-helper.exe frontend\src-tauri\binaries\llama-helper-x86_64-pc-windows-msvc.exe -Force
+
+      # The release preflight's native half: locked cargo check, sidecar and
+      # runtime staging, then every required native group in the release profile
+      # (test-windows-native.ps1 fails on a missing, empty or failing group).
+      - name: Run the required native library test groups
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cd frontend
+          .\scripts\build-windows-release.ps1 -Feature windows-gpu -CheckOnly -NativeOnly
+
+      - name: Trim stale test executables after the run
+        if: ${{ always() }}
+        run: ./frontend/scripts/limit-native-test-cache.ps1 -NoFailOnLowSpace
+
+      - name: Generate native test summary
+        run: |
+          @(
+            '## Native library tests',
+            '',
+            "**Commit:** $env:GITHUB_SHA",
+            '',
+            '- Designated local runner identity verified',
+            '- Locked native check and the required release-profile library test groups passed',
+            '- Live capture, speech models, real providers, the interface and the installer were not exercised; see docs/windows-release.md'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

@@ -416,6 +416,29 @@ jobs:
           if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
           .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",")
 
+      # Unpacks the NSIS installer just built (nothing is installed) and runs the
+      # packaged executable's headless self-test on a synthetic profile in two
+      # processes. It does not capture audio, load speech models, drive the
+      # interface or run the installer; those acceptance checks stay manual.
+      - name: Run packaged-binary acceptance
+        if: ${{ !inputs['check-only'] }}
+        shell: pwsh
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $expectedNsis = "ClawScribe_$($env:CLAWSCRIBE_INSTALLER_VERSION)_x64-setup.exe"
+          $installer = $null
+          foreach ($folder in @("target\release\bundle\nsis", "frontend\src-tauri\target\release\bundle\nsis")) {
+            $candidate = Join-Path $folder $expectedNsis
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $installer = (Resolve-Path -LiteralPath $candidate).Path; break }
+          }
+          if (-not $installer) {
+            throw "No current-version NSIS setup '$expectedNsis' was found for packaged-binary acceptance."
+          }
+          .\frontend\scripts\test-packaged-acceptance.ps1 -Installer $installer
+
       - name: Write build metadata
         if: ${{ !inputs['check-only'] }}
         shell: pwsh
