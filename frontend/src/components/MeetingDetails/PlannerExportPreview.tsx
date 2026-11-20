@@ -20,6 +20,8 @@ import {
 } from "@/components/ui/dialog";
 import {
   microsoftExportService,
+  TASK_IDENTITY_REVIEW_MESSAGE,
+  taskIdentityReviewIds,
   type BucketInfo,
   type ExportReport,
 } from "@/services/microsoftExportService";
@@ -28,6 +30,7 @@ import { useConfig } from "@/contexts/ConfigContext";
 
 interface Row {
   localId: string;
+  originalTitleHash?: string | null;
   title: string;
   details: string | null;
   owner: string | null;
@@ -76,12 +79,14 @@ export function PlannerExportPreview({
   const [polishing, setPolishing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reviewIds, setReviewIds] = useState(() => new Set<string>());
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setReviewIds(new Set());
     setRows([]);
     setBuckets([]);
     (async () => {
@@ -101,6 +106,7 @@ export function PlannerExportPreview({
           defaultBucketId;
         const baseRows: Row[] = items.map((item) => ({
           localId: item.localId,
+          originalTitleHash: item.originalTitleHash,
           title: item.title,
           details: item.details || "",
           owner: item.owner,
@@ -175,6 +181,7 @@ export function PlannerExportPreview({
       .filter((r) => r.include && r.title.trim())
       .map((r) => ({
         localId: r.localId,
+        originalTitleHash: r.originalTitleHash,
         title: r.title.trim(),
         owner: r.owner,
         dueDate: r.dueDate,
@@ -190,8 +197,10 @@ export function PlannerExportPreview({
         planId,
         tasks,
       );
+      const needsReview = taskIdentityReviewIds(report);
+      setReviewIds(needsReview);
       onReport(report);
-      onOpenChange(false);
+      if (needsReview.size === 0) onOpenChange(false);
     } catch (e) {
       toast.error("Planner export failed", {
         description: e instanceof Error ? e.message : String(e),
@@ -235,6 +244,13 @@ export function PlannerExportPreview({
           </div>
         ) : (
           <>
+            {reviewIds.size > 0 && <div className="space-y-2">
+              <p role="status" className="text-sm text-muted-foreground">{TASK_IDENTITY_REVIEW_MESSAGE}</p>
+              {onReviewActions && <Button type="button" variant="outline" disabled={busy} onClick={() => {
+                onOpenChange(false);
+                onReviewActions();
+              }}>Review meeting actions</Button>}
+            </div>}
             <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
               <Button variant="ghost"
                 type="button"
@@ -282,6 +298,7 @@ export function PlannerExportPreview({
                         disabled={!row.include}
                         className="h-auto shadow-none md:text-sm disabled:opacity-100 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed"
                       />
+                      {reviewIds.has(row.localId) && <p className="text-sm text-warning">Review required. This task was held back.</p>}
                       <label className="block space-y-1.5">
                         <span className="text-xs font-medium text-muted-foreground">
                           Planner task notes

@@ -44,7 +44,7 @@ owners to Azure AD users or assign tasks to other people.
 Microsoft To Do task creation is not naturally idempotent. ClawScribe keeps a
 local history keyed by account, list, meeting, and saved action ID. Re-exporting
 the same saved action skips the existing task even when its title or the selected
-batch changes. Existing history is used when its original action and title match.
+batch changes. Ambiguous matches with older suggestions are held for review.
 
 The ledger saves each pending attempt before contacting Graph and each result
 afterwards. Unreadable history or a failed write stops export. Interrupted or

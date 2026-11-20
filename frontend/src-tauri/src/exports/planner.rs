@@ -152,8 +152,7 @@ pub fn ensure_local_action_ids(items: &mut [ExportActionItem]) {
     }
 }
 
-/// Stable hash of an action's title, used in the per-item dedupe key so that an
-/// edited action gets a fresh key.
+/// Stable hash of a task title for reconciling positional export history.
 pub fn action_hash(action: &ExportActionItem) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -162,8 +161,7 @@ pub fn action_hash(action: &ExportActionItem) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Build the per-item Planner dedupe key documented in `planner-export.md`:
-/// `planner:{tenantId}:{userId}:{planId}:{bucketId}:{meetingHash}:{localActionId}:{actionHash}`.
+/// Build the Planner key for a task without matching export history.
 pub fn dedupe_key(
     tenant_id: &str,
     user_id: &str,
@@ -171,10 +169,10 @@ pub fn dedupe_key(
     meeting: &MeetingExport,
     action: &ExportActionItem,
 ) -> String {
-    crate::exports::ledger::task_key(
+    crate::exports::ledger::task_key_for_action(
         &task_scope(tenant_id, user_id, destination),
         &meeting.meeting_id,
-        &action.local_action_id,
+        action,
         &action_hash(action),
     )
 }

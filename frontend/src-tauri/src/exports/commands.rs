@@ -778,6 +778,7 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
 pub struct PlannerTaskPreview {
     pub local_id: String,
     pub title: String,
+    pub original_title_hash: Option<String>,
     pub details: String,
     pub owner: Option<String>,
     pub due_date: Option<String>,
@@ -819,6 +820,8 @@ pub async fn preview_planner_tasks(
         .map(|action| PlannerTaskPreview {
             local_id: action.local_action_id.clone(),
             title: action.task.clone(),
+            original_title_hash: super::ledger::is_positional_action_id(&action.local_action_id)
+                .then(|| super::planner::action_hash(action)),
             details: crate::exports::planner::build_task_details_description(
                 &meeting_export,
                 action,
@@ -849,6 +852,8 @@ pub struct PlannerTaskInput {
     /// the key and create duplicate tasks on re-export.
     #[serde(default)]
     pub local_id: String,
+    #[serde(default)]
+    pub original_title_hash: Option<String>,
     pub title: String,
     pub owner: Option<String>,
     pub due_date: Option<String>,
@@ -862,11 +867,35 @@ pub struct PlannerTaskInput {
 pub struct ToDoTaskInput {
     #[serde(default)]
     pub local_id: String,
+    #[serde(default)]
+    pub original_title_hash: Option<String>,
     pub title: String,
     pub owner: Option<String>,
     pub due_date: Option<String>,
     #[serde(default)]
     pub details: Option<String>,
+}
+
+fn selected_action_history(
+    reviewed: Option<&[super::actions::ReviewedAction]>,
+    local_id: &str,
+    original_title_hash: Option<String>,
+) -> Option<super::actions::LegacyAction> {
+    if super::ledger::is_positional_action_id(local_id) {
+        // Title edits and Planner polish must not hide an earlier attempt for
+        // the original summary suggestion.
+        return original_title_hash
+            .filter(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(|title_hash| super::actions::LegacyAction {
+                id: local_id.into(),
+                title_hash,
+            });
+    }
+    reviewed?
+        .iter()
+        .find(|action| action.id == local_id)?
+        .legacy_action
+        .clone()
 }
 
 /// Export a user-reviewed set of Planner tasks. Each task carries its own bucket,
@@ -897,12 +926,6 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         &meeting_id,
     )
     .await?;
-    let legacy_for = |id: &str| {
-        reviewed
-            .as_ref()
-            .and_then(|actions| actions.iter().find(|action| action.id == id))
-            .and_then(|action| action.legacy_action.clone())
-    };
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let mut by_bucket: BTreeMap<String, Vec<PlannerTaskInput>> = BTreeMap::new();
@@ -934,7 +957,11 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
             .map(|t| crate::exports::model::ExportActionItem {
                 // Preserve the preview's local id so the dedupe key is stable
                 // across reordering/deselection; do not regenerate per bucket.
-                legacy_action: legacy_for(&t.local_id),
+                legacy_action: selected_action_history(
+                    reviewed.as_deref(),
+                    &t.local_id,
+                    t.original_title_hash,
+                ),
                 local_action_id: t.local_id,
                 task: t.title,
                 owner: t.owner,
@@ -1029,12 +1056,6 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         &meeting_id,
     )
     .await?;
-    let legacy_for = |id: &str| {
-        reviewed
-            .as_ref()
-            .and_then(|actions| actions.iter().find(|action| action.id == id))
-            .and_then(|action| action.legacy_action.clone())
-    };
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -1046,7 +1067,11 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
     let mut action_items: Vec<crate::exports::model::ExportActionItem> = tasks
         .into_iter()
         .map(|t| crate::exports::model::ExportActionItem {
-            legacy_action: legacy_for(&t.local_id),
+            legacy_action: selected_action_history(
+                reviewed.as_deref(),
+                &t.local_id,
+                t.original_title_hash,
+            ),
             local_action_id: t.local_id,
             task: t.title,
             owner: t.owner,

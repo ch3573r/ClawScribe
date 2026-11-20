@@ -35,6 +35,14 @@ export interface ExportReport {
   items: ExportItemResult[];
 }
 
+export const TASK_IDENTITY_REVIEW_CODE = "task_identity_review_required";
+export const TASK_IDENTITY_REVIEW_MESSAGE =
+  "Check the destination for the marked tasks. In Meeting actions, use Add action for each task you confirm is new, then save and export those actions.";
+
+export function taskIdentityReviewIds(report: ExportReport): Set<string> {
+  return new Set(report.items.filter((item) => item.code === TASK_IDENTITY_REVIEW_CODE).map((item) => item.localId));
+}
+
 export interface OneNoteResume {
   id: string;
   sectionName: string;
@@ -123,6 +131,7 @@ export interface CalendarEvent {
 export interface PlannerTaskPreview {
   localId: string;
   title: string;
+  originalTitleHash?: string | null;
   details: string;
   owner: string | null;
   dueDate: string | null;
@@ -133,6 +142,7 @@ export interface PlannerTaskInput {
   // backend dedupe key survives reordering/deselection and re-exports don't
   // create duplicate tasks.
   localId: string;
+  originalTitleHash?: string | null;
   title: string;
   owner: string | null;
   dueDate: string | null;
@@ -142,6 +152,7 @@ export interface PlannerTaskInput {
 
 export interface ToDoTaskInput {
   localId: string;
+  originalTitleHash?: string | null;
   title: string;
   owner: string | null;
   dueDate: string | null;

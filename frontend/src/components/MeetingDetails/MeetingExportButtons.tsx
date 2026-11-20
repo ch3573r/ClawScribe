@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   ONENOTE_LARGE_LIBRARY_MESSAGE,
+  TASK_IDENTITY_REVIEW_CODE,
   isOneNoteLargeLibraryError,
   microsoftExportService,
   type MicrosoftConnectionInfo,
@@ -237,10 +238,13 @@ export function MeetingExportButtons({
             : undefined,
         });
       } else {
+        const description = report.items.some(item => item.status === "unknownaftersubmit")
+          ? "Check Microsoft before retrying an export with an unknown outcome."
+          : report.items.some(item => item.code === TASK_IDENTITY_REVIEW_CODE)
+            ? "Check the tasks marked for review before exporting again."
+            : "Open Export history to review the results.";
         toast.warning(`${label} export finished with issues`, {
-          description: report.items.some(item => item.status === "unknownaftersubmit")
-            ? "Check Microsoft before retrying an export with an unknown outcome."
-            : "Open Export history to review the results.",
+          description,
         });
       }
     },

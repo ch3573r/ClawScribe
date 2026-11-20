@@ -4,10 +4,14 @@
 //! Succeeded items are never re-sent; partial batch failures preserve the
 //! successful resource IDs and only failed items are retried on a later run.
 
+use std::collections::HashMap;
+
 use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::error::GraphErrorKind;
-use crate::exports::ledger::ExportLedger;
-use crate::exports::model::{ExportStatus, MeetingExport, MicrosoftConnectionState};
+use crate::exports::ledger::{task_key_for_action, ExportLedger};
+use crate::exports::model::{
+    ExportActionItem, ExportStatus, MeetingExport, MicrosoftConnectionState,
+};
 use crate::exports::onenote::{self, DEFAULT_PAGE_BUDGET_BYTES};
 use crate::exports::planner::{self, PlannerDestination};
 use crate::exports::todo::{self, ToDoDestination};
@@ -57,7 +61,7 @@ pub struct ItemResult {
     pub resource_id: Option<String>,
     pub web_url: Option<String>,
     pub code: Option<String>,
-    /// False when the item was satisfied from the ledger without calling Graph.
+    /// Whether a create was submitted to Graph for this item.
     pub graph_called: bool,
 }
 
@@ -300,6 +304,60 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
     }
 }
 
+/// Resolve the selection before sending anything so one row can't claim the
+/// history written for another row during the same export.
+fn resolve_task_keys(
+    ledger: &ExportLedger,
+    meeting: &MeetingExport,
+    scope: &str,
+    action_hash: fn(&ExportActionItem) -> String,
+) -> Vec<Result<String, ItemResult>> {
+    let mut claims = HashMap::new();
+    let keys: Vec<_> = meeting
+        .action_items
+        .iter()
+        .map(|action| {
+            let hash = action_hash(action);
+            let local_id = action.local_action_id.as_str();
+            let current = task_key_for_action(scope, &meeting.meeting_id, action, &hash);
+            let existing = ledger.existing_task_key(
+                scope,
+                &meeting.meeting_id,
+                local_id,
+                &hash,
+                action.legacy_action.as_ref(),
+            );
+            if let Ok(Some(key)) = &existing {
+                claims
+                    .entry(key.clone())
+                    .and_modify(|claim| {
+                        if *claim != Some(local_id) {
+                            *claim = None;
+                        }
+                    })
+                    .or_insert(Some(local_id));
+            }
+            (local_id, current, existing)
+        })
+        .collect();
+
+    keys.into_iter()
+        .map(|(local_id, current, existing)| match existing {
+            Ok(Some(key)) if claims[&key].is_some() => Ok(key),
+            Ok(None) => Ok(current),
+            _ => Err(ItemResult {
+                dedupe_key: current,
+                local_id: local_id.into(),
+                status: ExportStatus::Failed,
+                resource_id: None,
+                web_url: None,
+                code: Some("task_identity_review_required".into()),
+                graph_called: false,
+            }),
+        })
+        .collect()
+}
+
 /// Export a meeting's reviewed action items as Planner tasks.
 pub async fn export_planner<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
@@ -310,20 +368,17 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
 ) -> Result<ExportReport, planner::PlannerBuildError> {
     let url = format!("{GRAPH_BASE}/planner/tasks");
     let mut items = Vec::new();
+    let scope = planner::task_scope(ctx.tenant_id, ctx.user_id, destination);
+    let keys = resolve_task_keys(ledger, meeting, &scope, planner::action_hash);
 
-    for action in &meeting.action_items {
-        let scope = planner::task_scope(ctx.tenant_id, ctx.user_id, destination);
-        let dedupe_key = ledger
-            .existing_task_key(
-                &scope,
-                &meeting.meeting_id,
-                &action.local_action_id,
-                &planner::action_hash(action),
-                action.legacy_action.as_ref(),
-            )
-            .unwrap_or_else(|| {
-                planner::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action)
-            });
+    for (action, key) in meeting.action_items.iter().zip(keys) {
+        let dedupe_key = match key {
+            Ok(key) => key,
+            Err(review) => {
+                items.push(review);
+                continue;
+            }
+        };
         let local_id = action.local_action_id.clone();
 
         if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
@@ -384,20 +439,17 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
 ) -> Result<ExportReport, todo::ToDoBuildError> {
     let url = todo_tasks_url(&destination.list_id);
     let mut items = Vec::new();
+    let scope = todo::task_scope(ctx.tenant_id, ctx.user_id, destination);
+    let keys = resolve_task_keys(ledger, meeting, &scope, todo::action_hash);
 
-    for action in &meeting.action_items {
-        let scope = todo::task_scope(ctx.tenant_id, ctx.user_id, destination);
-        let dedupe_key = ledger
-            .existing_task_key(
-                &scope,
-                &meeting.meeting_id,
-                &action.local_action_id,
-                &todo::action_hash(action),
-                action.legacy_action.as_ref(),
-            )
-            .unwrap_or_else(|| {
-                todo::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action)
-            });
+    for (action, key) in meeting.action_items.iter().zip(keys) {
+        let dedupe_key = match key {
+            Ok(key) => key,
+            Err(review) => {
+                items.push(review);
+                continue;
+            }
+        };
         let local_id = action.local_action_id.clone();
 
         if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
@@ -890,6 +942,154 @@ mod tests {
             assert!(!report.items[0].graph_called);
             assert!(report.items[1].graph_called);
             assert_eq!(report.items[1].resource_id.as_deref(), Some("new-task"));
+        }
+    }
+
+    async fn export_tasks_for_test(
+        client: &GraphClient<MockGraphTransport, RecordingSleeper>,
+        ledger: &mut ExportLedger,
+        meeting: &MeetingExport,
+        planner: bool,
+    ) -> ExportReport {
+        if planner {
+            let destination = PlannerDestination {
+                plan_id: "plan-1".into(),
+                bucket_id: "bucket-1".into(),
+            };
+            export_planner(client, ledger, meeting, &destination, &ctx())
+                .await
+                .unwrap()
+        } else {
+            let destination = ToDoDestination {
+                list_id: "list-1".into(),
+            };
+            export_todo(client, ledger, meeting, &destination, &ctx())
+                .await
+                .unwrap()
+        }
+    }
+
+    fn assert_task_identity_review(item: &ItemResult) {
+        assert_eq!(item.status, ExportStatus::Failed);
+        assert_eq!(item.code.as_deref(), Some("task_identity_review_required"));
+        assert!(item.resource_id.is_none());
+        assert!(!item.graph_called);
+    }
+
+    #[tokio::test]
+    async fn same_title_suggestions_create_separately_and_block_ambiguous_replays() {
+        for (planner, url) in [(true, planner_url()), (false, todo_tasks_url("list-1"))] {
+            let transport = MockGraphTransport::new();
+            transport.queue_for_url(
+                &url,
+                [
+                    GraphResponse::success(201, r#"{"id":"task-first"}"#),
+                    GraphResponse::success(201, r#"{"id":"task-second"}"#),
+                ],
+            );
+            let client = client(transport);
+            let mut meeting = meeting();
+            meeting.action_items.truncate(2);
+            meeting.action_items[1].task = meeting.action_items[0].task.clone();
+            let mut ledger = ExportLedger::new(&meeting.meeting_id);
+            let first = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            assert_eq!(first.items[0].resource_id.as_deref(), Some("task-first"));
+            assert_eq!(first.items[1].resource_id.as_deref(), Some("task-second"));
+            assert!(first.items.iter().all(|item| item.graph_called));
+
+            let history = ledger.entries.clone();
+            let repeated = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            repeated.items.iter().for_each(assert_task_identity_review);
+            meeting.action_items.reverse();
+            meeting.action_items[0].local_action_id = "action-5".into();
+            let reordered = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            assert_eq!(reordered.items[0].local_id, "action-5");
+            reordered.items.iter().for_each(assert_task_identity_review);
+
+            meeting.action_items.truncate(1);
+            let action = &mut meeting.action_items[0];
+            action.legacy_action = Some(crate::exports::actions::LegacyAction {
+                id: action.local_action_id.clone(),
+                title_hash: planner::action_hash(action),
+            });
+            action.task = "Edited task".into();
+            let edited = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            assert_task_identity_review(&edited.items[0]);
+            meeting.action_items[0].local_action_id = "00000000-0000-4000-8000-000000000001".into();
+            let linked = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            assert_task_identity_review(&linked.items[0]);
+            assert_eq!(client.transport().calls_for(&url), 2);
+            assert_eq!(ledger.entries, history);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_legacy_match_requires_review_but_independent_saved_actions_can_export() {
+        for (planner, url) in [(true, planner_url()), (false, todo_tasks_url("list-1"))] {
+            let transport = MockGraphTransport::new();
+            transport.queue_for_url(
+                &url,
+                [
+                    GraphResponse::success(201, r#"{"id":"old-task"}"#),
+                    GraphResponse::success(201, r#"{"id":"reviewed-first"}"#),
+                    GraphResponse::success(201, r#"{"id":"reviewed-second"}"#),
+                ],
+            );
+            let client = client(transport);
+            let mut meeting = meeting();
+            let mut ledger = ExportLedger::new(&meeting.meeting_id);
+            let mut first = meeting.clone();
+            first.action_items.truncate(1);
+            let first = export_tasks_for_test(&client, &mut ledger, &first, planner).await;
+            assert_eq!(first.items[0].resource_id.as_deref(), Some("old-task"));
+
+            meeting.action_items.truncate(2);
+            meeting.action_items[1].task = meeting.action_items[0].task.clone();
+            let repeated = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            repeated.items.iter().for_each(assert_task_identity_review);
+            assert_eq!(client.transport().calls_for(&url), 1);
+
+            for (action, id) in meeting.action_items.iter_mut().zip([
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+            ]) {
+                action.local_action_id = id.into();
+            }
+            let mut first_saved = meeting.clone();
+            first_saved.action_items.truncate(1);
+            let first_saved =
+                export_tasks_for_test(&client, &mut ledger, &first_saved, planner).await;
+            assert!(first_saved.items[0].graph_called);
+            let saved = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            assert_eq!(
+                saved.items[0].resource_id.as_deref(),
+                Some("reviewed-first")
+            );
+            assert_eq!(
+                saved.items[1].resource_id.as_deref(),
+                Some("reviewed-second")
+            );
+            assert!(!saved.items[0].graph_called);
+            assert!(saved.items[1].graph_called);
+
+            meeting.action_items.reverse();
+            let action = &mut meeting.action_items[0];
+            action.legacy_action = Some(crate::exports::actions::LegacyAction {
+                id: "action-2".into(),
+                title_hash: planner::action_hash(action),
+            });
+            action.task = "Updated reviewed task".into();
+            let saved_retry = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
+            assert_eq!(
+                saved_retry.items[0].resource_id.as_deref(),
+                Some("reviewed-second")
+            );
+            assert_eq!(
+                saved_retry.items[1].resource_id.as_deref(),
+                Some("reviewed-first")
+            );
+            assert!(saved_retry.items.iter().all(|item| !item.graph_called));
+            assert_eq!(client.transport().calls_for(&url), 3);
         }
     }
 

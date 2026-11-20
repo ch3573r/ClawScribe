@@ -1612,9 +1612,9 @@ mod tests {
         use crate::exports::{
             client::{GraphClient, RetryPolicy, TokioSleeper},
             exporter::{export_planner, ExportContext},
-            ledger::{meeting_dir, ExportLedger},
+            ledger::{meeting_dir, task_key, ExportLedger},
             model::ExportStatus,
-            planner::{dedupe_key, PlannerDestination},
+            planner::{action_hash, dedupe_key, task_scope, PlannerDestination},
             transport::{GraphResponse, MockGraphTransport},
         };
 
@@ -1646,6 +1646,28 @@ mod tests {
         };
         ledger.record_success(&key(0), Some("old-task".into()), None, None);
         ledger.begin_attempt(&key(1), None);
+        let mut shifted = meeting.clone();
+        shifted.action_items.truncate(1);
+        let action = &mut shifted.action_items[0];
+        action.local_action_id = "action-5".into();
+        action.task = "File evidence".into();
+        let hash = action_hash(action);
+        let scope = task_scope("tenant", "user", &destination);
+        ledger.record_success(
+            &format!("{scope}:1234567890abcdef:action-4:{hash}"),
+            Some("previous-task".into()),
+            None,
+            None,
+        );
+        let pending_key = task_key(&scope, "portable", "action-6", &hash);
+        ledger.begin_attempt(&pending_key, None);
+        let saved_id = "00000000-0000-4000-8000-000000000001";
+        ledger.record_failure(
+            &task_key(&scope, "portable", saved_id, &hash),
+            ExportStatus::Failed,
+            None,
+            None,
+        );
         ledger.checkpoint().await.unwrap();
 
         let calendar = super::super::calendar::tests::sample();
@@ -1744,6 +1766,33 @@ mod tests {
         assert_eq!(report.items[1].status, ExportStatus::UnknownAfterSubmit);
         assert!(!report.items[1].graph_called);
         assert!(report.items[2].graph_called);
+        assert_eq!(
+            ledger.entry(&pending_key).unwrap().status,
+            ExportStatus::UnknownAfterSubmit
+        );
+        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account)
+            .await
+            .unwrap();
+        assert_eq!(report.items[0].local_id, "action-5");
+        assert_eq!(
+            report.items[0].code.as_deref(),
+            Some("task_identity_review_required")
+        );
+        assert!(!report.items[0].graph_called);
+        let action = &mut shifted.action_items[0];
+        action.legacy_action = Some(crate::exports::actions::LegacyAction {
+            id: action.local_action_id.clone(),
+            title_hash: hash,
+        });
+        action.local_action_id = saved_id.into();
+        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.items[0].code.as_deref(),
+            Some("task_identity_review_required")
+        );
+        assert!(!report.items[0].graph_called);
         assert_eq!(client.transport().calls_for(url), 1);
     }
 

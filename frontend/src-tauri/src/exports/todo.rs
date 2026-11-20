@@ -148,10 +148,10 @@ pub fn dedupe_key(
     meeting: &MeetingExport,
     action: &ExportActionItem,
 ) -> String {
-    crate::exports::ledger::task_key(
+    crate::exports::ledger::task_key_for_action(
         &task_scope(tenant_id, user_id, destination),
         &meeting.meeting_id,
-        &action.local_action_id,
+        action,
         &action_hash(action),
     )
 }

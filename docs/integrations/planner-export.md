@@ -64,7 +64,7 @@ An interrupted submission can have an unknown outcome and is not automatically
 retried. Check Planner before creating another task. A saved action retains its
 identity when edited and is scoped to the Microsoft account, plan, and bucket.
 Adding a task to the selection preserves the history for tasks already submitted.
-Existing history is used when its original action and title match. See
+Ambiguous matches with older suggestions are held for review. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).
 
 The ledger stores:

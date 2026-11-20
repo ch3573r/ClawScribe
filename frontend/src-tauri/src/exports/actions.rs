@@ -88,10 +88,7 @@ fn validate(actions: &mut Vec<ReviewedAction>) -> Result<(), String> {
             return Err("Invalid action source reference.".into());
         }
         if action.legacy_action.as_ref().is_some_and(|legacy| {
-            !legacy
-                .id
-                .strip_prefix("action-")
-                .is_some_and(|index| index.parse::<u32>().is_ok())
+            !super::ledger::is_positional_action_id(&legacy.id)
                 || legacy.title_hash.len() != 16
                 || !legacy.title_hash.bytes().all(|b| b.is_ascii_hexdigit())
         }) {

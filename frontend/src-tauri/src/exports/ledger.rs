@@ -18,6 +18,9 @@ pub const LEDGER_SCHEMA: &str = "clawscribe.exports.v1";
 pub const LEDGER_FILENAME: &str = "exports.json";
 pub(crate) const MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AmbiguousTaskIdentity;
+
 pub(crate) fn meeting_dir(app_data: &Path, meeting_id: &str) -> PathBuf {
     let safe: String = meeting_id
         .chars()
@@ -46,6 +49,12 @@ fn meeting_key_hash(meeting_id: &str) -> String {
         .collect()
 }
 
+pub(super) fn is_positional_action_id(action_id: &str) -> bool {
+    action_id
+        .strip_prefix("action-")
+        .is_some_and(|position| position.parse::<u32>().is_ok())
+}
+
 pub(crate) fn task_key(scope: &str, meeting_id: &str, action_id: &str, title_hash: &str) -> String {
     let meeting_hash = meeting_key_hash(meeting_id);
     if uuid::Uuid::parse_str(action_id).is_ok() {
@@ -54,6 +63,19 @@ pub(crate) fn task_key(scope: &str, meeting_id: &str, action_id: &str, title_has
         // Old callers send positional IDs that can be reused for other titles.
         format!("{scope}:v2:{meeting_hash}:{action_id}:{title_hash}")
     }
+}
+
+pub(super) fn task_key_for_action(
+    scope: &str,
+    meeting_id: &str,
+    action: &super::model::ExportActionItem,
+    title_hash: &str,
+) -> String {
+    let original_hash = action
+        .legacy_action
+        .as_ref()
+        .map_or(title_hash, |legacy| legacy.title_hash.as_str());
+    task_key(scope, meeting_id, &action.local_action_id, original_hash)
 }
 
 /// One export record, keyed by its dedupe key in [`ExportLedger::entries`].
@@ -454,8 +476,8 @@ impl ExportLedger {
         }
     }
 
-    /// Resolve old task keys without relying on the hash of the original batch.
-    /// Keep the original record so old callers and restored backups share it.
+    /// Resolve past task attempts within this destination and meeting. Older
+    /// keys use a batch hash and are already scoped to a meeting by the ledger.
     pub(crate) fn existing_task_key(
         &self,
         scope: &str,
@@ -463,87 +485,76 @@ impl ExportLedger {
         action_id: &str,
         title_hash: &str,
         legacy_action: Option<&super::actions::LegacyAction>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, AmbiguousTaskIdentity> {
         let current = task_key(scope, meeting_id, action_id, title_hash);
+        let stable_id = uuid::Uuid::parse_str(action_id).is_ok();
+        let mut exact_uuid = self.entries.get_key_value(&current).filter(|_| stable_id);
+        if exact_uuid.is_some_and(|(_, entry)| !entry.status.allows_automatic_retry()) {
+            return Ok(Some(current));
+        }
+
         let (old_id, old_hash) = legacy_action.map_or((action_id, title_hash), |legacy| {
             (&legacy.id, &legacy.title_hash)
         });
-        let previous = [old_hash, title_hash].map(|hash| task_key(scope, meeting_id, old_id, hash));
-        let suffixes = [old_hash, title_hash].map(|hash| format!(":{old_id}:{hash}"));
-
-        // For positional (action-N) identifiers that have not yet been given a UUID,
-        // also look for the same title_hash at a different position within this scope
-        // and meeting.  This handles the case where an item is inserted before an
-        // unsaved action, shifting its position.  Return a match only when unique —
-        // the same title appearing at multiple positions is ambiguous.
-        let positional_match_key = if uuid::Uuid::parse_str(action_id).is_err() {
-            let meeting_hash = meeting_key_hash(meeting_id);
-            // v2: scope:v2:<meeting_hash>:action-<N>:<title_hash>
-            let v2_prefix = format!("{scope}:v2:{meeting_hash}:action-");
-            let v2_tail = format!(":{title_hash}");
-            // old: scope:<16hex>:action-<N>:<title_hash>
-            let old_prefix = format!("{scope}:");
-
-            let candidates: Vec<&String> = self
-                .entries
-                .keys()
-                .filter(|key| {
-                    if key.starts_with(&v2_prefix) && key.ends_with(&v2_tail) {
-                        let mid = &key[v2_prefix.len()..key.len() - v2_tail.len()];
-                        return mid.parse::<u32>().is_ok();
+        let scope_prefix = format!("{scope}:");
+        let v2_prefix = format!("v2:{}:", meeting_key_hash(meeting_id));
+        let positional = is_positional_action_id(old_id);
+        let candidates = self.entries.iter().filter_map(|(key, entry)| {
+            let scoped = key.strip_prefix(&scope_prefix)?;
+            let action = match scoped.strip_prefix(&v2_prefix) {
+                Some(action) => action,
+                None => {
+                    let (batch, action) = scoped.split_once(':')?;
+                    if batch.len() != 16 || !batch.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return None;
                     }
-                    if let Some(rest) = key.strip_prefix(&old_prefix) {
-                        if let Some((batch, rest2)) = rest.split_once(':') {
-                            if batch.len() == 16 && batch.bytes().all(|b| b.is_ascii_hexdigit()) {
-                                if let Some(action_rest) = rest2.strip_prefix("action-") {
-                                    if let Some((n, t)) = action_rest.split_once(':') {
-                                        return n.parse::<u32>().is_ok() && t == title_hash;
-                                    }
-                                }
-                            }
-                        }
+                    action
+                }
+            };
+            let (id, hash) = action.split_once(':')?;
+            (hash == old_hash || hash == title_hash).then_some((id, hash, key, entry))
+        });
+        fn priority(entry: &LedgerEntry) -> (bool, bool, Option<&str>) {
+            (
+                entry.status.is_terminal_success(),
+                !entry.status.allows_automatic_retry(),
+                entry.last_attempt_at.as_deref(),
+            )
+        }
+        let mut legacy_match = None;
+        let mut ambiguous = false;
+        for (id, hash, key, entry) in candidates {
+            if stable_id && id == action_id {
+                // Pre-v2 keys could also carry a UUID and title hash.
+                if exact_uuid.is_none_or(|(_, previous)| priority(entry) >= priority(previous)) {
+                    exact_uuid = Some((key, entry));
+                }
+            } else if id == old_id || (positional && is_positional_action_id(id)) {
+                if let Some((previous_id, previous_hash, _, previous)) = legacy_match {
+                    ambiguous |= previous_id != id || previous_hash != hash;
+                    if priority(entry) < priority(previous) {
+                        continue;
                     }
-                    false
-                })
-                .collect();
-
-            if candidates.len() == 1 {
-                Some(candidates[0].clone())
-            } else {
-                None
+                }
+                legacy_match = Some((id, hash, key, entry));
             }
-        } else {
-            None
-        };
+        }
 
-        self.entries
-            .iter()
-            .filter(|(key, _)| {
-                if key.as_str() == current || previous.iter().any(|previous| previous == *key) {
-                    return true;
-                }
-                if key.strip_prefix(scope)
-                    .and_then(|key| key.strip_prefix(':'))
-                    .is_some_and(|key| {
-                        suffixes.iter().any(|suffix| {
-                            key.strip_suffix(suffix.as_str()).is_some_and(|batch| {
-                                batch.len() == 16 && batch.bytes().all(|b| b.is_ascii_hexdigit())
-                            })
-                        })
-                    })
-                {
-                    return true;
-                }
-                positional_match_key.as_deref() == Some(key.as_str())
-            })
-            .max_by_key(|(_, entry)| {
-                (
-                    entry.status.is_terminal_success(),
-                    !entry.status.allows_automatic_retry(),
-                    &entry.last_attempt_at,
-                )
-            })
-            .map(|(key, _)| key.clone())
+        // A retryable UUID can coexist with older protected history after a
+        // restore. Keep that protection for suggested actions linked to it.
+        if let Some((key, entry)) = exact_uuid {
+            if !entry.status.allows_automatic_retry()
+                || (!ambiguous
+                    && legacy_match
+                        .is_none_or(|(_, _, _, old)| old.status.allows_automatic_retry()))
+            {
+                return Ok(Some(key.clone()));
+            }
+        }
+        if ambiguous {
+            return Err(AmbiguousTaskIdentity);
+        }
+        Ok(legacy_match.map(|(_, _, key, _)| key.clone()))
     }
 
     /// Whether a Graph call should be skipped because this key already
@@ -695,8 +706,9 @@ mod tests {
             title_hash: "cccccccccccccccc".into(),
         };
         let id = uuid::Uuid::new_v4().to_string();
-        let restored =
-            ledger.existing_task_key(scope, "meeting", &id, "bbbbbbbbbbbbbbbb", Some(&selected));
+        let restored = ledger
+            .existing_task_key(scope, "meeting", &id, "bbbbbbbbbbbbbbbb", Some(&selected))
+            .unwrap();
         assert_eq!(restored.as_deref(), Some(previous));
         assert!(!ledger.may_attempt(restored.as_deref().unwrap()));
         assert!(ledger
@@ -707,6 +719,7 @@ mod tests {
                 "bbbbbbbbbbbbbbbb",
                 Some(&selected)
             )
+            .unwrap()
             .is_none());
     }
 
@@ -965,26 +978,42 @@ mod tests {
         ledger.record_success(&key_a1, Some("task-A".into()), None, None);
 
         // Now A is at action-2 (new item inserted before it)
-        let found = ledger.existing_task_key(scope, "meeting", "action-2", hash_a, None);
+        let found = ledger
+            .existing_task_key(scope, "meeting", "action-2", hash_a, None)
+            .unwrap();
         assert_eq!(found.as_deref(), Some(key_a1.as_str()));
         assert_eq!(
-            ledger.already_succeeded(&key_a1).unwrap().resource_id.as_deref(),
+            ledger
+                .already_succeeded(&key_a1)
+                .unwrap()
+                .resource_id
+                .as_deref(),
             Some("task-A")
         );
     }
 
     #[test]
-    fn positional_dedup_no_match_when_ambiguous() {
+    fn positional_dedup_requires_review_when_ambiguous() {
         let mut ledger = ExportLedger::new("meeting");
         let scope = "planner:tenant:user:plan:bucket";
         let hash = "bbbb000000000000";
         // Same title at two positions
-        ledger.record_success(&task_key(scope, "meeting", "action-1", hash), None, None, None);
-        ledger.record_success(&task_key(scope, "meeting", "action-3", hash), None, None, None);
+        ledger.record_success(
+            &task_key(scope, "meeting", "action-1", hash),
+            None,
+            None,
+            None,
+        );
+        ledger.record_success(
+            &task_key(scope, "meeting", "action-3", hash),
+            None,
+            None,
+            None,
+        );
 
         // action-2 with same hash — ambiguous, must not match either
         let found = ledger.existing_task_key(scope, "meeting", "action-2", hash, None);
-        assert!(found.is_none());
+        assert_eq!(found, Err(AmbiguousTaskIdentity));
     }
 
     #[test]
@@ -994,9 +1023,16 @@ mod tests {
         let hash = "cccc000000000000";
         // A UUID entry already exists (no title_hash in key)
         let uuid = uuid::Uuid::new_v4().to_string();
-        ledger.record_success(&task_key(scope, "meeting", &uuid, hash), Some("task-UUID".into()), None, None);
+        ledger.record_success(
+            &task_key(scope, "meeting", &uuid, hash),
+            Some("task-UUID".into()),
+            None,
+            None,
+        );
         // Positional search for action-N should not find the UUID entry
-        let found = ledger.existing_task_key(scope, "meeting", "action-1", hash, None);
+        let found = ledger
+            .existing_task_key(scope, "meeting", "action-1", hash, None)
+            .unwrap();
         assert!(found.is_none());
     }
 
@@ -1006,18 +1042,32 @@ mod tests {
         let scope = "todo:tenant:user:list";
         let hash_a = "dddd000000000000";
         let hash_b = "eeee000000000000";
-        ledger.record_success(&task_key(scope, "meeting", "action-1", hash_a), Some("task-A".into()), None, None);
-        ledger.record_success(&task_key(scope, "meeting", "action-2", hash_b), Some("task-B".into()), None, None);
+        ledger.record_success(
+            &task_key(scope, "meeting", "action-1", hash_a),
+            Some("task-A".into()),
+            None,
+            None,
+        );
+        ledger.record_success(
+            &task_key(scope, "meeting", "action-2", hash_b),
+            Some("task-B".into()),
+            None,
+            None,
+        );
 
         // A shifts to action-2 (new item B shifts to action-3)
-        let found_a = ledger.existing_task_key(scope, "meeting", "action-2", hash_a, None);
+        let found_a = ledger
+            .existing_task_key(scope, "meeting", "action-2", hash_a, None)
+            .unwrap();
         assert_eq!(
             found_a.as_deref(),
             Some(task_key(scope, "meeting", "action-1", hash_a).as_str())
         );
 
         // B shifts to action-3
-        let found_b = ledger.existing_task_key(scope, "meeting", "action-3", hash_b, None);
+        let found_b = ledger
+            .existing_task_key(scope, "meeting", "action-3", hash_b, None)
+            .unwrap();
         assert_eq!(
             found_b.as_deref(),
             Some(task_key(scope, "meeting", "action-2", hash_b).as_str())
@@ -1034,7 +1084,35 @@ mod tests {
         ledger.record_success(&old_key, Some("task-old".into()), None, None);
 
         // action-2 lookup should find the old-format action-1 entry
-        let found = ledger.existing_task_key(scope, "meeting", "action-2", hash, None);
+        let found = ledger
+            .existing_task_key(scope, "meeting", "action-2", hash, None)
+            .unwrap();
         assert_eq!(found.as_deref(), Some(old_key.as_str()));
+    }
+
+    #[test]
+    fn matching_key_formats_preserve_unknown_outcome_and_destination_scope() {
+        let mut ledger = ExportLedger::new("meeting");
+        let scope = "todo:tenant:user:list";
+        let hash = "ffff000000000000";
+        let unknown = format!("{scope}:1234567890abcdef:action-1:{hash}");
+        ledger.record_failure(&unknown, ExportStatus::UnknownAfterSubmit, None, None);
+        for (scope, meeting_id, position) in [
+            (scope, "meeting", "action-1"),
+            ("todo:tenant:user:other", "meeting", "action-2"),
+            (scope, "other", "action-3"),
+        ] {
+            ledger.record_failure(
+                &task_key(scope, meeting_id, position, hash),
+                ExportStatus::Failed,
+                None,
+                None,
+            );
+        }
+        let found = ledger
+            .existing_task_key(scope, "meeting", "action-4", hash, None)
+            .unwrap();
+        assert_eq!(found.as_deref(), Some(unknown.as_str()));
+        assert!(!ledger.may_attempt(&unknown));
     }
 }

@@ -185,6 +185,12 @@ for the page or task before taking further action. There is no automatic remote
 reconciliation or reset control for these entries. A saved task keeps its identity
 across edits, and choosing a different destination starts a separate export.
 
+Older Planner and To Do exports identified summary suggestions by title and
+position. When a title matches several past tasks, or several suggestions match
+one past task, ClawScribe marks the affected tasks for review. Check the selected
+destination for existing tasks. Open **Meeting actions**, use **Add action** for
+each task you confirm is new, and save those actions before exporting them.
+
 OneNote records the created section before submitting pages. Resume reuses that
 section with the same content and skips pages whose history protects them from a
 duplicate submission.
