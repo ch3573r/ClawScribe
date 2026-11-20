@@ -117,6 +117,31 @@ impl LedgerEntry {
     }
 }
 
+/// Merge priority for export statuses. Higher wins over lower when merging two
+/// ledgers. Pending must be normalised to UnknownAfterSubmit before calling this.
+fn status_merge_priority(status: ExportStatus) -> u8 {
+    match status {
+        ExportStatus::Succeeded => 4,
+        ExportStatus::UnknownAfterSubmit => 3,
+        ExportStatus::DestinationNotFound
+        | ExportStatus::AccessDenied
+        | ExportStatus::TenantBlocked => 2,
+        ExportStatus::Failed | ExportStatus::PartialFailure | ExportStatus::FailedAuth => 1,
+        ExportStatus::Pending => 0,
+    }
+}
+
+/// Return the later of two optional RFC-3339 timestamps (lexicographic order is
+/// correct for same-precision, same-timezone RFC-3339 strings).
+fn max_opt_timestamp(a: Option<&str>, b: Option<&str>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if a >= b { a } else { b }.to_string()),
+        (Some(a), None) => Some(a.to_string()),
+        (None, Some(b)) => Some(b.to_string()),
+        (None, None) => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportLedger {
@@ -318,6 +343,117 @@ impl ExportLedger {
         self.entries.get(dedupe_key)
     }
 
+    /// Merge entries from `incoming` into `self`.
+    ///
+    /// Used when restoring into an installation that already has a ledger file —
+    /// for example after a previous partial restore left one behind.
+    ///
+    /// Rules:
+    /// * `Succeeded` beats everything; statuses that block automatic retry beat
+    ///   those that allow it; `Pending` is normalised to `UnknownAfterSubmit`.
+    /// * When both entries have succeeded with *different* `resource_id`s the
+    ///   existing entry is kept intact (a code is added to signal the conflict)
+    ///   rather than silently overwriting the local machine's known remote ID.
+    /// * `resource_id`: on conflict (both set, different), keep existing.
+    /// * `attempts`: take the maximum of both.
+    /// * `onenote_sections`: add incoming sections not already present.
+    pub(crate) fn merge_incoming(&mut self, incoming: &ExportLedger) {
+        for (key, inc) in &incoming.entries {
+            let inc_status = if inc.status == ExportStatus::Pending {
+                ExportStatus::UnknownAfterSubmit
+            } else {
+                inc.status
+            };
+
+            match self.entries.entry(key.clone()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    let mut entry = inc.clone();
+                    entry.status = inc_status;
+                    if inc.status == ExportStatus::Pending && entry.code.is_none() {
+                        entry.code = Some("interrupted_export_review_required".into());
+                    }
+                    v.insert(entry);
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    let ex = o.get_mut();
+                    // Normalise existing pending status.
+                    if ex.status == ExportStatus::Pending {
+                        ex.status = ExportStatus::UnknownAfterSubmit;
+                        if ex.code.is_none() {
+                            ex.code = Some("interrupted_export_review_required".into());
+                        }
+                    }
+
+                    // Both succeeded with different resource IDs: genuinely contradictory.
+                    // Preserve the existing entry intact and flag for user review; do not
+                    // overwrite the local machine's known remote ID.
+                    let resource_conflict = ex.resource_id.is_some()
+                        && inc.resource_id.is_some()
+                        && ex.resource_id != inc.resource_id
+                        && ex.status.is_terminal_success()
+                        && inc_status.is_terminal_success();
+                    if resource_conflict {
+                        ex.code =
+                            Some("merge_conflict_check_for_duplicates_in_microsoft_365".into());
+                        ex.attempts = ex.attempts.max(inc.attempts);
+                        continue;
+                    }
+
+                    let prefer_incoming =
+                        status_merge_priority(inc_status) > status_merge_priority(ex.status);
+
+                    // resource_id: on a non-contradictory conflict (at most one side has an
+                    // ID), use whichever the winning side provides, falling back to the other.
+                    let new_resource_id = if ex.resource_id.is_some()
+                        && inc.resource_id.is_some()
+                        && ex.resource_id != inc.resource_id
+                    {
+                        // Single-side contradiction: keep existing.
+                        ex.resource_id.clone()
+                    } else if prefer_incoming {
+                        inc.resource_id.clone().or_else(|| ex.resource_id.clone())
+                    } else {
+                        ex.resource_id.clone().or_else(|| inc.resource_id.clone())
+                    };
+
+                    if prefer_incoming {
+                        ex.status = inc_status;
+                        ex.code = inc.code.clone();
+                        ex.web_url = inc.web_url.clone().or_else(|| ex.web_url.clone());
+                        ex.last_attempt_at = max_opt_timestamp(
+                            ex.last_attempt_at.as_deref(),
+                            inc.last_attempt_at.as_deref(),
+                        );
+                    } else {
+                        ex.web_url = ex.web_url.clone().or_else(|| inc.web_url.clone());
+                    }
+                    ex.resource_id = new_resource_id;
+                    ex.attempts = ex.attempts.max(inc.attempts);
+                }
+            }
+        }
+
+        // Merge onenote_sections: add incoming entries not already present locally.
+        for (id, section) in &incoming.onenote_sections {
+            self.onenote_sections
+                .entry(id.clone())
+                .and_modify(|saved| {
+                    if saved.section_id.is_none()
+                        && saved.tenant_id == section.tenant_id
+                        && saved.user_id == section.user_id
+                        && saved.notebook_id == section.notebook_id
+                        && saved.content_hash == section.content_hash
+                        && saved.section_name == section.section_name
+                        && saved.page_title == section.page_title
+                        && saved.options == section.options
+                    {
+                        saved.section_id.clone_from(&section.section_id);
+                    }
+                })
+                .or_insert_with(|| section.clone());
+        }
+    }
+
     /// Resolve old task keys without relying on the hash of the original batch.
     /// Keep the original record so old callers and restored backups share it.
     pub(crate) fn existing_task_key(
@@ -334,13 +470,59 @@ impl ExportLedger {
         });
         let previous = [old_hash, title_hash].map(|hash| task_key(scope, meeting_id, old_id, hash));
         let suffixes = [old_hash, title_hash].map(|hash| format!(":{old_id}:{hash}"));
+
+        // For positional (action-N) identifiers that have not yet been given a UUID,
+        // also look for the same title_hash at a different position within this scope
+        // and meeting.  This handles the case where an item is inserted before an
+        // unsaved action, shifting its position.  Return a match only when unique —
+        // the same title appearing at multiple positions is ambiguous.
+        let positional_match_key = if uuid::Uuid::parse_str(action_id).is_err() {
+            let meeting_hash = meeting_key_hash(meeting_id);
+            // v2: scope:v2:<meeting_hash>:action-<N>:<title_hash>
+            let v2_prefix = format!("{scope}:v2:{meeting_hash}:action-");
+            let v2_tail = format!(":{title_hash}");
+            // old: scope:<16hex>:action-<N>:<title_hash>
+            let old_prefix = format!("{scope}:");
+
+            let candidates: Vec<&String> = self
+                .entries
+                .keys()
+                .filter(|key| {
+                    if key.starts_with(&v2_prefix) && key.ends_with(&v2_tail) {
+                        let mid = &key[v2_prefix.len()..key.len() - v2_tail.len()];
+                        return mid.parse::<u32>().is_ok();
+                    }
+                    if let Some(rest) = key.strip_prefix(&old_prefix) {
+                        if let Some((batch, rest2)) = rest.split_once(':') {
+                            if batch.len() == 16 && batch.bytes().all(|b| b.is_ascii_hexdigit()) {
+                                if let Some(action_rest) = rest2.strip_prefix("action-") {
+                                    if let Some((n, t)) = action_rest.split_once(':') {
+                                        return n.parse::<u32>().is_ok() && t == title_hash;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    false
+                })
+                .collect();
+
+            if candidates.len() == 1 {
+                Some(candidates[0].clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         self.entries
             .iter()
             .filter(|(key, _)| {
                 if key.as_str() == current || previous.iter().any(|previous| previous == *key) {
                     return true;
                 }
-                key.strip_prefix(scope)
+                if key.strip_prefix(scope)
                     .and_then(|key| key.strip_prefix(':'))
                     .is_some_and(|key| {
                         suffixes.iter().any(|suffix| {
@@ -349,6 +531,10 @@ impl ExportLedger {
                             })
                         })
                     })
+                {
+                    return true;
+                }
+                positional_match_key.as_deref() == Some(key.as_str())
             })
             .max_by_key(|(_, entry)| {
                 (
@@ -641,5 +827,214 @@ mod tests {
         assert_eq!(ledger.entry("k").unwrap().attempts, 1);
         ledger.begin_attempt("k", Some("t1".into()));
         assert_eq!(ledger.entry("k").unwrap().attempts, 2);
+    }
+
+    // ── merge_incoming ──────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_adds_new_incoming_entries_and_normalises_pending() {
+        let mut existing = ExportLedger::new("m");
+        existing.record_failure("k-fail", ExportStatus::Failed, None, None);
+
+        let mut incoming = ExportLedger::new("m");
+        incoming.record_success("k-new", Some("id-new".into()), None, Some("t1".into()));
+        incoming.begin_attempt("k-pending", None); // should become UnknownAfterSubmit
+
+        existing.merge_incoming(&incoming);
+
+        assert_eq!(existing.entry("k-new").unwrap().status, ExportStatus::Succeeded);
+        assert_eq!(
+            existing.entry("k-new").unwrap().resource_id.as_deref(),
+            Some("id-new")
+        );
+        // Incoming pending normalised to unknown
+        assert_eq!(
+            existing.entry("k-pending").unwrap().status,
+            ExportStatus::UnknownAfterSubmit
+        );
+        assert!(existing
+            .entry("k-pending")
+            .unwrap()
+            .code
+            .as_deref()
+            .is_some());
+    }
+
+    #[test]
+    fn merge_prefers_succeeded_over_failed_on_same_key() {
+        let mut existing = ExportLedger::new("m");
+        existing.record_failure("k", ExportStatus::Failed, Some("throttled".into()), None);
+        existing.entries.get_mut("k").unwrap().attempts = 3;
+
+        let mut incoming = ExportLedger::new("m");
+        incoming.record_success("k", Some("task-1".into()), None, Some("t1".into()));
+        incoming.entries.get_mut("k").unwrap().attempts = 1;
+
+        existing.merge_incoming(&incoming);
+
+        let e = existing.entry("k").unwrap();
+        assert_eq!(e.status, ExportStatus::Succeeded);
+        assert_eq!(e.resource_id.as_deref(), Some("task-1"));
+        assert_eq!(e.attempts, 3); // max
+    }
+
+    #[test]
+    fn merge_keeps_unknown_over_incoming_failed() {
+        let mut existing = ExportLedger::new("m");
+        existing.record_failure("k", ExportStatus::UnknownAfterSubmit, None, None);
+
+        let mut incoming = ExportLedger::new("m");
+        incoming.record_failure("k", ExportStatus::Failed, Some("timeout".into()), None);
+
+        existing.merge_incoming(&incoming);
+
+        let e = existing.entry("k").unwrap();
+        assert_eq!(e.status, ExportStatus::UnknownAfterSubmit);
+    }
+
+    #[test]
+    fn merge_contradictory_succeeded_resource_ids_flags_and_keeps_existing() {
+        let mut existing = ExportLedger::new("m");
+        existing.record_success("k", Some("task-local".into()), None, None);
+
+        let mut incoming = ExportLedger::new("m");
+        incoming.record_success("k", Some("task-archive".into()), None, None);
+
+        existing.merge_incoming(&incoming);
+
+        let e = existing.entry("k").unwrap();
+        // Status unchanged (still Succeeded), local resource_id preserved
+        assert_eq!(e.status, ExportStatus::Succeeded);
+        assert_eq!(e.resource_id.as_deref(), Some("task-local"));
+        // Conflict flagged via code
+        assert!(e.code.as_ref().is_some_and(|c| c.contains("conflict")));
+    }
+
+    #[test]
+    fn merge_onenote_sections_adds_incoming_keeps_existing() {
+        let section_a = OneNoteSection {
+            tenant_id: "t".into(),
+            user_id: "u".into(),
+            notebook_id: "nb".into(),
+            section_id: Some("s1".into()),
+            section_name: "Existing".into(),
+            page_title: "p".into(),
+            content_hash: "a".repeat(64),
+            options: None,
+            started_at: "2026-11-01T00:00:00Z".into(),
+        };
+        let section_b = OneNoteSection {
+            section_name: "Incoming".into(),
+            section_id: Some("s2".into()),
+            ..section_a.clone()
+        };
+        let section_c = OneNoteSection {
+            section_name: "New".into(),
+            section_id: Some("s3".into()),
+            ..section_a.clone()
+        };
+
+        let uuid_a = "00000000-0000-0000-0000-000000000001";
+        let uuid_b = "00000000-0000-0000-0000-000000000002";
+
+        let mut existing = ExportLedger::new("m");
+        existing.onenote_sections.insert(uuid_a.into(), section_a.clone());
+
+        let mut incoming = ExportLedger::new("m");
+        incoming.onenote_sections.insert(uuid_a.into(), section_b); // conflict — keep existing
+        incoming.onenote_sections.insert(uuid_b.into(), section_c.clone()); // new — add
+
+        existing.merge_incoming(&incoming);
+
+        assert_eq!(existing.onenote_sections[uuid_a].section_name, "Existing");
+        assert_eq!(existing.onenote_sections[uuid_b].section_name, "New");
+        existing.onenote_sections.get_mut(uuid_b).unwrap().section_id = None;
+        existing.merge_incoming(&incoming);
+        assert_eq!(existing.onenote_sections[uuid_b].section_id.as_deref(), Some("s3"));
+    }
+
+    // ── existing_task_key positional dedup ──────────────────────────────────
+
+    #[test]
+    fn positional_dedup_finds_same_title_at_different_action_n_position() {
+        let mut ledger = ExportLedger::new("meeting");
+        let scope = "planner:tenant:user:plan:bucket";
+        let hash_a = "aaaa000000000000";
+        // A was at action-1
+        let key_a1 = task_key(scope, "meeting", "action-1", hash_a);
+        ledger.record_success(&key_a1, Some("task-A".into()), None, None);
+
+        // Now A is at action-2 (new item inserted before it)
+        let found = ledger.existing_task_key(scope, "meeting", "action-2", hash_a, None);
+        assert_eq!(found.as_deref(), Some(key_a1.as_str()));
+        assert_eq!(
+            ledger.already_succeeded(&key_a1).unwrap().resource_id.as_deref(),
+            Some("task-A")
+        );
+    }
+
+    #[test]
+    fn positional_dedup_no_match_when_ambiguous() {
+        let mut ledger = ExportLedger::new("meeting");
+        let scope = "planner:tenant:user:plan:bucket";
+        let hash = "bbbb000000000000";
+        // Same title at two positions
+        ledger.record_success(&task_key(scope, "meeting", "action-1", hash), None, None, None);
+        ledger.record_success(&task_key(scope, "meeting", "action-3", hash), None, None, None);
+
+        // action-2 with same hash — ambiguous, must not match either
+        let found = ledger.existing_task_key(scope, "meeting", "action-2", hash, None);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn positional_dedup_skipped_for_uuid_action_id() {
+        let mut ledger = ExportLedger::new("meeting");
+        let scope = "planner:tenant:user:plan:bucket";
+        let hash = "cccc000000000000";
+        // A UUID entry already exists (no title_hash in key)
+        let uuid = uuid::Uuid::new_v4().to_string();
+        ledger.record_success(&task_key(scope, "meeting", &uuid, hash), Some("task-UUID".into()), None, None);
+        // Positional search for action-N should not find the UUID entry
+        let found = ledger.existing_task_key(scope, "meeting", "action-1", hash, None);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn positional_dedup_distinct_titles_dont_interfere() {
+        let mut ledger = ExportLedger::new("meeting");
+        let scope = "todo:tenant:user:list";
+        let hash_a = "dddd000000000000";
+        let hash_b = "eeee000000000000";
+        ledger.record_success(&task_key(scope, "meeting", "action-1", hash_a), Some("task-A".into()), None, None);
+        ledger.record_success(&task_key(scope, "meeting", "action-2", hash_b), Some("task-B".into()), None, None);
+
+        // A shifts to action-2 (new item B shifts to action-3)
+        let found_a = ledger.existing_task_key(scope, "meeting", "action-2", hash_a, None);
+        assert_eq!(
+            found_a.as_deref(),
+            Some(task_key(scope, "meeting", "action-1", hash_a).as_str())
+        );
+
+        // B shifts to action-3
+        let found_b = ledger.existing_task_key(scope, "meeting", "action-3", hash_b, None);
+        assert_eq!(
+            found_b.as_deref(),
+            Some(task_key(scope, "meeting", "action-2", hash_b).as_str())
+        );
+    }
+
+    #[test]
+    fn positional_dedup_matches_old_format_key() {
+        let mut ledger = ExportLedger::new("meeting");
+        let scope = "planner:tenant:user:plan:bucket";
+        let hash = "ffff000000000000";
+        // Insert an old-format key (batch hash instead of v2)
+        let old_key = format!("{scope}:1234567890abcdef:action-1:{hash}");
+        ledger.record_success(&old_key, Some("task-old".into()), None, None);
+
+        // action-2 lookup should find the old-format action-1 entry
+        let found = ledger.existing_task_key(scope, "meeting", "action-2", hash, None);
+        assert_eq!(found.as_deref(), Some(old_key.as_str()));
     }
 }

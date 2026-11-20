@@ -2,18 +2,22 @@
 
 use crate::exports::ledger::{meeting_dir, ExportLedger, LEDGER_FILENAME, MAX_LEDGER_BYTES};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use super::{failure, text_field, Manifest, MAX_MANIFEST};
+use super::{failure, meeting_failure, text_field, Manifest, MAX_MANIFEST};
+
+pub(super) const UNREADABLE_HISTORY: &str =
+    "Microsoft export history could not be read. Check file access or recover the history from a known-good copy before retrying.";
 
 pub(super) fn capture(manifest: &mut Manifest, app_data: &Path) -> Result<(), String> {
     let mut budget = MAX_MANIFEST;
     for (index, row) in manifest.tables["meetings"].iter().enumerate() {
         let id = text_field(row, "id")?;
-        if let Some(mut ledger) = ExportLedger::read(&meeting_dir(app_data, id))? {
+        if let Some(mut ledger) = ExportLedger::read(&meeting_dir(app_data, id))
+            .map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))? {
             ledger.retain_microsoft_links();
-            ledger.validate_archive(id)?;
+            ledger.validate_archive(id).map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))?;
             debit_budget(&mut budget, &ledger)?;
             manifest.export_ledgers.insert(index, ledger);
         }
@@ -130,8 +134,12 @@ pub(super) fn selected(manifest: &Manifest, meetings: &HashSet<String>) -> Vec<E
         .collect()
 }
 
+/// Tracks ledger files written during a restore so they can be rolled back if
+/// the database transaction fails.  Each entry is `(path, previous_bytes)`:
+/// `None` means the file was newly created (delete on rollback); `Some` holds
+/// the original content to restore atomically.
 #[derive(Default)]
-pub(super) struct PublishedHistory(Vec<PathBuf>);
+pub(super) struct PublishedHistory(Vec<(PathBuf, Option<Vec<u8>>)>);
 
 impl PublishedHistory {
     pub(super) fn keep(mut self) {
@@ -141,8 +149,43 @@ impl PublishedHistory {
 
 impl Drop for PublishedHistory {
     fn drop(&mut self) {
-        for path in self.0.drain(..) {
-            let _ = std::fs::remove_file(path);
+        for (path, previous) in self.0.drain(..) {
+            match previous {
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                Some(bytes) => {
+                    // Best-effort: restore previous content atomically.
+                    if let Some(parent) = path.parent() {
+                        if let Ok(mut tmp) = tempfile::NamedTempFile::new_in(parent) {
+                            if tmp.write_all(&bytes).is_ok() {
+                                let _ = tmp.persist(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read the raw bytes of a ledger file without parsing (bounded read).
+fn read_ledger_bytes(folder: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path = folder.join(LEDGER_FILENAME);
+    match std::fs::File::open(&path) {
+        Ok(file) => {
+            let mut body = Vec::new();
+            file.take(MAX_LEDGER_BYTES + 1)
+                .read_to_end(&mut body)
+                .map_err(|_| "Could not read export history.".to_string())?;
+            if body.len() as u64 > MAX_LEDGER_BYTES {
+                return Err("Export history exceeds the supported size.".into());
+            }
+            Ok(Some(body))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => {
+            Err("Could not read export history. Restore access before exporting.".into())
         }
     }
 }
@@ -156,12 +199,40 @@ pub(super) fn publish(
         ledger.retain_microsoft_links();
         let root = app_data.ok_or("Microsoft export history requires an app data directory.")?;
         let dir = meeting_dir(root, &ledger.meeting_id);
-        if ExportLedger::read(&dir)?.as_ref() == Some(&ledger) {
-            // A previous restore may have published the file before interruption.
-            continue;
+        let path = dir.join(LEDGER_FILENAME);
+
+        // Read existing file once (raw bytes + parsed) so we can compare, merge,
+        // and roll back atomically without reading the file a second time.
+        let prev_bytes = read_ledger_bytes(&dir)?;
+
+        match prev_bytes {
+            None => {
+                // No existing file: create new, roll back by deleting on failure.
+                ledger.restore(&dir)?;
+                published.0.push((path, None));
+            }
+            Some(ref bytes) => {
+                let mut existing: ExportLedger =
+                    serde_json::from_slice(bytes).map_err(|_| {
+                        "Export history is invalid. Restore it before continuing to avoid duplicates.".to_string()
+                    })?;
+
+                existing.retain_microsoft_links();
+                existing.validate_archive(&ledger.meeting_id)?;
+                if existing == ledger {
+                    // A previous restore wrote this exact file; nothing to do.
+                    continue;
+                }
+
+                // Merge incoming history into the existing file, then overwrite.
+                // On rollback the previous bytes are restored atomically.
+                let mut merged = existing;
+                merged.merge_incoming(&ledger);
+                merged.validate_archive(&ledger.meeting_id)?;
+                merged.save(&dir)?;
+                published.0.push((path, prev_bytes));
+            }
         }
-        ledger.restore(&dir)?;
-        published.0.push(dir.join(LEDGER_FILENAME));
     }
     Ok(published)
 }

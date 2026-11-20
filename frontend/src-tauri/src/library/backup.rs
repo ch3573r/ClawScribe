@@ -388,7 +388,8 @@ fn write_archive_impl(
                     text_field(meeting, "id")?,
                     folder,
                     &mut history_budget,
-                )?;
+                )
+                .map_err(|_| meeting_failure(meeting, archive_exports::UNREADABLE_HISTORY))?;
                 continue;
             }
             let mut input = File::open(entry.path()).map_err(failure)?;
@@ -3360,5 +3361,173 @@ mod tests {
         )
         .is_err());
         assert!(!destination.exists());
+    }
+
+    // ── export-history merge + rollback ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn fresh_db_with_leftover_ledger_merges_instead_of_aborting() {
+        use crate::exports::ledger::{meeting_dir, task_key, ExportLedger};
+        use crate::exports::model::ExportStatus;
+
+        const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
+        let key1 = task_key(SCOPE, "m-merge", "11111111-1111-1111-1111-111111111111", "");
+        let key2 = task_key(SCOPE, "m-merge", "22222222-2222-2222-2222-222222222222", "");
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES \
+             ('m-merge','Merge test','2026-11-20','2026-11-20')",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+
+        // Build an archive with one succeeded entry for the meeting.
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "m-merge");
+        let mut archive_ledger = ExportLedger::load_or_new(&profile_dir, "m-merge").unwrap();
+        archive_ledger.record_success(&key1, Some("task-archive".into()), None, None);
+        archive_ledger.checkpoint().await.unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let archive = profile.path().join("m-merge.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        // Simulate a fresh DB that has a leftover ledger from a previous partial
+        // restore (a different entry for the same meeting).
+        let fresh = tempfile::tempdir().unwrap();
+        let leftover_dir = meeting_dir(fresh.path(), "m-merge");
+        let mut leftover = ExportLedger::load_or_new(&leftover_dir, "m-merge").unwrap();
+        leftover.record_failure(&key2, ExportStatus::Failed, Some("timeout".into()), None);
+        leftover.checkpoint().await.unwrap();
+
+        let restored = empty_conversation_destination().await;
+        let (manifest, stage) =
+            unpack(&archive, &fresh.path().join("recordings"), &HashSet::new()).unwrap();
+        // Should succeed even though a leftover ledger file already exists.
+        import_manifest_impl(&restored, manifest, stage, None, Some(fresh.path()))
+            .await
+            .unwrap();
+
+        // Merged ledger must contain both entries.
+        let merged =
+            ExportLedger::load_or_new(&meeting_dir(fresh.path(), "m-merge"), "m-merge").unwrap();
+        assert_eq!(merged.entry(&key1).unwrap().status, ExportStatus::Succeeded);
+        assert_eq!(merged.entry(&key2).unwrap().status, ExportStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn ledger_rollback_on_db_commit_failure_restores_previous_content() {
+        use crate::exports::ledger::{meeting_dir, task_key, ExportLedger};
+        use crate::exports::model::ExportStatus;
+
+        const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
+        let key1 = task_key(SCOPE, "m-rollback", "11111111-1111-1111-1111-111111111111", "");
+        let key2 = task_key(SCOPE, "m-rollback", "22222222-2222-2222-2222-222222222222", "");
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES \
+             ('m-rollback','Rollback test','2026-11-20','2026-11-20')",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+
+        // Archive has entry key1 (succeeded).
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "m-rollback");
+        let mut ledger = ExportLedger::load_or_new(&profile_dir, "m-rollback").unwrap();
+        ledger.record_success(&key1, Some("task-orig".into()), None, None);
+        ledger.checkpoint().await.unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let archive = profile.path().join("m-rollback.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        // Destination has leftover ledger with a different entry.
+        let dest_dir = tempfile::tempdir().unwrap();
+        let leftover_dir = meeting_dir(dest_dir.path(), "m-rollback");
+        let mut leftover = ExportLedger::load_or_new(&leftover_dir, "m-rollback").unwrap();
+        leftover.record_failure(&key2, ExportStatus::Failed, None, None);
+        leftover.checkpoint().await.unwrap();
+        let prev_bytes = std::fs::read(leftover_dir.join(crate::exports::ledger::LEDGER_FILENAME)).unwrap();
+
+        // Use a DB that will reject the commit (FK violation trigger).
+        let rejected_pool = empty_conversation_destination().await;
+        sqlx::query("CREATE TABLE rollback_fixture_fail(x TEXT REFERENCES meetings(id) DEFERRABLE INITIALLY DEFERRED)")
+            .execute(&rejected_pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER rollback_fixture_trigger AFTER INSERT ON meetings BEGIN INSERT INTO rollback_fixture_fail VALUES ('no-parent'); END")
+            .execute(&rejected_pool).await.unwrap();
+
+        let (manifest, stage) = unpack(
+            &archive,
+            &dest_dir.path().join("recordings"),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            import_manifest_impl(&rejected_pool, manifest, stage, None, Some(dest_dir.path()))
+                .await
+                .is_err()
+        );
+
+        // After rollback the ledger file must be restored to its previous content.
+        let after_rollback =
+            std::fs::read(leftover_dir.join(crate::exports::ledger::LEDGER_FILENAME)).unwrap();
+        assert_eq!(after_rollback, prev_bytes);
+    }
+
+    #[tokio::test]
+    async fn same_profile_restore_is_idempotent() {
+        use crate::exports::ledger::{meeting_dir, task_key, ExportLedger};
+
+        const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
+        let key1 = task_key(SCOPE, "m-idem", "11111111-1111-1111-1111-111111111111", "");
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES \
+             ('m-idem','Idempotent test','2026-11-20','2026-11-20')",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "m-idem");
+        let mut ledger = ExportLedger::load_or_new(&profile_dir, "m-idem").unwrap();
+        ledger.record_success(&key1, Some("task".into()), None, None);
+        ledger.checkpoint().await.unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let archive = profile.path().join("m-idem.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        // First restore succeeds.
+        let fresh = tempfile::tempdir().unwrap();
+        let dest1 = empty_conversation_destination().await;
+        let (manifest, stage) =
+            unpack(&archive, &fresh.path().join("recordings"), &HashSet::new()).unwrap();
+        import_manifest_impl(&dest1, manifest, stage, None, Some(fresh.path()))
+            .await
+            .unwrap();
+
+        // Second restore into the same DB (meeting already exists) succeeds
+        // without touching the ledger file or reporting an error.
+        let (manifest2, stage2) =
+            unpack(&archive, &fresh.path().join("recordings2"), &HashSet::new()).unwrap();
+        let report = import_manifest_impl(&dest1, manifest2, stage2, None, Some(fresh.path()))
+            .await
+            .unwrap();
+        assert_eq!(report.meetings, 0);
+        assert_eq!(report.skipped, 1);
     }
 }
