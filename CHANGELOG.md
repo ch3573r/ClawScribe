@@ -4,6 +4,7 @@
 
 - Start in audio-only mode without a model download. Recording Stop saves the meeting, calendar context, and live notes together. Recovery preserves partial audio and capture-gap warnings.
 - Search titles and transcript passages from the sidebar or Archive, follow playback across transcript pages, and add timestamped notes. Summary use of those notes is opt-in.
+- If a provider fails to answer a question in a saved conversation, you can retry the question.
 - Review attendance and recurring-series templates. Automatic notes require approval for the selected external destination. Failed jobs can retain completed excerpts.
 - Edit and track follow-up actions offline. Planner, Microsoft To Do, and OneNote exports retain their history across retries and library restores.
 - Review Archive warnings, saved-audio sizes, and removal choices. Retranscription keeps the previous revision. Hosted MAI audio preparation streams from disk.
