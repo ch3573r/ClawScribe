@@ -47,34 +47,54 @@ const isDelimiterRow = (line: string | undefined, columns: number) =>
 
 /** Inline Markdown to plain text. */
 function plainInline(value: string): string {
-  return value
+  // Code spans are slotted out first so emphasis regexes cannot touch their content.
+  const slots: string[] = [];
+  const v = value.replace(/\u0000/g, '')
+    .replace(/`([^`]+)`/g, (_, c: string) => { slots.push(c); return `\u0000${slots.length - 1}\u0000`; });
+  const r = v
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label: string, url: string) => label === url ? url : `${label} (${url})`)
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/(\*\*|__)(.+?)\1/g, '$2')
     .replace(/(^|[^*\w])\*(?!\s)([^*]+?)\*(?!\w)/g, '$1$2')
     .replace(/~~(.+?)~~/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
     .replace(MARKDOWN_ESCAPES, '$1');
+  return r.replace(/\u0000(\d+)\u0000/g, (_, i: string) => slots[Number(i)] ?? '');
 }
 
-/** Inline Markdown to escaped HTML with a fixed tag set. */
-function htmlInline(value: string): string {
-  value = value.replace(/\u0000/g, '');
+/** Inline Markdown to escaped HTML with a fixed tag set.
+ *
+ * outerCode is passed only on recursive calls for link labels; it carries the
+ * code-slot map from the outer invocation so that a label like [`fn`](url)
+ * can restore its code span after the outer call extracted it. */
+function htmlInline(value: string, outerCode?: readonly string[]): string {
+  const isNested = outerCode !== undefined;
+  // Top-level: strip NUL bytes and PUA sentinels used as slot delimiters.
+  if (!isNested) value = value.replace(/[\u0000]/g, '');
+  // Code spans are extracted with PUA sentinels before link extraction so that
+  // link syntax inside a code span is never parsed as an actual link.
+  const code: string[] = [];
+  let text = isNested ? value : value.replace(/`([^`]+)`/g, (_, c: string) => {
+    code.push(c);
+    return `${code.length - 1}`;
+  });
   const links: string[] = [];
-  // Links are lifted out first so their address is never rewritten by emphasis rules.
-  let text = value.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+  text = text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label: string, url: string) => {
-      links.push(`<a href="${escapeHtml(url)}">${htmlInline(label)}</a>`);
+      links.push(`<a href="${escapeHtml(url)}">${htmlInline(label, isNested ? outerCode : code)}</a>`);
       return `\u0000${links.length - 1}\u0000`;
     })
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
   text = escapeHtml(text.replace(MARKDOWN_ESCAPES, '$1'))
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>')
     .replace(/(^|[^*\w])\*(?!\s)([^*]+?)\*(?!\w)/g, '$1<em>$2</em>')
     .replace(/~~(.+?)~~/g, '<s>$1</s>');
-  return text.replace(/\u0000(\d+)\u0000/g, (_, index: string) => links[Number(index)] ?? '');
+  const activeCode = isNested ? (outerCode ?? []) : code;
+  return text
+    .replace(/\u0000(\d+)\u0000/g, (_, i: string) => links[Number(i)] ?? '')
+    .replace(/(\d+)/g, (_, i: string) => `<code>${escapeHtml(activeCode[Number(i)] ?? '')}</code>`);
 }
 
 const BULLET = /^(\s*)[-*+]\s+(?:\[( |x|X)\]\s+)?(.*)$/;

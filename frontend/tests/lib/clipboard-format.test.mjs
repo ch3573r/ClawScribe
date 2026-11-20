@@ -84,6 +84,39 @@ test('source anchors keep their visible label only', () => {
   assert.equal(markdownToPlainText('Intro\n\n\n\nOutro\n'), 'Intro\n\nOutro');
 });
 
+test('code spans preserve underscores, Markdown markers, HTML markup, and link syntax', () => {
+  // Emphasis markers inside code spans must be preserved as literals.
+  assert.equal(markdownToPlainText('Call `__init__` and `**kwargs`'), 'Call __init__ and **kwargs');
+  assert.match(markdownToSafeHtml('Use `__init__` here'), /<code>__init__<\/code>/);
+  assert.match(markdownToSafeHtml('Pass `**kwargs` too'), /<code>\*\*kwargs<\/code>/);
+  assert.match(markdownToSafeHtml('Also `~~struck~~` text'), /<code>~~struck~~<\/code>/);
+  assert.equal(markdownToPlainText('Use `~~still~~` text'), 'Use ~~still~~ text');
+  // HTML markup inside a code span must be escaped, not passed through.
+  assert.match(markdownToSafeHtml('Use `<b>raw</b>` tags'), /<code>&lt;b&gt;raw&lt;\/b&gt;<\/code>/);
+  // Link syntax inside a code span must remain literal, not create an <a> element.
+  assert.match(markdownToSafeHtml('See `[link](https://example.com)` syntax'),
+    /<code>\[link\]\(https:\/\/example\.com\)<\/code>/);
+  assert.equal(markdownToSafeHtml('See `[link](https://example.com)` syntax').includes('<a'), false,
+    'link syntax inside code span must not become an anchor');
+  // Forged NUL placeholder bytes in input must not cause slot substitution.
+  assert.doesNotMatch(markdownToSafeHtml(`x\u00000\u0000y`), /<a /);
+  // Forged PUA sentinel bytes in input must likewise be stripped.
+  assert.doesNotMatch(markdownToSafeHtml(`x0y`), /<code>/);
+});
+
+test('nested emphasis renders with balanced HTML tag stacks', () => {
+  // Bold outer, italic inner: tags must nest without crossing.
+  assert.match(markdownToSafeHtml('**outer *inner* end**'),
+    /<p><strong>outer <em>inner<\/em> end<\/strong><\/p>/);
+  // Italic outer, bold inner: same requirement.
+  assert.match(markdownToSafeHtml('*outer **inner** end*'),
+    /<p><em>outer <strong>inner<\/strong> end<\/em><\/p>/);
+  // Triple-asterisk collapses to balanced strong+em without crossed tags.
+  const triple = markdownToSafeHtml('***bold italic*** text');
+  assert.match(triple, /<strong><em>bold italic<\/em><\/strong>/);
+  assert.equal(/<\/strong>[^]*<\/em>/.test(triple), false, 'no </strong> before </em>');
+});
+
 test('the transcript copy has the title, date, times and speakers but no id or Markdown', () => {
   const rows = [
     { id: 'row-1', text: 'Hello <everyone>.', audio_start_time: 5, timestamp: '', speaker: 'Me' },
