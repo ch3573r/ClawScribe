@@ -2611,6 +2611,24 @@ mod startup_guard_tests {
     use super::start_allowed;
 
     #[tokio::test]
+    async fn starting_recording_keeps_recovery_away_from_the_spool() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let spool = root.path().join(".audio-spool");
+        std::fs::create_dir(&spool).unwrap();
+        let chunk = spool.join("00000000000000000000.chunk");
+        std::fs::write(&chunk, b"synthetic capture prefix").unwrap();
+        let _starting = super::StartingState::claim().unwrap();
+        let result = crate::audio::incremental_saver::recover_audio_in_folder(
+            root.path().to_string_lossy().into_owned(),
+        )
+        .await;
+        assert!(matches!(result, Err(message) if message.contains("Stop recording")));
+        assert_eq!(std::fs::read(&chunk).unwrap(), b"synthetic capture prefix");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
     async fn recording_cannot_start_after_the_database_failed_to_open() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         assert!(start_allowed().is_ok());

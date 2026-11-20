@@ -503,7 +503,7 @@ pub async fn recover_audio_from_checkpoints<R: tauri::Runtime>(
 pub(crate) async fn recover_audio_in_folder(
     meeting_folder: String,
 ) -> Result<AudioRecoveryStatus, String> {
-    if super::recording_commands::is_recording().await {
+    if super::recording_commands::is_starting() || super::recording_commands::capture_active() {
         return Err("Stop recording before recovering audio.".into());
     }
     let spool_folder = PathBuf::from(&meeting_folder);
@@ -707,6 +707,9 @@ pub async fn cleanup_checkpoints<R: tauri::Runtime>(
     // The webview names the folder; only a recording folder, or one saved in the
     // library, may be touched.
     let folder_path = authorized_recording_folder(&app, &meeting_folder, true).await?;
+    if super::recording_commands::active_recording_folder().protects(&folder_path) {
+        return Err("Stop recording before cleaning up its checkpoints.".into());
+    }
     let checkpoints_dir = folder_path.join(".checkpoints");
 
     if checkpoints_dir.exists() {
