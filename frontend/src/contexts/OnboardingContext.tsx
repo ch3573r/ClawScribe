@@ -174,37 +174,18 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   };
 
   const performAutoDetection = async () => {
-    // Check Homebrew (macOS only)
-    if (typeof navigator !== 'undefined' && navigator.platform?.toLowerCase().includes('mac')) {
-      const homebrewDbPath = '/usr/local/var/meetily/meeting_minutes.db';
-      try {
-        const homebrewCheck = await invoke<{ exists: boolean; size: number } | null>(
-          'check_homebrew_database',
-          { path: homebrewDbPath }
-        );
-
-        if (homebrewCheck?.exists) {
-          console.log('[OnboardingContext] Found Homebrew database, importing');
-          await invoke('import_and_initialize_database', { legacyDbPath: homebrewDbPath });
-          setDatabaseExists(true);
-          return;
-        }
-      } catch (e) {
-        console.log('[OnboardingContext] Homebrew check failed, continuing:', e);
-      }
-    }
-
-    // Check default legacy database location
+    // The core looks for a legacy database in the places it knows (the app's
+    // own data folder, and the Homebrew one on macOS) and imports it. Nothing
+    // here names a file.
     try {
-      const legacyPath = await invoke<string | null>('check_default_legacy_database');
-      if (legacyPath) {
-        console.log('[OnboardingContext] Found legacy database, importing');
-        await invoke('import_and_initialize_database', { legacyDbPath: legacyPath });
+      const imported = await invoke<boolean>('import_legacy_database_if_present');
+      if (imported) {
+        console.log('[OnboardingContext] Imported the legacy database');
         setDatabaseExists(true);
         return;
       }
     } catch (e) {
-      console.log('[OnboardingContext] Legacy check failed, continuing:', e);
+      console.log('[OnboardingContext] Legacy import failed, continuing:', e);
     }
 
     // No legacy database found - initialize fresh

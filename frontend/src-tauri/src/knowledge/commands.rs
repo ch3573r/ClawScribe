@@ -18,7 +18,9 @@ pub async fn knowledge_import_document(
     meeting_id: String,
     path: String,
 ) -> Result<super::documents::DocumentAttachment, String> {
-    crate::local_path::check_local(&path)?;
+    // Only a document the user chose in a dialog the core opened, once.
+    let taken = crate::file_grants::take(crate::file_grants::Purpose::ReferenceDocument, &path)?;
+    let path = taken.path.to_string_lossy().into_owned();
     let lease = runtime
         .documents
         .begin(&request_id)

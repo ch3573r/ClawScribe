@@ -97,6 +97,8 @@ pub struct InterruptedRecording {
     pub reason: String,
     /// The library meeting this folder belongs to, when it is saved.
     pub registered_meeting_id: Option<String>,
+    /// The user asked not to be asked about this folder again.
+    pub kept: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -112,15 +114,7 @@ pub struct InterruptedScan {
 /// A path as text for comparison: both slash directions and (on Windows) letter
 /// case are the same, a trailing separator is ignored.
 pub(crate) fn folder_key(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    #[cfg(windows)]
-    let text = text.to_ascii_lowercase();
-    let trimmed = text.trim_end_matches('/');
-    if trimmed.is_empty() || trimmed.ends_with(':') {
-        text
-    } else {
-        trimmed.to_string()
-    }
+    crate::local_path::comparable_text(&path.to_string_lossy())
 }
 
 fn is_link(metadata: &std::fs::Metadata) -> bool {
@@ -272,11 +266,14 @@ pub(crate) fn classify_folder(folder: &Path, registered: Option<&str>) -> Option
         reasons,
         reason,
         registered_meeting_id: registered.map(str::to_string),
+        kept: false,
     })
 }
 
 pub(crate) struct ScanInput<'a> {
     pub roots: &'a [PathBuf],
+    /// Folders the user asked not to be asked about again.
+    pub kept: &'a [String],
     /// Folder key -> library meeting id.
     pub registered: &'a HashMap<String, String>,
     pub active: ActiveFolder,
@@ -347,6 +344,10 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
                 }
                 let registered = input.registered.get(&key).map(String::as_str);
                 let Some(mut found) = classify_folder(&path, registered) else { continue };
+                found.kept = input
+                    .kept
+                    .iter()
+                    .any(|known| crate::local_path::comparable_text(known) == key);
                 // The folder as the shell and the app's other commands will see it, inside a root.
                 match crate::database::meeting_files::resolve_recording_folder(&path, input.roots) {
                     Ok(canonical) => {
@@ -418,20 +419,41 @@ async fn registered_rows(pool: &sqlx::SqlitePool) -> Result<Vec<(String, String)
     .map_err(|_| "Could not read the library".to_string())
 }
 
-/// Folder key -> meeting id, for each saved folder as written and as it resolves.
-/// Resolving touches the disk, so call it off the async threads.
-fn registered_map(rows: Vec<(String, String)>) -> HashMap<String, String> {
-    rows.into_iter()
-        .flat_map(|(id, folder)| {
-            let canonical = std::fs::canonicalize(&folder)
-                .ok()
-                .map(|canonical| folder_key(&crate::database::meeting_files::plain_path(&canonical)));
-            [Some(folder_key(Path::new(&folder))), canonical]
-                .into_iter()
-                .flatten()
-                .map(move |key| (key, id.clone()))
-        })
-        .collect()
+/// Folder key -> meeting id for each saved folder, by its own text, and by its
+/// resolved path where that is cheap and safe: only a folder on a local drive is
+/// resolved (a network folder is never contacted for this), and only until the
+/// budget is spent. A saved folder that is neither local nor spelled inside a
+/// trusted root is not looked at at all. Call it off the async threads.
+fn registered_map(
+    rows: Vec<(String, String)>,
+    roots: &[PathBuf],
+    budget: Duration,
+) -> HashMap<String, String> {
+    let started = Instant::now();
+    let mut map = HashMap::new();
+    for (id, folder) in rows {
+        let local = crate::local_path::is_local_path_text(&folder);
+        if !local && !crate::trusted_roots::text_allowed(&folder, roots) {
+            continue;
+        }
+        map.insert(folder_key(Path::new(&folder)), id.clone());
+        if local && started.elapsed() < budget {
+            if let Ok(canonical) = std::fs::canonicalize(&folder) {
+                map.insert(folder_key(&crate::database::meeting_files::plain_path(&canonical)), id);
+            }
+        }
+    }
+    map
+}
+
+/// How much of a scan's time the registered-folder lookup may use.
+const REGISTERED_BUDGET: Duration = Duration::from_millis(1_000);
+
+fn kept_folders<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
+    use tauri_plugin_store::StoreExt;
+    app.store(crate::trusted_roots::STORE_FILE)
+        .map(|store| crate::trusted_roots::read(store.as_ref()).kept)
+        .unwrap_or_default()
 }
 
 /// Interrupted recordings found in the recording folders. Bounded in folders
@@ -444,9 +466,15 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
+    let kept = kept_folders(&app);
     tokio::task::spawn_blocking(move || {
-        let registered = registered_map(rows);
-        scan(&ScanInput { roots: &roots, registered: &registered, active, limits: Limits::default() })
+        // The whole scan stays inside its time limit: the registered-folder
+        // lookup comes out of it.
+        let started = Instant::now();
+        let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
+        let limits = Limits::default();
+        let limits = Limits { time_limit: limits.time_limit.saturating_sub(started.elapsed()), ..limits };
+        scan(&ScanInput { roots: &roots, kept: &kept, registered: &registered, active, limits })
     })
     .await
     .map_err(|_| "Could not look for interrupted recordings".to_string())
@@ -468,6 +496,93 @@ pub async fn preview_interrupted_recording<R: tauri::Runtime>(
     .map_err(|_| "Could not read the transcript".to_string())?
 }
 
+/// "Keep, do not ask again": remembers (or forgets) that this recording folder
+/// is not to be asked about. Nothing is deleted or changed in the folder.
+#[tauri::command]
+pub async fn keep_interrupted_recording<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    folder: String,
+    keep: bool,
+) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+    let roots = super::recording_preferences::recording_roots(&app).await;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
+        let store = app
+            .store(crate::trusted_roots::STORE_FILE)
+            .map_err(|_| "Could not save the choice".to_string())?;
+        crate::trusted_roots::set_kept(store.as_ref(), Path::new(&authorised), keep)
+    })
+    .await
+    .map_err(|_| "Could not save the choice".to_string())?
+}
+
+/// What repairing a saved recording achieved.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairedRecording {
+    pub meeting_id: String,
+    /// `success`, `partial`, `failed` or `none`, as audio recovery reports it.
+    pub audio_status: String,
+    pub audio_path: Option<String>,
+}
+
+/// Repairs the library meeting a folder already belongs to: the unfinished
+/// capture in its folder becomes its audio file, the capture is released, and
+/// the meeting's recovery status is updated. It never creates another meeting.
+#[tauri::command]
+pub async fn repair_saved_recording<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::state::AppState>,
+    folder: String,
+) -> Result<RepairedRecording, String> {
+    let roots = super::recording_preferences::recording_roots(&app).await;
+    let rows = registered_rows(state.db_manager.pool()).await?;
+    let active = super::recording_commands::active_recording_folder();
+    let (authorised, meeting_id) = tokio::task::spawn_blocking(move || -> Result<(String, String), String> {
+        let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
+        if matches!(active, ActiveFolder::Unknown)
+            || matches!(&active, ActiveFolder::Folder(running) if folder_key(running) == folder_key(Path::new(&authorised)))
+        {
+            return Err("A recording is running. Try again when it has stopped.".into());
+        }
+        let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
+        let meeting = registered
+            .get(&folder_key(Path::new(&authorised)))
+            .or_else(|| {
+                std::fs::canonicalize(&authorised)
+                    .ok()
+                    .and_then(|canonical| registered.get(&folder_key(&crate::database::meeting_files::plain_path(&canonical))))
+            })
+            .cloned()
+            .ok_or_else(|| "This recording is not saved in your library".to_string())?;
+        Ok((authorised, meeting))
+    })
+    .await
+    .map_err(|_| "Could not repair the recording".to_string())??;
+
+    let status = super::incremental_saver::recover_audio_in_folder(authorised.clone()).await?;
+    let recovered = status.audio_file_path.is_some() && matches!(status.status.as_str(), "success" | "partial");
+    if recovered {
+        // The capture has become the audio file: release it, and a complete
+        // recovery also removes legacy checkpoints.
+        let _ = super::incremental_saver::release_registered_capture(state.db_manager.pool(), &authorised).await;
+        if status.status == "success" {
+            let _ = std::fs::remove_dir_all(Path::new(&authorised).join(".checkpoints"));
+        }
+        // The meeting no longer has a failed audio save; a partial recovery says
+        // the capture had gaps.
+        let _ = sqlx::query(
+            "UPDATE recording_outcomes SET audio_save_failed = 0, capture_incomplete = ? WHERE meeting_id = ?",
+        )
+        .bind(i64::from(status.status == "partial"))
+        .bind(&meeting_id)
+        .execute(state.db_manager.pool())
+        .await;
+    }
+    Ok(RepairedRecording { meeting_id, audio_status: status.status, audio_path: status.audio_file_path })
+}
+
 /// Deletes an interrupted recording's folder, only on an explicit request and
 /// only for a folder that is still a candidate, is not saved in the library and
 /// is not the running recording's. The deletion is the validated cleanup the
@@ -481,7 +596,10 @@ pub async fn discard_interrupted_recording<R: tauri::Runtime>(
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
-    tokio::task::spawn_blocking(move || discard_folder(&folder, &roots, &registered_map(rows), &active))
+    tokio::task::spawn_blocking(move || {
+        let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
+        discard_folder(&folder, &roots, &registered, &active)
+    })
         .await
         .map_err(|_| "Could not delete the recording".to_string())?
 }
@@ -560,7 +678,7 @@ mod tests {
     }
 
     fn run(roots: &[PathBuf], registered: &HashMap<String, String>, active: ActiveFolder, limits: Limits) -> InterruptedScan {
-        scan(&ScanInput { roots, registered, active, limits })
+        scan(&ScanInput { roots, kept: &[], registered, active, limits })
     }
 
     fn names(scan: &InterruptedScan) -> Vec<String> {
@@ -791,6 +909,61 @@ mod tests {
         );
         assert_eq!(result.recordings.len(), 2);
         assert!(result.recordings[0].folder.ends_with("newer"));
+    }
+
+    #[test]
+    fn a_kept_folder_is_flagged_and_still_listed() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("recordings");
+        let keptf = make(&root, "kept");
+        marker(&keptf, "recording", None);
+        let other = make(&root, "other");
+        marker(&other, "recording", None);
+        let kept = vec![format!("{}/", keptf.to_string_lossy().to_uppercase().replace('\\', "/"))];
+        let result = scan(&ScanInput { roots: &[root], kept: &kept, registered: &HashMap::new(), active: ActiveFolder::None, limits: Limits::default() });
+        assert_eq!(result.recordings.len(), 2);
+        for found in &result.recordings {
+            #[cfg(windows)]
+            assert_eq!(found.kept, found.folder.ends_with("kept"), "{}", found.folder);
+            #[cfg(not(windows))]
+            let _ = found;
+        }
+    }
+
+    #[test]
+    fn the_registered_lookup_never_contacts_a_network_folder_outside_a_trusted_root() {
+        let base = tempfile::tempdir().unwrap();
+        let share = base.path().join("share");
+        let trusted = share.join("recordings");
+        let stranger = share.join("stranger");
+        for folder in [&trusted, &stranger] {
+            std::fs::create_dir_all(folder.join("m")).unwrap();
+        }
+        crate::local_path::mark_remote_for_tests(&share);
+        let rows = vec![
+            ("in-root".to_string(), trusted.join("m").to_string_lossy().into_owned()),
+            ("stranger".to_string(), stranger.join("m").to_string_lossy().into_owned()),
+            ("local".to_string(), base.path().to_string_lossy().into_owned()),
+        ];
+        let map = registered_map(rows, &[trusted.clone()], Duration::from_secs(5));
+        assert_eq!(map.get(&folder_key(&trusted.join("m"))).map(String::as_str), Some("in-root"));
+        assert!(!map.contains_key(&folder_key(&stranger.join("m"))), "not inside a trusted root: skipped");
+        assert!(map.values().any(|id| id == "local"), "a local folder is looked up");
+        // With no time left only the text keys are used.
+        let rushed = registered_map(vec![("local".into(), base.path().to_string_lossy().into_owned())], &[], Duration::ZERO);
+        assert_eq!(rushed.len(), 1);
+    }
+
+    #[test]
+    fn a_scan_of_a_trusted_network_root_finds_its_interrupted_recordings() {
+        let base = tempfile::tempdir().unwrap();
+        let share = base.path().join("share");
+        let root = share.join("recordings");
+        let folder = make(&root, "meeting");
+        marker(&folder, "recording", None);
+        crate::local_path::mark_remote_for_tests(&share);
+        let result = scan(&ScanInput { roots: &[root], kept: &[], registered: &HashMap::new(), active: ActiveFolder::None, limits: Limits::default() });
+        assert_eq!(names(&result), vec!["meeting"]);
     }
 
     #[test]

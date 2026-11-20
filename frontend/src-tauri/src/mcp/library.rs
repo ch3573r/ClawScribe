@@ -348,7 +348,9 @@ fn linked(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn local_directory(path: &Path) -> bool {
+/// A folder that may be looked at: absolute, without `..`, on a drive, or, when
+/// it is on the network, spelled inside a trusted root (a folder the user chose).
+fn local_directory(path: &Path, trusted: &[PathBuf]) -> bool {
     if !path.is_absolute()
         || path
             .components()
@@ -359,11 +361,16 @@ fn local_directory(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::path::Prefix;
-        if !matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
-        {
+        let on_a_drive = matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)));
+        let in_a_trusted_root = trusted
+            .iter()
+            .any(|root| crate::local_path::lexically_inside(&path.to_string_lossy(), root));
+        if !on_a_drive && !in_a_trusted_root {
             return false;
         }
     }
+    #[cfg(not(windows))]
+    let _ = trusted;
     // Check ancestors first so a junction is rejected before probing its target.
     path.ancestors()
         .collect::<Vec<_>>()
@@ -391,33 +398,24 @@ fn read_small_json(path: &Path) -> Option<Value> {
 }
 
 fn saved_audio(app_data: &Path, folder: &Path, id: &str) -> Option<PathBuf> {
-    // The same roots the app uses (configured, defaults, folders configured
-    // before, restored backups), read from the preferences file because this
-    // runs without the app.
-    let prefs = read_small_json(&app_data.join("recording_preferences.json"));
-    let configured = prefs
+    // The same roots the app uses (the defaults, the folders the user trusted,
+    // restored backups), read from the core's trust file because this runs
+    // without the app.
+    let trusted: Vec<PathBuf> = read_small_json(&app_data.join(crate::trusted_roots::STORE_FILE))
         .as_ref()
-        .and_then(|prefs| prefs.pointer("/preferences/save_folder"))
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    let previous = prefs
-        .as_ref()
-        .and_then(|prefs| prefs.pointer("/previous_save_folders"))
+        .and_then(|state| state.get("trusted"))
         .and_then(Value::as_array)
-        .map(|folders| {
-            folders
-                .iter()
-                .filter_map(Value::as_str)
-                .map(PathBuf::from)
-                .collect()
-        })
+        .map(|folders| folders.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
         .unwrap_or_default();
-    let roots = recording_preferences::roots_from(configured, previous, Some(app_data.to_path_buf()));
-    if !roots
-        .iter()
-        .any(|root| folder != root && folder.starts_with(root))
-        || !local_directory(folder)
-    {
+    let roots = recording_preferences::roots_from(trusted.clone(), Some(app_data.to_path_buf()));
+    let inside = roots.iter().any(|root| {
+        folder != root
+            && (folder.starts_with(root)
+                || crate::local_path::lexically_inside(&folder.to_string_lossy(), root)
+                    && crate::local_path::comparable_text(&folder.to_string_lossy())
+                        != crate::local_path::comparable_text(&root.to_string_lossy()))
+    });
+    if !inside || !local_directory(folder, &trusted) {
         return None;
     }
     let metadata = read_small_json(&folder.join("metadata.json"));
@@ -659,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_in_a_previously_configured_recordings_folder_is_found_but_an_unknown_folder_is_not() {
+    fn audio_in_a_trusted_recordings_folder_is_found_but_an_unknown_folder_is_not() {
         let root = tempfile::tempdir().unwrap();
         let current = root.path().join("current");
         let old = root.path().join("old-recordings");
@@ -670,23 +668,19 @@ mod tests {
             fs::write(meeting.join("metadata.json"), "{}").unwrap();
             fs::write(meeting.join("audio.wav"), b"synthetic").unwrap();
         }
-        let write_preferences = |previous: serde_json::Value| {
+        let write_preferences = |trusted: serde_json::Value| {
             fs::write(
-                root.path().join("recording_preferences.json"),
-                serde_json::to_vec(&json!({
-                    "preferences": { "save_folder": current },
-                    "previous_save_folders": previous,
-                }))
-                .unwrap(),
+                root.path().join(crate::trusted_roots::STORE_FILE),
+                serde_json::to_vec(&json!({ "trusted": trusted, "takeover_done": true })).unwrap(),
             )
             .unwrap();
         };
-        write_preferences(json!([old]));
+        write_preferences(json!([current, old]));
         assert!(saved_audio(root.path(), &current.join("meeting"), "a").is_some());
         assert!(saved_audio(root.path(), &old.join("meeting"), "a").is_some());
         assert!(saved_audio(root.path(), &stranger.join("meeting"), "a").is_none());
-        // Once the folder is no longer remembered, its audio is out of reach again.
-        write_preferences(json!([]));
+        // Once the folder is no longer trusted, its audio is out of reach again.
+        write_preferences(json!([current]));
         assert!(saved_audio(root.path(), &old.join("meeting"), "a").is_none());
     }
 

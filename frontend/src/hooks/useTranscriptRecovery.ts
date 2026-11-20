@@ -19,6 +19,7 @@ import {
   type RecoveryCandidate,
 } from '@/lib/interruptedRecordings';
 import { toast } from 'sonner';
+import { errorText } from '@/lib/errorText';
 
 interface AudioRecoveryStatus {
   status: string; // "success" | "partial" | "failed" | "none"
@@ -33,7 +34,9 @@ interface AudioRecoveryStatus {
  * (with their audio checked) merged with what the core finds on disk, one entry
  * per folder. A failed disk scan leaves the browser list as it was.
  */
-export async function fetchRecoveryCandidates(): Promise<{ candidates: RecoveryCandidate[]; scan: DiskScan; scanFailed: boolean }> {
+export async function fetchRecoveryCandidates(
+  options: { includeKept?: boolean } = {},
+): Promise<{ candidates: RecoveryCandidate[]; scan: DiskScan; scanFailed: boolean; keptCount: number }> {
   const meetings = await indexedDBService.getAllMeetings().catch((error) => {
     console.error('Failed to read the browser recovery data:', error);
     return [] as MeetingMetadata[];
@@ -85,7 +88,12 @@ export async function fetchRecoveryCandidates(): Promise<{ candidates: RecoveryC
     console.warn('Could not look for interrupted recordings on disk:', error);
     scanFailed = true;
   }
-  return { candidates: mergeRecoveryCandidates(meetingsWithAudioStatus, scan.recordings), scan, scanFailed };
+  const merged = mergeRecoveryCandidates(meetingsWithAudioStatus, scan.recordings);
+  // A recording the user asked not to be asked about again is left out, and
+  // counted, so Settings can still offer to show it.
+  const keptCount = merged.filter(candidate => candidate.disk?.kept).length;
+  const candidates = options.includeKept ? merged : merged.filter(candidate => !candidate.disk?.kept);
+  return { candidates, scan, scanFailed, keptCount };
 }
 
 export interface UseTranscriptRecoveryReturn {
@@ -94,7 +102,9 @@ export interface UseTranscriptRecoveryReturn {
   isRecovering: boolean;
   /** The recordings found on disk could be incomplete: the scan stopped at a bound. */
   diskScanTruncated: boolean;
-  checkForRecoverableTranscripts: () => Promise<RecoveryCandidate[]>;
+  checkForRecoverableTranscripts: (options?: { includeKept?: boolean }) => Promise<RecoveryCandidate[]>;
+  /** "Keep, do not ask again": the recording stays on disk and is not offered unasked. */
+  keepRecoverableMeeting: (meetingId: string) => Promise<void>;
   recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
   loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
@@ -116,10 +126,10 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
    * Check for recoverable meetings: unsaved meetings in IndexedDB and
    * interrupted recordings found in the recording folders.
    */
-  const checkForRecoverableTranscripts = useCallback(async (): Promise<RecoveryCandidate[]> => {
+  const checkForRecoverableTranscripts = useCallback(async (options: { includeKept?: boolean } = {}): Promise<RecoveryCandidate[]> => {
     setIsLoading(true);
     try {
-      const { candidates, scan } = await fetchRecoveryCandidates();
+      const { candidates, scan } = await fetchRecoveryCandidates(options);
       setCandidates(candidates);
       setDiskScanTruncated(scan.truncated);
       return candidates;
@@ -192,6 +202,27 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
    */
   const recoverDiskMeeting = useCallback(async (candidate: RecoveryCandidate) => {
     const recording = candidate.disk!;
+    // A recording that already belongs to a library meeting repairs that meeting
+    // (the core recovers the audio into its folder); it is never saved again.
+    if (recording.registeredMeetingId) {
+      const repaired = await invoke<{ meetingId: string; audioStatus: string; audioPath?: string | null }>(
+        'repair_saved_recording',
+        { folder: recording.folder },
+      );
+      setCandidates(prev => prev.filter(m => m.meetingId !== candidate.meetingId));
+      return {
+        success: true,
+        audioRecoveryStatus: {
+          status: repaired.audioStatus,
+          chunk_count: 0,
+          estimated_duration_seconds: 0,
+          audio_file_path: repaired.audioPath ?? undefined,
+          message: '',
+        } as AudioRecoveryStatus,
+        meetingId: repaired.meetingId,
+        transcriptCount: 0,
+      };
+    }
     let audioRecoveryStatus: AudioRecoveryStatus | null = null;
     if (recording.hasAudio) {
       try {
@@ -202,7 +233,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
           status: 'failed',
           chunk_count: 0,
           estimated_duration_seconds: 0,
-          message: error instanceof Error ? error.message : 'Unknown error',
+          message: errorText(error),
         };
       }
     } else {
@@ -298,7 +329,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
             status: 'failed',
             chunk_count: 0,
             estimated_duration_seconds: 0,
-            message: error instanceof Error ? error.message : 'Unknown error'
+            message: errorText(error)
           };
         }
       } else {
@@ -420,12 +451,21 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     }
   }, [setCandidates]);
 
+  const keepRecoverableMeeting = useCallback(async (meetingId: string): Promise<void> => {
+    const candidate = candidatesRef.current.find(c => c.meetingId === meetingId);
+    const folder = candidate?.disk?.folder;
+    if (!folder) throw new Error('This recording is not on disk and cannot be kept this way.');
+    await invoke('keep_interrupted_recording', { folder, keep: true });
+    setCandidates(prev => prev.filter(m => m.meetingId !== meetingId));
+  }, [setCandidates]);
+
   return {
     recoverableMeetings,
     isLoading,
     isRecovering,
     diskScanTruncated,
     checkForRecoverableTranscripts,
+    keepRecoverableMeeting,
     recoverMeeting,
     loadMeetingTranscripts,
     deleteRecoverableMeeting

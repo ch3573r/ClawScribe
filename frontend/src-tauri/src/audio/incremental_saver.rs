@@ -1127,16 +1127,35 @@ mod folder_authorization_tests {
     fn roots_with(l: &Layout) -> Vec<PathBuf> {
         // The previous folder reaches the roots through `roots_from`, as in the app.
         crate::audio::recording_preferences::roots_from(
-            Some(l.root.clone()),
-            vec![l.previous_root.clone()],
+            vec![l.root.clone(), l.previous_root.clone()],
             None,
         )
     }
 
     #[test]
+    fn recovery_and_probing_work_in_a_trusted_network_root_and_not_outside_it() {
+        let base = tempfile::tempdir().unwrap();
+        let share = base.path().join("share");
+        let root = share.join("recordings");
+        let inside = root.join("meeting");
+        let outside = share.join("other").join("meeting");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        crate::local_path::mark_remote_for_tests(&share);
+        let roots = crate::audio::recording_preferences::roots_from(vec![root.clone()], None);
+        assert_eq!(
+            authorize_recording_folder(&inside, &roots, &[], false).unwrap(),
+            inside.canonicalize().unwrap()
+        );
+        assert!(authorize_recording_folder(&outside, &roots, &[], false).is_err());
+        let none = crate::audio::recording_preferences::roots_from(vec![], None);
+        assert!(authorize_recording_folder(&inside, &none, &[], false).is_err());
+    }
+
+    #[test]
     fn without_remembering_the_old_folder_it_is_refused() {
         let l = layout();
-        let roots = crate::audio::recording_preferences::roots_from(Some(l.root.clone()), vec![], None);
+        let roots = crate::audio::recording_preferences::roots_from(vec![l.root.clone()], None);
         assert!(authorize_recording_folder(&l.in_previous, &roots, &[], false).is_err());
     }
 

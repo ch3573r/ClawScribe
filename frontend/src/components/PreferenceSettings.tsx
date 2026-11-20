@@ -15,7 +15,7 @@ import { useConfig, type NotificationSettings } from "@/contexts/ConfigContext";
 import { getAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useInterruptedRecordings } from "@/hooks/useInterruptedRecordings";
-import { RECOVERY_OPEN_REQUEST } from "@/lib/interruptedRecordings";
+import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from "@/lib/interruptedRecordings";
 
 type FolderKind = "database" | "models" | "recordings";
 
@@ -59,8 +59,8 @@ export function PreferenceSettings() {
   // Interrupted recordings (found in the browser data and on disk) are shown
   // only when there are some, and never while a recording is running.
   const interrupted = useInterruptedRecordings(!recordingState.isRecording);
-  const reviewInterrupted = () => {
-    try { sessionStorage.setItem(RECOVERY_OPEN_REQUEST, "true"); } catch { /* the home page still offers them on start */ }
+  const reviewInterrupted = (includeKept = false) => {
+    try { sessionStorage.setItem(RECOVERY_OPEN_REQUEST, includeKept ? RECOVERY_OPEN_ALL : "true"); } catch { /* the home page still offers them on start */ }
     router.push("/");
   };
 
@@ -213,14 +213,25 @@ export function PreferenceSettings() {
           </SettingsRow>
         ))}
         {locationsUnavailable && <NoteRow tone="muted">The database and model locations could not be read.</NoteRow>}
-        {interrupted.count > 0 && (
+        {(interrupted.count > 0 || interrupted.keptCount > 0) && (
           <SettingsRow
             title="Interrupted recordings"
-            description={`${interrupted.count} ${interrupted.count === 1 ? "recording was" : "recordings were"} interrupted. Review them to recover or delete them`}
+            description={
+              interrupted.count > 0
+                ? `${interrupted.count} ${interrupted.count === 1 ? "recording was" : "recordings were"} interrupted. Review them to recover or delete them${interrupted.keptCount > 0 ? `. ${interrupted.keptCount} more ${interrupted.keptCount === 1 ? "is" : "are"} kept and not offered` : ""}`
+                : `${interrupted.keptCount} ${interrupted.keptCount === 1 ? "recording is" : "recordings are"} kept and not offered`
+            }
           >
-            <Button type="button" variant="outline" size="sm" onClick={reviewInterrupted}>
-              Review ({interrupted.count})
-            </Button>
+            {interrupted.count > 0 && (
+              <Button type="button" variant="outline" size="sm" onClick={() => reviewInterrupted(false)}>
+                Review ({interrupted.count})
+              </Button>
+            )}
+            {interrupted.keptCount > 0 && (
+              <Button type="button" variant="ghost" size="sm" onClick={() => reviewInterrupted(true)}>
+                Show kept ({interrupted.keptCount})
+              </Button>
+            )}
           </SettingsRow>
         )}
       </SettingsCard>

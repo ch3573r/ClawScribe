@@ -343,6 +343,22 @@ fn is_program_name(path: &Path) -> bool {
     }
 }
 
+/// A `.cmd` or `.bat` shim that sits inside a `node_modules` folder: a
+/// project-local shim (`<project>/node_modules/.bin/claude.cmd`) that whoever
+/// controls the project controls. A global npm install puts its shim in the npm
+/// prefix folder itself (for example `%APPDATA%/npm/claude.cmd`), which has no
+/// `node_modules` component, so it is told apart by that component alone.
+fn is_project_local_shim(path: &Path) -> bool {
+    let is_script = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    is_script
+        && path.components().any(|component| {
+            matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.eq_ignore_ascii_case("node_modules")))
+        })
+}
+
 /// A configured program path: local text (checked before any filesystem call),
 /// a file called claude (claude.exe, claude.cmd, claude.bat), existing, a
 /// regular file, and still on a local disk once resolved.
@@ -351,12 +367,16 @@ fn validate_program_path(configured: &str) -> Result<PathBuf, String> {
         return Err(INVALID_PROGRAM.into());
     }
     let path = Path::new(configured);
-    if !is_program_name(path) || !is_program_file(path) {
+    if !is_program_name(path) || !is_program_file(path) || is_project_local_shim(path) {
         return Err(INVALID_PROGRAM.into());
     }
     let resolved = std::fs::canonicalize(path).map_err(|_| INVALID_PROGRAM.to_string())?;
     // A link may not turn it into a different program or a remote one.
-    if !crate::local_path::is_local_canonical(&resolved) || !is_program_name(&resolved) || !is_program_file(&resolved) {
+    if !crate::local_path::is_local_canonical(&resolved)
+        || !is_program_name(&resolved)
+        || !is_program_file(&resolved)
+        || is_project_local_shim(&resolved)
+    {
         return Err(INVALID_PROGRAM.into());
     }
     Ok(resolved)
@@ -376,7 +396,7 @@ fn resolve_program(config: &ClaudeCodeConfig) -> Result<Option<PathBuf>, String>
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .filter(|dir| dir.is_absolute())
         .flat_map(|dir| program_candidates(&dir.join("claude")))
-        .find(|path| is_program_file(path))
+        .find(|path| is_program_file(path) && !is_project_local_shim(path))
     {
         return Ok(std::fs::canonicalize(found).ok());
     }

@@ -1522,6 +1522,18 @@ export function ModelSettingsModal({
     });
   };
 
+  // The core opens the folder dialog and only accepts the folder it chose here
+  // (new or empty, or already ClawScribe's own Codex profile).
+  const chooseCodexHome = async () => {
+    try {
+      const folder = await invoke<string | null>('pick_codex_home_folder');
+      if (!folder) return;
+      await saveCodexSafe({ ...codexConfig, codexHomePath: folder, codexHomeMode: 'clawscribe-isolated', useExistingUserCodexSession: false, codexBinaryPath: null });
+    } catch (err) {
+      toast.error(typeof err === 'string' ? err : 'Could not use that folder');
+    }
+  };
+
   const saveCodexSafe = async (config: CodexProviderConfig) => {
     try { return await saveCodexConfig(config); } catch { throw new SaveError('Could not save the Codex settings'); }
   };
@@ -2001,9 +2013,13 @@ export function ModelSettingsModal({
         </SettingsRow>,
       );
       advanced.push(
-        <CommitInputRow key="codex-home" id="codex-home-path" title="Isolated CODEX_HOME" placeholder="%APPDATA%\ClawScribe\codex"
-          description="A folder on a local drive. ClawScribe never uses your normal ~/.codex profile or the standalone Codex CLI sign-in" value={codexConfig.codexHomePath || ''}
-          onCommit={async (value) => { await saveCodexSafe({ ...codexConfig, codexHomePath: value, codexHomeMode: 'clawscribe-isolated', useExistingUserCodexSession: false, codexBinaryPath: null }); }} />,
+        <SettingsRow key="codex-home" title="Isolated CODEX_HOME"
+          description={<>
+            A new or empty folder on a local drive that ClawScribe keeps its own Codex profile in. It never uses your normal ~/.codex profile or the standalone Codex CLI sign-in
+            <Meta className="mt-1 block break-all">{codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}</Meta>
+          </>}>
+          <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy}>Choose folder</Button>
+        </SettingsRow>,
         <CommitInputRow key="codex-timeout" id="codex-timeout" title="Timeout" description="Seconds, 30 or more" inputMode="numeric" value={String(codexConfig.timeoutSeconds)}
           validate={numberProblem(30, 86400, true, true)} onCommit={async (value) => { await saveCodexSafe({ ...codexConfig, timeoutSeconds: parseInt(value, 10) }); }} />,
         <SettingsRow key="codex-runtime" title="Runtime"
@@ -2571,19 +2587,10 @@ export function ModelSettingsModal({
 
             <div>
               <Label htmlFor="codex-home-path">Isolated CODEX_HOME</Label>
-              <Input
-                id="codex-home-path"
-                value={codexConfig.codexHomePath || ''}
-                onChange={(e) => setCodexConfig((prev) => ({
-                  ...prev,
-                  codexHomeMode: 'clawscribe-isolated',
-                  useExistingUserCodexSession: false,
-                  codexHomePath: e.target.value,
-                  codexBinaryPath: null,
-                }))}
-                placeholder="%APPDATA%\\ClawScribe\\codex"
-                className="mt-1"
-              />
+              <div className="mt-1 flex items-center gap-2">
+                <span id="codex-home-path" className="min-w-0 flex-1 break-all text-sm">{codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}</span>
+                <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy}>Choose folder</Button>
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
                 ClawScribe never uses the user's normal ~/.codex profile or the standalone Codex CLI auth state for this provider.
               </p>

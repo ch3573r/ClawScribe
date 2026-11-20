@@ -219,8 +219,6 @@ pub fn cancel_import() {
 /// Validate an audio file and return its info using metadata-only approach
 /// Missing duration is shown as unknown and measured during bounded batch preparation.
 pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
-    // A network or device path is refused before the first filesystem call.
-    crate::local_path::check_local(&path.to_string_lossy()).map_err(|message| anyhow!(message))?;
     // Check file exists
     if !path.exists() {
         return Err(anyhow!("File does not exist: {}", path.display()));
@@ -1313,6 +1311,9 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
         Some(path) => {
             let path_str = path.to_string();
             info!("Audio file selected");
+            // The user chose it in a dialog the core opened: the import accepts
+            // this file once, and no other path.
+            crate::file_grants::grant(crate::file_grants::Purpose::AudioImport, Path::new(&path_str))?;
 
             match validate_audio_file(Path::new(&path_str)) {
                 Ok(info) => Ok(Some(info)),
@@ -1333,7 +1334,9 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
 #[tauri::command]
 pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
     info!("Validating selected audio file");
-    validate_audio_file(Path::new(&path)).map_err(|e| e.to_string())
+    // Only a file the user chose (or dropped on the window) and the core saw.
+    let granted = crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, &path)?;
+    validate_audio_file(&granted).map_err(|e| e.to_string())
 }
 
 /// Start importing an audio file.
@@ -1350,7 +1353,9 @@ pub async fn start_import_audio_command<R: Runtime>(
     if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
         return Err("Import already in progress".to_string());
     }
-    crate::local_path::check_local(&source_path)?;
+    // Only a file the user chose (or dropped on the window) and the core saw, once.
+    let taken = crate::file_grants::take(crate::file_grants::Purpose::AudioImport, &source_path)?;
+    let source_path = taken.path.to_string_lossy().into_owned();
 
     // Spawn import in background
     tauri::async_runtime::spawn(async move {
@@ -1358,6 +1363,8 @@ pub async fn start_import_audio_command<R: Runtime>(
 
         if let Err(_e) = result {
             error!("Import failed");
+            // A retry needs no new choice.
+            crate::file_grants::give_back(crate::file_grants::Purpose::AudioImport, &taken);
         }
     });
 
@@ -1643,10 +1650,9 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
         // A network or relative path is refused before the filesystem is asked.
-        for refused in ["//host/share/file.mp4", "relative/file.mp4"] {
-            let error = validate_audio_file(Path::new(refused)).unwrap_err().to_string();
-            assert!(error.contains("local drive"), "{refused}: {error}");
-        }
+        // Only a granted path is accepted by the commands.
+        assert!(crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, "//host/share/never-granted.mp4").is_err());
+        assert!(crate::file_grants::take(crate::file_grants::Purpose::AudioImport, "relative/file.mp4").is_err());
     }
 
     #[test]

@@ -18,7 +18,7 @@ function attachment({meetingId,targets=meetings,open=async()=> 'planning.pdf',se
   let props={meetingId,meetings:targets,onAttached:attached};
   const {AttachReferenceButton}=loadTsModule('src/components/MeetingDetails/AttachReferenceButton.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
-    'lucide-react':{Paperclip:'clip',Check:'check'},'@tauri-apps/plugin-dialog':{open},
+    'lucide-react':{Paperclip:'clip',Check:'check'},'@tauri-apps/api/core':{invoke:async command=>{if(command!=='pick_reference_document')throw new Error('unexpected '+command);return open();}},
     '@/services/knowledgeService':{knowledgeService:{importDocument:async()=>({id:'document'}),cancelDocumentImport:async()=>{},...service}},
   });
   const render=()=>hooks.render(()=>AttachReferenceButton(props));

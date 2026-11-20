@@ -242,7 +242,8 @@ async fn run_retranscription<R: Runtime>(
         .db_manager
         .pool()
         .clone();
-    let folder_path = crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id)
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    let folder_path = crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id, &roots)
         .await
         .map_err(|message| anyhow!(message))?;
     let (audio_path, capture_gaps) =

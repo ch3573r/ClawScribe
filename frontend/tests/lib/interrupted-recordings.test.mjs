@@ -9,7 +9,7 @@ const json = value => JSON.parse(JSON.stringify(value));
 const disk = (folder, extra = {}) => ({
   folder, title: 'Weekly sync', startedAt: '2026-11-01T10:00:00Z', approxDurationSeconds: 1800, sizeBytes: 5 * 1024 * 1024,
   hasTranscript: true, transcriptLines: 12, hasCapture: true, hasAudio: true,
-  reasons: ['unfinished_audio'], reason: 'The recorded audio was not finished into a file', registeredMeetingId: null, ...extra,
+  reasons: ['unfinished_audio'], reason: 'The recorded audio was not finished into a file', registeredMeetingId: null, kept: false, ...extra,
 });
 const browser = (meetingId, folderPath, extra = {}) => ({
   meetingId, title: 'From the browser', startTime: 1_000, lastUpdated: 2_000, transcriptCount: 3, savedToSQLite: false, folderPath, ...extra,
@@ -94,6 +94,8 @@ function harness({ browserMeetings = [], scan = { recordings: [], truncated: fal
       if (command === 'recover_audio_from_checkpoints') {
         return { status: audioStatus, chunk_count: 1, estimated_duration_seconds: 1, audio_file_path: ['success', 'partial'].includes(audioStatus) ? args.meetingFolder + '/audio-recovered.wav' : undefined };
       }
+      if (command === 'keep_interrupted_recording') return;
+      if (command === 'repair_saved_recording') return { meetingId: args.folder === 'C:\Rec\saved' ? 'meeting-7' : 'other', audioStatus: 'success', audioPath: args.folder + '/audio-recovered.wav' };
       if (command === 'discard_interrupted_recording') { if (failDiscard) throw new Error('refused'); return; }
       if (command === 'release_recovered_capture' || command === 'cleanup_checkpoints') return;
       throw new Error('Unexpected command: ' + command);
@@ -219,5 +221,40 @@ test('deleting a browser entry only removes the browser data, never the folder',
   await h.render().checkForRecoverableTranscripts();
   await h.render().deleteRecoverableMeeting('m1');
   assert.deepEqual(h.names().filter(name => name.startsWith('delete') || name.startsWith('discard')), ['deleteBrowser']);
+  h.hooks.unmount();
+});
+
+test('a recording the user asked not to be asked about is left out and counted, and shown on request', async () => {
+  const scan = { recordings: [disk('C:\Rec\one'), disk('C:\Rec\kept', { kept: true })], truncated: false, recordingActive: false };
+  const h = harness({ scan });
+  const found = await h.render().checkForRecoverableTranscripts();
+  assert.equal(found.length, 1);
+  assert.equal(found[0].disk.folder, 'C:\Rec\one');
+  const all = await h.render().checkForRecoverableTranscripts({ includeKept: true });
+  assert.equal(all.length, 2);
+  h.hooks.unmount();
+});
+
+test('"Keep, do not ask again" goes to the core for that folder and removes the entry; nothing is deleted', async () => {
+  const h = harness({ scan: { recordings: [disk('C:\Rec\one')], truncated: false, recordingActive: false } });
+  await h.render().checkForRecoverableTranscripts();
+  await h.render().keepRecoverableMeeting(h.render().recoverableMeetings[0].meetingId);
+  const keep = h.calls.find(call => call[0] === 'keep_interrupted_recording');
+  assert.deepEqual(json(keep[1]), { folder: 'C:\Rec\one', keep: true });
+  assert.equal(h.render().recoverableMeetings.length, 0);
+  assert.equal(h.names().includes('discard_interrupted_recording'), false);
+  h.hooks.unmount();
+});
+
+test('a recording already saved in the library repairs that meeting and never saves a second one', async () => {
+  const h = harness({ scan: { recordings: [disk('C:\Rec\saved', { registeredMeetingId: 'meeting-7' })], truncated: false, recordingActive: false } });
+  await h.render().checkForRecoverableTranscripts();
+  const result = await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
+  assert.equal(result.meetingId, 'meeting-7');
+  assert.equal(result.success, true);
+  assert.equal(h.saves.length, 0, 'no second meeting is saved');
+  assert.deepEqual(json(h.calls.find(call => call[0] === 'repair_saved_recording')[1]), { folder: 'C:\Rec\saved' });
+  assert.equal(h.names().includes('save'), false);
+  assert.equal(h.render().recoverableMeetings.length, 0);
   h.hooks.unmount();
 });

@@ -2215,6 +2215,16 @@ pub async fn set_source_attribution_enabled<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<(), String> {
+    let _change = crate::behavior_settings::CHANGE_LOCK.lock().await;
+    apply_source_attribution(&app, enabled).await
+}
+
+/// Shared by the command and the hand-over of the webview's old values.
+pub(crate) async fn apply_source_attribution<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let app = app.clone();
     // Stored first: a failed save leaves the running value as it is.
     tauri::async_runtime::spawn_blocking(move || {
         crate::behavior_settings::save_source_attribution(&app, enabled)
@@ -2236,6 +2246,16 @@ pub async fn set_cloud_transcription_enabled<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<(), String> {
+    let _change = crate::behavior_settings::CHANGE_LOCK.lock().await;
+    apply_cloud_transcription(&app, enabled).await
+}
+
+/// Shared by the command and the hand-over of the webview's old values.
+pub(crate) async fn apply_cloud_transcription<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let app = app.clone();
     // Stored first: a failed save leaves the running value as it is.
     tauri::async_runtime::spawn_blocking(move || {
         crate::behavior_settings::save_cloud_transcription(&app, enabled)

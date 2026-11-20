@@ -293,18 +293,18 @@ export default function RootLayout({
   }, [router]);
 
   // Handle file drop for audio import
-  const handleFileDrop = useCallback((paths: string[]) => {
-    // Find the first audio file
-    const audioFile = paths.find(p => {
+  const handleFileDrop = useCallback((audioPaths: string[], otherCount: number) => {
+    // The first audio file the core granted
+    const audioFile = audioPaths.find(p => {
       const ext = p.split('.').pop()?.toLowerCase();
       return !!ext && isAudioExtension(ext);
     });
 
     if (audioFile) {
-      console.log('[Layout] Audio file dropped:', audioFile);
+      console.log('[Layout] Audio file dropped');
       setImportFilePath(audioFile);
       setShowImportDialog(true);
-    } else if (paths.length > 0) {
+    } else if (audioPaths.length + otherCount > 0) {
       toast.error('Please drop an audio file', {
         description: `Supported formats: ${getAudioFormatsDisplayList()}`
       });
@@ -340,10 +340,11 @@ export default function RootLayout({
       }
       unlisteners.push(unlistenDragLeave);
 
-      // Drop - process files
-      const unlistenDrop = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
+      // Drop - the core saw the drop and granted the audio files for import
+      // before telling the window; the paths come from the core's event.
+      const unlistenDrop = await listen<{ audio: string[]; other: number }>('files-dropped', (event) => {
         setShowDropOverlay(false);
-        handleFileDrop(event.payload.paths);
+        handleFileDrop(event.payload.audio ?? [], event.payload.other ?? 0);
       });
       if (cleanedUpRef.current) {
         unlistenDrop();

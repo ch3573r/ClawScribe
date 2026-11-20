@@ -15,6 +15,7 @@ import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
 import { takeActiveRecordingCalendar, setMeetingCalendar } from '@/lib/meetingCalendar';
+import { errorText } from '@/lib/errorText';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -448,19 +449,6 @@ export function useRecordingStop(
             // Update meeting count in analytics.json
             await Analytics.updateMeetingCount();
 
-            // Check for activation (first meeting)
-            const { Store } = await import('@tauri-apps/plugin-store');
-            const store = await Store.load('analytics.json');
-            const totalMeetings = await store.get<number>('total_meetings');
-
-            if (totalMeetings === 1) {
-              const daysSinceInstall = await Analytics.calculateDaysSince('first_launch_date');
-              await Analytics.track('user_activated', {
-                meetings_count: '1',
-                days_since_install: daysSinceInstall?.toString() || 'null',
-                first_meeting_duration_seconds: durationSeconds.toString()
-              });
-            }
           } catch (analyticsError) {
             console.error("Failed to track meeting completion analytics:");
             // Don't block user flow on analytics errors
@@ -468,9 +456,9 @@ export function useRecordingStop(
 
         } catch (saveError) {
           console.error("Failed to save meeting to database:");
-          setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : 'Unknown error');
+          setStatus(RecordingStatus.ERROR, errorText(saveError));
           toast.error('Failed to save meeting', {
-            description: saveError instanceof Error ? saveError.message : 'Unknown error'
+            description: errorText(saveError)
           });
           throw saveError;
         }
@@ -484,7 +472,7 @@ export function useRecordingStop(
       setIsRecordingDisabled(false);
     } catch (error) {
       console.error("Error in handleRecordingStop:");
-      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Unknown error');
+      setStatus(RecordingStatus.ERROR, errorText(error));
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {

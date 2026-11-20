@@ -58,11 +58,8 @@
                         "core:window:allow-set-title",
                         "core:window:allow-toggle-maximize",
                         "core:webview:allow-set-webview-zoom",
-                        "store:default",
                         "notification:default",
                         "notification:allow-is-permission-granted",
-                        "dialog:allow-open",
-                        "dialog:allow-save",
                         "dialog:allow-message",
                         "updater:default",
                         "process:default"

@@ -40,9 +40,79 @@ fn separator(c: char) -> bool {
     c == '\\' || c == '/'
 }
 
+/// A path as comparable text: both slash directions are one, a verbatim `\\?\`
+/// prefix is dropped, letter case does not matter on Windows, and a trailing
+/// separator is ignored (a bare root keeps its own).
+pub(crate) fn comparable_text(path: &str) -> String {
+    let mut text = path.replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/") {
+        text = match rest.strip_prefix("UNC/") {
+            Some(unc) => format!("//{unc}"),
+            None => rest.to_string(),
+        };
+    }
+    #[cfg(windows)]
+    let text = text.to_ascii_lowercase();
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        text
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Whether the text names `root` or something below it, judged by the text
+/// alone (no filesystem call): a path that spells a trusted root is the only
+/// kind of non-local text that may be looked at, and only without `..`
+/// components, so it cannot leave the root by its own spelling.
+pub(crate) fn lexically_inside(text: &str, root: &Path) -> bool {
+    if text.is_empty() || text.contains('\0') {
+        return false;
+    }
+    let comparable = comparable_text(text);
+    if comparable.split('/').any(|part| part == "..") {
+        return false;
+    }
+    let root = comparable_text(&root.to_string_lossy());
+    if root.is_empty() {
+        return false;
+    }
+    comparable == root || comparable.starts_with(&format!("{}/", root.trim_end_matches('/')))
+}
+
+/// Folders the tests declare to be network locations, so no real network is
+/// needed: such a path reads as not local, exactly like a share would.
+#[cfg(test)]
+static TEST_REMOTE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn mark_remote_for_tests(folder: &Path) {
+    TEST_REMOTE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(comparable_text(&folder.to_string_lossy()));
+}
+
+fn marked_remote(text: &str) -> bool {
+    #[cfg(test)]
+    {
+        let comparable = comparable_text(text);
+        TEST_REMOTE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|remote| comparable == *remote || comparable.starts_with(&format!("{remote}/")))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = text;
+        false
+    }
+}
+
 /// Whether `path` is a plain local absolute path. Pure text; no filesystem call.
 pub(crate) fn is_local_path_text(path: &str) -> bool {
-    if path.is_empty() || path.contains('\0') || path.starts_with(char::is_whitespace) {
+    if path.is_empty() || path.contains('\0') || path.starts_with(char::is_whitespace) || marked_remote(path) {
         return false;
     }
     let mut chars = path.chars();
@@ -124,6 +194,9 @@ pub(crate) fn resolve_local(text: &str) -> Result<std::path::PathBuf, String> {
 
 /// Whether a canonicalised path is on a local disk (`\\?\C:\...` on Windows).
 pub(crate) fn is_local_canonical(path: &Path) -> bool {
+    if marked_remote(&path.to_string_lossy()) {
+        return false;
+    }
     #[cfg(windows)]
     {
         matches!(
@@ -164,6 +237,43 @@ mod tests {
         ] {
             assert!(!is_local_path_text(refused), "{refused:?}");
         }
+    }
+
+    #[test]
+    fn a_path_is_lexically_inside_a_root_only_by_its_own_spelling() {
+        let root = Path::new(r"\\server\share\Recordings");
+        for inside in [
+            r"\\server\share\Recordings\Weekly",
+            r"//SERVER/Share/recordings/weekly/",
+            r"\\?\UNC\server\share\Recordings\a\b",
+            r"\\server\share\Recordings",
+        ] {
+            assert!(lexically_inside(inside, root), "{inside}");
+        }
+        for outside in [
+            r"\\server\share\Recordings-evil",
+            r"\\server\share\Other",
+            r"\\other\share\Recordings\x",
+            r"\\server\share\Recordings\..\Other",
+            r"\\server\share\Recordings\a\..\..\x",
+            r"\\server\share",
+            "",
+        ] {
+            assert!(!lexically_inside(outside, root), "{outside}");
+        }
+    }
+
+    #[test]
+    fn a_folder_the_tests_mark_as_network_reads_as_not_local() {
+        let base = tempfile::tempdir().unwrap();
+        let share = base.path().join("pretend-share");
+        std::fs::create_dir_all(&share).unwrap();
+        assert!(is_local_path_text(&share.to_string_lossy()));
+        mark_remote_for_tests(&share);
+        assert!(!is_local_path_text(&share.to_string_lossy()));
+        assert!(!is_local_path_text(&share.join("inner").to_string_lossy()));
+        assert!(!is_local_canonical(&share.canonicalize().unwrap()));
+        assert!(is_local_path_text(&base.path().join("pretend-share-not").to_string_lossy()), "only below the marked folder");
     }
 
     #[test]

@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { StoredTranscript } from '@/services/indexedDBService';
+import { errorText } from '@/lib/errorText';
 import { describeDuration, describeSize, type RecoveryCandidate } from '@/lib/interruptedRecordings';
 import { cn } from '@/lib/utils';
 
@@ -30,6 +31,8 @@ interface TranscriptRecoveryProps {
   recoverableMeetings: RecoveryCandidate[];
   onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
+  /** "Keep, do not ask again" for a recording found on disk. */
+  onKeep?: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
 }
 
@@ -39,6 +42,7 @@ export function TranscriptRecovery({
   recoverableMeetings,
   onRecover,
   onDelete,
+  onKeep,
   onLoadPreview,
 }: TranscriptRecoveryProps) {
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
@@ -94,6 +98,18 @@ export function TranscriptRecovery({
       toast.error('Could not recover the meeting. Your recovery data is still available. Try again.');
     } finally {
       setIsRecovering(false);
+    }
+  };
+
+  const handleKeep = async () => {
+    if (!selectedMeetingId || !onKeep || isRecovering || isDeleting) return;
+    try {
+      await onKeep(selectedMeetingId);
+      setSelectedMeetingId(null);
+      setPreviewTranscripts([]);
+    } catch (error) {
+      console.error('Keeping the recording failed:', error);
+      toast.error(errorText(error, 'Could not keep the recording. Try again.'));
     }
   };
 
@@ -288,6 +304,11 @@ export function TranscriptRecovery({
           >
             Cancel
           </Button>
+          {onKeep && selectedMeeting?.disk && (
+            <Button variant="ghost" onClick={handleKeep} disabled={isRecovering || isDeleting}>
+              Keep, do not ask again
+            </Button>
+          )}
           <Button
             ref={deleteButtonRef}
             variant="outline"

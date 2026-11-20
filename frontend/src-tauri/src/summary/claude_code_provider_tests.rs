@@ -841,3 +841,26 @@ fn only_a_file_named_claude_is_accepted_as_the_program() {
         assert!(accepted.is_ok(), "the file name's case does not matter on Windows: {accepted:?}");
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn a_project_local_shim_is_refused_and_a_global_npm_shim_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    // <project>/node_modules/.bin/claude.cmd
+    let local = dir.path().join("project").join("node_modules").join(".bin").join("claude.cmd");
+    // <npm prefix>\claude.cmd (global installs put the shim in the prefix folder itself)
+    let global = dir.path().join("npm").join("claude.cmd");
+    for shim in [&local, &global] {
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(shim, b"@echo off").unwrap();
+    }
+    assert!(is_project_local_shim(&local));
+    assert!(!is_project_local_shim(&global));
+    assert_eq!(
+        resolve_program(&ClaudeCodeConfig { program_path: Some(local.to_string_lossy().into_owned()) }).unwrap_err(),
+        INVALID_PROGRAM
+    );
+    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(global.to_string_lossy().into_owned()) }).is_ok());
+    // The shim of the real package inside node_modules is not a shim: only scripts are judged.
+    assert!(!is_project_local_shim(&dir.path().join("npm").join("node_modules").join("x").join("claude.exe")));
+}

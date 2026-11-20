@@ -18,6 +18,8 @@ export interface BehaviorSettings {
   cloudTranscription: boolean;
   sourceAttribution: boolean;
   language: string;
+  /** Whether the "recording started" notice is shown (the core's value; default yes). */
+  showRecordingNotification: boolean;
   /** Whether the old `localStorage` values were already handed to the core. */
   legacyMigrated: boolean;
 }
@@ -28,6 +30,7 @@ export const DEFAULT_BEHAVIOR_SETTINGS: BehaviorSettings = {
   cloudTranscription: false,
   sourceAttribution: false,
   language: "auto",
+  showRecordingNotification: true,
   legacyMigrated: false,
 };
 
@@ -106,6 +109,8 @@ export function readBehaviorSettings(value: unknown): BehaviorSettings {
     cloudTranscription: flag("cloudTranscription"),
     sourceAttribution: flag("sourceAttribution"),
     language,
+    // Only an explicit false switches the notice off.
+    showRecordingNotification: source.showRecordingNotification !== false,
     legacyMigrated: flag("legacyMigrated"),
   };
 }
@@ -146,9 +151,20 @@ export function loadBehaviorSettings(): Promise<BehaviorSettings> {
     try {
       let settings = readBehaviorSettings(await invoke<unknown>("get_behavior_settings"));
       if (!settings.legacyMigrated) {
-        settings = readBehaviorSettings(
-          await invoke<unknown>("migrate_legacy_behavior_settings", { legacy: readLegacyBehaviorSettings() }),
-        );
+        // The core refuses an engine change while a job holds the slot: try again
+        // for about fifteen seconds without holding anything up.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            settings = readBehaviorSettings(
+              await invoke<unknown>("migrate_legacy_behavior_settings", { legacy: readLegacyBehaviorSettings() }),
+            );
+            break;
+          } catch (error) {
+            const busy = typeof error === "string" && (error.startsWith("PARAKEET_WORKER_BUSY:") || error.includes("job is active"));
+            if (!busy || attempt >= 4) throw error;
+            await new Promise<void>((resolve) => setTimeout(resolve, 3_750));
+          }
+        }
       }
       publish(settings);
       return settings;

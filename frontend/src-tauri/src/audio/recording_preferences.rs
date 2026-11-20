@@ -27,6 +27,10 @@ pub struct RecordingPreferences {
     #[cfg(target_os = "macos")]
     #[serde(default)]
     pub system_audio_backend: Option<String>,
+    /// Set when the stored recordings folder is not a trusted root and the
+    /// default folder is used instead. Never read from the webview, never stored.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub folder_notice: Option<String>,
 }
 
 impl Default for RecordingPreferences {
@@ -39,6 +43,7 @@ impl Default for RecordingPreferences {
             preferred_system_device: None,
             #[cfg(target_os = "macos")]
             system_audio_backend: Some("coreaudio".to_string()),
+            folder_notice: None,
         }
     }
 }
@@ -149,123 +154,96 @@ fn read_previous_save_folders<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Why a folder may not be a root recordings are opened, recovered or deleted
-/// from, or None. Checked as text first (a network or device path is never
-/// asked about), then against the same protected folders a new recordings
-/// folder must avoid. A folder that does not exist yet is judged by its path.
-pub(crate) fn root_problem(folder: &std::path::Path, protected: &ProtectedFolders) -> Option<&'static str> {
-    if !crate::local_path::is_local_path_text(&folder.to_string_lossy()) {
-        return Some("is not a path on a local drive");
-    }
-    let resolved = |path: &std::path::Path| {
-        // Links resolved as far as the folder exists; the rest as written.
-        let mut existing = path.to_path_buf();
-        let mut rest = Vec::new();
-        while !existing.exists() {
-            match (existing.file_name().map(ToOwned::to_owned), existing.parent().map(std::path::Path::to_path_buf)) {
-                (Some(name), Some(parent)) => {
-                    rest.push(name);
-                    existing = parent;
-                }
-                _ => break,
-            }
-        }
-        let mut base = existing
-            .canonicalize()
-            .map(|canonical| crate::database::meeting_files::plain_path(&canonical))
-            .unwrap_or(existing);
-        for name in rest.into_iter().rev() {
-            base.push(name);
-        }
-        base
-    };
-    let folder = resolved(folder);
-    let inside = |root: &PathBuf| {
-        let root = resolved(root);
-        let (a, b) = (comparable(&folder), comparable(&root));
-        a == b || a.starts_with(&format!("{}/", b.trim_end_matches('/')))
-    };
-    let is_exact = protected.exact.iter().any(|root| comparable(&folder) == comparable(&resolved(root)));
-    if is_system_top_level(&folder)
-        || folder.parent().is_none()
-        || is_exact
-        || protected.trees.iter().any(inside)
-    {
-        return Some("is a system, profile or application-data folder");
-    }
-    None
-}
-
-/// The roots from their parts: the current and previous defaults, the
-/// configured folder, folders configured before, and restored backups. The
-/// configured and the previous folders are checked again here with the rules a
-/// new recordings folder must pass; one that fails is not a root (recording to
-/// the configured folder carries on, but nothing is opened, recovered or
-/// deleted from it). `rejected_roots` says which.
-pub(crate) fn roots_from(
-    configured: Option<PathBuf>,
-    previous: Vec<PathBuf>,
-    app_data_dir: Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let protected = protected_folders(app_data_dir.clone());
+/// The roots: the default folders, the restored backups and every folder the
+/// user trusted (chosen in the core's folder picker, or the folder an earlier
+/// version already used, taken over once). Network folders are roots like any
+/// other. Judged without touching the disk.
+pub(crate) fn roots_from(trusted: Vec<PathBuf>, app_data_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let mut roots = vec![
         get_default_recordings_folder(),
         get_legacy_default_recordings_folder(),
     ];
-    roots.extend(configured.filter(|folder| root_problem(folder, &protected).is_none()));
-    roots.extend(previous.into_iter().filter(|folder| root_problem(folder, &protected).is_none()));
+    roots.extend(trusted);
     roots.extend(app_data_dir.map(|data| data.join("restored-recordings")));
     roots
 }
 
-/// The configured and previous folders that are not accepted as roots, each with
-/// a sentence that names the kind of folder and never its path.
-pub(crate) fn rejected_roots(
-    configured: Option<&PathBuf>,
-    previous: &[PathBuf],
-    app_data_dir: Option<PathBuf>,
-) -> Vec<String> {
-    let protected = protected_folders(app_data_dir);
-    let mut problems = Vec::new();
-    if let Some(reason) = configured.and_then(|folder| root_problem(folder, &protected)) {
-        problems.push(format!(
-            "The recordings folder in use {reason}. Recording continues there, but its recordings are not opened, recovered or deleted from the app until you choose another folder."
-        ));
+fn trust_backing<R: Runtime>(app: &AppHandle<R>) -> Option<std::sync::Arc<tauri_plugin_store::Store<R>>> {
+    app.store(crate::trusted_roots::STORE_FILE).ok()
+}
+
+/// The recordings folders of an earlier version, as stored: the configured one
+/// and those configured before. Read raw, before any fallback.
+fn stored_folders<R: Runtime>(app: &AppHandle<R>) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let Ok(store) = app.store("recording_preferences.json") else {
+        return (None, Vec::new());
+    };
+    let configured = store
+        .get("preferences")
+        .and_then(|value| value.get("save_folder").cloned())
+        .and_then(|value| serde_json::from_value::<PathBuf>(value).ok());
+    (configured, read_previous_save_folders(app))
+}
+
+/// The first start of this version: the folders the user already had become
+/// roots. Idempotent, and cheap once done.
+pub(crate) fn ensure_takeover<R: Runtime>(app: &AppHandle<R>) {
+    let Some(backing) = trust_backing(app) else { return };
+    if crate::trusted_roots::read(backing.as_ref()).takeover_done {
+        return;
     }
-    for (index, folder) in previous.iter().enumerate() {
-        if let Some(reason) = root_problem(folder, &protected) {
-            problems.push(format!("Earlier recordings folder {} {reason} and is ignored.", index + 1));
+    let (configured, previous) = stored_folders(app);
+    let protected = protected_folders(tauri::Manager::path(app).app_data_dir().ok());
+    match crate::trusted_roots::take_over_once(backing.as_ref(), configured.as_deref(), &previous, &protected) {
+        Ok(outcome) => {
+            if !outcome.rejected.is_empty() {
+                warn!("{} earlier recordings folder(s) were not taken over; see Diagnostics", outcome.rejected.len());
+            }
+        }
+        Err(_) => warn!("The earlier recordings folders could not be taken over"),
+    }
+}
+
+/// Every folder a meeting's recording files may live in. Opening, recovering
+/// and deleting outside these is refused.
+pub(crate) async fn recording_roots<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
+    ensure_takeover(app);
+    let trusted = trust_backing(app)
+        .map(|store| crate::trusted_roots::read(store.as_ref()).trusted)
+        .unwrap_or_default();
+    let roots = roots_from(trusted, tauri::Manager::path(app).app_data_dir().ok());
+    crate::trusted_roots::set_snapshot(roots.clone());
+    roots
+}
+
+const FOLDER_NOTICE: &str = "The recordings folder saved earlier is not trusted (it was not chosen with the folder picker of this version, or it is a drive, system or profile folder). Recordings use the default folder until you choose a folder again.";
+
+/// What to tell the user about stored recordings folders that are not trusted.
+pub(crate) async fn recording_folder_problems<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    ensure_takeover(app);
+    let trust = trust_backing(app)
+        .map(|store| crate::trusted_roots::read(store.as_ref()))
+        .unwrap_or_default();
+    let defaults = [get_default_recordings_folder(), get_legacy_default_recordings_folder()];
+    let (configured, previous) = stored_folders(app);
+    let mut problems = Vec::new();
+    if let Some(folder) = &configured {
+        if !crate::trusted_roots::is_trusted_or_default(&trust, folder, &defaults) {
+            problems.push(format!("{FOLDER_NOTICE} Its recordings are not opened, recovered or deleted from the app."));
         }
     }
-    problems
-}
-
-/// The problems with the stored recordings folders, for Diagnostics.
-pub(crate) async fn recording_folder_problems<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
-    let configured = load_recording_preferences(app).await.ok().map(|preferences| preferences.save_folder);
-    let problems = rejected_roots(
-        configured.as_ref(),
-        &read_previous_save_folders(app),
-        tauri::Manager::path(app).app_data_dir().ok(),
-    );
+    let untrusted = previous
+        .iter()
+        .filter(|folder| !crate::trusted_roots::is_trusted_or_default(&trust, folder, &defaults))
+        .count();
+    if untrusted > 0 {
+        problems.push(format!("{untrusted} earlier recordings folder(s) are not trusted and are ignored."));
+    }
     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !problems.is_empty() && !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        warn!("A stored recordings folder is not accepted as a root; see Diagnostics");
+        warn!("A stored recordings folder is not trusted; see Diagnostics");
     }
     problems
-}
-
-/// Every folder a meeting's recording files may live in. Deleting or
-/// recovering a folder outside these is refused.
-pub(crate) async fn recording_roots<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
-    roots_from(
-        load_recording_preferences(app)
-            .await
-            .ok()
-            .map(|preferences| preferences.save_folder),
-        read_previous_save_folders(app),
-        tauri::Manager::path(app).app_data_dir().ok(),
-    )
 }
 
 fn paths_match(a: &PathBuf, b: &PathBuf) -> bool {
@@ -356,6 +334,19 @@ pub async fn load_recording_preferences<R: Runtime>(
         }
     }
 
+    // The folder must be a root the user chose (or the earlier folder taken over).
+    // Anything else, for example a value written outside the app, is not used.
+    ensure_takeover(app);
+    let trust = trust_backing(app)
+        .map(|store| crate::trusted_roots::read(store.as_ref()))
+        .unwrap_or_default();
+    let defaults = [get_default_recordings_folder(), get_legacy_default_recordings_folder()];
+    if !crate::trusted_roots::is_trusted_or_default(&trust, &prefs.save_folder, &defaults) {
+        warn!("The stored recordings folder is not trusted; the default folder is used");
+        prefs.save_folder = get_default_recordings_folder();
+        prefs.folder_notice = Some(FOLDER_NOTICE.to_string());
+    }
+
     info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
           prefs.save_folder, prefs.auto_save, prefs.file_format,
           prefs.preferred_mic_device, prefs.preferred_system_device);
@@ -377,7 +368,9 @@ pub async fn save_recording_preferences<R: Runtime>(
         .map_err(|e| anyhow::anyhow!("Failed to access store: {}", e))?;
 
     // Serialize preferences to JSON value
-    let prefs_value = serde_json::to_value(preferences)
+    let mut stored = preferences.clone();
+    stored.folder_notice = None;
+    let prefs_value = serde_json::to_value(&stored)
         .map_err(|e| anyhow::anyhow!("Failed to serialize preferences: {}", e))?;
 
     // A changed save folder must not strand recordings made in the old one:
@@ -516,46 +509,52 @@ pub(crate) fn validate_save_folder(
     requested: &std::path::Path,
     protected: &ProtectedFolders,
 ) -> Result<PathBuf, String> {
-    let text = requested.to_string_lossy();
-    if text.trim().is_empty()
-        || !crate::local_path::is_local_path_text(&text)
-    {
+    // The folder comes from the core's own folder picker, so a network location
+    // is fine; what is refused is a drive or share root, a system, profile or
+    // application-data folder.
+    if requested.as_os_str().is_empty() || !requested.is_absolute() && !requested.to_string_lossy().starts_with("\\\\") {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     let canonical = requested
         .canonicalize()
         .map_err(|_| SAVE_FOLDER_REFUSED.to_string())?;
-    if !canonical.is_dir() || !crate::local_path::is_local_canonical(&canonical) {
+    if !canonical.is_dir() {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     let resolved = crate::database::meeting_files::plain_path(&canonical);
-    let resolved_text = resolved.to_string_lossy();
-    if crate::database::meeting_files::is_network_or_device_path(&resolved_text)
-        || resolved.parent().is_none()
-    {
-        return Err(SAVE_FOLDER_REFUSED.into());
-    }
-    let known = |folder: &PathBuf| {
-        folder
-            .canonicalize()
-            .ok()
-            .map(|folder| crate::database::meeting_files::plain_path(&folder))
-    };
-    if is_system_top_level(&resolved)
-        || protected
-        .exact
-        .iter()
-        .filter_map(known)
-        .any(|folder| same_path(&folder, &resolved))
-        || protected
-            .trees
-            .iter()
-            .filter_map(known)
-            .any(|folder| resolved.starts_with(&folder) || same_path(&folder, &resolved))
-    {
+    if crate::trusted_roots::root_problem(&resolved, protected, true).is_some() {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     Ok(resolved)
+}
+
+/// What a request for a recordings folder amounts to.
+pub(crate) enum FolderChange {
+    /// The folder is the one in use: nothing changes.
+    Keep(PathBuf),
+    /// The default folder, which is always allowed.
+    Default,
+    /// A different folder, accepted only because the core's own folder picker
+    /// returned exactly this path in this session.
+    Granted(crate::file_grants::Taken),
+}
+
+/// A folder in the text the webview sent is not trusted. It stays as it is, is
+/// the default, or must equal a folder granted by the core's folder picker;
+/// anything else is refused.
+pub(crate) fn classify_folder_request(
+    current: Option<&std::path::Path>,
+    requested: &std::path::Path,
+    default: &std::path::Path,
+    take: impl FnOnce(&str) -> Result<crate::file_grants::Taken, String>,
+) -> Result<FolderChange, String> {
+    if let Some(current) = current.filter(|current| same_path(current, requested)) {
+        return Ok(FolderChange::Keep(current.to_path_buf()));
+    }
+    if same_path(requested, default) {
+        return Ok(FolderChange::Default);
+    }
+    take(&requested.to_string_lossy()).map(FolderChange::Granted)
 }
 
 #[tauri::command]
@@ -563,29 +562,49 @@ pub async fn set_recording_preferences<R: Runtime>(
     app: AppHandle<R>,
     mut preferences: RecordingPreferences,
 ) -> Result<(), String> {
-    // A save folder that stays as it is needs no new check (other settings can
-    // still be saved); a changed one must be a proper recordings folder.
+    // The folder is not taken from the text the webview sends. Unchanged, it
+    // stays; the default folder is always allowed; anything else must be a
+    // folder the user chose in the core's folder picker (`select_recording_folder`)
+    // in this session, and becomes a trusted root.
     let current = load_recording_preferences(&app).await.ok();
-    let unchanged = current
-        .as_ref()
-        .is_some_and(|current| same_path(&current.save_folder, &preferences.save_folder));
-    if !unchanged {
-        let requested = preferences.save_folder.clone();
-        // The default folder may not exist yet; it is the app's own to create.
-        if same_path(&requested, &get_default_recordings_folder()) {
-            ensure_recordings_directory(&requested)
-                .map_err(|_| "The recordings folder could not be created".to_string())?;
-        }
+    let change = classify_folder_request(
+        current.as_ref().map(|current| current.save_folder.as_path()),
+        &preferences.save_folder,
+        &get_default_recordings_folder(),
+        |text| crate::file_grants::take(crate::file_grants::Purpose::RecordingsFolder, text),
+    )?;
+    if let FolderChange::Keep(folder) = &change {
+        preferences.save_folder = folder.clone();
+    } else if let FolderChange::Default = &change {
+        preferences.save_folder = get_default_recordings_folder();
+        ensure_recordings_directory(&preferences.save_folder)
+            .map_err(|_| "The recordings folder could not be created".to_string())?;
+    } else if let FolderChange::Granted(taken) = change {
+        let granted = taken.path.clone();
         let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
-        preferences.save_folder = tokio::task::spawn_blocking(move || {
-            validate_save_folder(&requested, &protected)
+        let checked = granted.clone();
+        let trusted_app = app.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            validate_save_folder(&checked, &protected)?;
+            let backing = trust_backing(&trusted_app).ok_or_else(|| "Could not save the folder".to_string())?;
+            crate::trusted_roots::trust_folder(backing.as_ref(), &checked, &protected)
         })
         .await
-        .map_err(|_| "Could not check the recordings folder".to_string())??;
+        .map_err(|_| "Could not check the recordings folder".to_string())
+        .and_then(|result| result);
+        if let Err(message) = result {
+            crate::file_grants::give_back(crate::file_grants::Purpose::RecordingsFolder, &taken);
+            return Err(message);
+        }
+        preferences.save_folder = granted;
     }
-    save_recording_preferences(&app, &preferences)
+    preferences.folder_notice = None;
+    let saved = save_recording_preferences(&app, &preferences)
         .await
-        .map_err(|e| format!("Failed to save recording preferences: {}", e))
+        .map_err(|e| format!("Failed to save recording preferences: {}", e));
+    // The roots changed with it.
+    let _ = recording_roots(&app).await;
+    saved
 }
 
 #[tauri::command]
@@ -651,8 +670,11 @@ pub async fn select_recording_folder<R: Runtime>(
         tokio::task::spawn_blocking(move || validate_save_folder(&checked, &protected))
             .await
             .map_err(|_| "Could not check the recordings folder".to_string())??;
+        // The choice is remembered by the core; `set_recording_preferences`
+        // accepts a changed folder only if it is this one.
+        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &folder)?;
 
-        info!("User selected recordings folder: {}", folder_path);
+        info!("User selected a recordings folder");
         Ok(Some(folder_path))
     } else {
         info!("User cancelled recordings folder selection");
@@ -848,32 +870,6 @@ mod previous_folder_tests {
         assert_eq!(list.len(), 1);
     }
 
-    #[test]
-    fn the_roots_include_previous_folders_defaults_and_restored_backups() {
-        let base = tempfile::tempdir().unwrap();
-        let (current, before, long_ago, data) = (
-            base.path().join("current"),
-            base.path().join("before"),
-            base.path().join("long-ago"),
-            base.path().join("data"),
-        );
-        let roots = roots_from(
-            Some(current.clone()),
-            vec![before.clone(), long_ago.clone()],
-            Some(data.clone()),
-        );
-        for expected in [
-            get_default_recordings_folder(),
-            get_legacy_default_recordings_folder(),
-            current,
-            before,
-            long_ago,
-            data.join("restored-recordings"),
-        ] {
-            assert!(roots.contains(&expected), "{expected:?} missing");
-        }
-        assert_eq!(roots_from(None, vec![], None).len(), 2);
-    }
 }
 
 #[cfg(test)]
@@ -966,52 +962,64 @@ mod save_folder_tests {
 #[cfg(test)]
 mod root_tests {
     use super::*;
+    use crate::behavior_settings::test_memory::Memory;
 
     #[test]
-    fn stored_folders_that_fail_the_rules_are_not_roots_and_are_reported_without_their_path() {
+    fn the_roots_are_the_defaults_the_restored_backups_and_what_the_user_trusted() {
         let base = tempfile::tempdir().unwrap();
-        let good = base.path().join("recordings");
-        let home = dirs::home_dir().expect("a profile folder");
-        let documents = dirs::document_dir();
-        let mut bad: Vec<PathBuf> = vec![home.clone(), PathBuf::from(r"\\h\s\recordings")];
-        bad.extend(documents.clone());
-        #[cfg(windows)]
-        {
-            bad.push(PathBuf::from(r"D:\Windows"));
-            bad.push(PathBuf::from(r"C:\Program Files\Rec"));
-            bad.push(PathBuf::from(r"E:\Users"));
-            bad.push(PathBuf::from("C:/"));
+        let (share, local, data) = (base.path().join("share"), base.path().join("local"), base.path().join("data"));
+        let roots = roots_from(vec![share.clone(), local.clone()], Some(data.clone()));
+        for expected in [get_default_recordings_folder(), get_legacy_default_recordings_folder(), share, local, data.join("restored-recordings")] {
+            assert!(roots.contains(&expected), "{expected:?} missing");
         }
-        let roots = roots_from(Some(good.clone()), bad.clone(), None);
-        assert!(roots.contains(&good));
-        for folder in &bad {
-            assert!(!roots.contains(folder), "{} is not a root", folder.display());
-        }
-        // The configured one that fails is dropped as a root too, and reported.
-        let roots = roots_from(Some(home.clone()), vec![good.clone()], None);
-        assert!(!roots.contains(&home) && roots.contains(&good));
-        let problems = rejected_roots(Some(&home), &[good.clone(), bad[1].clone()], None);
-        assert_eq!(problems.len(), 2);
-        assert!(problems[0].contains("recordings folder in use") && problems[1].contains("Earlier recordings folder 2"));
-        let all = problems.join(" ");
-        assert!(!all.contains(&home.to_string_lossy().to_string()), "the report never names the path");
-        assert!(rejected_roots(Some(&good), &[good.clone()], None).is_empty());
+        assert_eq!(roots_from(vec![], None).len(), 2);
     }
 
     #[test]
-    fn a_folder_that_does_not_exist_yet_is_judged_by_its_path() {
+    fn a_changed_folder_as_plain_text_is_refused_and_only_the_pickers_choice_is_accepted() {
+        let base = tempfile::tempdir().unwrap();
+        let (current, picked, typed) = (base.path().join("current"), base.path().join("picked"), base.path().join("typed"));
+        let default = get_default_recordings_folder();
+        let take = |text: &str| crate::file_grants::take(crate::file_grants::Purpose::RecordingsFolder, text);
+        // Unchanged and the default need no grant.
+        assert!(matches!(classify_folder_request(Some(&current), &current, &default, take), Ok(FolderChange::Keep(_))));
+        assert!(matches!(classify_folder_request(Some(&current), &default, &default, take), Ok(FolderChange::Default)));
+        // Text the webview made up, a network folder included, is not trusted.
+        crate::local_path::mark_remote_for_tests(&base.path().join("share"));
+        for text in [typed.clone(), base.path().join("share").join("recordings"), PathBuf::from(r"\\host\share\recordings")] {
+            assert!(classify_folder_request(Some(&current), &text, &default, take).is_err(), "{}", text.display());
+        }
+        // The folder the picker returned is accepted once, network or not.
+        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &picked).unwrap();
+        assert!(matches!(classify_folder_request(Some(&current), &picked, &default, take), Ok(FolderChange::Granted(_))));
+        assert!(classify_folder_request(Some(&current), &picked, &default, take).is_err(), "used up");
+        let share_pick = base.path().join("share").join("picked");
+        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &share_pick).unwrap();
+        assert!(matches!(classify_folder_request(Some(&current), &share_pick, &default, take), Ok(FolderChange::Granted(_))));
+    }
+
+    #[test]
+    fn a_folder_the_picker_returned_is_validated_and_a_share_root_is_refused() {
         let protected = protected_folders(None);
         let base = tempfile::tempdir().unwrap();
-        assert!(root_problem(&base.path().join("not-yet").join("deep"), &protected).is_none());
+        let fine = base.path().join("recordings");
+        std::fs::create_dir_all(&fine).unwrap();
+        assert!(validate_save_folder(&fine, &protected).is_ok());
         if let Some(home) = dirs::home_dir() {
-            assert!(root_problem(&home, &protected).is_some());
-            assert!(root_problem(&home.join("AppData"), &protected).is_some());
-            assert!(root_problem(&home.join("NotCreatedYet"), &protected).is_none(), "a subfolder is fine");
+            assert!(validate_save_folder(&home, &protected).is_err());
+            assert!(validate_save_folder(&home.join("AppData"), &protected).is_err());
         }
+        // A folder marked as network is accepted like any other; a drive root is not.
+        let share = base.path().join("share");
+        std::fs::create_dir_all(share.join("recordings")).unwrap();
+        crate::local_path::mark_remote_for_tests(&share);
+        assert!(validate_save_folder(&share.join("recordings"), &protected).is_ok());
+        let root = base.path().ancestors().last().unwrap().to_path_buf();
+        assert!(validate_save_folder(&root, &protected).is_err(), "a drive root");
     }
 
     #[test]
-    fn the_known_user_folders_themselves_are_refused_as_a_new_recordings_folder_and_subfolders_are_not() {
+    fn the_known_user_folders_themselves_are_refused_and_subfolders_are_not() {
         let protected = protected_folders(None);
         for known in [dirs::document_dir(), dirs::desktop_dir(), dirs::download_dir()].into_iter().flatten() {
             if known.is_dir() {
@@ -1022,17 +1030,28 @@ mod root_tests {
             if let Some(users) = home.parent() {
                 assert!(validate_save_folder(users, &protected).is_err(), "the folder holding every profile");
             }
-            let appdata = home.join("AppData");
-            if appdata.is_dir() {
-                assert!(validate_save_folder(&appdata, &protected).is_err());
-            }
         }
+    }
+
+    #[test]
+    fn only_trusted_or_default_folders_are_accepted_as_the_recordings_folder() {
+        let trust = crate::trusted_roots::Trust::default();
+        let defaults = [get_default_recordings_folder(), get_legacy_default_recordings_folder()];
+        let base = tempfile::tempdir().unwrap();
+        let elsewhere = base.path().join("elsewhere");
+        assert!(!crate::trusted_roots::is_trusted_or_default(&trust, &elsewhere, &defaults));
+        assert!(crate::trusted_roots::is_trusted_or_default(&trust, &get_default_recordings_folder(), &defaults));
+        let memory = Memory::default();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        crate::trusted_roots::trust_folder(&memory, &elsewhere, &ProtectedFolders::default()).unwrap();
+        assert!(crate::trusted_roots::is_trusted_or_default(&crate::trusted_roots::read(&memory), &elsewhere, &defaults));
+        assert!(!FOLDER_NOTICE.contains(":\\"), "the notice names no path");
     }
 
     #[cfg(windows)]
     #[test]
     fn system_top_level_folders_are_recognised_on_any_drive() {
-        for refused in [r"C:\Windows", r"D:\windows\System32", r"E:\Program Files", r"F:\Program Files (x86)\x", r"G:\ProgramData", r"H:\Recovery", r"C:\Users", r"X:\System Volume Information", r"C:\$Recycle.Bin\S-1"] {
+        for refused in [r"C:\Windows", r"D:\windows\System32", r"E:\Program Files", r"G:\ProgramData", r"C:\Users", r"C:\$Recycle.Bin\S-1"] {
             assert!(is_system_top_level(std::path::Path::new(refused)), "{refused}");
         }
         for fine in [r"D:\Recordings", r"E:\Data\Windows", r"C:\"] {

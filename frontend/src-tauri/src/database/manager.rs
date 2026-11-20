@@ -352,20 +352,21 @@ fn prune_expired_snapshots(database: &Path) -> std::io::Result<()> {
 }
 
 /// A SQLite snapshot includes committed WAL pages even when another reader
-/// prevents a complete checkpoint. Never copy only the main database file.
+/// prevents a complete checkpoint. Never copy only the main database file. The
+/// source is opened read-only and is never created, checkpointed or modified:
+/// it may be a database the app does not own.
 async fn snapshot_database(source: &Path, target: &Path) -> Result<()> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(source)
+                .read_only(true)
+                .create_if_missing(false)
                 .busy_timeout(Duration::from_secs(5)),
         )
         .await?;
     let result = async {
-        sqlx::query("PRAGMA wal_checkpoint(FULL)")
-            .execute(&pool)
-            .await?;
         let staged = tempfile::NamedTempFile::new_in(target.parent().unwrap_or(Path::new(".")))
             .map_err(sqlx::Error::Io)?
             .into_temp_path();

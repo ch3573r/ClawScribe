@@ -2,6 +2,8 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { invoke } from '@tauri-apps/api/core';
+import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 
 /**
  * Shows the recording notification toast with compliance message.
@@ -14,9 +16,8 @@ import Analytics from '@/lib/analytics';
  */
 export async function showRecordingNotification(): Promise<void> {
   try {
-    const { Store } = await import('@tauri-apps/plugin-store');
-    const store = await Store.load('preferences.json');
-    const showNotification = await store.get<boolean>('show_recording_notification') ?? true;
+    // The core owns the preference; it is shown unless the core says it was switched off.
+    const showNotification = (await loadBehaviorSettings()).showRecordingNotification;
 
     if (showNotification) {
       let dontShowAgain = false;
@@ -40,10 +41,8 @@ export async function showRecordingNotification(): Promise<void> {
               variant="ghost"
               onClick={async () => {
                 if (dontShowAgain) {
-                  const { Store } = await import('@tauri-apps/plugin-store');
-                  const store = await Store.load('preferences.json');
-                  await store.set('show_recording_notification', false);
-                  await store.save();
+                  await invoke('set_recording_notification_preference', { enabled: false });
+                  await refreshBehaviorSettings();
                 }
                 Analytics.trackButtonClick('recording_notification_acknowledged', 'toast');
                 toast.dismiss(toastId);

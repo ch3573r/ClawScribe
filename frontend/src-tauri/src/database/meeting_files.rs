@@ -17,12 +17,14 @@ pub(crate) fn resolve_recording_folder(
     if folder.as_os_str().is_empty() {
         return Err(REFUSED.into());
     }
-    // Local text first: canonicalising a network path already contacts it.
-    if is_network_or_device_path(&folder.to_string_lossy()) {
+    // The text first: canonicalising a network path already contacts it, so a
+    // path that is not on a local drive is only looked at when its own spelling
+    // is inside a trusted root (a folder the user chose, network or not).
+    if !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots) {
         return Err(REFUSED.into());
     }
     let canonical = folder.canonicalize().map_err(|_| REFUSED.to_string())?;
-    if !canonical.is_dir() || !crate::local_path::is_local_canonical(&canonical) {
+    if !canonical.is_dir() {
         return Err(REFUSED.into());
     }
     let inside = roots
@@ -150,12 +152,17 @@ pub(crate) fn authorize_new_meeting_folder(
     requested: &str,
     roots: &[PathBuf],
 ) -> Result<String, String> {
-    if requested.trim().is_empty() || is_network_or_device_path(requested) {
+    if requested.trim().is_empty() {
         return Err(REFUSED.into());
     }
     let path = Path::new(requested);
+    // A folder this process created is accepted first, wherever the root is:
+    // it is the core's own text, and nothing is looked up.
     if let Some(text) = core_folder_text(path) {
         return Ok(text);
+    }
+    if !crate::trusted_roots::text_allowed(requested, roots) {
+        return Err(REFUSED.into());
     }
     let canonical = resolve_recording_folder(path, roots)?;
     if !has_app_marker(&canonical, None) {
@@ -171,7 +178,7 @@ pub(crate) fn authorize_folder_to_open(
     requested: &str,
     roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    if requested.trim().is_empty() || is_network_or_device_path(requested) {
+    if requested.trim().is_empty() || !crate::trusted_roots::text_allowed(requested, roots) {
         return Err(REFUSED.into());
     }
     let path = Path::new(requested);
@@ -187,6 +194,7 @@ pub(crate) fn authorize_folder_to_open(
 pub(crate) async fn registered_meeting_folder(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
+    roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
     let folder: Option<String> = sqlx::query_scalar(
         "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
@@ -196,7 +204,8 @@ pub(crate) async fn registered_meeting_folder(
     .await
     .map_err(|_| "Could not read the meeting".to_string())?;
     let folder = folder.ok_or_else(|| "This meeting has no recording folder".to_string())?;
-    let resolved = crate::local_path::resolve_local(&folder)?;
+    // On a local drive, or inside a root the user trusted (a network folder).
+    let resolved = crate::trusted_roots::resolve_allowed(&folder, roots)?;
     if resolved.is_dir() {
         Ok(plain_path(&resolved))
     } else {
@@ -214,8 +223,8 @@ pub(crate) fn remove_recording_folder(
     other_folders: &[PathBuf],
 ) -> Result<(), String> {
     let retained = |reason: &str| format!("Recording folder kept: {} ({reason})", folder.display());
-    if is_network_or_device_path(&folder.to_string_lossy()) {
-        return Err(retained("not a local recording location"));
+    if !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots) {
+        return Err(retained("not a recording location"));
     }
     let metadata = match std::fs::symlink_metadata(folder) {
         Ok(value) => value,
@@ -456,7 +465,7 @@ mod tests {
             assert!(authorize_new_meeting_folder(refused, &[PathBuf::from("C:/")]).is_err());
             assert!(remove_recording_folder(Path::new(refused), "meeting-1", &[], &[])
                 .unwrap_err()
-                .contains("not a local"));
+                .contains("not a recording location"));
         }
         assert!(!is_network_or_device_path(r"C:\Users\x"));
         #[cfg(not(windows))]
@@ -584,12 +593,113 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            registered_meeting_folder(&pool, "saved").await.unwrap(),
+            registered_meeting_folder(&pool, "saved", &[]).await.unwrap(),
             plain_path(&folder.canonicalize().unwrap())
         );
         for refused in ["network", "relative", "gone", "no-folder", "unknown-meeting"] {
-            assert!(registered_meeting_folder(&pool, refused).await.is_err(), "{refused}");
+            assert!(registered_meeting_folder(&pool, refused, &[]).await.is_err(), "{refused}");
         }
+    }
+
+    /// A recordings folder on a share: marked as network for the tests, so no
+    /// real network is needed.
+    fn pretend_share(base: &Path) -> (PathBuf, PathBuf) {
+        let share = base.join("share");
+        let root = share.join("recordings");
+        std::fs::create_dir_all(root.join("meeting")).unwrap();
+        std::fs::create_dir_all(share.join("other").join("meeting")).unwrap();
+        crate::local_path::mark_remote_for_tests(&share);
+        (share, root)
+    }
+
+    #[test]
+    fn a_trusted_network_root_works_like_a_local_one_for_save_open_recover_and_delete() {
+        let base = tempfile::tempdir().unwrap();
+        let (share, root) = pretend_share(base.path());
+        let meeting = root.join("meeting");
+        write_marker(&meeting, None);
+        let text = meeting.to_string_lossy().into_owned();
+        let roots = [root.clone()];
+        assert!(!crate::local_path::is_local_path_text(&text), "the test root reads as network");
+
+        // Save and recover: a marked folder in the root is accepted (the saved text is the folder's own).
+        let saved = authorize_new_meeting_folder(&text, &roots).unwrap();
+        assert!(Path::new(&saved).ends_with("meeting"));
+        // Open.
+        assert!(authorize_folder_to_open(&text, &roots).is_ok());
+        assert!(resolve_recording_folder(&meeting, &roots).is_ok());
+        // A folder the core created itself is accepted first, even with no root known.
+        let created = root.join("created-by-the-core");
+        std::fs::create_dir_all(&created).unwrap();
+        register_core_folder(&created);
+        assert!(authorize_new_meeting_folder(&created.to_string_lossy(), &[]).is_ok());
+        // Delete.
+        write_marker(&meeting, Some("meeting-1"));
+        remove_recording_folder(&meeting, "meeting-1", &roots, &[]).unwrap();
+        assert!(!meeting.exists());
+        let _ = share;
+    }
+
+    #[test]
+    fn network_text_outside_the_trusted_root_or_without_any_root_is_refused_before_the_disk_is_asked() {
+        let base = tempfile::tempdir().unwrap();
+        let (share, root) = pretend_share(base.path());
+        let other = share.join("other").join("meeting");
+        write_marker(&other, None);
+        write_marker(&root.join("meeting"), None);
+        let roots = [root.clone()];
+        let outside = other.to_string_lossy().into_owned();
+        let sneaky = format!("{}/../other/meeting", root.to_string_lossy());
+        for text in [&outside, &sneaky] {
+            assert!(authorize_new_meeting_folder(text, &roots).is_err());
+            assert!(authorize_folder_to_open(text, &roots).is_err());
+            assert!(resolve_recording_folder(Path::new(text), &roots).is_err());
+            assert!(remove_recording_folder(Path::new(text), "meeting-1", &roots, &[]).is_err());
+        }
+        // With no trusted root the same folder is refused: the place is not trusted on its own.
+        let inside = root.join("meeting").to_string_lossy().into_owned();
+        assert!(authorize_new_meeting_folder(&inside, &[]).is_err());
+        assert!(authorize_folder_to_open(&inside, &[]).is_err());
+        assert!(other.exists(), "nothing was deleted");
+    }
+
+    #[tokio::test]
+    async fn a_meeting_in_a_trusted_network_root_resolves_and_one_outside_it_does_not() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let (share, root) = pretend_share(base.path());
+        for (id, path) in [
+            ("inside", root.join("meeting").to_string_lossy().into_owned()),
+            ("outside", share.join("other").join("meeting").to_string_lossy().into_owned()),
+        ] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+                .bind(id)
+                .bind(path)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let roots = [root.clone()];
+        assert!(registered_meeting_folder(&pool, "inside", &roots).await.is_ok());
+        assert!(registered_meeting_folder(&pool, "outside", &roots).await.is_err());
+        assert!(registered_meeting_folder(&pool, "inside", &[]).await.is_err());
+    }
+
+    #[test]
+    fn playback_lookups_through_the_shared_folder_helper_follow_the_trusted_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let (_share, root) = pretend_share(base.path());
+        let meeting = root.join("meeting");
+        crate::trusted_roots::set_snapshot(vec![root.clone()]);
+        let found = crate::canonicalize_existing_dir(&meeting).unwrap();
+        assert!(found.is_some(), "a folder in a trusted network root is found");
+        crate::trusted_roots::set_snapshot(vec![]);
+        assert!(crate::canonicalize_existing_dir(&meeting).unwrap().is_none(), "without the root it is not looked at");
     }
 
     #[test]

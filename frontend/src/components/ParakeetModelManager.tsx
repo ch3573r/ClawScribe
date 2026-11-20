@@ -11,6 +11,7 @@ import {
 import { ParakeetModelTable } from '@/components/settings/ParakeetModelTable';
 import { usePcTestResults } from '@/components/settings/pcTestResults';
 import { PcTestAction, PcTestReport, useTranscriptionPcTest } from '@/components/TranscriptionPcTest';
+import { errorText } from '@/lib/errorText';
 
 interface ParakeetModelManagerProps {
   selectedModel?: string;
@@ -60,7 +61,7 @@ export function ParakeetModelManager({
       console.error('Failed to initialize Parakeet:', err);
       setError(err instanceof Error ? err.message : 'Failed to load models');
       toast.error('Failed to load transcription models', {
-        description: err instanceof Error ? err.message : 'Unknown error',
+        description: errorText(err),
         duration: 5000
       });
     } finally {
@@ -239,7 +240,7 @@ export function ParakeetModelManager({
     } catch (err) {
       console.error('Failed to cancel download:', err);
       toast.error('Failed to cancel download', {
-        description: err instanceof Error ? err.message : 'Unknown error',
+        description: errorText(err),
         duration: 4000
       });
     }

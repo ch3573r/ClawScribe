@@ -598,6 +598,19 @@ pub async fn set_parakeet_use_directml<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<(), String> {
+    let _change = crate::behavior_settings::CHANGE_LOCK.lock().await;
+    apply_parakeet_directml(&app, enabled).await
+}
+
+/// The change itself, shared by the command and the one-time hand-over of the
+/// webview's old values: it refuses while another job holds the slot, stores the
+/// value first, and unloads the model so it reloads with the change. The caller
+/// holds `behavior_settings::CHANGE_LOCK`.
+pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let app = app.clone();
     let _job = crate::audio::inference::claim_job()?;
     // Stored first: when the save fails the running value is unchanged.
     tauri::async_runtime::spawn_blocking(move || {
@@ -654,6 +667,16 @@ pub async fn set_parakeet_use_worker<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<(), String> {
+    let _change = crate::behavior_settings::CHANGE_LOCK.lock().await;
+    apply_parakeet_worker(&app, enabled).await
+}
+
+/// See `apply_parakeet_directml`.
+pub(crate) async fn apply_parakeet_worker<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let app = app.clone();
     let _job = crate::audio::inference::claim_job()
         .map_err(|error| format!("PARAKEET_WORKER_BUSY: {error}"))?;
     // Stored first: when the save fails the running value is unchanged.

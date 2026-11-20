@@ -19,10 +19,11 @@ import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
-import { RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecordings';
+import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecordings';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
+import { errorText } from '@/lib/errorText';
 
 export default function Home() {
   // Local page state (not moved to contexts)
@@ -56,6 +57,7 @@ export default function Home() {
     isLoading: isLoadingRecovery,
     isRecovering,
     checkForRecoverableTranscripts,
+    keepRecoverableMeeting,
     recoverMeeting,
     loadMeetingTranscripts,
     deleteRecoverableMeeting
@@ -96,15 +98,16 @@ export default function Home() {
   // Settings > General can ask for the dialog again ("Interrupted recordings").
   // It opens only when there is something to recover and nothing is running.
   useEffect(() => {
-    let requested = false;
+    let requested: string | null = null;
     try {
-      requested = sessionStorage.getItem(RECOVERY_OPEN_REQUEST) === 'true';
+      requested = sessionStorage.getItem(RECOVERY_OPEN_REQUEST);
       sessionStorage.removeItem(RECOVERY_OPEN_REQUEST);
     } catch {
       return;
     }
     if (!requested) return;
-    void checkForRecoverableTranscripts().then(found => {
+    // "Show kept" also lists the recordings the user asked not to be asked about.
+    void checkForRecoverableTranscripts({ includeKept: requested === RECOVERY_OPEN_ALL }).then(found => {
       if (found.length > 0) setShowRecoveryDialog(true);
     });
   }, [checkForRecoverableTranscripts]);
@@ -163,7 +166,7 @@ export default function Home() {
       }
     } catch (error) {
       toast.error('Failed to recover meeting', {
-        description: error instanceof Error ? error.message : 'Unknown error occurred',
+        description: errorText(error),
       });
       throw error;
     }
@@ -204,6 +207,7 @@ export default function Home() {
         recoverableMeetings={recoverableMeetings}
         onRecover={handleRecovery}
         onDelete={deleteRecoverableMeeting}
+        onKeep={keepRecoverableMeeting}
         onLoadPreview={loadMeetingTranscripts}
       />
       <div className="flex flex-1 overflow-hidden">

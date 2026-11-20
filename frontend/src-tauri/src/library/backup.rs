@@ -1407,7 +1407,7 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
     // Only a path the user chose in the save dialog the core opened
     // (`pick_backup_save_path`), once.
     let granted = crate::file_grants::take(crate::file_grants::Purpose::BackupSave, &path)?;
-    let result = backup_library_to(app, granted.clone()).await;
+    let result = backup_library_to(app, granted.path.clone()).await;
     if result.is_err() {
         crate::file_grants::give_back(crate::file_grants::Purpose::BackupSave, &granted);
     }
@@ -1421,7 +1421,7 @@ async fn backup_library_to(app: AppHandle, path: PathBuf) -> Result<BackupReport
     {
         return Err("Choose a .zip backup file.".into());
     }
-    crate::file_grants::save_target_is_local(&path)?;
+    crate::file_grants::save_target_parent_exists(&path)?;
     let _guard = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
@@ -1445,7 +1445,7 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
     // Only an archive the user chose in the file dialog the core opened
     // (`pick_backup_restore_path`), once.
     let granted = crate::file_grants::take(crate::file_grants::Purpose::BackupOpen, &path)?;
-    let result = restore_library_from(app, granted.clone()).await;
+    let result = restore_library_from(app, granted.path.clone()).await;
     if result.is_err() {
         crate::file_grants::give_back(crate::file_grants::Purpose::BackupOpen, &granted);
     }
@@ -1453,7 +1453,6 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
 }
 
 async fn restore_library_from(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
-    crate::local_path::resolve_local(&path.to_string_lossy())?;
     let _guard = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;

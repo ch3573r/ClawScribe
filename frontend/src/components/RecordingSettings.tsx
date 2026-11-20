@@ -16,6 +16,8 @@ import { setSourceAttribution } from '@/lib/sourceAttribution';
 import { useConfig } from '@/contexts/ConfigContext';
 import { selectedDevicesFromPreferences } from '@/lib/audioDevicePreferences';
 import { RecordingMode, useRecordingState } from '@/contexts/RecordingStateContext';
+import { errorText } from '@/lib/errorText';
+import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -23,6 +25,8 @@ export interface RecordingPreferences {
   file_format: string;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+  /** Set by the core when the stored recordings folder is not trusted and the default is used. */
+  folder_notice?: string | null;
 }
 
 interface RecordingSettingsProps {
@@ -83,10 +87,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   useEffect(() => {
     const loadNotificationPref = async () => {
       try {
-        const { Store } = await import('@tauri-apps/plugin-store');
-        const store = await Store.load('preferences.json');
-        const show = await store.get<boolean>('show_recording_notification') ?? true;
-        setShowRecordingNotification(show);
+        // The core owns the preference.
+        setShowRecordingNotification((await loadBehaviorSettings()).showRecordingNotification);
       } catch (error) {
         console.error('Failed to load notification preference:', error);
       }
@@ -158,18 +160,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     } catch (error) {
       console.error('Failed to choose recordings folder:', error);
       toast.error('Failed to choose recordings folder', {
-        description: error instanceof Error ? error.message : String(error)
+        description: errorText(error)
       });
     }
   };
 
   const handleNotificationToggle = async (enabled: boolean) => {
     try {
+      await invoke('set_recording_notification_preference', { enabled });
+      await refreshBehaviorSettings();
       setShowRecordingNotification(enabled);
-      const { Store } = await import('@tauri-apps/plugin-store');
-      const store = await Store.load('preferences.json');
-      await store.set('show_recording_notification', enabled);
-      await store.save();
       toast.success('Preference saved');
       await Analytics.track('recording_notification_preference_changed', {
         enabled: enabled.toString()
@@ -202,7 +202,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
       toast.error(toastOptions?.errorTitle || "Failed to save recording preferences", {
-        description: error instanceof Error ? error.message : String(error)
+        description: errorText(error)
       });
     } finally {
       setSaving(false);
@@ -262,7 +262,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         {savesAudio && (
           <SettingsRow
             title="Save location"
-            description={<Meta className="whitespace-normal break-all">{preferences.save_folder || 'Default folder'}</Meta>}
+            description={<>
+              <Meta className="whitespace-normal break-all">{preferences.save_folder || 'Default folder'}</Meta>
+              {preferences.folder_notice && <span role="status" className="mt-1 block text-[13px] text-warning-foreground">{preferences.folder_notice}</span>}
+            </>}
           >
             <Button variant="outline" size="sm" onClick={handleChooseFolder} disabled={saving}>Choose folder</Button>
             <Button variant="outline" size="sm" onClick={handleOpenFolder}>

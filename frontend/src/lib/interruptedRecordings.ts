@@ -21,6 +21,8 @@ export interface DiskRecording {
   reasons: string[];
   reason: string;
   registeredMeetingId: string | null;
+  /** The user asked not to be asked about this recording again. */
+  kept: boolean;
 }
 
 export interface DiskScan {
@@ -43,6 +45,8 @@ const DISK_PREFIX = "disk:";
 
 /** Set by Settings to ask the home page to open the recovery dialog. */
 export const RECOVERY_OPEN_REQUEST = "recovery_open_requested";
+/** The value that also shows the recordings the user asked not to be asked about. */
+export const RECOVERY_OPEN_ALL = "all"; 
 
 /** A folder path for comparison: slash direction, case and a trailing separator do not matter. */
 export function folderKey(path: string | null | undefined): string {
@@ -78,6 +82,7 @@ function readRecording(value: unknown): DiskRecording | null {
     reasons: Array.isArray(source.reasons) ? source.reasons.filter((reason): reason is string => typeof reason === "string") : [],
     reason: text(source.reason) ?? "The recording was interrupted",
     registeredMeetingId: text(source.registeredMeetingId),
+    kept: source.kept === true,
   };
 }
 

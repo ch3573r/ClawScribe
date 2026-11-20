@@ -46,6 +46,7 @@ pub mod config;
 pub mod behavior_settings;
 pub(crate) mod credentials;
 pub(crate) mod file_grants;
+pub(crate) mod trusted_roots;
 pub(crate) mod local_path;
 pub mod database;
 pub mod diagnostics;
@@ -229,6 +230,8 @@ async fn resolve_meeting_audio_file(
     state: tauri::State<'_, state::AppState>,
     meeting_folder: String,
 ) -> Result<Option<String>, String> {
+    // The trusted roots (a network recordings folder included) decide what may be looked at.
+    let _ = audio::recording_preferences::recording_roots(&app).await;
     let Some(folder) = canonicalize_existing_dir(&meeting_folder)? else {
         return Ok(None);
     };
@@ -264,9 +267,11 @@ async fn resolve_meeting_audio_file(
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
     let path = path.as_ref();
-    // A network or device path is never looked at: even asking whether it is a
-    // folder would contact the remote machine.
-    if !local_path::is_local_path_text(&path.to_string_lossy()) {
+    // A network or device path is never looked at unless its own spelling is
+    // inside a root the user trusted: even asking whether it is a folder would
+    // contact the remote machine.
+    let roots = trusted_roots::snapshot();
+    if !trusted_roots::text_allowed(&path.to_string_lossy(), &roots) {
         return Ok(None);
     }
     if !path.is_dir() {
@@ -276,8 +281,9 @@ fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, 
     let resolved = path
         .canonicalize()
         .map_err(|_| "Failed to resolve the meeting folder".to_string())?;
-    // A mapped network drive resolves to a UNC path.
-    Ok(local_path::is_local_canonical(&resolved).then_some(resolved))
+    // A mapped network drive resolves to a UNC path: fine inside a trusted root.
+    Ok((local_path::is_local_canonical(&resolved) || trusted_roots::canonical_inside(&resolved, &roots))
+        .then_some(resolved))
 }
 
 fn canonical_folder_is_registered<'a>(
@@ -488,6 +494,15 @@ pub(crate) fn set_language_runtime(language: &str) {
 /// The language is owned by the core: a change is stored first, then applied.
 #[tauri::command]
 async fn set_language_preference(app: AppHandle, language: String) -> Result<(), String> {
+    let _change = behavior_settings::CHANGE_LOCK.lock().await;
+    apply_language(&app, &language).await
+}
+
+/// The change itself, shared by the command and the hand-over of the webview's
+/// old value: stored first, then applied, and live transcription starts over
+/// for the new language. The caller holds `behavior_settings::CHANGE_LOCK`.
+pub(crate) async fn apply_language(app: &AppHandle, language: &str) -> Result<(), String> {
+    let language = language.to_string();
     {
         let lang_pref = LANGUAGE_PREFERENCE
             .lock()
@@ -602,6 +617,9 @@ pub fn run() {
             // Settings that change how the core behaves come from the core's own
             // storage, before anything can start a recording or an import.
             behavior_settings::load_and_apply(_app.handle());
+            // The recordings folders of an earlier version become trusted roots
+            // once, here, before any window exists.
+            tauri::async_runtime::block_on(audio::recording_preferences::recording_roots(_app.handle()));
             audio::com_anchor::ensure_device_enumerator();
             audio::transcription::queue::cleanup_abandoned_transcription_spools();
 
@@ -717,6 +735,18 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Files dropped on the window: the core saw the drop, so it is the
+            // user's choice. The audio files are granted for import here, then
+            // the window is told; the webview never supplies these paths.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if window.label() == "main" {
+                    let audio = file_grants::grant_dropped_audio(paths);
+                    let _ = window.emit(
+                        "files-dropped",
+                        serde_json::json!({ "audio": audio, "other": paths.len() - audio.len() }),
+                    );
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
@@ -835,12 +865,15 @@ pub fn run() {
             audio::incremental_saver::release_recovered_capture,
             audio::incremental_saver::has_audio_checkpoints,
             file_grants::pick_transcription_test_audio,
+            file_grants::pick_reference_document,
             file_grants::pick_backup_save_path,
             file_grants::pick_backup_restore_path,
             file_grants::pick_word_save_path,
             audio::interrupted::find_interrupted_recordings,
             audio::interrupted::preview_interrupted_recording,
             audio::interrupted::discard_interrupted_recording,
+            audio::interrupted::keep_interrupted_recording,
+            audio::interrupted::repair_saved_recording,
             ollama::get_ollama_models,
             ollama::pull_ollama_model,
             ollama::delete_ollama_model,
@@ -853,6 +886,7 @@ pub fn run() {
             summary::claude_code_provider::claude_code_save_config,
             summary::claude_code_provider::claude_code_check_status,
             summary::codex_provider::codex_save_config,
+            summary::codex_provider::pick_codex_home_folder,
             summary::codex_provider::codex_check_installation,
             summary::codex_provider::codex_list_models,
             summary::codex_provider::codex_find_automatically,
@@ -951,6 +985,7 @@ pub fn run() {
             set_language_preference,
             behavior_settings::get_behavior_settings,
             behavior_settings::migrate_legacy_behavior_settings,
+            behavior_settings::set_recording_notification_preference,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
@@ -961,9 +996,7 @@ pub fn run() {
             audio::permissions::trigger_system_audio_permission_command,
             // Database import commands
             database::commands::check_first_launch,
-            database::commands::check_default_legacy_database,
-            database::commands::check_homebrew_database,
-            database::commands::import_and_initialize_database,
+            database::commands::import_legacy_database_if_present,
             knowledge::indexer::knowledge_search,
             knowledge::commands::knowledge_ask,
             knowledge::commands::knowledge_live_snapshot,

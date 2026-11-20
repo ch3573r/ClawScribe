@@ -2161,7 +2161,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             .db_manager
             .pool()
             .clone();
-        crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id)
+        let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+        crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id, &roots)
             .await
             .map_err(|message| anyhow!(message))?
     };

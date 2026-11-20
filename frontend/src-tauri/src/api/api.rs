@@ -713,9 +713,8 @@ pub async fn api_test_transcript_provider<R: Runtime>(
     // (`pick_transcription_test_audio`), once, or one of the user's own recordings.
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
     let (audio_path, grant) = {
-        crate::local_path::check_local(&audio_path)?;
         match crate::file_grants::take(crate::file_grants::Purpose::TestAudio, &audio_path) {
-            Ok(granted) => (granted.clone(), Some(granted)),
+            Ok(granted) => (granted.path.clone(), Some(granted)),
             Err(_) if crate::file_grants::inside_roots(Path::new(&audio_path), &roots) => {
                 (std::path::PathBuf::from(&audio_path), None)
             }
@@ -1474,13 +1473,31 @@ pub async fn api_save_transcript<R: Runtime>(
     let folder_path = match folder_path.filter(|folder| !folder.trim().is_empty()) {
         Some(requested) => {
             let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    crate::database::meeting_files::authorize_new_meeting_folder(&requested, &roots)
-                })
+            // A folder this process created for a recording may be saved again (a
+            // retry of the same save finds its meeting). Any other folder, one
+            // from an earlier run being recovered, must not already belong to a
+            // meeting: that one is repaired, not saved a second time.
+            let created_here = crate::database::meeting_files::core_folder_text(std::path::Path::new(&requested)).is_some();
+            let asked = requested.clone();
+            let authorised = tokio::task::spawn_blocking(move || {
+                crate::database::meeting_files::authorize_new_meeting_folder(&requested, &roots)
+            })
+            .await
+            .map_err(|_| "Could not check the recording folder".to_string())??;
+            if !created_here {
+                let existing: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM meetings WHERE folder_path COLLATE NOCASE IN (?, ?) LIMIT 1",
+                )
+                .bind(&authorised)
+                .bind(&asked)
+                .fetch_optional(state.db_manager.pool())
                 .await
-                .map_err(|_| "Could not check the recording folder".to_string())??,
-            )
+                .map_err(|_| "Could not check the library".to_string())?;
+                if existing.is_some() {
+                    return Err("This recording is already saved in your library. Use Recover on it to repair that meeting instead of saving it again.".into());
+                }
+            }
+            Some(authorised)
         }
         None => None,
     };

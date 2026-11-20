@@ -217,7 +217,7 @@ pub async fn export_local_word(
         include_transcript,
         include_speakers,
         include_timestamps,
-        granted.to_string_lossy().into_owned(),
+        granted.path.to_string_lossy().into_owned(),
     )
     .await;
     if result.is_err() {
@@ -236,7 +236,7 @@ async fn export_local_word_to(
     include_timestamps: bool,
     path: String,
 ) -> Result<(), String> {
-    crate::file_grants::save_target_is_local(Path::new(&path))?;
+    crate::file_grants::save_target_parent_exists(Path::new(&path))?;
     if !Path::new(&path)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"))

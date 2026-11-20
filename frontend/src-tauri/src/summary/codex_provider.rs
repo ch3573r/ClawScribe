@@ -392,6 +392,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         assert!(
             once.contains("# Keep this comment") && once.contains("[features]\nshell_tool = false")
         );
+        claim_codex_home(temp.path()).unwrap();
         remove_legacy_auth_after_keyring_signin(temp.path(), false);
         assert!(temp.path().join("auth.json").exists());
         remove_legacy_auth_after_keyring_signin(temp.path(), true);
@@ -1676,12 +1677,33 @@ pub async fn codex_save_config<R: Runtime>(
     // The isolated profile folder is the one setting that names a place on disk:
     // it is created, and a `config.toml` is written in it. It must be a local
     // folder that is neither the user's own Codex profile nor a system folder.
-    if let Some(value) = config.codex_home_path.as_deref().filter(|value| !value.trim().is_empty()) {
-        validate_codex_home(value)?;
-    }
     let mut full = load_processing_config(&app).unwrap_or_default();
+    let mut config = config;
+    let mut taken = None;
+    if let Some(value) = config.codex_home_path.clone().filter(|value| !value.trim().is_empty()) {
+        let validated = validate_codex_home(&value)?;
+        let unchanged = full.processing.codex.codex_home_path.as_deref().is_some_and(|saved| {
+            codex_path_key(&expand_windows_style_appdata(&saved.to_string())) == codex_path_key(&validated)
+        });
+        if !unchanged && codex_path_key(&validated) != codex_path_key(&default_isolated_codex_home()) {
+            // A different folder is accepted only if the user chose it in the
+            // core's folder picker (`pick_codex_home_folder`) in this session.
+            let grant = crate::file_grants::take(crate::file_grants::Purpose::CodexHome, &value)?;
+            if let Err(message) = codex_home_usable(&grant.path) {
+                crate::file_grants::give_back(crate::file_grants::Purpose::CodexHome, &grant);
+                return Err(message);
+            }
+            config.codex_home_path = Some(grant.path.to_string_lossy().into_owned());
+            taken = Some(grant);
+        }
+    }
     full.processing.codex = normalize_codex_config(config);
-    save_processing_config(&app, &full)?;
+    if let Err(error) = save_processing_config(&app, &full) {
+        if let Some(grant) = &taken {
+            crate::file_grants::give_back(crate::file_grants::Purpose::CodexHome, grant);
+        }
+        return Err(error);
+    }
     Ok(full)
 }
 
@@ -2031,6 +2053,88 @@ fn validate_codex_home(value: &str) -> Result<PathBuf, String> {
     Ok(expanded)
 }
 
+/// The file the core writes into a Codex profile folder it has claimed. A folder
+/// without it is never modified, so a folder that merely looks like a Codex home
+/// (or the user's real one) cannot be rewritten or emptied.
+const CODEX_HOME_MARKER: &str = ".clawscribe-codex-home";
+
+#[derive(Debug, PartialEq, Eq)]
+enum HomeState {
+    /// Does not exist yet: it will be created.
+    New,
+    /// Exists with nothing in it.
+    Empty,
+    /// Carries the marker: it is ClawScribe's.
+    Marked,
+    /// Holds other files and no marker: not ours.
+    Foreign,
+}
+
+fn codex_home_state(home: &Path) -> HomeState {
+    let Ok(metadata) = fs::symlink_metadata(home) else { return HomeState::New };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return HomeState::Foreign;
+    }
+    let marker = fs::symlink_metadata(home.join(CODEX_HOME_MARKER)).is_ok_and(|m| m.is_file());
+    if marker {
+        return HomeState::Marked;
+    }
+    match fs::read_dir(home) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                HomeState::Empty
+            } else {
+                HomeState::Foreign
+            }
+        }
+        Err(_) => HomeState::Foreign,
+    }
+}
+
+/// A folder the user may pick as ClawScribe's Codex profile: it passes the
+/// path rules and is new, empty or already ClawScribe's.
+fn codex_home_usable(home: &Path) -> Result<(), String> {
+    validate_codex_home(&home.to_string_lossy())?;
+    if codex_home_state(home) == HomeState::Foreign {
+        return Err("That folder already holds other files. Choose a new or empty folder for ClawScribe's Codex profile.".into());
+    }
+    Ok(())
+}
+
+/// Claims a profile folder on first use: creates it and writes the marker. The
+/// default folder (ClawScribe's own location since earlier versions) is
+/// claimed even if it predates the marker; any other folder must be new, empty
+/// or already marked. Nothing in a folder that is not ClawScribe's is touched.
+fn claim_codex_home(home: &Path) -> Result<(), String> {
+    let is_default = codex_path_key(home) == codex_path_key(&default_isolated_codex_home());
+    match codex_home_state(home) {
+        HomeState::Marked => return Ok(()),
+        HomeState::Foreign if !is_default => {
+            return Err("The Codex profile folder holds other files and is not ClawScribe's. Choose a new or empty folder.".into())
+        }
+        _ => {}
+    }
+    fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile".to_string())?;
+    fs::write(home.join(CODEX_HOME_MARKER), "This folder is ClawScribe's own Codex profile.\n")
+        .map_err(|_| "Failed to mark the isolated Codex profile".to_string())
+}
+
+/// Opens the folder dialog for ClawScribe's Codex profile. Returns the chosen
+/// folder, which `codex_save_config` then accepts once.
+#[tauri::command]
+pub async fn pick_codex_home_folder<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let chosen = tokio::task::spawn_blocking(move || {
+        app.dialog().file().blocking_pick_folder().and_then(|path| path.into_path().ok())
+    })
+    .await
+    .map_err(|_| "The folder dialog failed".to_string())?;
+    let Some(folder) = chosen else { return Ok(None) };
+    codex_home_usable(&folder)?;
+    crate::file_grants::grant(crate::file_grants::Purpose::CodexHome, &folder)?;
+    Ok(Some(folder.to_string_lossy().into_owned()))
+}
+
 fn default_isolated_codex_home() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -2168,7 +2272,7 @@ fn expand_windows_style_appdata(value: &String) -> PathBuf {
 }
 
 fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
-    fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile")?;
+    claim_codex_home(home)?;
     let path = home.join("config.toml");
     let existing = if path.exists() {
         fs::read_to_string(&path).map_err(|_| "Failed to read isolated Codex configuration")?
@@ -2203,7 +2307,9 @@ fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
 }
 
 fn remove_legacy_auth_after_keyring_signin(home: &Path, authenticated: bool) {
-    if authenticated {
+    // Only in a profile that is ClawScribe's: nothing is deleted from a folder
+    // without the marker.
+    if authenticated && fs::symlink_metadata(home.join(CODEX_HOME_MARKER)).is_ok_and(|m| m.is_file()) {
         if let Err(error) = fs::remove_file(home.join("auth.json")) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("Could not remove obsolete Codex credential file");
@@ -4254,5 +4360,57 @@ mod codex_home_tests {
         if config.codex_home_path.is_some() {
             assert_eq!(config.effective_codex_home(), Some(default_isolated_codex_home()));
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_home_marker_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_or_empty_folder_is_claimed_with_a_marker_and_a_marked_one_is_reused() {
+        let base = tempfile::tempdir().unwrap();
+        let new = base.path().join("new-profile");
+        assert_eq!(codex_home_state(&new), HomeState::New);
+        claim_codex_home(&new).unwrap();
+        assert_eq!(codex_home_state(&new), HomeState::Marked);
+        let empty = base.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(codex_home_state(&empty), HomeState::Empty);
+        claim_codex_home(&empty).unwrap();
+        // Used again: other files in a marked folder are fine, they are ClawScribe's.
+        fs::write(new.join("config.toml"), "model = \"x\"\n").unwrap();
+        assert_eq!(codex_home_state(&new), HomeState::Marked);
+        claim_codex_home(&new).unwrap();
+    }
+
+    #[test]
+    fn a_folder_with_files_and_no_marker_is_never_claimed_modified_or_emptied() {
+        let base = tempfile::tempdir().unwrap();
+        let foreign = base.path().join("someone-elses-codex");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("config.toml"), "approval_policy = \"never\"\n").unwrap();
+        fs::write(foreign.join("auth.json"), "{}").unwrap();
+        assert_eq!(codex_home_state(&foreign), HomeState::Foreign);
+        assert!(claim_codex_home(&foreign).is_err());
+        assert!(codex_home_usable(&foreign).is_err());
+        assert!(prepare_isolated_codex_home(&foreign, "model").is_err());
+        // Signing in must not delete a credential file from a folder that is not ClawScribe's.
+        remove_legacy_auth_after_keyring_signin(&foreign, true);
+        assert_eq!(fs::read_to_string(foreign.join("config.toml")).unwrap(), "approval_policy = \"never\"\n");
+        assert!(foreign.join("auth.json").exists());
+        assert!(!foreign.join(CODEX_HOME_MARKER).exists());
+    }
+
+    #[test]
+    fn deletion_of_the_old_credential_file_happens_only_in_a_marked_folder() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("mine");
+        claim_codex_home(&home).unwrap();
+        fs::write(home.join("auth.json"), "{}").unwrap();
+        remove_legacy_auth_after_keyring_signin(&home, false);
+        assert!(home.join("auth.json").exists());
+        remove_legacy_auth_after_keyring_signin(&home, true);
+        assert!(!home.join("auth.json").exists());
     }
 }
