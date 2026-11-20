@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useTranscripts } from '@/contexts/TranscriptContext';
+import { useCallback, useEffect } from 'react';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
@@ -7,203 +6,130 @@ import { recordingService } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import { offerSpeakerDetectionCancellation } from '@/lib/speakerDetectionCancellation';
-import { getPendingCalendar, beginRecordingCalendar } from '@/lib/meetingCalendar';
+import {
+  consumeNextCalendarChoice, getActiveRecordingCalendar, getNextCalendarChoice, isReviewedCalendar,
+  microsoftCalendarRevision, setActiveRecordingCalendar,
+} from '@/lib/meetingCalendar';
+import { readRecordingCalendar, resolveRecordingCalendar } from '@/services/recordingCalendarService';
 import { toast } from 'sonner';
+import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
+import {
+  isDiskSpaceRefusal, LIVE_MODEL_FAILURE_MESSAGE, liveModelStartFailure, startErrorText, transcriptionSettingsPath,
+} from '@/lib/start-error';
+import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
-interface UseRecordingStartReturn {
-  handleRecordingStart: () => Promise<void>;
-  isAutoStarting: boolean;
+type StartSource = 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call' | 'remote_request';
+let startInProgress = false;
+
+export const DEVICE_PREFERENCES_UNAVAILABLE = 'recording_device_preferences_unavailable';
+export const START_REQUEST_EXPIRED = 'recording_request_expired';
+export const START_BUSY = 'recording_start_busy';
+
+export function reportStartFailure(error: unknown): void {
+  const message = startErrorText(error);
+  const modelFailure = liveModelStartFailure(error);
+  if (message === START_REQUEST_EXPIRED || message === START_BUSY) return;
+  if (isDiskSpaceRefusal(error)) {
+    toast.error('Not enough disk space', {
+      description: message,
+      duration: 15000,
+      action: { label: 'Review storage', onClick: openStorageDialog },
+    });
+  } else if (modelFailure) {
+    toast.error('Live transcription unavailable', {
+      description: LIVE_MODEL_FAILURE_MESSAGE[modelFailure],
+      action: {
+        label: 'Transcription settings',
+        onClick: () => window.location.assign(transcriptionSettingsPath()),
+      },
+    });
+  } else if (message === DEVICE_PREFERENCES_UNAVAILABLE) {
+    toast.error('Could not verify audio device preferences', {
+      action: { label: 'Recording settings', onClick: () => window.location.assign('/settings?tab=recording') },
+    });
+  } else {
+    toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
+  }
 }
 
-function isTranscriptionReadinessError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return (
-    message.includes('transcription') ||
-    message.includes('speech recognition') ||
-    message.includes('speaker detection') ||
-    message.includes('model') ||
-    message.includes('provider')
-  );
+function meetingTitleAt(timestamp: number): string {
+  const now = new Date(timestamp);
+  const [day, month, hour, minute, second] = [
+    now.getDate(), now.getMonth() + 1, now.getHours(), now.getMinutes(), now.getSeconds(),
+  ].map(value => String(value).padStart(2, '0'));
+  return `Meeting ${day}_${month}_${String(now.getFullYear()).slice(-2)}_${hour}_${minute}_${second}`;
 }
 
-/**
- * Custom hook for managing recording start lifecycle.
- * Handles both manual start (button click) and auto-start (from sidebar navigation).
- *
- * Features:
- * - Meeting title generation (format: Meeting DD_MM_YY_HH_MM_SS)
- * - Transcript clearing on start
- * - Analytics tracking
- * - Recording notification display
- * - Auto-start from sidebar via sessionStorage flag
- */
-export function useRecordingStart(
-  isRecording: boolean,
-  setIsRecording: (value: boolean) => void
-): UseRecordingStartReturn {
-  const [isAutoStarting, setIsAutoStarting] = useState(false);
-
-  const { clearTranscripts, setMeetingTitle } = useTranscripts();
+export function useStartRecordingSession() {
   const { setIsMeetingActive } = useSidebar();
-  const { selectedDevices } = useConfig();
-  const { setStatus } = useRecordingState();
+  const { selectedDevices, devicePreferencesStatus } = useConfig();
+  const { setStatus, isRecording, isStopping, isProcessing, isSaving } = useRecordingState();
 
-  // Generate meeting title with timestamp
-  const generateMeetingTitle = useCallback(() => {
-    const now = new Date();
-    const day = String(now.getDate()).padStart(2, '0');
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const year = String(now.getFullYear()).slice(-2);
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    return `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
-  }, []);
-
-  // Title every recording (home button, sidebar auto/direct) from the calendar
-  // event chosen for the next recording, if any; else the generated title.
-  // Read the pending calendar selection ONCE before starting, and derive the
-  // title from that same object — so the title and the attendee binding can't
-  // diverge if "Use for next recording" changes during the async startup. The
-  // returned `calendar` is frozen via beginRecordingCalendar(calendar) on success.
-  const snapshotPendingForStart = useCallback(() => {
-    const calendar = getPendingCalendar();
-    const title = calendar?.subject?.trim() || generateMeetingTitle();
-    return { title, calendar };
-  }, [generateMeetingTitle]);
-
-  const startBackendRecording = useCallback(
-    async (source: 'home_page' | 'sidebar_auto' | 'sidebar_direct'): Promise<string> => {
-      const { title, calendar: pendingCal } = snapshotPendingForStart();
-      setMeetingTitle(title);
-      setStatus(RecordingStatus.STARTING, 'Initializing recording...');
-
-      try {
-        await recordingService.startRecordingWithDevices(
-          selectedDevices?.micDevice || null,
-          selectedDevices?.systemDevice || null,
-          title,
-        );
-      } catch (error) {
-        await offerSpeakerDetectionCancellation(error, () => startBackendRecording(source));
-        throw error;
-      }
-
-      beginRecordingCalendar(pendingCal);
-      setIsRecording(true);
-      clearTranscripts();
+  const start = useCallback(async (source: StartSource, requestId?: string): Promise<string> => {
+    if (startInProgress || isRecording || isStopping || isProcessing || isSaving) throw START_BUSY;
+    if (devicePreferencesStatus !== 'ready') throw DEVICE_PREFERENCES_UNAVAILABLE;
+    startInProgress = true;
+    const now = Date.now();
+    const choice = getNextCalendarChoice();
+    const microsoftRevision = microsoftCalendarRevision;
+    setStatus(RecordingStatus.STARTING, 'Initializing recording…');
+    try {
+      const sessionId = await recordingService.startRecordingWithDevices(
+        selectedDevices.micDevice, selectedDevices.systemDevice, meetingTitleAt(now), choice.link, requestId,
+        readPinnedSummaryLanguageDefault(),
+      );
+      consumeNextCalendarChoice(choice);
       setIsMeetingActive(true);
       Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();
-      return title;
-    },
-    [
-      clearTranscripts,
-      selectedDevices,
-      setIsMeetingActive,
-      setIsRecording,
-      setMeetingTitle,
-      setStatus,
-      snapshotPendingForStart,
-    ],
-  );
+      // Calendar I/O begins only once native capture is running. The write is
+      // scoped to that session; stopping or a correction can win the race.
+      void readRecordingCalendar(sessionId).then(draft => {
+        if (microsoftRevision !== microsoftCalendarRevision && draft.link?.source === 'microsoft' && !isReviewedCalendar(draft.link)) return;
+        const previous = getActiveRecordingCalendar(sessionId);
+        if (previous && previous.revision > draft.revision) return;
+        const initial = previous?.revision === draft.revision
+          ? { ...previous, startedAt: now } : { sessionId, startedAt: now, ...draft, status: 'none' as const, matches: [] };
+        if (setActiveRecordingCalendar(initial) && !choice.link && !choice.skip && draft.revision === 0) {
+          return resolveRecordingCalendar(initial, now, microsoftRevision);
+        }
+      }).catch(() => {});
+      return sessionId;
+    } catch (error) {
+      setStatus(RecordingStatus.ERROR, 'Could not start the recording.');
+      Analytics.trackButtonClick('start_recording_error', source);
+      // A delayed retry requires a new native request and fresh call evidence.
+      if (!requestId) await offerSpeakerDetectionCancellation(error, () => start(source)).catch(() => {});
+      throw error;
+    } finally {
+      startInProgress = false;
+    }
+  }, [devicePreferencesStatus, selectedDevices, setIsMeetingActive, setStatus, isRecording, isStopping, isProcessing, isSaving]);
+  return start;
+}
 
-  // Handle manual recording start (from button click)
+export function useRecordingStart() {
+  const start = useStartRecordingSession();
+
   const handleRecordingStart = useCallback(async () => {
     try {
-      console.log('handleRecordingStart called - starting backend recording');
-      const title = await startBackendRecording('home_page');
-      console.log('Backend recording started successfully');
-      console.log('Recording title:', title);
+      await start('home_page');
     } catch (error) {
-      console.error('Failed to start recording:', error);
-      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording');
-      setIsRecording(false); // Reset state on error
-      Analytics.trackButtonClick('start_recording_error', 'home_page');
-      if (isTranscriptionReadinessError(error)) return;
-      // Re-throw so RecordingControls can handle device-specific errors
-      throw error;
+      if (!liveModelStartFailure(error) && error !== START_BUSY) throw error;
     }
-  }, [setIsRecording, setStatus, startBackendRecording]);
+  }, [start]);
 
-  // Check for autoStartRecording flag and start recording automatically
   useEffect(() => {
-    const checkAutoStartRecording = async () => {
-      if (typeof window !== 'undefined') {
-        const shouldAutoStart = sessionStorage.getItem('autoStartRecording');
-        if (shouldAutoStart === 'true' && !isRecording && !isAutoStarting) {
-          console.log('Auto-starting recording from navigation...');
-          setIsAutoStarting(true);
-          sessionStorage.removeItem('autoStartRecording'); // Clear the flag
+    if (sessionStorage.getItem('autoStartRecording') !== 'true') return;
+    sessionStorage.removeItem('autoStartRecording');
+    void start('sidebar_auto').catch(reportStartFailure);
+  }, [start]);
 
-          // Start the actual backend recording
-          try {
-            const title = await startBackendRecording('sidebar_auto');
-            console.log('Auto-start backend recording completed:', title);
-          } catch (error) {
-            console.error('Failed to auto-start recording:', error);
-            setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to auto-start recording');
-            if (!isTranscriptionReadinessError(error)) {
-              toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
-            }
-            Analytics.trackButtonClick('start_recording_error', 'sidebar_auto');
-          } finally {
-            setIsAutoStarting(false);
-          }
-        }
-      }
-    };
-
-    checkAutoStartRecording();
-  }, [
-    isRecording,
-    isAutoStarting,
-    selectedDevices,
-    setStatus,
-    startBackendRecording,
-  ]);
-
-  // Listen for direct recording trigger from sidebar when already on home page
   useEffect(() => {
-    const handleDirectStart = async () => {
-      if (isRecording || isAutoStarting) {
-        console.log('Recording already in progress, ignoring direct start event');
-        return;
-      }
+    const onStart = () => { void start('sidebar_direct').catch(reportStartFailure); };
+    window.addEventListener('start-recording-from-sidebar', onStart);
+    return () => window.removeEventListener('start-recording-from-sidebar', onStart);
+  }, [start]);
 
-      console.log('Direct start from sidebar - starting backend recording');
-      setIsAutoStarting(true);
-
-      try {
-        const title = await startBackendRecording('sidebar_direct');
-        console.log('Backend recording completed:', title);
-      } catch (error) {
-        console.error('Failed to start recording from sidebar:', error);
-        setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording from sidebar');
-        if (!isTranscriptionReadinessError(error)) {
-          toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
-        }
-        Analytics.trackButtonClick('start_recording_error', 'sidebar_direct');
-      } finally {
-        setIsAutoStarting(false);
-      }
-    };
-
-    window.addEventListener('start-recording-from-sidebar', handleDirectStart);
-
-    return () => {
-      window.removeEventListener('start-recording-from-sidebar', handleDirectStart);
-    };
-  }, [
-    isRecording,
-    isAutoStarting,
-    selectedDevices,
-    setStatus,
-    startBackendRecording,
-  ]);
-
-  return {
-    handleRecordingStart,
-    isAutoStarting,
-  };
+  return { handleRecordingStart };
 }

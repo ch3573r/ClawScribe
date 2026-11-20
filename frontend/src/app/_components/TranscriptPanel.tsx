@@ -1,13 +1,14 @@
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { PermissionWarning } from '@/components/PermissionWarning';
+import { LiveSourceLanguages } from '@/components/LiveSourceLanguages';
+import { RecordingCalendarReview } from '@/components/MeetingAttendance';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, GlobeIcon } from 'lucide-react';
+import { Copy } from 'lucide-react';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
-import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
 import { useMemo, type ReactNode } from 'react';
 
@@ -22,20 +23,18 @@ interface TranscriptPanelProps {
   // indicates stop-processing state for transcripts; derived from backend statuses.
   isProcessingStop: boolean;
   isStopping: boolean;
-  showModal: (name: ModalType, message?: string) => void;
   assistance?: ReactNode;
 }
 
 export function TranscriptPanel({
   isProcessingStop,
   isStopping,
-  showModal,
   assistance,
 }: TranscriptPanelProps) {
   // Contexts
   const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
-  const { transcriptModelConfig } = useConfig();
-  const { isRecording, isPaused, status, sessionMode } = useRecordingState();
+  const { selectedLanguage } = useConfig();
+  const { isRecording, isPaused, status, sessionMode, sessionId } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
   const isLinux = useIsLinux();
   const isStarting = status === RecordingStatus.STARTING;
@@ -66,7 +65,7 @@ export function TranscriptPanel({
                     variant="outline"
                     size="sm"
                     onClick={copyTranscript}
-                    title="Copy Transcript"
+                    title="Copy transcript"
                   >
                     <Copy />
                     <span className='hidden md:inline'>
@@ -74,21 +73,12 @@ export function TranscriptPanel({
                     </span>
                   </Button>
                 )}
-                {transcriptModelConfig.provider === "localWhisper" &&
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => showModal('languageSettings')}
-                    title="Language"
-                  >
-                    <GlobeIcon />
-                    <span className='hidden md:inline'>
-                      Language
-                    </span>
-                  </Button>
-                }
               </ButtonGroup>
             </div>
+            {isRecording && sessionId && <RecordingCalendarReview key={sessionId} sessionId={sessionId} disabled={isStopping || isProcessingStop} />}
+            {isRecording && sessionMode === 'live' && sessionId && selectedLanguage === 'auto' && (
+                <LiveSourceLanguages key={sessionId} sessionId={sessionId} />
+            )}
           </div>
         </div>
       </div>

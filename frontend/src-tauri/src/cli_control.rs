@@ -26,14 +26,24 @@ pub fn parse_cli_action<S: AsRef<str>>(args: &[S]) -> Option<CliAction> {
 
 /// Performs the action through the tray's recording handler (the same path the
 /// global start/stop shortcut uses). Start and stop carry their intent, so
-/// repeating a command is harmless and a request never does the opposite.
+/// repeating a command is harmless and a request never does the opposite. A
+/// start is carried out in the background: the running window keeps its page and
+/// drafts and is not brought forward.
 pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
+    // Without the meeting database nothing may start a recording.
+    if crate::database::setup::startup_failed() {
+        return;
+    }
     let want_recording = match action {
         CliAction::ToggleRecording => None,
         CliAction::StartRecording => Some(true),
         CliAction::StopRecording => Some(false),
     };
-    crate::tray::recording_intent_handler(app, want_recording);
+    crate::tray::recording_intent_handler(
+        app,
+        want_recording,
+        crate::start_request::StartSource::Cli,
+    );
 }
 
 #[cfg(test)]

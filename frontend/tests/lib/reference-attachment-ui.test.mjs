@@ -18,7 +18,7 @@ function attachment({meetingId,targets=meetings,open=async()=> 'planning.pdf',se
   let props={meetingId,meetings:targets,onAttached:attached};
   const {AttachReferenceButton}=loadTsModule('src/components/MeetingDetails/AttachReferenceButton.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
-    'lucide-react':{Paperclip:'clip',Check:'check'},'@tauri-apps/plugin-dialog':{open},
+    'lucide-react':{Paperclip:'clip',Check:'check'},'@tauri-apps/api/core':{invoke:async command=>{if(command!=='pick_reference_document')throw new Error('unexpected '+command);return open();}},
     '@/services/knowledgeService':{knowledgeService:{importDocument:async()=>({id:'document'}),cancelDocumentImport:async()=>{},...service}},
   });
   const render=()=>hooks.render(()=>AttachReferenceButton(props));
@@ -160,7 +160,7 @@ function cornerChat(service, options = {}) {
   const selected=[],state={scope:{kind:'meeting',meeting_id:'one'},messages:[],documents:[{attachment:{id:'file',display_name:'Plan.pdf'},meeting_ids:['one']}],selectedDocumentIds:[],cancel(){},reloadHistory(){},reloadDocuments(){},refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled])};
   const {useKnowledgeSearch}=service?loadTsModule('src/hooks/useKnowledgeSearch.ts',{
     react:hooks.react,'@tauri-apps/api/event':{listen:async()=>()=>{}},
-    '@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],cancel:async()=>{},history:async()=>[],scopeDocuments:async()=>[],documentSharing:async()=>false,...service}},
+    '@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],conversationScope:async()=>({all_meetings:false,meeting_ids:['one'],tags:[],tag_mode:'any',untagged:false,from:null,to:null}),cancel:async()=>{},history:async()=>[],scopeDocuments:async()=>[],documentSharing:async()=>false,...service}},
   }):{useKnowledgeSearch:scope=>({...state,scope})};
   const {MeetingChat}=loadTsModule('src/components/MeetingDetails/MeetingChat.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
@@ -409,7 +409,7 @@ async function readyChat(app) { app.chat();await flush();app.chat();await flush(
 async function libraryChat(app) {
   nodes(app.chat().props.contextBar).find(node=>node.type==='button'&&text(node)==='Other saved meetings').props.onClick();
   await readyChat(app);
-  app.chat().props.state.selectConversation({kind:'library',id:'saved-thread'});
+  await app.chat().props.state.selectConversation({kind:'library',id:'saved-thread'});
   return readyChat(app);
 }
 

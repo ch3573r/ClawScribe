@@ -288,6 +288,7 @@ fn unpack_error(path: &Path, destination: &Path) -> String {
 
 #[tokio::test]
 async fn backup_v2_excludes_orphans_and_restores_attached_documents() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     let orphan = "00000000-0000-4000-8000-000000000065";
     seed_document(
@@ -347,6 +348,7 @@ async fn backup_v2_excludes_orphans_and_restores_attached_documents() {
 
 #[tokio::test]
 async fn backup_v2_document_roundtrip() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, request, originals) = document_fixture().await;
     let expected_documents = rows(&source, "knowledge_documents").await;
     let expected_blocks = rows(&source, "knowledge_document_blocks").await;
@@ -520,6 +522,7 @@ async fn backup_v2_document_roundtrip() {
 
 #[tokio::test]
 async fn restore_v1_without_documents() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, request) = super::tests::conversation_fixture().await;
     let (mut manifest, folders) = snapshot(&source).await.unwrap();
     manifest.version = 1;
@@ -553,6 +556,7 @@ async fn restore_v1_without_documents() {
 
 #[tokio::test]
 async fn tampered_document_hash_rejected_before_publication() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     let manifest = raw_v2(&source).await;
     let root = tempfile::tempdir().unwrap();
@@ -572,6 +576,7 @@ async fn tampered_document_hash_rejected_before_publication() {
 
 #[tokio::test]
 async fn traversal_and_unsafe_document_names_rejected_before_extraction() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     for unsafe_name in [
         "../escape.pdf",
@@ -601,6 +606,7 @@ async fn traversal_and_unsafe_document_names_rejected_before_extraction() {
 
 #[tokio::test]
 async fn malicious_document_metadata_rejected_before_extraction() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     for (key, value) in [
         ("id", Value::from("invalid-uuid")),
@@ -635,6 +641,7 @@ async fn malicious_document_metadata_rejected_before_extraction() {
 
 #[tokio::test]
 async fn skipped_meeting_keeps_shared_documents_for_new_owners() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, request, originals) = document_fixture().await;
     let manifest = raw_v2(&source).await;
     let destination = super::tests::empty_conversation_destination().await;
@@ -678,6 +685,7 @@ async fn skipped_meeting_keeps_shared_documents_for_new_owners() {
 
 #[tokio::test]
 async fn document_id_collision_remaps_originals_blocks_and_historical_references() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, request, originals) = document_fixture().await;
     let manifest = raw_v2(&source).await;
     let expected_blocks = manifest.tables["knowledge_document_blocks"]
@@ -811,6 +819,7 @@ async fn document_id_collision_remaps_originals_blocks_and_historical_references
 
 #[tokio::test]
 async fn restore_failure_rolls_back_documents_and_keeps_existing_originals_and_audio() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     let manifest = raw_v2(&source).await;
     let destination = super::tests::empty_conversation_destination().await;
@@ -846,6 +855,7 @@ async fn restore_failure_rolls_back_documents_and_keeps_existing_originals_and_a
 
 #[tokio::test]
 async fn commit_failure_removes_published_originals_without_touching_existing_files() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     let manifest = raw_v2(&source).await;
     let destination = super::tests::empty_conversation_destination().await;

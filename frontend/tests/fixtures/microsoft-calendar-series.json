@@ -1,0 +1,51 @@
+{
+  "value": [
+    {
+      "id": "fixture-occurrence-one",
+      "type": "occurrence",
+      "seriesMasterId": "FixtureMaster/Ab=",
+      "subject": "Weekly planning",
+      "start": { "dateTime": "2030-04-15T10:00:00" },
+      "end": { "dateTime": "2030-04-15T11:00:00" },
+      "attendees": [
+        { "emailAddress": { "name": "Invited person", "address": "invitee@example.com" } }
+      ]
+    },
+    {
+      "id": "fixture-occurrence-two",
+      "type": "occurrence",
+      "seriesMasterId": "FixtureMaster/Ab=",
+      "subject": "Weekly planning",
+      "start": { "dateTime": "2030-04-22T10:00:00" },
+      "end": { "dateTime": "2030-04-22T11:00:00" }
+    },
+    {
+      "id": "fixture-exception",
+      "type": "exception",
+      "seriesMasterId": "FixtureMaster/Ab=",
+      "subject": "Rescheduled planning",
+      "start": { "dateTime": "2030-04-30T11:00:00" },
+      "end": { "dateTime": "2030-04-30T12:00:00" }
+    },
+    {
+      "id": "fixture-single",
+      "type": "singleInstance",
+      "seriesMasterId": null
+    },
+    {
+      "id": "fixture-missing-master",
+      "type": "occurrence"
+    },
+    {
+      "id": "fixture-empty-master",
+      "type": "exception",
+      "seriesMasterId": ""
+    },
+    {
+      "id": "fixture-cancelled",
+      "type": "occurrence",
+      "seriesMasterId": "FixtureMaster/Ab=",
+      "isCancelled": true
+    }
+  ]
+}

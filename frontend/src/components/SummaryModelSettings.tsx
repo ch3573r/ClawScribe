@@ -4,9 +4,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
-import { SummaryLanguageSettings } from '@/components/SummaryLanguageSettings';
-import { Switch } from './ui/switch';
-import { useConfig } from '@/contexts/ConfigContext';
+import { SettingsCard } from '@/components/ui/settings-layout';
+import { readSecretStatus, withoutSecrets } from '@/lib/secret-key';
 
 interface SummaryModelSettingsProps {
   refetchTrigger?: number; // Change this to trigger refetch
@@ -23,24 +22,13 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
     customOpenAIModel: 'gpt-4o-mini',
   });
 
-  const { isAutoSummary, toggleIsAutoSummary } = useConfig();
-
   // Reusable fetch function
   const fetchModelConfig = useCallback(async () => {
     try {
-      const data = await invoke('api_get_model_config') as any;
+      const raw = await invoke('api_get_model_config') as any;
+      // The core reports whether a key is stored, never the key.
+      const data = raw && { ...withoutSecrets(raw), apiKeyStatus: readSecretStatus(raw.apiKeyStatus) };
       if (data && data.provider !== null) {
-        // Fetch API key if not included and provider requires it
-        if (['claude', 'groq', 'openai', 'openrouter'].includes(data.provider) && !data.apiKey) {
-          try {
-            const apiKeyData = await invoke('api_get_api_key', {
-              provider: data.provider
-            }) as string;
-            data.apiKey = apiKeyData;
-          } catch (err) {
-            console.error('Failed to fetch API key:', err);
-          }
-        }
         // Fetch Custom OpenAI config if that's the active provider
         if (data.provider === 'custom-openai') {
           try {
@@ -49,7 +37,7 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
               data.customOpenAIDisplayName = customConfig.displayName || null;
               data.customOpenAIEndpoint = customConfig.endpoint || null;
               data.customOpenAIModel = customConfig.model || null;
-              data.customOpenAIApiKey = customConfig.apiKey || null;
+              data.customOpenAIKeyStatus = readSecretStatus(customConfig.apiKeyStatus);
               data.maxTokens = customConfig.maxTokens || null;
               data.contextWindow = customConfig.contextWindow || null;
               data.temperature = customConfig.temperature || null;
@@ -89,7 +77,6 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('SummaryModelSettings received model-config-updated event:', event.payload);
         setModelConfig(event.payload);
       });
 
@@ -104,7 +91,8 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
     };
   }, []);
 
-  // Save handler
+  // Save handler. The Model card saves as the user changes a setting, so a
+  // failure is rethrown for the field to show instead of announced in a toast.
   const handleSaveModelConfig = async (config: ModelConfig) => {
     try {
       await invoke('api_save_model_config', {
@@ -115,47 +103,28 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
         ollamaEndpoint: config.ollamaEndpoint,
       });
 
-      setModelConfig(config);
+      // The key (if one was typed) is stored now; keep and share only the rest.
+      const shared = withoutSecrets({ ...config, customOpenAIApiKey: null });
+      setModelConfig(shared);
 
       // Emit event to sync other components
       const { emit } = await import('@tauri-apps/api/event');
-      await emit('model-config-updated', config);
-
-      toast.success('Model settings saved successfully');
+      await emit('model-config-updated', shared);
     } catch (error) {
-      console.error('Error saving model config:', error);
-      toast.error('Failed to save model settings');
+      console.error('Error saving model config');
+      throw error;
     }
   };
 
   return (
-    <div className='flex flex-col gap-4'>
-      <div className="bg-card rounded-lg border border-border p-6 shadow-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-semibold text-foreground mb-2">Automatic summaries</h3>
-            <p className="text-sm text-muted-foreground">Generate a summary automatically when a meeting ends.</p>
-          </div>
-          <Switch checked={isAutoSummary} onCheckedChange={toggleIsAutoSummary} />
-        </div>
-      </div>
-
-      <SummaryLanguageSettings />
-
-      <div className="bg-card rounded-lg border border-border p-6 shadow-sm">
-        <h3 className="text-lg font-semibold mb-4">Summary model</h3>
-        <p className="text-sm text-muted-foreground mb-6">
-          Choose the AI provider and model used to summarize your meetings. Pick a
-          Built-in or Ollama option to keep everything on your machine.
-        </p>
-
-        <ModelSettingsModal
-          modelConfig={modelConfig}
-          setModelConfig={setModelConfig}
-          onSave={handleSaveModelConfig}
-          skipInitialFetch={true}
-        />
-      </div>
-    </div>
+    <SettingsCard title="Model">
+      <ModelSettingsModal
+        modelConfig={modelConfig}
+        setModelConfig={setModelConfig}
+        onSave={handleSaveModelConfig}
+        skipInitialFetch={true}
+        autosave
+      />
+    </SettingsCard>
   );
 }

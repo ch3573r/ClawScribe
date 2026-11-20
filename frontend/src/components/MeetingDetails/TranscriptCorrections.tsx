@@ -9,6 +9,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from '@/components/ui/textarea';
 import { ReplaceOptions, ReplacePreview, TextReplaceDialog } from './TextReplaceDialog';
 import { TranscriptSegmentData } from '@/types';
+import { readLearnVocabulary, replacementSuggestion, vocabularySuggestions } from '@/lib/vocabulary-learning';
+import { offerVocabularyWords } from '@/lib/vocabulary-offer';
 
 interface EditResult { changed: number; file_warning: boolean }
 interface EditState { can_undo: boolean; pending_file_sync: boolean; has_edits: boolean; can_restore_previous: boolean }
@@ -47,11 +49,11 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     try { await refresh(); await onChanged?.(); }
     catch { setError('The correction is saved. Reopen the meeting to refresh its transcript.'); }
   };
-  const change = async (command: string, args: Record<string, unknown>) => {
+  const change = async (command: string, args: Record<string, unknown>, afterSaved?: () => void) => {
     if (operation.current) return;
     operation.current = true;
     setBusy(true); setError('');
-    try { const result = await invoke<EditResult>(command, { meetingId, ...args }); await completed(result); if (currentMeeting.current === meetingId) onClose(); }
+    try { const result = await invoke<EditResult>(command, { meetingId, ...args }); await completed(result); if (currentMeeting.current === meetingId) onClose(); afterSaved?.(); }
     catch (e) { if (currentMeeting.current === meetingId) setError(typeof e === 'string' ? e : 'Could not save the correction. Your text is retained.'); }
     finally { operation.current = false; setBusy(false); }
   };
@@ -59,17 +61,20 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
   const replace = async (options: ReplaceOptions, token: string) => {
     const result = await invoke<EditResult>('api_replace_transcript_text', { meetingId, ...options, previewToken: token });
     await completed(result);
+    if (readLearnVocabulary()) void offerVocabularyWords(replacementSuggestion(options.replacement));
   };
   return <>
     {renderActions?.({ busy, canUndo: state.can_undo, canRestore: state.can_restore_previous,
       undo: () => void change('api_undo_transcript_edit', {}), restore: () => void change('api_restore_previous_transcript', {}) })}
     {(state.has_edits || state.pending_file_sync || (!editing && error)) && <div className="space-y-2 border-b border-border px-3 py-2 text-xs">
       {state.has_edits && <p className="text-muted-foreground">Transcript corrected. Regenerate notes to include the changes.</p>}
-      {state.pending_file_sync && <p role="alert">Corrections are saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
+      {state.pending_file_sync && <p role="alert">The transcript is saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
+        if (operation.current) return;
+        operation.current = true;
         setBusy(true); setError('');
         try { await invoke('api_sync_transcript_file', { meetingId }); await refresh(); }
-        catch { setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
-        finally { setBusy(false); }
+        catch { if (currentMeeting.current === meetingId) setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
+        finally { operation.current = false; setBusy(false); }
       }}>Retry file update</Button></p>}
       {!editing && error && <p role="alert" className="text-destructive">{error}</p>}
     </div>}
@@ -78,7 +83,7 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
         <label className="space-y-2 text-sm">Transcript text<Textarea autoFocus rows={8} value={text} disabled={busy} onChange={e => setText(e.target.value)} /></label>
         {editing?.original_text && <Accordion type="single" collapsible className="text-sm"><AccordionItem value="recognition" className="group/details border-0"><AccordionTrigger className="cursor-pointer rounded-none py-0 font-normal hover:no-underline">Original recognition</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden"><p className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{editing.original_text}</p></AccordionContent></AccordionItem></Accordion>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change('api_update_transcript_text', { transcriptId: editing.id, expectedText: editing.text, text })}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change('api_update_transcript_text', { transcriptId: editing.id, expectedText: editing.text, text }, () => { if (readLearnVocabulary()) void offerVocabularyWords(vocabularySuggestions(editing.text, text)); })}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <TextReplaceDialog key={meetingId} open={replaceOpen} onOpenChange={onReplaceOpenChange} title="transcript" preview={preview} apply={replace} />

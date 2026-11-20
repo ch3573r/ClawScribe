@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type Ref } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import { Paperclip } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,8 +46,8 @@ export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disa
     const current = generation.current;
     let request: string | null = null;
     try {
-      const path = await open({ multiple: false, directory: false,
-        filters: [{ name: 'Reference documents', extensions: ['pdf', 'docx', 'txt', 'md'] }] });
+      // The core opens the dialog and only accepts the document it chose here.
+      const path = await invoke<string | null>('pick_reference_document');
       if (current !== generation.current || typeof path !== 'string') return;
       request = globalThis.crypto.randomUUID(); activeImport.current = request; setExtracting(true);
       await knowledgeService.importDocument(target, path, request);

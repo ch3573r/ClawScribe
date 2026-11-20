@@ -262,28 +262,39 @@ async fn verify_cached(path: &Path, size: u64, hash: &str) -> Result<()> {
 pub(crate) async fn verify_file(path: &Path, size: u64, hash: &str) -> Result<()> {
     let path = path.to_path_buf();
     let hash = hash.to_owned();
-    tokio::task::spawn_blocking(move || {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        if file.metadata()?.len() != size {
-            bail!("Model size does not match the pinned download");
+    tokio::task::spawn_blocking(move || verify_file_blocking(&path, size, &hash, |_| Ok(())))
+        .await?
+}
+
+/// Check before opening and after each bounded read so the worker can yield to
+/// foreground work without leaving a detached hash pass reading the file.
+pub(crate) fn verify_file_blocking(
+    path: &Path,
+    size: u64,
+    hash: &str,
+    mut checkpoint: impl FnMut(usize) -> Result<()>,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    checkpoint(0)?;
+    let mut file = std::fs::File::open(path)?;
+    if file.metadata()?.len() != size {
+        bail!("Model size does not match the pinned download");
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 1024 * 64];
+    loop {
+        let count = file.read(&mut buffer)?;
+        checkpoint(count)?;
+        if count == 0 {
+            break;
         }
-        let mut digest = Sha256::new();
-        let mut buffer = [0; 1024 * 64];
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
-        if format!("{:x}", digest.finalize()) != hash {
-            bail!("Model SHA-256 does not match the pinned download; retry to download again");
-        }
-        Ok(())
-    })
-    .await?
+        digest.update(&buffer[..count]);
+    }
+    if format!("{:x}", digest.finalize()) != hash {
+        bail!("Model SHA-256 does not match the pinned download; retry to download again");
+    }
+    Ok(())
 }
 
 pub(crate) async fn download_file_checked_with_verification(

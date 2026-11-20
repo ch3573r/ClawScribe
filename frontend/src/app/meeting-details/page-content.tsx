@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
+import { SavedMeetingAttendance } from '@/components/MeetingAttendance';
 import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
 import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
 import { ModelConfig } from '@/components/ModelSettingsModal';
@@ -23,15 +24,23 @@ import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperatio
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
+import { stepPlaybackRate } from '@/lib/playback-controls';
+import type { MeetingBookmark } from '@/lib/library';
 import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
 import { useSpeakerLabelVisibility } from '@/hooks/useSpeakerLabelVisibility';
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+import { ChevronLeft } from 'lucide-react';
+import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 
 export default function PageContent({
   meeting,
   evidenceToken,
+  fromArchive,
+  archiveAction,
   summaryData,
-  shouldAutoGenerate = false,
-  onAutoGenerateComplete,
+  summaryJob,
   onMeetingUpdated,
   onRefetchTranscripts,
   onRevealTranscript,
@@ -40,6 +49,7 @@ export default function PageContent({
   // Pagination props for efficient transcript loading
   segments,
   timelineSegments,
+  timelineComplete,
   hasMore,
   isLoadingMore,
   totalCount,
@@ -48,9 +58,10 @@ export default function PageContent({
 }: {
   meeting: any;
   evidenceToken?: string | null;
+  fromArchive?: boolean;
+  archiveAction?: string | null;
   summaryData: Summary | null;
-  shouldAutoGenerate?: boolean;
-  onAutoGenerateComplete?: () => void;
+  summaryJob: SummaryJobSnapshot | null;
   onMeetingUpdated?: () => Promise<void>;
   onRevealTranscript?: (id: string, index: number) => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
@@ -59,6 +70,7 @@ export default function PageContent({
   // Pagination props
   segments?: any[];
   timelineSegments?: TranscriptSegmentData[];
+  timelineComplete?: boolean;
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
@@ -102,6 +114,12 @@ export default function PageContent({
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
+  // Review tools: follow-along, bookmarks on the timeline, and requests raised by keyboard shortcuts.
+  const [followPlayback, setFollowPlayback] = useState(true);
+  const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
+  const [findOpenRequest, setFindOpenRequest] = useState(0);
+  const [bookmarkRequest, setBookmarkRequest] = useState(0);
+  const stopFollowing = useCallback(() => setFollowPlayback(false), []);
   const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
   const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
@@ -132,6 +150,13 @@ export default function PageContent({
   // Audio actions operate on the recording folder. The player/timeline waits for
   // a resolved media file, which can lag behind freshly saved recordings.
   const hasRecordingFolder = Boolean(meeting.folder_path);
+  useEffect(() => {
+    if (archiveAction === 'summary') {
+      document.getElementById('meeting-summary-panel')?.focus();
+    } else if (archiveAction === 'files') {
+      document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+    }
+  }, [archiveAction]);
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
@@ -139,7 +164,7 @@ export default function PageContent({
     sourceAttributionEnabled, hasRecordingFolder, timelineSegments, segments, meetingData.transcripts,
   );
   const showSpeakerAttribution = useSpeakerLabelVisibility(meeting.id, hasSpeakerAttribution);
-  const templates = useTemplates();
+  const templates = useTemplates(meeting.id);
 
   // Callback to register the modal open function
   const handleRegisterModalOpen = (openFn: () => void) => {
@@ -169,9 +194,10 @@ export default function PageContent({
         ollamaEndpoint: config.ollamaEndpoint ?? null,
       });
 
-      // Emit event so ConfigContext and other listeners stay in sync
+      // Emit event so ConfigContext and other listeners stay in sync. A typed key
+      // is stored now and is not shared.
       const { emit } = await import('@tauri-apps/api/event');
-      await emit('model-config-updated', config);
+      await emit('model-config-updated', { ...config, apiKey: null, customOpenAIApiKey: null });
 
       toast.success('Model settings saved successfully');
     } catch (error) {
@@ -183,16 +209,28 @@ export default function PageContent({
   const summaryGeneration = useSummaryGeneration({
     beforeGeneration: meetingData.flushPendingChanges,
     meeting,
-    transcripts: meetingData.transcripts,
     modelConfig: modelConfig,
     isModelConfigLoading: false, // ConfigContext loads on mount
-    selectedTemplate: templates.selectedTemplate,
+    selectedTemplate: templates.requestedTemplate,
     includeSpeakerLabels: showSpeakerAttribution,
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
     onOpenModelSettings: handleOpenModelSettings,
   });
+  const summaryBusy = ['processing', 'summarizing', 'regenerating'].includes(summaryGeneration.summaryStatus);
+
+  // A summary is already running for this meeting: show it as generating and
+  // take its result, instead of offering Generate.
+  const summaryRunning = isActiveSummary(summaryJob?.status);
+  const attachSummary = summaryGeneration.attachToRunningSummary;
+  useEffect(() => {
+    if (summaryRunning && !isActiveSummary(summaryGeneration.summaryStatus)) {
+      attachSummary(Boolean(summaryData));
+    }
+    // A listener owns progress through the terminal status.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summaryRunning, meeting.id]);
 
   const copyOperations = useCopyOperations({
     meeting,
@@ -245,6 +283,11 @@ export default function PageContent({
     void audioPlayer.seek(seconds);
   }, [audioPlayer.seek]);
 
+  const playPassage = useCallback((seconds: number) => {
+    void audioPlayer.seek(seconds);
+    void audioPlayer.play();
+  }, [audioPlayer.seek, audioPlayer.play]);
+
   const handleTimelinePlayPause = useCallback(() => {
     if (audioPlayer.isPlaying) {
       audioPlayer.pause();
@@ -252,6 +295,17 @@ export default function PageContent({
       void audioPlayer.play();
     }
   }, [audioPlayer.isPlaying, audioPlayer.pause, audioPlayer.play]);
+
+  // Space, arrows, speed, follow, bookmark and find. Resolved by playback-controls,
+  // which stands down while typing, in dialogs and menus, and on controls that own the key.
+  usePlaybackShortcuts({
+    toggle: isAudioReady ? handleTimelinePlayPause : undefined,
+    seek: isAudioReady ? ({ seconds }) => { void audioPlayer.seekBy(seconds); } : undefined,
+    rate: isAudioReady ? ({ direction }) => audioPlayer.setRate(stepPlaybackRate(audioPlayer.rate, direction)) : undefined,
+    follow: isAudioReady ? () => setFollowPlayback(value => !value) : undefined,
+    bookmark: isAudioReady ? () => setBookmarkRequest(value => value + 1) : undefined,
+    find: () => setFindOpenRequest(value => value + 1),
+  });
 
   // Track page view
   useEffect(() => {
@@ -269,30 +323,6 @@ export default function PageContent({
     return () => window.removeEventListener('shortcut:generate-summary', onGenerate);
   }, [meetingData.transcripts.length, summaryGeneration]);
 
-  // Auto-generate summary when flag is set
-  useEffect(() => {
-    let cancelled = false;
-
-    const autoGenerate = async () => {
-      if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
-        console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
-        await summaryGeneration.handleGenerateSummary('');
-
-        // Notify parent that auto-generation is complete (only if not cancelled)
-        if (onAutoGenerateComplete && !cancelled) {
-          onAutoGenerateComplete();
-        }
-      }
-    };
-
-    autoGenerate();
-
-    // Cleanup: cancel if component unmounts or meeting changes
-    return () => {
-      cancelled = true;
-    };
-  }, [shouldAutoGenerate, meeting.id]); // Re-run if meeting changes
-
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -300,12 +330,18 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex h-full flex-col bg-background"
     >
+      {fromArchive && <div className="shrink-0 px-4 pt-2">
+        <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />Back to archive</Link></Button>
+      </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
       <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
-        disabled={['processing', 'summarizing', 'regenerating'].includes(summaryGeneration.summaryStatus)}
-        getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder} />
+        disabled={summaryBusy}
+        getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
+        attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
+          durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
+          templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           key={meeting.id}
@@ -319,12 +355,19 @@ export default function PageContent({
           isAudioReady={isAudioReady}
           onPlayPause={handleTimelinePlayPause}
           onSeek={isAudioReady ? handleTimelineSeek : undefined}
+          rate={audioPlayer.rate}
+          onRateChange={audioPlayer.setRate}
+          followPlayback={followPlayback}
+          onFollowChange={setFollowPlayback}
+          bookmarks={bookmarks}
         />
       )}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          openTranscription={archiveAction === 'transcribe'}
           focusedSource={focusedSource}
           speakerSegments={timelineSegments}
+          timelineComplete={timelineComplete}
           sourceAttributionEnabled={sourceAttributionEnabled}
           transcripts={meetingData.transcripts}
           onCopyTranscript={copyOperations.handleCopyTranscript}
@@ -345,10 +388,16 @@ export default function PageContent({
           audioStatus={audioStatus}
           showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
-          onSeekToTime={isAudioReady ? handleTimelineSeek : undefined}
+          onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
+          onRevealSegment={onRevealTranscript}
+          followPlayback={isAudioReady && followPlayback && audioPlayer.isPlaying}
+          onFollowStop={stopFollowing}
+          findOpenRequest={findOpenRequest}
+          bookmarkRequest={bookmarkRequest}
+          onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
           onRevealSource={async (source) => {
@@ -385,6 +434,7 @@ export default function PageContent({
           summaryRevision={meetingData.summaryRevision}
           onRestorePrevious={meetingData.restorePreviousSummary}
           summaryError={summaryGeneration.summaryError}
+          jobSnapshot={summaryGeneration.jobUpdate ?? summaryJob}
           onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
           getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
           availableTemplates={templates.availableTemplates}

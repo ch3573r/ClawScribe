@@ -2015,19 +2015,25 @@ pub fn active_speaker_diarization_command() -> Option<String> {
         .map(|job| job.meeting_id.clone())
 }
 
-#[tauri::command]
-pub fn cancel_speaker_diarization_command(meeting_id: String) -> std::result::Result<(), String> {
+/// Ok(true): the running job was told to stop. Ok(false): no such job is
+/// running (yet). Err: the job is already saving and cannot be cancelled.
+fn request_diarization_cancel(meeting_id: &str) -> std::result::Result<bool, String> {
     let active = DIARIZATION_MEETING
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let Some(job) = active.as_ref().filter(|job| job.meeting_id == meeting_id) else {
-        return Ok(());
+        return Ok(false);
     };
     if job.saving {
         return Err("Speaker labels are already being saved. Wait for completion.".into());
     }
     job.cancelled.store(true, Ordering::Release);
-    Ok(())
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn cancel_speaker_diarization_command(meeting_id: String) -> std::result::Result<(), String> {
+    request_diarization_cancel(&meeting_id).map(|_| ())
 }
 
 fn diarization_cancel_flag() -> Arc<AtomicBool> {
@@ -2077,7 +2083,17 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     num_speakers: Option<i32>,
     preserve_existing_labels: Option<bool>,
 ) -> std::result::Result<SpeakerDiarizationComplete, String> {
-    let _job = super::inference::claim_job_preempting_local_summary(
+    // Registered so a starting recording can cancel this job. Labels are saved
+    // in one transaction that refuses a cancelled run, and a run that is
+    // already saving reports "cannot cancel" and is simply waited for.
+    let cancel_meeting = meeting_id.clone();
+    // Reports false before the run has started and once it is saving; the
+    // recording start re-issues it, so only an effective cancel is announced.
+    let cancel: super::inference::CancelBatchJob =
+        Arc::new(move || matches!(request_diarization_cancel(&cancel_meeting), Ok(true)));
+    let _job = super::inference::claim_batch_job(
+        super::inference::BatchJob::SpeakerDetection,
+        cancel,
         "Local summary stopped because speaker detection started. Generate it again afterwards.",
     )
     .await?;
@@ -2121,11 +2137,6 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     }
 }
 
-#[tauri::command]
-pub fn is_speaker_diarization_in_progress_command() -> bool {
-    DIARIZATION_IN_PROGRESS.load(Ordering::SeqCst)
-}
-
 async fn run_speaker_diarization_for_meeting<R: Runtime>(
     app: AppHandle<R>,
     meeting_id: String,
@@ -2138,13 +2149,23 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
 ) -> Result<SpeakerDiarizationComplete> {
     check_diarization_cancelled(&meeting_id)?;
     let run_started = Instant::now();
-    let folder_path = PathBuf::from(&meeting_folder_path);
-    if !folder_path.is_dir() {
-        return Err(anyhow!(
-            "Meeting folder is not available: {}",
-            folder_path.display()
-        ));
-    }
+    // The folder is the one the core saved for this meeting; the path the
+    // webview sends is not trusted. Custom model files from the webview are not
+    // used either: the models are the ones the app downloads.
+    let _ = (&meeting_folder_path, &segmentation_model_path, &embedding_model_path);
+    let (segmentation_model_path, embedding_model_path): (Option<String>, Option<String>) = (None, None);
+    let folder_path = {
+        let pool = app
+            .try_state::<AppState>()
+            .ok_or_else(|| anyhow!("Application database is not initialized"))?
+            .db_manager
+            .pool()
+            .clone();
+        let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+        crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id, &roots)
+            .await
+            .map_err(|message| anyhow!(message))?
+    };
 
     emit_progress(
         &app,
@@ -2379,8 +2400,15 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     );
 
     let mapped_segments = attempt.mapped_segments;
-    let (updated_segments, file_warning) =
-        save_diarization_labels(&pool, &meeting_id, &stored_segments, &mapped_segments).await?;
+    let roots = super::recording_preferences::recording_roots(&app).await;
+    let (updated_segments, file_warning) = save_diarization_labels(
+        &pool,
+        &meeting_id,
+        &stored_segments,
+        &mapped_segments,
+        &roots,
+    )
+    .await?;
 
     let speaker_count = transcript_speaker_count(&mapped_segments);
     let turn_count = attempt.turns.len();
@@ -2425,8 +2453,13 @@ async fn save_diarization_labels(
     meeting_id: &str,
     stored_segments: &[StoredTranscriptSegment],
     mapped_segments: &[TranscriptSegment],
+    roots: &[PathBuf],
 ) -> Result<(usize, bool)> {
     begin_diarization_save(meeting_id)?;
+    // Speaker labels do not change what produced the text; keep its provenance
+    // with the archived revision so a later restore does not turn it "unknown".
+    let files_provenance =
+        crate::database::transcript_edits::file_provenance(pool, meeting_id, roots).await;
     let mut tx = pool.begin().await?;
     let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id"
@@ -2443,9 +2476,16 @@ async fn save_diarization_labels(
                 .bind(meeting_id)
                 .fetch_all(&mut *tx)
                 .await?;
-        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES (?, ?, ?, ?)")
+        let provenance = crate::database::transcript_edits::revision_provenance(
+            &mut tx,
+            meeting_id,
+            files_provenance,
+        )
+        .await
+        .map_err(|e| anyhow!(e))?;
+        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json, provenance_json) VALUES (?, ?, ?, ?, ?)")
             .bind(Uuid::new_v4().to_string()).bind(meeting_id).bind(Utc::now().to_rfc3339())
-            .bind(serde_json::to_string(&previous)?).execute(&mut *tx).await?;
+            .bind(serde_json::to_string(&previous)?).bind(provenance).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
             .bind(&meeting_id)
             .execute(&mut *tx)
@@ -2496,7 +2536,7 @@ async fn save_diarization_labels(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id)
+    let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id, roots)
         .await
         .is_err();
     Ok((updated_segments, file_warning))
@@ -4350,11 +4390,13 @@ mod tests {
         started_rx.await.unwrap();
         cancel_speaker_diarization_command(meeting.into()).unwrap();
         assert!(native.await.unwrap().is_err());
-        assert!(save_diarization_labels(&pool, meeting, &stored, &mapped)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("cancelled"));
+        assert!(
+            save_diarization_labels(&pool, meeting, &stored, &mapped, &[])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
         let current: Vec<StoredTranscriptSegment> =
             sqlx::query_as("SELECT * FROM transcripts ORDER BY audio_start_time, timestamp, id")
                 .fetch_all(&pool)
@@ -4404,9 +4446,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let (updated, warning) = save_diarization_labels(&pool, "review-test", &stored, &mapped)
-            .await
-            .unwrap();
+        let (updated, warning) =
+            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
+                .await
+                .unwrap();
         assert_eq!(updated, 2);
         assert!(warning);
         let labels: i64 =
@@ -4423,7 +4466,7 @@ mod tests {
         .unwrap();
         assert_eq!(pending, 1);
         std::fs::create_dir(&missing_folder).unwrap();
-        crate::database::transcript_edits::sync_file(&pool, "review-test")
+        crate::database::transcript_edits::sync_file(&pool, "review-test", &[])
             .await
             .unwrap();
         assert!(missing_folder.join("transcripts.json").is_file());
@@ -4444,7 +4487,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        save_diarization_labels(&pool, "review-test", &stored, &mapped)
+        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
             .await
             .unwrap();
         let original: Option<String> =
@@ -4457,7 +4500,7 @@ mod tests {
             .fetch_one(&pool).await.unwrap();
         assert!(has_edits);
         assert_eq!(
-            crate::database::transcript_edits::restore_previous(&pool, "review-test")
+            crate::database::transcript_edits::restore_previous(&pool, "review-test", &[])
                 .await
                 .unwrap(),
             2
@@ -4486,7 +4529,7 @@ mod tests {
         second_piece.id = "a-split-2".into();
         second_piece.text = "Second piece".into();
         mapped.push(second_piece);
-        save_diarization_labels(&pool, "review-test", &stored, &mapped)
+        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
             .await
             .unwrap();
         let pieces: Vec<Option<String>> = sqlx::query_scalar(
@@ -4505,7 +4548,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let error = save_diarization_labels(&pool, "review-test", &stored, &mapped)
+        let error = save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "The transcript changed while speakers were being detected. Run speaker detection again.");
@@ -4523,7 +4566,7 @@ mod tests {
     async fn speaker_save_applies_labels_when_the_snapshot_matches() {
         let (pool, stored, mapped) = label_save_fixture().await;
         assert_eq!(
-            save_diarization_labels(&pool, "review-test", &stored, &mapped)
+            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
                 .await
                 .unwrap()
                 .0,

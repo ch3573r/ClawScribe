@@ -82,6 +82,14 @@ pub struct NemotronModel {
     mel: MelExtractor,
     vocab: Vec<String>,
     lang_slots: HashMap<String, i64>,
+    pub(crate) backend: (SessionBackend, SessionBackend),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionBackend {
+    Cpu,
+    DirectMl,
+    CpuFallback,
 }
 
 impl NemotronModel {
@@ -94,7 +102,7 @@ impl NemotronModel {
         // DirectML decoder/joint probe by default on fp16 DirectML builds. The
         // self-test keeps CPU as the correctness fallback, and
         // NEMOTRON_DECODE_EP=cpu remains the opt-out for benchmarking.
-        let encoder = Self::load_encoder(dir, cpu_capable)?;
+        let (encoder, encoder_backend) = Self::load_encoder(dir, cpu_capable)?;
         // Variant-aware decoder/joint CPU threading. The joint is a large
         // 640x13088 matmul called hundreds of times per segment: int8 weights run
         // fast single-threaded, but fp16 weights upconvert to fp32 and need a
@@ -117,7 +125,7 @@ impl NemotronModel {
             Some(1) => "1 thread".to_string(),
             Some(n) => format!("{n} threads"),
         };
-        let (decoder, joint) =
+        let (decoder, joint, decode_backend) =
             Self::load_decode_sessions(dir, cpu_capable, decode_threads, &decode_mode)?;
         let vocab = Self::load_vocab(dir)?;
         // Prompt slots are required. Loading without them used to silently map
@@ -141,6 +149,7 @@ impl NemotronModel {
             mel: MelExtractor::new(),
             vocab,
             lang_slots,
+            backend: (encoder_backend, decode_backend),
         })
     }
 
@@ -168,7 +177,10 @@ impl NemotronModel {
     /// longer assumed GPU-only: when DirectML is unavailable or every level
     /// fails, it falls back to a CPU probe, reporting `CpuUnsupported` only when
     /// neither path can run the encoder.
-    fn load_encoder(dir: &Path, cpu_capable: bool) -> Result<Session, NemotronError> {
+    fn load_encoder(
+        dir: &Path,
+        cpu_capable: bool,
+    ) -> Result<(Session, SessionBackend), NemotronError> {
         let path = dir.join("encoder.onnx");
 
         // Benchmark lever: NEMOTRON_FORCE_CPU=1 skips DirectML so the same audio
@@ -178,9 +190,15 @@ impl NemotronModel {
         if std::env::var("NEMOTRON_FORCE_CPU").is_ok_and(|v| !v.is_empty() && v != "0") {
             log::info!("Nemotron encoder: NEMOTRON_FORCE_CPU set — forcing CPU execution");
             if cpu_capable {
-                return Self::init_session(dir, "encoder.onnx");
+                return Ok((
+                    Self::init_session(dir, "encoder.onnx")?,
+                    SessionBackend::Cpu,
+                ));
             }
-            return Self::try_cpu_encoder(&path).ok_or(NemotronError::CpuUnsupported);
+            return Ok((
+                Self::try_cpu_encoder(&path).ok_or(NemotronError::CpuUnsupported)?,
+                SessionBackend::Cpu,
+            ));
         }
 
         #[cfg(feature = "directml")]
@@ -202,7 +220,7 @@ impl NemotronModel {
                                     log::info!(
                                         "Nemotron encoder: DirectML (GPU) @ graph_opt={lvl}, probe |max|={pmax:.3} (int8)"
                                     );
-                                    return Ok(session);
+                                    return Ok((session, SessionBackend::DirectMl));
                                 }
                                 log::warn!(
                                     "Nemotron encoder: DirectML @ graph_opt={lvl} probe collapsed (|max|={pmax:.3}); trying a lower level"
@@ -219,7 +237,7 @@ impl NemotronModel {
                 }
                 log::warn!("Nemotron int8 encoder: no DirectML graph_opt level produced valid output; trying CPU");
                 if let Some(session) = Self::try_cpu_encoder(&path) {
-                    return Ok(session);
+                    return Ok((session, SessionBackend::CpuFallback));
                 }
                 log::error!(
                     "Nemotron int8 encoder: neither DirectML nor the CPU EP could run this encoder"
@@ -249,7 +267,7 @@ impl NemotronModel {
                                     log::info!(
                                         "Nemotron encoder: DirectML GPU-accelerated @ graph_opt={lvl} (self-test passed, ~{ratio:.2}x CPU)"
                                     );
-                                    return Ok(session);
+                                    return Ok((session, SessionBackend::DirectMl));
                                 }
                                 Some(ratio) => log::warn!(
                                     "Nemotron encoder: DirectML @ graph_opt={lvl} self-test passed but only ~{ratio:.2}x CPU — ORT likely placed the heavy ops on the CPU EP; not using DirectML at this level"
@@ -270,7 +288,7 @@ impl NemotronModel {
                 }
             }
             log::warn!("Nemotron encoder: no DirectML graph_opt level was both correct and measurably GPU-accelerated; using CPU");
-            return Ok(cpu_session);
+            return Ok((cpu_session, SessionBackend::CpuFallback));
         }
         // Built without DirectML: fp16 runs on CPU; int8 falls back to a CPU probe
         // (some ORT builds can run its ConvInteger encoder on the CPU EP).
@@ -279,14 +297,14 @@ impl NemotronModel {
             if !cpu_capable {
                 log::info!("Nemotron int8 encoder: DirectML not in this build — probing CPU");
                 if let Some(session) = Self::try_cpu_encoder(&path) {
-                    return Ok(session);
+                    return Ok((session, SessionBackend::Cpu));
                 }
                 log::error!("Nemotron int8 encoder: CPU EP cannot run this encoder and DirectML isn't in this build");
                 return Err(NemotronError::CpuUnsupported);
             }
             let session = Self::init_session(dir, "encoder.onnx")?;
             log::info!("Nemotron encoder: CPU");
-            Ok(session)
+            Ok((session, SessionBackend::Cpu))
         }
     }
 
@@ -451,17 +469,17 @@ impl NemotronModel {
         cpu_capable: bool,
         threads: Option<usize>,
         cpu_mode: &str,
-    ) -> Result<(Session, Session), NemotronError> {
+    ) -> Result<(Session, Session, SessionBackend), NemotronError> {
         let decoder_path = dir.join("decoder.onnx");
         let joint_path = dir.join("joint.onnx");
         let variant = if cpu_capable { "fp16" } else { "int8" };
         let decode_ep = std::env::var("NEMOTRON_DECODE_EP")
             .unwrap_or_else(|_| Self::default_decode_ep(cpu_capable))
             .to_ascii_lowercase();
+        let wants_dml = matches!(decode_ep.as_str(), "dml" | "directml" | "gpu");
 
         #[cfg(feature = "directml")]
         {
-            let wants_dml = matches!(decode_ep.as_str(), "dml" | "directml" | "gpu");
             if wants_dml && cpu_capable {
                 log::info!(
                     "Nemotron decoder/joint: DirectML requested for fp16 (CPU fallback {cpu_mode})"
@@ -480,12 +498,12 @@ impl NemotronModel {
                             log::info!(
                                 "Nemotron decoder/joint: DirectML enabled for fp16 (self-test passed)"
                             );
-                            return Ok((dml_decoder, dml_joint));
+                            return Ok((dml_decoder, dml_joint, SessionBackend::DirectMl));
                         }
                         log::warn!(
                             "Nemotron decoder/joint: DirectML self-test failed; using CPU {cpu_mode} (fp16)"
                         );
-                        return Ok((cpu_decoder, cpu_joint));
+                        return Ok((cpu_decoder, cpu_joint, SessionBackend::CpuFallback));
                     }
                     (decoder_result, joint_result) => {
                         if let Err(e) = decoder_result {
@@ -497,7 +515,7 @@ impl NemotronModel {
                         log::warn!(
                             "Nemotron decoder/joint: DirectML unavailable; using CPU {cpu_mode} ({variant})"
                         );
-                        return Ok((cpu_decoder, cpu_joint));
+                        return Ok((cpu_decoder, cpu_joint, SessionBackend::CpuFallback));
                     }
                 }
             } else if wants_dml && !cpu_capable {
@@ -513,7 +531,7 @@ impl NemotronModel {
 
         #[cfg(not(feature = "directml"))]
         {
-            if matches!(decode_ep.as_str(), "dml" | "directml" | "gpu") {
+            if wants_dml {
                 log::warn!(
                     "Nemotron decoder/joint: NEMOTRON_DECODE_EP=dml requested, but this build has no DirectML feature; using CPU {cpu_mode} ({variant})"
                 );
@@ -527,7 +545,12 @@ impl NemotronModel {
         log::info!("Nemotron decoder/joint: CPU {cpu_mode} ({variant})");
         let decoder = Self::build_decode_session(&decoder_path, threads)?;
         let joint = Self::build_decode_session(&joint_path, threads)?;
-        Ok((decoder, joint))
+        let backend = if wants_dml {
+            SessionBackend::CpuFallback
+        } else {
+            SessionBackend::Cpu
+        };
+        Ok((decoder, joint, backend))
     }
 
     fn default_decode_ep(_cpu_capable: bool) -> String {
@@ -728,7 +751,11 @@ impl NemotronModel {
         opt: GraphOptimizationLevel,
     ) -> Result<Session, NemotronError> {
         let providers = [
-            DirectMLExecutionProvider::default().build(),
+            // Let the caller's existing CPU retry handle registration failures.
+            // A silent ORT fallback would make a CPU probe look like a GPU run.
+            DirectMLExecutionProvider::default()
+                .build()
+                .error_on_failure(),
             CPUExecutionProvider::default().build(),
         ];
         let builder = Session::builder()?

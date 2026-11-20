@@ -3,6 +3,7 @@ import test from 'node:test';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
+const names = value => Object.fromEntries(value.split(' ').map(name => [name, name]));
 const jsx = (type, props) => ({ type, props });
 const nodes = root => Array.isArray(root) ? root.flatMap(nodes) : root && typeof root === 'object'
   ? [root, ...nodes(root.props?.children)] : [];
@@ -14,7 +15,8 @@ function setup(invoke) {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@tauri-apps/api/core': { invoke }, 'lucide-react': { X: 'X' },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/input': { Input: 'Input' },
-    '@/components/ui/label': { Label: 'Label' }, '@/components/ui/page-section': { PageSection: 'PageSection' },
+    '@/components/ui/settings-layout': names('Meta SettingsCard SettingsFooter SettingsRow'),
+    '@/components/ui/switch': { Switch: 'Switch' },
   });
   const render = () => hooks.render(() => CustomVocabularySettings());
   const find = (type, predicate = () => true) => nodes(render()).find(node => node.type === type && predicate(node));
@@ -134,4 +136,30 @@ test('an empty recovered vocabulary can be replaced from settings', async t => {
   await flush();
   assert.deepEqual(writes.map(words => Array.from(words)), [['Zoë']]);
   assert.match(text(ui.render()), /Word added/);
+});
+
+test('suggesting words from corrections is an off-by-default choice that is saved only when changed', async t => {
+  const stored = new Map();
+  const previousWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) } };
+  t.after(() => { globalThis.window = previousWindow; });
+  const ui = setup(command => command === 'get_custom_vocabulary' ? Promise.resolve([]) : Promise.resolve([]));
+  t.after(() => ui.hooks.unmount());
+  ui.render();
+  await flush();
+  const row = ui.find('SettingsRow');
+  assert.equal(row.props.title, 'Suggest words from my corrections');
+  assert.match(row.props.description, /Nothing is added until you confirm/);
+  assert.equal(ui.find('Switch').props.checked, false);
+  assert.equal(stored.size, 0);
+  ui.find('Switch').props.onCheckedChange(true);
+  assert.equal(stored.get('clawscribe.learnVocabularyFromCorrections'), 'true');
+  assert.equal(ui.find('Switch').props.checked, true);
+  ui.find('Switch').props.onCheckedChange(false);
+  assert.equal(stored.size, 0);
+  // Storage that refuses the write keeps the switch off and says why.
+  globalThis.window.localStorage.setItem = () => { throw new Error('blocked'); };
+  ui.find('Switch').props.onCheckedChange(true);
+  assert.equal(ui.find('Switch').props.checked, false);
+  assert.match(text(ui.render()), /Could not save this choice/);
 });

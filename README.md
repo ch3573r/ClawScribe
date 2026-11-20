@@ -7,11 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-Source version: **0.5.59**. This Windows GPU preview changes the default voice
-model for speaker detection, reworks speaker relabeling, points summary citations
-at the cited segment and lists action items so they can be exported. It builds on
-the meeting details rework and the Claude Code provider from 0.5.58. See the
-[0.5.59 preview notes](docs/releases/0.5.59.md) and the
+**0.63.0** is a Windows GPU preview. It hardens recording against stuck devices
+and full disks, shows real audio levels, keeps stored keys inside the core and
+finds interrupted recordings on disk. See the
+[0.63.0 preview notes](docs/releases/0.63.0.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -38,8 +37,8 @@ Choose a microphone and the output device used by Teams, Webex, or the other
 meeting application. Make a short test recording and verify that both your
 voice and the remote participants are audible in playback. Start recording,
 review the live transcript, then stop and allow queued transcription to finish
-before generating notes. Automatic meeting detection is a separate Teams
-feature; general system-audio capture does not require it.
+before generating notes. You can also enable call detection for selected
+meeting apps under **Settings → Recording → Call detection**.
 
 **Test mic** in Recording settings shows the microphone actually tested. If a
 preferred Windows microphone is unavailable, the test identifies its fallback
@@ -60,22 +59,36 @@ instance from a Stream Deck, AutoHotkey, or a script:
 
 Example: `"C:\Path\To\ClawScribe.exe" --toggle-recording`. The flags only work
 on an instance that is already running; launching the app with a flag does not
-start a recording.
+start a recording. A start from the command line, the tray or a global shortcut
+runs in the background: the window keeps its page and any unsaved text, and it
+is not brought to the front. See
+[Recording from the tray, shortcuts and command line](docs/tray-and-recording-control.md).
 
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.
-- **Record now, transcribe later:** choose audio-only mode on Home or in
-  Recording settings. It always saves audio, skips the speech model and live
-  transcription, and leaves a **Transcribe** action on the saved meeting.
+- **Record now, transcribe later:** choose **Record audio now** on first launch
+  to open Home in audio-only mode without a model download. Audio-only mode
+  always saves audio and leaves a **Transcribe** action on the saved meeting.
+  Live transcription and the local notes model can be set up independently.
+  If a speech model fails after capture opens, a session with audio saving
+  enabled continues in audio-only mode.
+- **Check recording readiness:** Home shows the microphone, system output, and
+  on-device live engine. **Recheck devices** refreshes the list after a change.
+  Any hosted file-transcription preference is shown separately.
 - Recording continues after temporary queue pressure or spool-write failures,
   with incomplete audio reported visibly. Playback streams saved recordings.
   Stop saves available audio even if transcript backup writes fail, and capture
-  gaps are reported separately from save failures. Repeated Stop actions reuse
-  the same library meeting. Recovery originals use about 700 MB per hour while recording; choose a local
+  gaps are reported even after a source reconnects. Retry a missing source
+  without interrupting the other source. Stop saves one library meeting and
+  leaves the recording available in **Interrupted recordings** if the library
+  write fails. Recovery originals use about 700 MB per hour while recording. Choose a local
   folder with enough space. See [recording and recovery](docs/meeting-quality.md).
+- On Windows, a sleep notification asks ClawScribe to save the current recording.
+  Sign-out and shutdown use the recording recovery files if Windows closes the
+  app before it can finish. See [Windows sleep and sign-out](docs/tray-and-recording-control.md#windows-sleep-sign-out-and-shutdown).
 - Correct transcript passages or preview literal find-and-replace across the
   entire meeting. Original recognition and segment timing are retained; undo
   restores previous corrections. Regenerate notes after correcting a transcript.
@@ -84,6 +97,9 @@ start a recording.
   toolbar. Cancellation waits for the current native step before another recording
   can start.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
+- Select several files and review them one at a time. For each file, choose the
+  meeting date, use the file's modified time, or keep the import time. You can
+  also ask Built-in AI to generate notes after transcription.
 - HE-AAC imports use the decoder's actual sample rate to preserve timing.
 - Interrupted Whisper and Parakeet downloads retain partial files for retry;
   cancellation finishes the active transfer before another attempt can start.
@@ -112,10 +128,23 @@ are pinned to specific revisions and SHA-256-verified before use. Damaged or
 incomplete files require re-download; unchanged verified files reuse their
 integrity checks.
 
+In **Settings → Transcription**, choose **Test this PC** to time an installed
+Whisper, Parakeet or Nemotron model on two built-in speech samples in German and English.
+The result shows the model, runtime backend, and processing time for each
+sample. If the model falls behind, you can switch to **Record now, transcribe
+later**. The test runs locally and leaves the microphone free.
+
 Whisper preserves recognized repetitions and short answers instead of removing
 them through phrase matching. Nemotron's **Auto** language follows the system
 locale; select the spoken language explicitly when it differs. Parakeet's Auto
 selection does not label an unknown language as English.
+
+In **Auto** language mode, the live transcript can show a separate language for
+the microphone and system audio. Whisper uses confirmed languages to help with
+short replies and continues checking longer turns for language switches.
+Multilingual Parakeet estimates the languages from finalized text. When
+the two sources overlap, ClawScribe keeps the transcript and leaves each
+source's language unchanged. See [live transcript behavior](docs/meeting-quality.md#live-transcript-behavior).
 
 **Settings → Transcription → Custom vocabulary** stores up to 500 names or
 terms (64 characters each) and corrects similar spellings in new recordings,
@@ -138,15 +167,22 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 
 ## Meeting Notes And Exports
 
+Search saved meeting titles and transcript passages from the sidebar or
+**Meetings → Archive**. Archive search supports project and date filters and
+opens passage matches at their verified transcript position, including later
+pages. Return to Archive to keep the current search and filters.
+
 The meeting-memory preview in this source branch adds **Meetings → Meeting
 memory** in a separate tab: use the searchable picker to select saved meetings
 explicitly, or choose all saved meetings, then
 search transcript passages and ask cited questions. Project Any/All/Untagged
 filters and inclusive dates constrain that same selection. Keyword retrieval
 works without downloading a model; optional local semantic retrieval uses the
-embedding model under **Settings → Meeting memory**. Results show the mode
+embedding model under **Settings → Meeting memory**. Installed files are
+verified when first needed after startup or enabling semantic search. Results show the mode
 actually used, and answers show the configured and executed summary provider.
-The first question starts a saved conversation automatically. Model settings
+The first question starts a saved conversation automatically. Conversations
+restore their last submitted meeting scope, and answers can be copied. Model settings
 show download bytes and integrity verification separately from indexing. The
 pinned multilingual E5 model and tokenizer use ONNX Runtime locally on CPU;
 healthy files can be verified without downloading them again.
@@ -169,15 +205,18 @@ an external answer provider requires **Use selected references for answers** for
 conversation, off by default.
 
 Source also includes a collapsible **Live assistance** panel above the Home
-transcript. Explicitly choose **Ask**, **Summarize so far**, or **List open
+transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
 questions** using the configured summary provider; no provider request runs
 automatically. **Share live transcript with the provider** is off by default
-and remembered for future recordings, with the same control in Memory settings.
+and remembered for future recordings. Switch it on in Memory settings; the panel
+shows during a recording only while it is on.
 Selected saved meetings can supplement the current recording. Document selection
 is explicit, and document sharing is independent and resets for each recording.
 The panel and each answer show finalized-through time and incomplete status;
-recent speech may still be catching up. Context covers the last ten minutes of
-finalized backend speech, so “so far” does not mean a complete meeting summary.
+recent speech may still be catching up. Context is a fixed window of up to ten
+minutes of finalized speech, ending at the finalized-through time. It is shorter
+early in a recording or when the segment or size limit applies, and the answer
+says so.
 Cancel abandons assistance without waiting for the provider. Stop immediately
 clears temporary Live messages; navigation preserves the current request without
 starting another listener. Audio-only recordings and Built-in AI offer saved
@@ -198,8 +237,9 @@ without these checks.
 - **Project tags:** choose existing labels from a searchable list or create new
   ones, then filter the archive and transcript search by one or more projects
   (matching any or all), or show untagged meetings.
-- **Meeting bookmarks:** mark a moment while recording, then label and revisit
-  it from the saved transcript panel. Add markers during playback too.
+- **Meeting bookmarks and notes:** mark a moment from the recording bar, tray, or
+  keyboard. Add timestamped notes while recording or during playback, then revisit
+  them in the saved transcript. Choose whether to include them in meeting summaries.
 
 Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Per-meeting summary
@@ -207,6 +247,15 @@ context is saved in the local library and included in backups. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
 bundled Codex app-server path, plus **Claude Code** using your own installation.
+
+Enable **Summarize automatically** in Summary settings to generate local notes
+with Built-in AI or loopback Ollama after saving a recording. External providers
+with a known destination require a review in Summary settings. A changed provider,
+model, or destination requires fresh approval. For audio imports, you can review
+and use the selected provider for that file. Reopen the meeting to check progress,
+see why notes were skipped, or recover excerpt notes after a failed attempt.
+Windows notifications can tell you when automatic notes are ready. See
+[Automatic notes](docs/automatic-notes.md) for supported providers and recovery.
 
 **Claude Code**: Uses the Claude Code you installed and signed in to. Your Claude
 plan's limits apply. Install it yourself, run `claude auth login` in a terminal,
@@ -235,28 +284,44 @@ previous version after a successful generation.
 
 Saving a title leaves unchanged notes alone. Failed saves retain drafts, and
 edits made during a save remain available to save again. Switching meetings
-discards late loading results from the previous meeting. Automatic summaries
-wait for saved notes to load and use the provider you have configured.
+discards late loading results from the previous meeting.
 
 New summaries request links to supporting transcript passages. Open a source
 link to inspect the text, reveal it in the transcript, or play its saved audio.
 Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
-Microsoft sign-in supports calendar context and exports. Teams detection can
-prompt or auto-start recording according to your setting. Invited attendees
-can be included as a reviewable attendance checklist; an invitation does not
-prove attendance.
+Open **Meeting actions** from a saved meeting to review suggestions from the
+summary or add follow-ups manually. Saved actions keep their owner, due date,
+completion status, and any available source reference. This works offline.
 
-- **OneNote:** choose or create a notebook and export notes/transcripts into a
-  fresh dated section, avoiding large-library section-listing problems.
+**Settings → Calendars** lets you import an `.ics` file or add a read-only
+subscription from a calendar provider. Upcoming meetings appear on Home, and
+the sidebar shows the next one. Choose **Use for next recording** or let
+ClawScribe link a single timed event in progress. Review attendance while
+recording or from the saved meeting. Summaries receive only calendar names you
+confirm. In a saved recurring meeting, open **Attendance** to choose a summary
+template for the series. This works with Microsoft 365 and iCalendar. iCalendar
+works without a Microsoft account. See [Calendar sources and attendance](docs/integrations/icalendar.md).
+
+Microsoft sign-in supports calendar context and exports. Windows call detection
+can prompt or start recording for the Teams, Zoom, Webex and Google Meet
+providers you enable. Optional automatic stop applies to the recording started
+for that call after the detector observes its end. Existing Teams preferences
+remain Teams-only until you select other providers.
+See [call detection](docs/teams-detection.md).
+
+- **OneNote:** export notes or transcripts into a new section or resume in the
+  saved section ID. Both paths work without listing sections.
 - **Planner and Microsoft To Do:** review and edit action items before exporting;
   saved export history protects supported re-export paths against duplicates.
 - **Confluence:** copy rich text into a browser draft, or publish through a
   configured self-hosted Server/Data Center REST endpoint.
 - **OpenClaw:** optional handoff of completed Meetily-compatible recording folders.
 
-Microsoft exports stop if duplicate-protection history cannot be read or saved.
+**Export history** shows Microsoft export results from the meeting and travels
+with portable backups. Microsoft exports stop if duplicate-protection history
+cannot be read or saved.
 An interrupted export with an unknown outcome is not automatically repeated;
 check the destination before creating another page or task. See
 [Microsoft export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
@@ -272,6 +337,19 @@ OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
 ## Library And Data
+
+**Meetings → Archive** shows recording source and measured duration when available.
+Filter to meetings that need attention to find incomplete recordings, missing
+transcripts, and failed summaries. Use
+**Storage** to measure the library or select meetings to review which saved
+audio copies can be removed while keeping their transcripts and notes.
+See [Archive review and storage](docs/local-library.md#archive-review-and-storage).
+
+**Settings → Assistant access** lets an MCP client read the
+saved meeting library. Enable the switch, copy the configuration, and add it
+to your assistant. It can search meetings, read their notes and transcripts,
+and locate saved recordings. The connection uses local standard input and
+output. Access is off by default. See [local assistant access](docs/local-library.md#local-assistant-access).
 
 **Backup and restore** saves a portable archive of meeting data, summary context,
 and recordings. Restore adds missing meetings and skips existing IDs. Backups
@@ -294,13 +372,83 @@ meetings. See [local library tools](docs/local-library.md#deleting-meetings).
 ## Update Preferences
 
 ClawScribe checks **stable releases** by default. Enable **Include prereleases**
-under **Settings > Preferences > Updates** or **About** to receive preview builds
+under **Settings > General > Updates** or **About** to receive preview builds
 as well. The choice persists across restarts and applies to manual and startup
 checks. You still choose when to install; checking at launch is a separate option.
 
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.63.0 preview
+
+- A device reconnect no longer blocks the app, and a failed Stop is shown.
+- A recording does not start on a nearly full disk, and a notice appears when
+  space runs low.
+- Home shows real levels for the microphone and the meeting audio.
+- Recovery also finds interrupted recordings in the recording folders.
+- Stored keys stay in the core and are only sent to the address they were saved
+  for. Files and folders are used when you chose them in a dialog.
+- Engine, cloud and language settings are stored by the core.
+
+See the [preview notes](docs/releases/0.63.0.md) for limits and pending
+real-device checks.
+
+## What changed in the 0.62.0 preview
+
+- A manually started recording uses the title and the devices you chose.
+- Starting a recording stops a running retranscription, import, speaker
+  detection or PC test instead of failing.
+- Stop in the sidebar works from every page, and a stop no longer pulls you to
+  the new meeting unless Home is open.
+- Quit during a recording saves the meeting first. A capture failure is shown.
+- Notices follow the theme and appear at the bottom right.
+- Settings → Transcription has a language setting. Settings → Appearance has
+  more fonts, a separate transcript and summary font, and a text size setting.
+- Translated summaries keep English working terms.
+
+See the [preview notes](docs/releases/0.62.0.md) for limits and pending
+real-device checks.
+
+## What changed in the 0.61.1 preview
+
+- With live transcription, audio capture starts while the speech model loads. The
+  first seconds after pressing Record are no longer lost.
+- Quiet speech is raised to a normal level before Parakeet transcribes it, in live
+  recording, retranscription and import.
+
+See the [preview notes](docs/releases/0.61.1.md) for a known issue and pending
+real-device checks.
+
+## What changed in the 0.61.0 preview
+
+- Settings has one page per topic. Add-ons is split into Microsoft 365, Calendars,
+  Confluence and Assistant access. The Beta switches are on the Transcription page.
+- **Settings → Privacy** lists what stays on this PC and what leaves it, based on
+  your current settings.
+- Call detection is under **Settings → Recording**, with a live microphone level.
+  It recognises Teams calls whose controls read Leave and Mute mic.
+- Parakeet models are listed in a table that keeps the measured speed per model.
+- Summary settings save as you change them. A different provider is used only
+  after you choose **Use**.
+- The sidebar shows the next calendar event and groups meetings by date.
+- Calendar files and subscriptions can be up to 16 MiB.
+
+See the [preview notes](docs/releases/0.61.0.md) for pending real-device checks.
+
+## What changed in the 0.5.60 preview
+
+- Import an iCalendar file or add a read-only subscription in **Settings → Add-ons**.
+  Choose an upcoming event to prefill the next recording title and review invitees.
+- Enable call detection for Teams, Zoom, Webex or Google Meet. Automatic stop can
+  finish the recording that the detector started when the call ends.
+- See language estimates for the microphone and system audio when source
+  attribution is enabled. **Test this PC** times an installed speech model.
+- Connect an MCP client to the local meeting library with read-only access.
+  The Live assistance panel appears when live transcript sharing is enabled.
+
+See the [preview notes](docs/releases/0.5.60.md) for updater settings and pending
+real-device checks.
 
 ## What changed in 0.5.59 preview
 
@@ -407,6 +555,11 @@ The historical Python/FastAPI service has been removed; no standalone service,
 Docker component, or manually started whisper-server is needed for local use.
 
 ## Documentation And Support
+
+In **Settings → Diagnostics**, choose **Save report** to save a JSON file for
+troubleshooting. It contains app and platform information, device counts,
+engine status, and failure categories. You choose where to save it and whether
+to share it. See the [diagnostics report contents](docs/architecture.md#diagnostics-report).
 
 - [Documentation index](docs/README.md)
 - [Building from source](docs/BUILDING.md)

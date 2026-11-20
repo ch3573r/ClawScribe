@@ -13,7 +13,7 @@ use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 #[cfg(not(target_os = "macos"))]
 use super::devices::{default_input_device, default_output_device};
 use super::pipeline::AudioPipelineManager;
-use super::recording_saver::RecordingSaver;
+use super::recording_saver::{RecordingSaver, RecordingTranscripts};
 use super::recording_state::{DeviceType as RecordingDeviceType, RecordingState};
 use super::stream::AudioStreamManager;
 use super::transcription::queue::{transcription_queue, TranscriptionQueueReceiver};
@@ -28,21 +28,17 @@ pub struct LiveTranscriptSink {
     pub session_id: String,
     pub recording_generation: crate::knowledge::live::RecordingGeneration,
     state: Arc<crate::knowledge::live::LiveState>,
+    transcripts: Arc<RecordingTranscripts>,
 }
 impl LiveTranscriptSink {
-    pub(crate) fn new(
-        state: Arc<crate::knowledge::live::LiveState>,
-        session_id: String,
-        recording_generation: crate::knowledge::live::RecordingGeneration,
-    ) -> Self {
-        Self {
-            state,
-            session_id,
-            recording_generation,
+    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) -> bool {
+        // A finished decode can be marked partial when some text was unreadable.
+        // Keep the readable portion in the recording; live assistance filters it.
+        if !self.transcripts.record_update(&self.session_id, update) {
+            return false;
         }
-    }
-    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) {
         self.state.ingest(&self.session_id, update);
+        true
     }
     fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
         self.state.snapshot(&self.session_id)
@@ -51,6 +47,7 @@ impl LiveTranscriptSink {
 
 /// Simplified recording manager that coordinates all audio components
 pub struct RecordingManager {
+    detected_call: bool,
     live: Option<LiveTranscriptSink>,
     mode: super::recording_mode::RecordingMode,
     state: Arc<RecordingState>,
@@ -74,6 +71,7 @@ impl RecordingManager {
 
         Self {
             live: None,
+            detected_call: false,
             mode: super::recording_mode::RecordingMode::Live,
             state,
             stream_manager,
@@ -89,11 +87,39 @@ impl RecordingManager {
         self.mode = mode;
         self.recording_saver.set_mode(mode);
     }
-    pub(crate) fn bind_live_session(&mut self, sink: LiveTranscriptSink) {
-        self.live = Some(sink);
+
+    pub(crate) fn set_summary_language(&mut self, language: Option<&str>) {
+        self.recording_saver.set_summary_language(language);
+    }
+    pub(crate) fn bind_live_session(
+        &mut self,
+        state: Arc<crate::knowledge::live::LiveState>,
+        session_id: String,
+        recording_generation: crate::knowledge::live::RecordingGeneration,
+    ) -> LiveTranscriptSink {
+        let sink = LiveTranscriptSink {
+            transcripts: self.recording_saver.bind_transcript_session(&session_id),
+            session_id,
+            recording_generation,
+            state,
+        };
+        self.live = Some(sink.clone());
+        sink
+    }
+
+    pub(crate) fn close_transcript_input(&self) {
+        self.recording_saver.close_transcript_input();
     }
     pub(crate) fn live_session_id(&self) -> Option<&str> {
         self.live.as_ref().map(|sink| sink.session_id.as_str())
+    }
+    pub(super) fn mark_detected_call(&mut self, session: &str) {
+        if self.live_session_id() == Some(session) {
+            self.detected_call = true;
+        }
+    }
+    pub(super) fn owns_detected_call(&self, session: &str) -> bool {
+        self.detected_call && self.live_session_id() == Some(session)
     }
     pub(crate) fn live_recording_generation(
         &self,
@@ -130,25 +156,52 @@ impl RecordingManager {
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
     ) -> Result<TranscriptionQueueReceiver> {
+        self.start_recording_with_preparation(
+            microphone_device,
+            system_device,
+            auto_save,
+            |_| async { Ok(()) },
+        )
+        .await
+    }
+
+    pub(crate) async fn start_recording_with_preparation<F, Fut>(
+        &mut self,
+        microphone_device: Option<Arc<AudioDevice>>,
+        system_device: Option<Arc<AudioDevice>>,
+        auto_save: bool,
+        prepare: F,
+    ) -> Result<TranscriptionQueueReceiver>
+    where
+        F: FnOnce(Option<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
         let result = self
-            .start_session(microphone_device, system_device, auto_save)
+            .start_session(microphone_device, system_device, auto_save, prepare)
             .await;
         if result.is_err() {
             self.state.stop_recording();
-            let _ = self.stream_manager.stop_streams();
-            let _ = self.pipeline_manager.stop().await;
-            self.recording_saver.failed_start().await;
+            let streams_stopped = self.stream_manager.stop_streams().is_ok();
+            let pipeline_drained = self.pipeline_manager.stop().await.is_ok();
+            self.recording_saver
+                .failed_start(streams_stopped && pipeline_drained)
+                .await;
             self.state.cleanup();
         }
         result
     }
 
-    async fn start_session(
+    async fn start_session<F, Fut>(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
-    ) -> Result<TranscriptionQueueReceiver> {
+        prepare: F,
+    ) -> Result<TranscriptionQueueReceiver>
+    where
+        F: FnOnce(Option<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
         info!("Starting recording manager (auto_save: {})", auto_save);
 
         // Stage VAD segments on disk. Slow inference must not retain an
@@ -161,6 +214,7 @@ impl RecordingManager {
         let recording_sender = self
             .recording_saver
             .start_accumulation(auto_save, self.state.clone())?;
+        prepare(self.recording_id().map(str::to_owned)).await?;
 
         // Start recording state first
         self.state.start_recording()?;
@@ -331,6 +385,34 @@ impl RecordingManager {
         }
     }
 
+    pub fn continue_audio_only(&mut self) {
+        self.state.disable_live_transcription();
+        self.mode = super::recording_mode::RecordingMode::AudioOnly;
+        self.recording_saver.continue_audio_only();
+    }
+
+    pub async fn abort_start(&mut self, preserve_audio: bool) {
+        if preserve_audio {
+            self.continue_audio_only();
+            let drained = self.stop_streams_and_force_flush().await.is_ok();
+            self.recording_saver.failed_start(drained).await;
+            self.state.cleanup();
+            return;
+        }
+        if let Some(ref mut monitor) = self.device_monitor {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(3), monitor.stop_monitoring())
+                    .await;
+        }
+        self.state.stop_recording();
+        let streams_stopped = self.stream_manager.stop_streams().is_ok();
+        let pipeline_drained = self.pipeline_manager.stop().await.is_ok();
+        self.recording_saver
+            .failed_start(streams_stopped && pipeline_drained)
+            .await;
+        self.state.cleanup();
+    }
+
     /// Stop recording streams without saving (for use when waiting for transcription)
     pub async fn stop_streams_only(&mut self) -> Result<()> {
         info!("Stopping recording streams only");
@@ -393,15 +475,33 @@ impl RecordingManager {
     pub async fn save_recording_only<R: tauri::Runtime>(
         &mut self,
         app: &tauri::AppHandle<R>,
+        outcome: super::outcome::RecordingOutcome,
     ) -> Result<super::recording_saver::RecordingSaveReport> {
         self.recording_saver
-            .stop_and_save(
-                app,
-                self.state.get_active_recording_duration(),
-                self.state.capture_incomplete(),
-            )
+            .stop_and_save(app, self.state.get_active_recording_duration(), outcome)
             .await
             .map_err(anyhow::Error::msg)
+    }
+
+    pub(crate) fn recording_id(&self) -> Option<&str> {
+        self.recording_saver.recording_id()
+    }
+
+    pub(crate) fn library_transcripts(&self) -> Vec<crate::api::TranscriptSegment> {
+        self.recording_saver
+            .get_transcript_segments()
+            .into_iter()
+            .map(|segment| crate::api::TranscriptSegment {
+                id: segment.id,
+                text: segment.text,
+                timestamp: segment.display_time,
+                audio_start_time: Some(segment.audio_start_time),
+                audio_end_time: Some(segment.audio_end_time),
+                duration: Some(segment.duration),
+                speaker: segment.speaker,
+                word_timestamps: segment.word_timestamps,
+            })
+            .collect()
     }
 
     /// Stop recording and save audio (legacy method)
@@ -431,7 +531,14 @@ impl RecordingManager {
         // Save the recording with actual duration
         match self
             .recording_saver
-            .stop_and_save(app, recording_duration, self.state.capture_incomplete())
+            .stop_and_save(
+                app,
+                recording_duration,
+                super::outcome::RecordingOutcome {
+                    capture_incomplete: self.state.capture_incomplete(),
+                    ..Default::default()
+                },
+            )
             .await
         {
             Ok(report) if report.audio_path.is_some() => {
@@ -526,6 +633,22 @@ impl RecordingManager {
         F: Fn(&str) + Send + Sync + 'static,
     {
         self.state.set_warning_callback(callback);
+    }
+
+    /// Set a callback for the live input levels (about ten calls a second).
+    pub fn set_levels_callback<F>(&self, callback: F)
+    where
+        F: Fn(&super::recording_levels::RecordingLevels) + Send + Sync + 'static,
+    {
+        self.state.set_levels_callback(callback);
+    }
+
+    /// Set a callback for the recordings volume running low on space.
+    pub fn set_disk_space_callback<F>(&self, callback: F)
+    where
+        F: Fn(u64, &std::path::Path) + Send + Sync + 'static,
+    {
+        self.state.set_disk_space_callback(callback);
     }
 
     pub fn set_warning_cleared_callback<F>(&self, callback: F)
@@ -626,136 +749,64 @@ impl RecordingManager {
 
     pub fn handle_device_disconnect_event(
         &mut self,
-        _device_name: String,
+        device_name: String,
         device_type: DeviceMonitorType,
     ) {
-        warn!("Audio device disconnected");
-
-        let device = match device_type {
-            DeviceMonitorType::Microphone => self.state.get_microphone_device(),
-            DeviceMonitorType::SystemAudio => self.state.get_system_device(),
-        };
-
-        if let Some(device) = device {
-            let recording_device_type = match device_type {
-                DeviceMonitorType::Microphone => RecordingDeviceType::Microphone,
-                DeviceMonitorType::SystemAudio => RecordingDeviceType::System,
-            };
-            self.state.start_reconnecting(device, recording_device_type);
-        }
+        let (source, kind) = source_types(device_type);
+        let device = Arc::new(AudioDevice::new(device_name, kind));
+        self.state.mark_source_missing(device, source);
     }
 
-    /// Attempt to reconnect a disconnected device
-    /// Returns true if reconnection successful
     pub async fn attempt_device_reconnect(
         &mut self,
         device_name: &str,
         device_type: DeviceMonitorType,
-    ) -> Result<bool> {
-        info!(
-            "🔄 Attempting to reconnect device: {} ({:?})",
-            device_name, device_type
-        );
-
-        // List current devices
-        let available_devices = list_audio_devices().await?;
-
-        // Find the device by name
-        let device = available_devices
+    ) -> Result<ReconnectResult> {
+        let (source, kind) = source_types(device_type);
+        let pending = self.state.disconnected_devices();
+        if !pending
             .iter()
-            .find(|d| d.name == device_name)
-            .cloned();
-
-        if let Some(device) = device {
-            info!("✅ Device '{}' found, recreating stream...", device_name);
-
-            // Determine which device to reconnect based on type
-            let device_arc: Arc<AudioDevice> = Arc::new(device);
-            match device_type {
-                DeviceMonitorType::Microphone => {
-                    // Stop existing mic stream and start new one
-                    // We need to keep system audio running if it exists
-                    let system_device = self.state.get_system_device();
-
-                    // Restart streams with new microphone
-                    self.stream_manager.stop_streams()?;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                    self.stream_manager
-                        .start_streams(Some(device_arc.clone()), system_device, None)
-                        .await?;
-                    self.state.set_microphone_device(device_arc);
-                    self.state.stop_reconnecting();
-
-                    info!("✅ Microphone reconnected successfully");
-                    Ok(true)
-                }
-                DeviceMonitorType::SystemAudio => {
-                    // Stop existing system audio stream and start new one
-                    let microphone_device = self.state.get_microphone_device();
-
-                    // Restart streams with new system audio
-                    self.stream_manager.stop_streams()?;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                    self.stream_manager
-                        .start_streams(microphone_device, Some(device_arc.clone()), None)
-                        .await?;
-                    self.state.set_system_device(device_arc);
-                    self.state.stop_reconnecting();
-
-                    info!("✅ System audio reconnected successfully");
-                    Ok(true)
-                }
-            }
-        } else {
-            warn!("Audio device still unavailable");
-            Ok(false)
-        }
-    }
-
-    /// Handle a device disconnect event
-    /// Pauses recording and attempts reconnection
-    pub async fn handle_device_disconnect(
-        &mut self,
-        device_name: String,
-        device_type: DeviceMonitorType,
-    ) {
-        self.handle_device_disconnect_event(device_name, device_type);
-    }
-
-    /// Handle a device reconnect event
-    pub async fn handle_device_reconnect(
-        &mut self,
-        device_name: String,
-        device_type: DeviceMonitorType,
-    ) -> Result<()> {
-        info!("📱 Device reconnected: {} ({:?})", device_name, device_type);
-
-        // Attempt to reconnect the device
-        match self
-            .attempt_device_reconnect(&device_name, device_type)
-            .await
+            .any(|(device, missing)| device.name == device_name && *missing == source)
         {
-            Ok(true) => {
-                info!("✅ Successfully reconnected device: {}", device_name);
-                self.state.stop_reconnecting();
-                Ok(())
-            }
-            Ok(false) => {
-                warn!("Device reconnect attempt failed (device not yet available)");
-                Err(anyhow::anyhow!("Device not available"))
-            }
-            Err(e) => {
-                error!("Device reconnect failed");
-                Err(e)
-            }
+            return Ok(self.reconnect_result(false));
         }
+
+        let device = list_audio_devices()
+            .await?
+            .into_iter()
+            .find(|device| device.name == device_name && device.device_type == kind);
+        let Some(device) = device.map(Arc::new) else {
+            return Ok(self.reconnect_result(false));
+        };
+        self.state.mark_source_reconnected(&source);
+        if self
+            .stream_manager
+            .reconnect_source(device.clone(), source.clone())
+            .await
+            .is_err()
+        {
+            self.state.mark_source_missing(device, source.clone());
+            warn!("Requested audio source could not be reopened");
+        }
+        // An error callback can report a disconnect even while the stream is opening.
+        Ok(self.reconnect_result(self.source_active(&source)))
     }
 
-    /// Check if currently attempting to reconnect
-    pub fn is_reconnecting(&self) -> bool {
-        self.state.is_reconnecting()
+    fn source_active(&self, source: &RecordingDeviceType) -> bool {
+        self.stream_manager.source_active(source)
+            && !self
+                .state
+                .disconnected_devices()
+                .iter()
+                .any(|(_, missing)| missing == source)
+    }
+
+    fn reconnect_result(&self, reconnected: bool) -> ReconnectResult {
+        ReconnectResult {
+            reconnected,
+            microphone_active: self.source_active(&RecordingDeviceType::Microphone),
+            system_audio_active: self.source_active(&RecordingDeviceType::System),
+        }
     }
 
     /// Get reference to recording state for external access
@@ -774,5 +825,48 @@ impl Drop for RecordingManager {
     fn drop(&mut self) {
         // Note: Can't call async cleanup in Drop, but streams have their own Drop implementations
         self.state.cleanup();
+    }
+}
+
+fn source_types(device: DeviceMonitorType) -> (RecordingDeviceType, super::devices::DeviceType) {
+    use super::devices::DeviceType;
+    match device {
+        DeviceMonitorType::Microphone => (RecordingDeviceType::Microphone, DeviceType::Input),
+        DeviceMonitorType::SystemAudio => (RecordingDeviceType::System, DeviceType::Output),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ReconnectResult {
+    pub reconnected: bool,
+    pub microphone_active: bool,
+    pub system_audio_active: bool,
+}
+
+#[cfg(test)]
+mod reconnect_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn failed_loopback_stays_pending_when_mic_returns_and_gaps_survive_retry() {
+        let manager = RecordingManager::new();
+        let (mic, mic_kind) = source_types(DeviceMonitorType::Microphone);
+        let (system, system_kind) = source_types(DeviceMonitorType::SystemAudio);
+        manager.state.mark_source_missing(
+            Arc::new(AudioDevice::new("synthetic output".into(), system_kind)),
+            system.clone(),
+        );
+        manager.state.mark_source_missing(
+            Arc::new(AudioDevice::new("synthetic microphone".into(), mic_kind)),
+            mic.clone(),
+        );
+        manager.state.mark_source_reconnected(&mic);
+        let pending = manager.state.disconnected_devices();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, system);
+        assert!(!manager.reconnect_result(false).reconnected);
+        manager.state.mark_source_reconnected(&system);
+        assert!(manager.state.disconnected_devices().is_empty());
+        assert!(manager.state.capture_incomplete());
     }
 }

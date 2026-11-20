@@ -4,7 +4,6 @@
 // validate-and-load, and the DirectML toggle. Mirrors parakeet_engine::commands.
 
 use crate::nemotron_engine::nemotron_engine::{ModelInfo, NemotronEngine, NEMOTRON_MODEL};
-use crate::parakeet_engine::ModelStatus;
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, Manager, Runtime};
 
@@ -95,36 +94,28 @@ pub async fn nemotron_cancel_download(model_name: String) -> Result<(), String> 
 }
 
 /// Ensure a Nemotron model is downloaded and loaded for the configured engine.
-pub async fn nemotron_validate_model_ready_with_config<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<String, String> {
-    let engine = engine().ok_or_else(|| "Nemotron engine not initialized".to_string())?;
+pub(crate) async fn nemotron_validate_model_ready_for(
+    configured: Option<String>,
+) -> Result<String, crate::audio::transcription::engine::LiveModelFailure> {
+    use crate::audio::transcription::engine::{
+        check_model_files, LiveModelFailure, ModelFileState,
+    };
 
-    // Resolve the configured model name (single v1 model otherwise).
-    let configured =
-        match crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await {
-            Ok(Some(cfg)) if cfg.provider == "nemotron" && !cfg.model.is_empty() => cfg.model,
-            _ => NEMOTRON_MODEL.to_string(),
-        };
-
+    let engine = engine().ok_or(LiveModelFailure::LoadFailed)?;
+    let configured = configured.unwrap_or_else(|| NEMOTRON_MODEL.to_string());
     let models = engine
         .discover_models()
         .await
-        .map_err(|e| format!("Failed to discover Nemotron models: {}", e))?;
-
-    let available = models
-        .iter()
-        .any(|m| m.name == configured && matches!(m.status, ModelStatus::Available));
-    if !available {
-        return Err(format!(
-            "Nemotron model '{}' is not downloaded. Download it from Settings to enable streaming transcription.",
-            configured
-        ));
-    }
-
-    engine
-        .load_model(&configured)
-        .await
-        .map_err(|e| format!("Failed to load Nemotron model '{}': {}", configured, e))?;
+        .map_err(|_| LiveModelFailure::LoadFailed)?;
+    check_model_files(
+        models
+            .iter()
+            .filter(|model| model.name == configured)
+            .map(|model| ModelFileState::from(&model.status)),
+    )?;
+    engine.load_model(&configured).await.map_err(|error| {
+        log::warn!("Nemotron live model load failed: {error}");
+        LiveModelFailure::LoadFailed
+    })?;
     Ok(configured)
 }

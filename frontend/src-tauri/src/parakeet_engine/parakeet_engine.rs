@@ -620,6 +620,18 @@ impl ParakeetEngine {
         self.current_model.read().await.is_some()
     }
 
+    /// Report the active session, including any worker respawn during inference.
+    pub(crate) async fn session_status(&self) -> Option<(bool, u64)> {
+        self.current_model
+            .read()
+            .await
+            .as_ref()
+            .map(|model| match model {
+                LoadedModel::InProcess(model) => (model.directml_registered, 0),
+                LoadedModel::Worker(worker) => worker.session_status(),
+            })
+    }
+
     /// Transcribe audio samples using the loaded Parakeet model
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>) -> Result<String> {
         Ok(self.transcribe_audio_timestamped(audio_data).await?.text)

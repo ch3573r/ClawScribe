@@ -3,7 +3,6 @@
 import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { Loader2, Upload, ChevronDown } from "lucide-react";
 import {
@@ -35,9 +34,12 @@ import {
 } from "@/components/ui/dialog";
 import {
   ONENOTE_LARGE_LIBRARY_MESSAGE,
+  TASK_IDENTITY_REVIEW_CODE,
   isOneNoteLargeLibraryError,
   microsoftExportService,
   type MicrosoftConnectionInfo,
+  type OneNoteResume,
+  type MeetingExportHistory,
   type NotebookInfo,
 } from "@/services/microsoftExportService";
 import {
@@ -65,6 +67,7 @@ interface MeetingExportButtonsProps {
   /** Resolves the current summary as markdown. */
   getMarkdown: () => Promise<string>;
   disabled?: boolean;
+  onReviewActions?: () => void;
 }
 
 type DocumentDestination = "word" | "onedrive" | "confluence";
@@ -120,6 +123,16 @@ function defaultConfluencePageTitle(title: string, createdAt?: string): string {
   return defaultDatedTitle(title, createdAt);
 }
 
+function historyStatus(status: string): string {
+  switch (status) {
+    case "succeeded": return "Exported";
+    case "unknown_after_submit": return "Outcome unknown";
+    case "failed_auth": return "Sign-in expired";
+    case "destination_not_found": return "Destination unavailable";
+    default: return "Failed";
+  }
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -134,9 +147,12 @@ export function MeetingExportButtons({
   meetingCreatedAt,
   getMarkdown,
   disabled = false,
+  onReviewActions,
 }: MeetingExportButtonsProps) {
   const [connected, setConnected] = useState(false);
-  const [hasActionItems, setHasActionItems] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<MeetingExportHistory[] | null>(null);
+  const [historyError, setHistoryError] = useState("");
   const [busy, setBusy] = useState<Busy>(null);
   const pending = useRef(false);
   const [documentDestination, setDocumentDestination] = useState<DocumentDestination | null>(null);
@@ -148,6 +164,11 @@ export function MeetingExportButtons({
   };
 
   const [oneNoteOpen, setOneNoteOpen] = useState(false);
+  const [resumes, setResumes] = useState<OneNoteResume[] | null>(null);
+  const [resumeError, setResumeError] = useState("");
+  const [resumeId, setResumeId] = useState("new");
+  const selectedResume = resumes?.find(attempt => attempt.id === resumeId);
+  const showNewSection = resumes !== null && !selectedResume;
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [todoOpen, setToDoOpen] = useState(false);
   const [oneNoteNotebooks, setOneNoteNotebooks] = useState<NotebookInfo[]>([]);
@@ -192,20 +213,11 @@ export function MeetingExportButtons({
       } catch {
         if (!cancelled) setConnected(false);
       }
-      try {
-        const md = await getMarkdown();
-        const present = md.trim()
-          ? await microsoftExportService.summaryHasActionItems(md)
-          : false;
-        if (!cancelled) setHasActionItems(present);
-      } catch {
-        if (!cancelled) setHasActionItems(false);
-      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [meetingId, getMarkdown]);
+  }, [meetingId]);
 
   const reportToast = useCallback(
     (
@@ -226,10 +238,13 @@ export function MeetingExportButtons({
             : undefined,
         });
       } else {
-        const failing = report.items.find((i) => i.code) ?? report.items[0];
-        const reason = failing?.code ?? report.overall;
+        const description = report.items.some(item => item.status === "unknownaftersubmit")
+          ? "Check Microsoft before retrying an export with an unknown outcome."
+          : report.items.some(item => item.code === TASK_IDENTITY_REVIEW_CODE)
+            ? "Check the tasks marked for review before exporting again."
+            : "Open Export history to review the results.";
         toast.warning(`${label} export finished with issues`, {
-          description: `Reason: ${reason}`,
+          description,
         });
       }
     },
@@ -237,9 +252,9 @@ export function MeetingExportButtons({
   );
 
   useEffect(() => {
-    if (!oneNoteOpen || !connected) return;
+    if (!oneNoteOpen || !connected || !showNewSection) return;
     void loadOneNoteNotebooks();
-  }, [connected, loadOneNoteNotebooks, oneNoteOpen]);
+  }, [connected, loadOneNoteNotebooks, oneNoteOpen, showNewSection]);
 
   const submitNewNotebook = useCallback(async () => {
     const name = sanitizeNotebookName(newNotebookName).trim();
@@ -264,9 +279,30 @@ export function MeetingExportButtons({
     }
   }, [newNotebookName]);
 
-  // Opening the OneNote dialog: load the saved destination if present, then let
-  // the user override it or create a notebook/section inline.
-  const openOneNote = useCallback(() => {
+  const openHistory = useCallback(async () => {
+    setHistoryOpen(true);
+    setHistory(null);
+    setHistoryError("");
+    try {
+      setHistory(await microsoftExportService.getMeetingExportHistory(meetingId));
+    } catch (error) {
+      setHistoryError(errorText(error));
+    }
+  }, [meetingId]);
+
+  const loadResumes = useCallback(async () => {
+    setResumeError("");
+    setResumes(null);
+    try {
+      const available = await microsoftExportService.listOneNoteResumes(meetingId);
+      setResumeId(available[0]?.id ?? "new");
+      setResumes(available);
+    } catch (error) {
+      setResumeError(errorText(error));
+    }
+  }, [meetingId]);
+
+  const openOneNote = useCallback(async () => {
     setExportOptions(defaultExportOptions());
     const saved = getExportDestinations();
     const generatedTitle = defaultDatedTitle(meetingTitle, meetingCreatedAt);
@@ -278,64 +314,39 @@ export function MeetingExportButtons({
     setCreatingNotebook(false);
     setNewNotebookName("");
     setOneNoteOpen(true);
-  }, [meetingCreatedAt, meetingTitle]);
+    await loadResumes();
+  }, [loadResumes, meetingCreatedAt, meetingTitle]);
 
   const confirmOneNote = useCallback(async () => {
-    if (pending.current) return;
-    const pageTitle = oneNotePageTitle.trim() || defaultDatedTitle(meetingTitle, meetingCreatedAt);
+    if (pending.current || !resumes || selectedResume?.canResume === false) return;
+    const pageTitle = selectedResume?.pageTitle ?? (oneNotePageTitle.trim() || defaultDatedTitle(meetingTitle, meetingCreatedAt));
     const sectionName = sanitizeSectionName(oneNoteSectionName).trim();
-    if (!oneNoteNotebookId) {
-      toast.info("Choose a OneNote notebook.");
-      return;
-    }
-    if (!sectionName) {
-      toast.info("Enter a OneNote section name.");
-      return;
-    }
+    if (!selectedResume && (!oneNoteNotebookId || !sectionName)) return;
+    const options = selectedResume?.options ?? exportOptions;
     pending.current = true;
     setBusy("onenote");
     try {
-      const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, exportOptions);
-      const notebookName =
-        oneNoteNotebooks.find((n) => n.id === oneNoteNotebookId)?.displayName ??
-        oneNoteSavedNotebookName ??
-        undefined;
-      setExportDestinations({
-        notebookId: oneNoteNotebookId,
-        notebookName,
-        sectionId: undefined,
-        sectionName: undefined,
-      });
+      const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, options);
+      if (!selectedResume) {
+        const notebookName = oneNoteNotebooks.find(n => n.id === oneNoteNotebookId)?.displayName ?? oneNoteSavedNotebookName ?? undefined;
+        setExportDestinations({ notebookId: oneNoteNotebookId, notebookName, sectionId: undefined, sectionName: undefined });
+      }
       const report = await microsoftExportService.exportMeetingToOneNoteSection(
-        meetingId,
-        pageTitle,
-        md,
-        oneNoteNotebookId,
-        sectionName,
+        meetingId, pageTitle, md, oneNoteNotebookId, sectionName, options, selectedResume?.id ?? null,
       );
       reportToast("OneNote", report);
-      setOneNoteOpen(false);
-    } catch (e) {
-      toast.error("OneNote export failed", {
-        description: e instanceof Error ? e.message : String(e),
-      });
+      if (report.overall === "succeeded") setOneNoteOpen(false);
+      else await loadResumes();
+    } catch (error) {
+      toast.error("OneNote export failed", { description: errorText(error) });
+      // Section creation may already have been checkpointed before the failure.
+      if (!selectedResume) await loadResumes();
     } finally {
       pending.current = false;
       setBusy(null);
     }
-  }, [
-    getMarkdown,
-    exportOptions,
-    meetingCreatedAt,
-    meetingId,
-    meetingTitle,
-    oneNoteNotebookId,
-    oneNoteNotebooks,
-    oneNoteSavedNotebookName,
-    oneNotePageTitle,
-    oneNoteSectionName,
-    reportToast,
-  ]);
+  }, [getMarkdown, exportOptions, loadResumes, meetingCreatedAt, meetingId, meetingTitle, oneNoteNotebookId,
+    oneNoteNotebooks, oneNoteSavedNotebookName, oneNotePageTitle, oneNoteSectionName, reportToast, resumes, selectedResume]);
 
   const selectedNotebookMissing =
     !!oneNoteNotebookId && !oneNoteNotebooks.some((n) => n.id === oneNoteNotebookId);
@@ -345,7 +356,7 @@ export function MeetingExportButtons({
   const openPlanner = useCallback(() => {
     if (!hasPlannerDestination(getExportDestinations())) {
       toast.info("Pick a Planner plan and default bucket first", {
-        description: "Settings → Add-ons → Planner task export.",
+        description: "Settings → Microsoft 365 → Planner.",
       });
       return;
     }
@@ -355,7 +366,7 @@ export function MeetingExportButtons({
   const openToDo = useCallback(() => {
     if (!hasToDoDestination(getExportDestinations())) {
       toast.info("Pick a Microsoft To Do list first", {
-        description: "Settings → Add-ons → Microsoft To Do export.",
+        description: "Settings → Microsoft 365 → To Do.",
       });
       return;
     }
@@ -391,7 +402,7 @@ export function MeetingExportButtons({
         const spaceKey = confluenceSpaceKey?.trim();
         if (!baseUrl || !spaceKey) {
           toast.info("Finish Confluence REST setup first", {
-            description: "Settings → Add-ons → Confluence export.",
+            description: "Settings → Confluence.",
           });
           return;
         }
@@ -497,7 +508,8 @@ export function MeetingExportButtons({
     setBusy("word");
     try {
       const markdown = await readExportSummary(getMarkdown, exportOptions);
-      const path = await save({ defaultPath: safeDocumentName(meetingTitle), filters: [{ name: "Word document", extensions: ["docx"] }] });
+      // The core opens the save dialog and only accepts the path it chose here.
+      const path = await invoke<string | null>("pick_word_save_path", { suggestedName: safeDocumentName(meetingTitle) });
       if (!path) return;
       await invoke("export_local_word", {
         meetingId, title: meetingTitle, markdown, path,
@@ -547,13 +559,13 @@ export function MeetingExportButtons({
               OneDrive DOCX/PDF
             </DropdownMenuItem>
           )}
-          {connected && hasActionItems && (
+          {connected && (
             <DropdownMenuItem onClick={openPlanner}>
               <PlannerIcon className="mr-2 h-4 w-4" />
               Planner action items
             </DropdownMenuItem>
           )}
-          {connected && hasActionItems && (
+          {connected && (
             <DropdownMenuItem onClick={openToDo}>
               <ToDoIcon className="mr-2 h-4 w-4" />
               Microsoft To Do tasks
@@ -563,6 +575,7 @@ export function MeetingExportButtons({
             <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => void openHistory()}>Export history</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -582,137 +595,181 @@ export function MeetingExportButtons({
         </DialogContent>
       </Dialog>
 
+      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Export history</DialogTitle>
+            <DialogDescription>OneNote pages and tasks exported to Planner or Microsoft To Do from this meeting.</DialogDescription>
+          </DialogHeader>
+          {historyError && <div className="space-y-2">
+            <p role="alert" className="text-sm text-destructive">{historyError}</p>
+            <Button type="button" variant="outline" onClick={() => void openHistory()}>Retry loading</Button>
+          </div>}
+          {!history && !historyError && <p role="status" className="text-sm text-muted-foreground">Loading export history…</p>}
+          {history?.length === 0 && <p className="text-sm text-muted-foreground">No Microsoft exports recorded for this meeting.</p>}
+          {history?.some(item => item.status === "unknown_after_submit") && <p className="text-sm text-muted-foreground">Check Microsoft for exports with an unknown outcome before trying again.</p>}
+          {!!history?.length && <ul className="divide-y divide-border">
+            {history.map((item, index) => <li key={index} className="flex items-center gap-3 py-2 text-sm">
+              <div className="flex-1">
+                <p>{item.destination} · {historyStatus(item.status)}</p>
+                {item.at && <time className="text-xs text-muted-foreground" dateTime={item.at}>{new Date(item.at).toLocaleString()}</time>}
+              </div>
+              {item.webUrl && <Button type="button" variant="outline" size="sm" aria-label={`Open in ${item.destination}`} onClick={() => void openExternal(item.webUrl!)}>Open</Button>}
+            </li>)}
+          </ul>}
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={oneNoteOpen} onOpenChange={(o) => !busy && setOneNoteOpen(o)}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Export to OneNote</DialogTitle>
             <DialogDescription>
-              Create a new dated section in the selected notebook, then export
-              the meeting page into it.
+              Resume in a saved section or export to a new section.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="onenote-notebook">Notebook</Label>
-                <Button variant="ghost"
-                  type="button"
-                  className="h-auto gap-0 rounded-none p-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground disabled:opacity-50"
-                  onClick={() => void loadOneNoteNotebooks()}
-                  disabled={loadingOneNoteNotebooks || busy === "onenote"}
-                >
-                  {loadingOneNoteNotebooks ? "Loading..." : "Reload"}
-                </Button>
-              </div>
-              <Select
-                value={creatingNotebook ? "__new__" : oneNoteNotebookId || EMPTY_NOTEBOOK_VALUE}
-                onValueChange={(value) => {
-                  if (value === "__new__") {
-                    focusNewNotebookOnClose.current = true;
-                    setCreatingNotebook(true);
-                    return;
-                  }
-                  setCreatingNotebook(false);
-                  setOneNoteNotebookId(value === EMPTY_NOTEBOOK_VALUE ? "" : value);
-                  setOneNoteSavedNotebookName(null);
-                }}
-                disabled={loadingOneNoteNotebooks || busy === "onenote"}
-              >
-                <SelectTrigger id="onenote-notebook" className="h-auto w-full rounded-lg border border-border bg-background px-3 py-2 text-sm shadow-none"><SelectValue /></SelectTrigger>
-                <SelectContent onCloseAutoFocus={(event) => {
-                  if (focusNewNotebookOnClose.current) {
-                    focusNewNotebookOnClose.current = false;
-                    event.preventDefault();
-                    newNotebookInputRef.current?.focus();
-                  }
-                }}>
-                  <SelectItem value={EMPTY_NOTEBOOK_VALUE}>
-                    {loadingOneNoteNotebooks ? "Loading..." : "Select a notebook"}
-                  </SelectItem>
-                  {oneNoteNotebooks.map((notebook) => (
-                    <SelectItem key={notebook.id} value={notebook.id}>
-                      {notebook.displayName}
-                    </SelectItem>
-                  ))}
-                  {selectedNotebookMissing && (
-                    <SelectItem value={oneNoteNotebookId}>
-                      {oneNoteSavedNotebookName ?? "Saved notebook"}
-                    </SelectItem>
-                  )}
-                  <SelectItem value="__new__">+ New notebook...</SelectItem>
+            {resumeError && <div className="space-y-2">
+              <p role="alert" className="text-sm text-destructive">{resumeError}</p>
+              <Button type="button" variant="outline" onClick={() => void loadResumes()}>Retry loading</Button>
+            </div>}
+            {!resumes && !resumeError && <p role="status" className="text-sm text-muted-foreground">Loading saved sections…</p>}
+            {!!resumes?.length && <div className="space-y-2">
+              <Label htmlFor="onenote-export-section">Section</Label>
+              <Select value={resumeId} onValueChange={setResumeId} disabled={busy === "onenote"}>
+                <SelectTrigger id="onenote-export-section"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {resumes.map(attempt => <SelectItem key={attempt.id} value={attempt.id}>{attempt.sectionName} · {new Date(attempt.startedAt).toLocaleString()}</SelectItem>)}
+                  <SelectItem value="new">Create another section</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-
-            {oneNoteNotebookListingLimited && (
-              <p className="rounded-lg border border-warning-border/30 bg-warning p-3 text-sm text-warning-foreground">
-                {ONENOTE_LARGE_LIBRARY_MESSAGE}
-              </p>
-            )}
-
-            {creatingNotebook && (
-              <div className="space-y-2 rounded-lg border border-border bg-muted p-3">
-                <Label htmlFor="onenote-new-notebook">New notebook name</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="onenote-new-notebook"
-                    ref={newNotebookInputRef}
-                    value={newNotebookName}
-                    onChange={(e) => setNewNotebookName(sanitizeNotebookName(e.target.value))}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void submitNewNotebook();
-                      if (e.key === "Escape") setCreatingNotebook(false);
-                    }}
-                    maxLength={ONENOTE_NOTEBOOK_MAX}
-                    autoFocus
-                  />
-                  <Button
+            </div>}
+            {selectedResume && <p className="text-sm text-muted-foreground">{selectedResume.canResume
+              ? "Resume with the original title and content options. Previously created pages will be skipped."
+              : "The section creation outcome is unknown. Check OneNote before creating another section."}</p>}
+            {showNewSection && <>
+              <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="onenote-notebook">Notebook</Label>
+                  <Button variant="ghost"
                     type="button"
-                    size="sm"
-                    onClick={() => void submitNewNotebook()}
-                    disabled={savingNotebook || !newNotebookName.trim()}
+                    className="h-auto gap-0 rounded-none p-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground disabled:opacity-50"
+                    onClick={() => void loadOneNoteNotebooks()}
+                    disabled={loadingOneNoteNotebooks || busy === "onenote"}
                   >
-                    {savingNotebook ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
+                    {loadingOneNoteNotebooks ? "Loading..." : "Reload"}
                   </Button>
                 </div>
+                <Select
+                  value={creatingNotebook ? "__new__" : oneNoteNotebookId || EMPTY_NOTEBOOK_VALUE}
+                  onValueChange={(value) => {
+                    if (value === "__new__") {
+                      focusNewNotebookOnClose.current = true;
+                      setCreatingNotebook(true);
+                      return;
+                    }
+                    setCreatingNotebook(false);
+                    setOneNoteNotebookId(value === EMPTY_NOTEBOOK_VALUE ? "" : value);
+                    setOneNoteSavedNotebookName(null);
+                  }}
+                  disabled={loadingOneNoteNotebooks || busy === "onenote"}
+                >
+                  <SelectTrigger id="onenote-notebook" className="h-auto w-full rounded-lg border border-border bg-background px-3 py-2 text-sm shadow-none"><SelectValue /></SelectTrigger>
+                  <SelectContent onCloseAutoFocus={(event) => {
+                    if (focusNewNotebookOnClose.current) {
+                      focusNewNotebookOnClose.current = false;
+                      event.preventDefault();
+                      newNotebookInputRef.current?.focus();
+                    }
+                  }}>
+                    <SelectItem value={EMPTY_NOTEBOOK_VALUE}>
+                      {loadingOneNoteNotebooks ? "Loading..." : "Select a notebook"}
+                    </SelectItem>
+                    {oneNoteNotebooks.map((notebook) => (
+                      <SelectItem key={notebook.id} value={notebook.id}>
+                        {notebook.displayName}
+                      </SelectItem>
+                    ))}
+                    {selectedNotebookMissing && (
+                      <SelectItem value={oneNoteNotebookId}>
+                        {oneNoteSavedNotebookName ?? "Saved notebook"}
+                      </SelectItem>
+                    )}
+                    <SelectItem value="__new__">+ New notebook...</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-            )}
 
-            <div className="space-y-2">
-              <Label htmlFor="onenote-section-name">New section name</Label>
-              <Input
-                id="onenote-section-name"
-                value={oneNoteSectionName}
-                onChange={(e) => setOneNoteSectionName(sanitizeSectionName(e.target.value))}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionName.trim()) {
-                    void confirmOneNote();
-                  }
-                }}
-                maxLength={ONENOTE_SECTION_MAX}
-                disabled={busy === "onenote"}
-              />
-              <p className="text-xs text-muted-foreground">
-                A fresh OneNote section is created for this export. Invalid
-                OneNote characters are removed automatically. Max 49 characters.
-              </p>
-            </div>
+              {oneNoteNotebookListingLimited && (
+                <p className="rounded-lg border border-warning-border/30 bg-warning p-3 text-sm text-warning-foreground">
+                  {ONENOTE_LARGE_LIBRARY_MESSAGE}
+                </p>
+              )}
 
-            <div className="space-y-2">
-              <Label htmlFor="onenote-page-title">Page title</Label>
-              <Input
-                id="onenote-page-title"
-                value={oneNotePageTitle}
-                onChange={(e) => setOneNotePageTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionName.trim()) {
-                    void confirmOneNote();
-                  }
-                }}
-                disabled={busy === "onenote"}
-              />
-            </div>
+              {creatingNotebook && (
+                <div className="space-y-2 rounded-lg border border-border bg-muted p-3">
+                  <Label htmlFor="onenote-new-notebook">New notebook name</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="onenote-new-notebook"
+                      ref={newNotebookInputRef}
+                      value={newNotebookName}
+                      onChange={(e) => setNewNotebookName(sanitizeNotebookName(e.target.value))}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void submitNewNotebook();
+                        if (e.key === "Escape") setCreatingNotebook(false);
+                      }}
+                      maxLength={ONENOTE_NOTEBOOK_MAX}
+                      autoFocus
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void submitNewNotebook()}
+                      disabled={savingNotebook || !newNotebookName.trim()}
+                    >
+                      {savingNotebook ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <Label htmlFor="onenote-section-name">New section name</Label>
+                <Input
+                  id="onenote-section-name"
+                  value={oneNoteSectionName}
+                  onChange={(e) => setOneNoteSectionName(sanitizeSectionName(e.target.value))}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionName.trim()) {
+                      void confirmOneNote();
+                    }
+                  }}
+                  maxLength={ONENOTE_SECTION_MAX}
+                  disabled={busy === "onenote"}
+                />
+                <p className="text-xs text-muted-foreground">
+                  A fresh OneNote section is created for this export. Invalid
+                  OneNote characters are removed automatically. Max 49 characters.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="onenote-page-title">Page title</Label>
+                <Input
+                  id="onenote-page-title"
+                  value={oneNotePageTitle}
+                  onChange={(e) => setOneNotePageTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && oneNoteNotebookId && oneNoteSectionName.trim()) {
+                      void confirmOneNote();
+                    }
+                  }}
+                  disabled={busy === "onenote"}
+                />
+              </div>
+            </>}
           </div>
           <DialogFooter>
             <Button
@@ -726,10 +783,10 @@ export function MeetingExportButtons({
             <Button
               type="button"
               onClick={confirmOneNote}
-              disabled={busy === "onenote" || !oneNoteNotebookId || !oneNoteSectionName.trim()}
+              disabled={busy === "onenote" || !resumes || selectedResume?.canResume === false || (!selectedResume && (!oneNoteNotebookId || !oneNoteSectionName.trim()))}
             >
               {busy === "onenote" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Export page
+              {selectedResume ? "Resume export" : resumes?.length ? "Create another section" : "Export page"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -746,6 +803,7 @@ export function MeetingExportButtons({
           defaultBucketId={getExportDestinations().bucketId ?? ""}
           defaultBucketName={getExportDestinations().bucketName}
           getMarkdown={getMarkdown}
+          onReviewActions={onReviewActions}
           onReport={(report) => reportToast("Planner", report)}
         />
       )}
@@ -758,6 +816,7 @@ export function MeetingExportButtons({
           listId={getExportDestinations().todoListId ?? ""}
           listName={getExportDestinations().todoListName}
           getMarkdown={getMarkdown}
+          onReviewActions={onReviewActions}
           onReport={(report) => reportToast("Microsoft To Do", report)}
         />
       )}

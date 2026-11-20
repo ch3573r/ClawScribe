@@ -1,6 +1,6 @@
 pub use super::chunking::{chunk_text, rough_token_count};
 
-use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::llm_client::{generate_summary, LLMProvider, SummaryDispatch};
 use crate::summary::templates::Template;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -154,11 +154,8 @@ fn english_markdown_after_normalization_result(
     match normalization_result {
         Ok(normalized) => Ok(normalized),
         Err(e) if e.contains("cancelled") => Err(e),
-        Err(e) => {
-            error!(
-                "English normalization pass failed; returning pass-1 markdown without hard fail: {}",
-                e
-            );
+        Err(_) => {
+            error!("English normalization failed; retaining the first pass");
             Ok(original_markdown.to_string())
         }
     }
@@ -216,11 +213,11 @@ fn translation_system_prompt(target_language: &str) -> String {
         r#"You are a precise translator. Translate the provided Markdown document into {target_language} while preserving structure exactly.
 
 **CRITICAL RULES:**
-1. Translate every sentence, heading, list item, and table cell into {target_language}.
+1. Translate every sentence, heading, list item, and table cell into natural {target_language}, the way a native-speaking colleague would write meeting notes. Do not translate word for word.
 2. Preserve the Markdown structure EXACTLY: keep every `#`, `**`, `-`, `|`, code fence marker, and table pipe in the same position.
 3. Do NOT translate: proper nouns (names of people, products, companies), code identifiers, file paths, URLs, numeric values, or text inside backticks.
 4. Do not add commentary or explanation. Output ONLY the translated Markdown.
-5. If a technical term has no standard translation, keep the original English word."#
+5. Keep English terms that people working in {target_language} normally say in English: technical, IT, product and business terms such as rollout, deployment, release, backup, ticket, review, roadmap, feature, update, workshop and call. Never coin or force a native word for such a term; apply only the grammar of {target_language} to it, such as articles, capitalisation and compounds."#
     )
 }
 
@@ -333,7 +330,7 @@ pub fn extract_meeting_name_from_markdown(markdown: &str) -> Option<String> {
 /// Tuple of (final_summary_markdown, english_summary_markdown, number_of_chunks_processed)
 /// where english_summary_markdown is the canonical AI-generated English summary
 /// (equals final_summary_markdown when target language is English)
-pub async fn generate_meeting_summary(
+pub(crate) async fn generate_meeting_summary(
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -351,9 +348,11 @@ pub async fn generate_meeting_summary(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
     summary_language: Option<&str>,
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
+    reduction: &super::context_budget::Reduction,
 ) -> Result<(String, String, i64), String> {
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -401,8 +400,13 @@ pub async fn generate_meeting_summary(
                 model_name,
                 super::context_budget::EXTRACT_FACTS.len() + 256,
             )?;
-            let (content_to_summarize, successful_chunk_count) =
-                super::context_budget::reduce(text, budget, piece_budget, |chunk| async move {
+            let (content_to_summarize, successful_chunk_count) = super::context_budget::reduce(
+                text,
+                budget,
+                piece_budget,
+                reduction,
+                cancellation_token,
+                |chunk| async move {
                     generate_summary(
                         client,
                         provider,
@@ -418,6 +422,7 @@ pub async fn generate_meeting_summary(
                         top_p,
                         app_data_dir,
                         cancellation_token,
+                        dispatch,
                     )
                     .await
                     .and_then(|text| require_summary_markdown(&text, "Meeting excerpt"))
@@ -468,6 +473,7 @@ pub async fn generate_meeting_summary(
                 top_p,
                 app_data_dir,
                 cancellation_token,
+                dispatch,
             )
             .await?;
 
@@ -497,6 +503,7 @@ pub async fn generate_meeting_summary(
                 top_p,
                 app_data_dir,
                 cancellation_token,
+                dispatch,
             )
             .await
             {
@@ -525,6 +532,7 @@ pub async fn generate_meeting_summary(
                     top_p,
                     app_data_dir,
                     cancellation_token,
+                    dispatch,
                 )
                 .await,
             )?;
@@ -555,6 +563,7 @@ async fn run_markdown_transform(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -577,6 +586,7 @@ async fn run_markdown_transform(
         top_p,
         app_data_dir,
         cancellation_token,
+        dispatch,
     )
     .await
     .map_err(|e| format!("{failure_label} failed: {e}"))?;
@@ -600,6 +610,7 @@ async fn translate_markdown(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     info!("Translation pass: target language = {}", target_language);
 
@@ -624,6 +635,7 @@ async fn translate_markdown(
         top_p,
         app_data_dir,
         cancellation_token,
+        dispatch,
     )
     .await
 }
@@ -643,6 +655,7 @@ async fn normalize_markdown_to_english(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     info!("English normalization pass: preserving Markdown structure");
 
@@ -666,6 +679,7 @@ async fn normalize_markdown_to_english(
         top_p,
         app_data_dir,
         cancellation_token,
+        dispatch,
     )
     .await
 }
@@ -699,9 +713,11 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("en"),
             Some("en"),
             None,
+            &crate::summary::context_budget::Reduction::default(),
         )
         .await;
         assert!(result

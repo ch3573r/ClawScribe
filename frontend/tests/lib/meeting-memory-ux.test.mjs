@@ -8,13 +8,16 @@ const text=node=>Array.isArray(node)?node.map(text).join(''):typeof node==='stri
 const meetings=[{id:'a',title:'Launch review'},{id:'b',title:'Budget planning'}];
 function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic_ready:0},sidebar={}) {
   const hooks=createHookHarness();const exports=loadTsModule(file,{
-    react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'next/navigation':{useRouter:()=>({push(){}})},
+    react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'next/navigation':{useRouter:()=>({push:sidebar.push ?? (()=>{})})},
     'next/link':'link',
+    '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null,...sidebar})},
     '@/contexts/ImportDialogContext':{useImportDialog:()=>({openImportDialog:sidebar.openImportDialog})},
     '@/contexts/RecordingStateContext':{useRecordingState:()=>({})},
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
+    '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows'},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
+    './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
     '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
@@ -24,6 +27,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>indexStatus,history:async()=>[]}},
     '@/components/ui/popover':{Popover:'popover',PopoverTrigger:'trigger',PopoverContent:'content'},
     '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({scope,messages:[],threads:[],cancel(){},search(){}})},
+    '@/hooks/useLibrarySearch':{useLibrarySearch:(query,active,scope)=>({results:query && active ? sidebar.search?.(query,scope) ?? {titles:[],passages:[],limited:false} : null,searching:false,error:''})},
     './SearchResults':{SearchResults:'results'},'./KnowledgeChat':{KnowledgeChat:'chat'},'./EvidencePreview':{EvidencePreview:'preview'},
   });
   return {...hooks,render:()=>hooks.render(()=>exports[name](props))};
@@ -74,15 +78,51 @@ test('archive empty state starts recording and imports through the shared flows'
   assert.deepEqual(calls,['record','import']);app.unmount();
 });
 
-test('archive filtering keeps controls and clear filters restores the full linked archive',()=>{
+test('archive filtering keeps controls and clear filters restores all rows',()=>{
   const app=surface('src/app/meetings/page.tsx','default');
   let tree=app.render();assert.match(text(tree),/2 meetings/);
-  assert.equal(nodes(tree).filter(node=>node.type==='link'&&node.props.href.startsWith('/meeting-details')).length,2);
+  assert.deepEqual([...nodes(tree).find(node=>node.type==='archive-rows').props.meetings.map(meeting=>meeting.id)],['b','a']);
   nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'missing'}});
-  tree=app.render();assert.match(text(tree),/0 of 2 meetings/);assert.match(text(tree),/No meetings match/);
+  tree=app.render();assert.match(text(tree),/No meetings match/);
   nodes(tree).find(node=>node.type==='button'&&text(node)==='Clear filters').props.onClick();
   tree=app.render();assert.match(text(tree),/2 meetings/);
-  assert.equal(nodes(tree).filter(node=>node.type==='link').length,2);app.unmount();
+  assert.equal(nodes(tree).find(node=>node.type==='archive-rows').props.meetings.length,2);app.unmount();
+});
+
+test('archive shows titles and passages and restores date and query when returning',()=>{
+  const observed=[], navigated=[];
+  const evidence={locator:{kind:'transcript',meeting_id:'b'},chunk_id:'late-segment'};
+  const sidebar={
+    setCurrentMeeting(){},
+    push:url=>navigated.push(url),
+    meetings:[{...meetings[0],created_at:'2026-01-01'},{...meetings[1],created_at:'2026-02-01'}],
+    search:(query,scope)=>{
+      observed.push([query,scope?.filter.from]);
+      return {titles:[{id:'a'}],passages:[{meeting_id:'b',title:'Budget planning',text:'Fixture passage 50% 📘',speaker:'Fixture speaker',evidence}],limited:false};
+    },
+  };
+  const app=surface('src/app/meetings/page.tsx','default',{},undefined,sidebar);
+  let tree=app.render();
+  nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'50%'}});
+  tree=app.render();
+  assert.match(text(tree),/Matching titles/);
+  assert.match(text(tree),/Fixture passage 50% 📘/);
+  const matchingRows=nodes(tree).find(node=>node.type==='archive-rows').props;
+  assert.deepEqual(Array.from(matchingRows.meetings,meeting=>meeting.id),['a']);
+  const rows=surface('src/components/Archive/ArchiveMeetingRows.tsx','ArchiveMeetingRows',{...matchingRows,active:false});
+  const titleLink=nodes(rows.render()).find(node=>node.type==='link'&&text(node)==='Launch review');
+  assert.equal(titleLink.props.href,'/meeting-details?id=a&from=archive');
+  rows.unmount();
+  nodes(tree).find(node=>node.type==='input'&&node.props.type==='date').props.onChange({target:{value:'2026-02-01'}});
+  tree=app.render();
+  assert.doesNotMatch(text(tree),/Launch review/);
+  nodes(tree).find(node=>node.props?.['aria-label']==='Show passage in Budget planning').props.onClick();
+  assert.match(navigated[0],/^\/meeting-details\?id=b&evidence=[\w-]+&from=archive$/);
+  app.reset();
+  tree=app.render(); // Same module and a simulated route remount.
+  assert.equal(nodes(tree).find(node=>node.type==='title-filter').props.value,'50%');
+  assert.deepEqual(observed.at(-1),['50%','2026-02-01']);
+  app.unmount();
 });
 
 test('memory empty-state action opens the existing chooser without expanding the scope',()=>{

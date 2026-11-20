@@ -1,7 +1,8 @@
 //! Durable source generations and canonical transcript snapshots.
-use super::types::*;
+use super::{scheduler::VerificationStatus, types::*};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
+pub(crate) mod literal;
 pub const READ_BYTES: usize = 16 * 1024;
 pub const DISPLAY_BYTES: usize = 1024;
 
@@ -75,6 +76,7 @@ impl Drop for CancelRead {
 struct ReadContext {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     background: bool,
+    literal_budget: Option<literal::Budget>,
 }
 impl ReadContext {
     /// Setup has no application-owned raw SQLite resource yet. Dropping its
@@ -132,6 +134,7 @@ async fn read_snapshot<T: Send + 'static>(
     let context = ReadContext {
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         background,
+        literal_budget: None,
     };
     let waiter = CancelRead(context.cancelled.clone());
     let runtime = tokio::runtime::Handle::current();
@@ -238,6 +241,9 @@ impl<'a> TextBlob<'a> {
             return Err(KnowledgeError::InvalidInput);
         }
         let mut bytes = vec![0u8; max.min(self.len - start)];
+        if let Some(budget) = &context.literal_budget {
+            budget.charge(bytes.len())?;
+        }
         if !bytes.is_empty() {
             let status = unsafe {
                 libsqlite3_sys::sqlite3_blob_read(
@@ -414,8 +420,25 @@ fn scan(
 ) -> Result<Option<(usize, usize)>, KnowledgeError> {
     let mut terms = terms.to_vec();
     terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
-    let mut patterns = vec![query.trim().to_lowercase()];
-    patterns.extend(terms.into_iter().map(|term| term.to_lowercase()));
+    let mut patterns = vec![literal_fold(query.trim())];
+    patterns.extend(terms.into_iter().map(|term| literal_fold(&term)));
+    scan_patterns(blob, &patterns, context)
+}
+
+fn folded_char(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase()
+        .map(|lower| if lower == 'ς' { 'σ' } else { lower })
+}
+
+fn literal_fold(text: &str) -> String {
+    text.chars().flat_map(folded_char).collect()
+}
+
+fn scan_patterns(
+    blob: &TextBlob<'_>,
+    patterns: &[String],
+    context: &ReadContext,
+) -> Result<Option<(usize, usize)>, KnowledgeError> {
     let mut best: Option<(usize, usize, usize)> = None;
     let mut start = 0;
     while start < blob.len {
@@ -426,7 +449,7 @@ fn scan(
         let mut folded = String::with_capacity(text.len() * 3);
         let mut map = Vec::with_capacity(text.len() * 3);
         for (offset, ch) in text.char_indices() {
-            for lower in ch.to_lowercase() {
+            for lower in folded_char(ch) {
                 folded.push(lower);
                 for _ in 0..lower.len_utf8() {
                     map.push((start + offset, start + offset + ch.len_utf8()));
@@ -541,7 +564,7 @@ pub async fn materialize(
 ) -> Result<Passage, KnowledgeError> {
     let selected = selected.clone();
     let pinned = selected.clone();
-    read_snapshot(pool, pinned, background, move |handle, row, context| {
+    let mut passage = read_snapshot(pool, pinned, background, move |handle, row, context| {
         if span.transcript_id != selected.transcript_id
             || span.end_byte < span.start_byte
             || span.end_byte - span.start_byte > READ_BYTES
@@ -641,6 +664,8 @@ pub async fn materialize(
             },
             meeting_id: selected.meeting_id,
             title,
+            // Decided after the snapshot, from the meeting's calendar link.
+            provider_title: None,
             date,
             speaker,
             metadata_truncated: title_clipped || date_clipped || speaker_clipped,
@@ -648,7 +673,17 @@ pub async fn materialize(
             rank: 0.,
         })
     })
-    .await
+    .await?;
+    if matches!(passage.evidence.locator, EvidenceLocator::Transcript { .. }) {
+        passage.provider_title = crate::library::calendar::knowledge_title(
+            pool,
+            &passage.meeting_id,
+            &passage.title,
+            passage.metadata_truncated,
+        )
+        .await;
+    }
+    Ok(passage)
 }
 
 fn document_passage(
@@ -719,6 +754,7 @@ fn document_passage(
             },
         },
         meeting_id: selected.meeting_id,
+        provider_title: Some(title.clone()),
         title,
         date,
         speaker: None,
@@ -967,9 +1003,9 @@ pub async fn invalidate_other_spaces(pool: &SqlitePool, space: &str) -> Result<(
     let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM knowledge_sources WHERE kind IN('meeting','document') AND semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
     requeue_sources(pool, &ids).await
 }
-pub async fn status(
+pub(super) async fn status(
     pool: &SqlitePool,
-    runtime_ready: bool,
+    verification: VerificationStatus,
     space: &str,
 ) -> Result<IndexStatus, KnowledgeError> {
     let enabled =
@@ -999,12 +1035,22 @@ pub async fn status(
         failed: failed as usize,
         reason: if !enabled {
             Some("disabled".into())
-        } else if !runtime_ready {
+        } else if matches!(
+            verification,
+            VerificationStatus::Inactive | VerificationStatus::Unavailable
+        ) {
             Some("model_unavailable".into())
         } else if failed > 0 {
             Some("indexing_failed".into())
         } else if paused > 0 {
             Some("paused".into())
+        } else if verification == VerificationStatus::Pending {
+            Some("model_pending".into())
+        } else if matches!(
+            verification,
+            VerificationStatus::Verifying | VerificationStatus::Updating
+        ) {
+            Some("model_verifying".into())
         } else if pending > 0 {
             Some("indexing".into())
         } else {
@@ -1018,6 +1064,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn canonical_row_pagination_does_not_require_an_active_index_job() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for state in ["ready", "paused", "failed"] {
             let pool = database().await;
             meeting(&pool, "one").await;
@@ -1314,6 +1361,7 @@ mod tests {
     }
     #[tokio::test]
     async fn aborted_blob_reader_keeps_lease_owned_and_releases_for_recreation_and_close() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use std::sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -1414,6 +1462,7 @@ mod tests {
     }
     #[tokio::test]
     async fn fts_row_identity_survives_gaps_moves_and_recreated_rows() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         meeting(&pool, "two").await;
@@ -1486,6 +1535,7 @@ mod tests {
     }
     #[tokio::test]
     async fn deletion_removes_populated_vectors_with_both_repository_and_fk_order() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for transcripts_first in [false, true] {
             let pool = database().await;
             meeting(&pool, "one").await;
@@ -1532,15 +1582,20 @@ mod tests {
     }
     #[tokio::test]
     async fn enabled_without_model_is_distinct_from_disabled() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
-        let disabled = status(&pool, false, "test-space").await.unwrap();
+        let disabled = status(&pool, VerificationStatus::Inactive, "test-space")
+            .await
+            .unwrap();
         assert!(!disabled.semantic_enabled);
         assert_eq!(disabled.reason.as_deref(), Some("disabled"));
         sqlx::query("UPDATE knowledge_settings SET enabled=1 WHERE singleton=1")
             .execute(&pool)
             .await
             .unwrap();
-        let missing = status(&pool, false, "test-space").await.unwrap();
+        let missing = status(&pool, VerificationStatus::Unavailable, "test-space")
+            .await
+            .unwrap();
         assert!(
             missing.semantic_enabled,
             "saved opt-in must be visible without a ready runtime"
@@ -1549,6 +1604,7 @@ mod tests {
     }
     #[tokio::test]
     async fn canonical_document_source_enters_shared_index_worker() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, document) = super::super::document_context::tests::fixture().await;
         let source = format!("document:{document}");
         sqlx::query("DELETE FROM knowledge_index_jobs WHERE source_id<>?")
@@ -1563,6 +1619,7 @@ mod tests {
     }
     #[tokio::test]
     async fn reserved_document_source_does_not_enter_meeting_worker() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let insert=sqlx::query("INSERT INTO knowledge_sources(id,kind,meeting_id) VALUES('document:reserved','document',NULL)").execute(&pool).await;
         assert!(insert.is_ok(),"source ownership must support future document migration without rebuilding evidence foreign keys");
@@ -1576,6 +1633,7 @@ mod tests {
     }
     #[tokio::test]
     async fn model_space_change_requires_reindex_and_supersedes_same_revision_worker() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1601,6 +1659,7 @@ mod tests {
     }
     #[tokio::test]
     async fn evidence_identity_survives_cache_rebuild_and_tracks_speaker_timing() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1652,6 +1711,7 @@ mod tests {
     }
     #[tokio::test]
     async fn clean_database_seeds_empty_meetings() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         let available = count(
@@ -1671,6 +1731,7 @@ mod tests {
     }
     #[tokio::test]
     async fn edited_source_cannot_publish_old_generation() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1724,6 +1785,7 @@ mod tests {
     }
     #[tokio::test]
     async fn transcript_move_invalidates_both_owners() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         meeting(&pool, "two").await;
@@ -1749,6 +1811,7 @@ mod tests {
     }
     #[tokio::test]
     async fn delete_cascades_index() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1781,6 +1844,7 @@ mod tests {
     }
     #[tokio::test]
     async fn restore_requeues_index() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         assert_eq!(
@@ -1819,6 +1883,7 @@ mod tests {
 
     #[tokio::test]
     async fn old_worker_cannot_publish_or_delete_newer_job() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1865,6 +1930,7 @@ mod tests {
     }
     #[tokio::test]
     async fn pauses_do_not_consume_three_failure_attempts() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         let job = next_job(&pool).await.unwrap().unwrap();
@@ -1895,6 +1961,7 @@ mod tests {
     }
     #[tokio::test]
     async fn upgrade_seeds_existing_library_and_fts() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

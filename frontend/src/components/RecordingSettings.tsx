@@ -1,16 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Meta, SettingsCard, SettingsColumns, SettingsRow } from '@/components/ui/settings-layout';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
+import { AudioDevicesCard } from '@/components/settings/AudioDevicesCard';
+import { CallDetectionSettings } from '@/components/settings/CallDetectionSettings';
+import { SignalCheck } from '@/components/settings/SignalCheck';
+import { useAudioLevelFeed } from '@/components/settings/useAudioLevelFeed';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
 import { useConfig } from '@/contexts/ConfigContext';
-import { selectedDevicesFromPreferences } from '@/lib/audioDevicePreferences';
-import { useRecordingState } from '@/contexts/RecordingStateContext';
-import { RecordingModeSelect } from '@/components/RecordingModeSelect';
+import { canEditLiveAudioSaving, selectedDevicesFromPreferences, type SelectedDevices } from '@/lib/audioDevicePreferences';
+import { RecordingMode, useRecordingState } from '@/contexts/RecordingStateContext';
+import { errorText } from '@/lib/errorText';
+import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -18,16 +24,22 @@ export interface RecordingPreferences {
   file_format: string;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+  /** Set by the core when the stored recordings folder is not trusted and the default is used. */
+  folder_notice?: string | null;
 }
 
 interface RecordingSettingsProps {
   onSave?: (preferences: RecordingPreferences) => void;
 }
 
+const UNSELECTED_RECORDING_MODE = '__unset_recording_mode__';
+
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
-  const { setSelectedDevices } = useConfig();
-  const { recordingMode } = useRecordingState();
+  const { selectedDevices, setSelectedDevices } = useConfig();
+  const recording = useRecordingState();
+  const { recordingMode } = recording;
   const audioOnly = recordingMode === 'audio_only';
+  const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping;
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
@@ -37,7 +49,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [preferencesFailed, setPreferencesFailed] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+
+  // The signal check runs only while this page is open and nothing is being
+  // recorded. The hook stops the native monitor when the page is left.
+  const levelFeed = useAudioLevelFeed({
+    enabled: !loading && !preferencesFailed && !recordingBusy,
+    micDevice: selectedDevices.micDevice,
+  });
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -48,13 +69,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         setSelectedDevices(selectedDevicesFromPreferences(prefs));
       } catch (error) {
         console.error('Failed to load recording preferences:', error);
-        // If loading fails, get default folder path
-        try {
-          const defaultPath = await invoke<string>('get_default_recordings_folder_path');
-          setPreferences(prev => ({ ...prev, save_folder: defaultPath }));
-        } catch (defaultError) {
-          console.error('Failed to get default folder path:', defaultError);
-        }
+        setPreferencesFailed(true);
       } finally {
         setLoading(false);
       }
@@ -67,10 +82,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   useEffect(() => {
     const loadNotificationPref = async () => {
       try {
-        const { Store } = await import('@tauri-apps/plugin-store');
-        const store = await Store.load('preferences.json');
-        const show = await store.get<boolean>('show_recording_notification') ?? true;
-        setShowRecordingNotification(show);
+        // The core owns the preference.
+        setShowRecordingNotification((await loadBehaviorSettings()).showRecordingNotification);
       } catch (error) {
         console.error('Failed to load notification preference:', error);
       }
@@ -79,13 +92,17 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   }, []);
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
-    const newPreferences = { ...preferences, auto_save: enabled };
-    setPreferences(newPreferences);
-    await savePreferences(newPreferences, {
+    if (!canEditLiveAudioSaving(recordingMode) || recordingBusy || recording.isSavingMode) return;
+    const saved = await savePreferences({ ...preferences, auto_save: enabled }, {
       successTitle: enabled ? 'Audio saving enabled' : 'Audio saving disabled'
     });
+    if (!saved) return;
     if (!enabled) {
-      await setSourceAttribution(false);
+      try {
+        await setSourceAttribution(false);
+      } catch {
+        toast.error('Could not update source attribution');
+      }
     }
 
     // Track auto-save setting change
@@ -100,16 +117,17 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       preferred_mic_device: devices.micDevice,
       preferred_system_device: devices.systemDevice
     };
-    setPreferences(newPreferences);
     const micDevice = newPreferences.preferred_mic_device || 'Default';
     const systemDevice = newPreferences.preferred_system_device || 'Default';
-    await savePreferences(newPreferences, {
+    const saved = await savePreferences(newPreferences, {
       successTitle: 'Device preferences saved',
       successDescription: `Microphone: ${micDevice}, System audio: ${systemDevice}`
     });
 
+    if (!saved) return;
+
     // Track default device preference changes
-    // Note: Individual device selection analytics are tracked in DeviceSelection component
+    // Note: Individual device selection analytics are tracked in the device selects
     await Analytics.track('default_devices_changed', {
       has_preferred_microphone: (!!devices.micDevice).toString(),
       has_preferred_system_audio: (!!devices.systemDevice).toString()
@@ -132,28 +150,27 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       }
 
       const newPreferences = { ...preferences, save_folder: selectedFolder };
-      setPreferences(newPreferences);
-      await savePreferences(newPreferences, {
+      const saved = await savePreferences(newPreferences, {
         successTitle: 'Save location updated',
         successDescription: selectedFolder
       });
+      // The new folder is trusted: the notice about the earlier one no longer applies.
+      if (saved) setPreferences(current => ({ ...current, folder_notice: null }));
 
       await Analytics.track('recording_save_folder_changed');
     } catch (error) {
       console.error('Failed to choose recordings folder:', error);
       toast.error('Failed to choose recordings folder', {
-        description: error instanceof Error ? error.message : String(error)
+        description: errorText(error)
       });
     }
   };
 
   const handleNotificationToggle = async (enabled: boolean) => {
     try {
+      await invoke('set_recording_notification_preference', { enabled });
+      await refreshBehaviorSettings();
       setShowRecordingNotification(enabled);
-      const { Store } = await import('@tauri-apps/plugin-store');
-      const store = await Store.load('preferences.json');
-      await store.set('show_recording_notification', enabled);
-      await store.save();
       toast.success('Preference saved');
       await Analytics.track('recording_notification_preference_changed', {
         enabled: enabled.toString()
@@ -172,9 +189,12 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       errorTitle?: string;
     }
   ) => {
+    if (savingRef.current || preferencesFailed) return false;
+    savingRef.current = true;
     setSaving(true);
     try {
       await invoke('set_recording_preferences', { preferences: prefs });
+      setPreferences(prefs);
       // Home, recording start, and Settings all consume the same device state.
       // Keep it in sync only after the backend accepted the preference update.
       setSelectedDevices(selectedDevicesFromPreferences(prefs));
@@ -183,131 +203,113 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       toast.success(toastOptions?.successTitle || "Recording preferences saved", {
         description: toastOptions?.successDescription
       });
+      return true;
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
       toast.error(toastOptions?.errorTitle || "Failed to save recording preferences", {
-        description: error instanceof Error ? error.message : String(error)
+        description: errorText(error)
       });
+      return false;
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
   if (loading) {
     return (
-      <div className="animate-pulse">
-        <div className="h-4 bg-muted rounded w-1/4 mb-4"></div>
-        <div className="h-8 bg-muted rounded mb-4"></div>
-      </div>
+      <SettingsColumns aside={null}>
+        <SettingsCard title="Capture" aria-busy="true">
+          <SettingsRow title="Loading recording settings" role="status" />
+        </SettingsCard>
+      </SettingsColumns>
     );
   }
 
+  if (preferencesFailed) {
+    return (
+      <SettingsColumns aside={null}>
+        <SettingsCard title="Capture">
+          <SettingsRow title="Could not load recording settings" role="alert" description="Reopen Recording settings to try again." />
+        </SettingsCard>
+      </SettingsColumns>
+    );
+  }
+
+  const modeLocked = recordingBusy || recording.isSavingMode || saving;
+  const savesAudio = audioOnly || preferences.auto_save;
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-semibold mb-4">Recording settings</h3>
-        <p className="text-sm text-muted-foreground mb-6">
-          Configure how your audio recordings are saved during meetings.
-        </p>
-      </div>
+    <SettingsColumns aside={<SignalCheck feed={levelFeed} unavailableReason={recordingBusy ? 'Not available while recording' : null} />}>
+      <SettingsCard title="Capture">
+        <SettingsRow
+          title="Recording mode"
+          htmlFor="recording-mode"
+          description={audioOnly
+            ? 'Always saves audio. No speech model or automatic notes run. Transcribe from the saved meeting later'
+            : 'Shows recognized speech while recording. Applies to the next recording'}
+        >
+          <Select
+            value={recordingMode || UNSELECTED_RECORDING_MODE}
+            disabled={modeLocked}
+            onValueChange={value => void recording.setRecordingMode((value === UNSELECTED_RECORDING_MODE ? '' : value) as RecordingMode)}
+          >
+            <SelectTrigger id="recording-mode" className="w-80 max-w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {!recordingMode && <SelectItem value={UNSELECTED_RECORDING_MODE}>Choose recording mode</SelectItem>}
+              <SelectItem value="live">Record with live transcription</SelectItem>
+              <SelectItem value="audio_only">Record now, transcribe later</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        {recording.modeError && <SettingsRow title={<span role="alert" className="text-destructive">{recording.modeError}</span>} />}
 
-      {/* Auto Save Toggle */}
-      <RecordingModeSelect />
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1">
-          <div className="font-medium">Save audio recordings</div>
-          <div className="text-sm text-muted-foreground">
-            {audioOnly ? 'Audio-only mode always saves the recording for later transcription.' : 'Automatically save audio files when recording stops'}
-          </div>
-        </div>
-        <Switch
-          checked={audioOnly || preferences.auto_save}
-          onCheckedChange={handleAutoSaveToggle}
-          disabled={saving}
-        />
-      </div>
+        <SettingsRow
+          title="Save audio recordings"
+          htmlFor="save-audio"
+          description={audioOnly
+            ? 'Audio-only mode always saves the recording for later transcription'
+            : `Keeps an ${preferences.file_format.toUpperCase()} file when a recording stops`}
+        >
+          <Switch id="save-audio" checked={savesAudio} onCheckedChange={handleAutoSaveToggle} disabled={modeLocked || !canEditLiveAudioSaving(recordingMode)} />
+        </SettingsRow>
 
-      {/* Folder Location - Only shown when auto_save is enabled */}
-      {(audioOnly || preferences.auto_save) && (
-        <div className="space-y-4">
-          <div className="p-4 border rounded-lg bg-muted">
-            <div className="font-medium mb-2">Save location</div>
-            <div className="text-sm text-muted-foreground mb-3 break-all">
-              {preferences.save_folder || 'Default folder'}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="ghost"
-                onClick={handleChooseFolder}
-                disabled={saving}
-                className="flex items-center gap-2 px-3 py-2 text-sm border border-input rounded-md hover:bg-background transition-colors disabled:cursor-not-allowed disabled:opacity-60 h-auto font-normal hover:text-foreground"
-              >
-                <FolderOpen className="w-4 h-4" />
-                Choose folder
-              </Button>
-              <Button variant="ghost"
-                onClick={handleOpenFolder}
-                className="flex items-center gap-2 px-3 py-2 text-sm border border-input rounded-md hover:bg-background transition-colors h-auto font-normal hover:text-foreground"
-              >
-                <FolderOpen className="w-4 h-4" />
-                Open folder
-              </Button>
-            </div>
-          </div>
+        {savesAudio && (
+          <SettingsRow
+            title="Save location"
+            description={<>
+              <Meta className="whitespace-normal break-all">{preferences.save_folder || 'Default folder'}</Meta>
+              {preferences.folder_notice && <span role="status" className="mt-1 block text-[13px] text-warning-foreground">{preferences.folder_notice}</span>}
+            </>}
+          >
+            <Button variant="outline" size="sm" onClick={handleChooseFolder} disabled={saving}>Choose folder</Button>
+            <Button variant="outline" size="sm" onClick={handleOpenFolder}>
+              <FolderOpen aria-hidden="true" />
+              Open recordings folder
+            </Button>
+          </SettingsRow>
+        )}
 
-          <div className="p-4 border rounded-lg bg-secondary">
-            <div className="text-sm text-secondary-foreground">
-              <strong>File format:</strong> {preferences.file_format.toUpperCase()} files
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              Recordings are saved with timestamp: recording_YYYYMMDD_HHMMSS.{preferences.file_format}
-            </div>
-          </div>
-        </div>
-      )}
+        <SettingsRow
+          title="Recording start reminder"
+          htmlFor="recording-start-reminder"
+          description="Reminds you to tell participants that the meeting is recorded"
+        >
+          <Switch id="recording-start-reminder" checked={showRecordingNotification} onCheckedChange={handleNotificationToggle} />
+        </SettingsRow>
+      </SettingsCard>
 
-      {/* Info when auto_save is disabled */}
-      {!preferences.auto_save && (
-        <div className="p-4 border rounded-lg bg-warning">
-          <div className="text-sm text-warning-foreground">
-            Audio recording is disabled. Enable "Save audio recordings" to automatically save your meeting audio.
-          </div>
-        </div>
-      )}
+      <AudioDevicesCard
+        selectedDevices={selectedDevices}
+        onDeviceChange={handleDeviceChange}
+        disabled={saving || recordingBusy}
+        feed={levelFeed}
+        meterPaused={recordingBusy}
+      />
 
-      {/* Recording Notification Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1">
-          <div className="font-medium">Recording start notification</div>
-          <div className="text-sm text-muted-foreground">
-            Show reminder to inform participants when recording starts
-          </div>
-        </div>
-        <Switch
-          checked={showRecordingNotification}
-          onCheckedChange={handleNotificationToggle}
-        />
-      </div>
-
-      {/* Device Preferences */}
-      <div className="space-y-4">
-        <div className="border-t pt-6">
-          <h4 className="text-base font-medium text-foreground mb-4">Default audio devices</h4>
-          <p className="text-sm text-muted-foreground mb-4">
-            Set your preferred microphone and system audio devices for recording. These will be automatically selected when starting new recordings.
-          </p>
-
-          <div className="border rounded-lg p-4 bg-muted">
-            <DeviceSelection
-              selectedDevices={{
-                micDevice: preferences.preferred_mic_device,
-                systemDevice: preferences.preferred_system_device
-              }}
-              onDeviceChange={handleDeviceChange}
-              disabled={saving}
-            />
-          </div>
-        </div>
-      </div>
-    </div>
+      <CallDetectionSettings />
+    </SettingsColumns>
   );
 }

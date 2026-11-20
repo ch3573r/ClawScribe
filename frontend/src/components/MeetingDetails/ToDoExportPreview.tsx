@@ -17,11 +17,16 @@ import {
 } from "@/components/ui/dialog";
 import {
   microsoftExportService,
+  TASK_IDENTITY_REVIEW_MESSAGE,
+  taskIdentityReviewIds,
+  taskPreviewCandidates,
+  type TaskPreviewCandidate,
   type ExportReport,
 } from "@/services/microsoftExportService";
 
 interface Row {
   localId: string;
+  originalTitleHash?: string | null;
   title: string;
   details: string | null;
   owner: string | null;
@@ -38,6 +43,7 @@ interface ToDoExportPreviewProps {
   listName?: string;
   getMarkdown: () => Promise<string>;
   onReport: (report: ExportReport) => void;
+  onReviewActions?: () => void;
 }
 
 export function ToDoExportPreview({
@@ -49,18 +55,23 @@ export function ToDoExportPreview({
   listName,
   getMarkdown,
   onReport,
+  onReviewActions,
 }: ToDoExportPreviewProps) {
   const [rows, setRows] = useState<Row[]>([]);
+  const [previewCandidates, setPreviewCandidates] = useState<readonly TaskPreviewCandidate[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reviewIds, setReviewIds] = useState(() => new Set<string>());
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setReviewIds(new Set());
     setRows([]);
+    setPreviewCandidates([]);
     (async () => {
       try {
         const md = await getMarkdown();
@@ -70,9 +81,11 @@ export function ToDoExportPreview({
           md,
         );
         if (cancelled) return;
+        setPreviewCandidates(taskPreviewCandidates(items));
         setRows(
           items.map((item) => ({
             localId: item.localId,
+            originalTitleHash: item.originalTitleHash,
             title: item.title,
             details: item.details || "",
             owner: item.owner,
@@ -105,6 +118,7 @@ export function ToDoExportPreview({
       .filter((r) => r.include && r.title.trim())
       .map((r) => ({
         localId: r.localId,
+        originalTitleHash: r.originalTitleHash,
         title: r.title.trim(),
         owner: r.owner,
         dueDate: r.dueDate,
@@ -118,9 +132,12 @@ export function ToDoExportPreview({
         meetingTitle,
         listId,
         tasks,
+        previewCandidates,
       );
+      const needsReview = taskIdentityReviewIds(report);
+      setReviewIds(needsReview);
       onReport(report);
-      onOpenChange(false);
+      if (needsReview.size === 0) onOpenChange(false);
     } catch (e) {
       toast.error("Microsoft To Do export failed", {
         description: e instanceof Error ? e.message : String(e),
@@ -128,7 +145,7 @@ export function ToDoExportPreview({
     } finally {
       setBusy(false);
     }
-  }, [rows, meetingId, meetingTitle, listId, onReport, onOpenChange]);
+  }, [rows, previewCandidates, meetingId, meetingTitle, listId, onReport, onOpenChange]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -156,11 +173,21 @@ export function ToDoExportPreview({
           </div>
         ) : rows.length === 0 ? (
           <div className="rounded-lg border border-border bg-muted p-6 text-center text-sm text-muted-foreground">
-            No action items were found in this summary. Generate or edit the summary so it
-            includes an &quot;Action items&quot; section, then try again.
+            <p>No open actions found. Add an action or review suggestions from the meeting summary.</p>
+            {onReviewActions && <Button type="button" variant="outline" className="mt-2" onClick={() => {
+              onOpenChange(false);
+              onReviewActions();
+            }}>Review meeting actions</Button>}
           </div>
         ) : (
           <>
+            {reviewIds.size > 0 && <div className="space-y-2">
+              <p role="status" className="text-sm text-muted-foreground">{TASK_IDENTITY_REVIEW_MESSAGE}</p>
+              {onReviewActions && <Button type="button" variant="outline" disabled={busy} onClick={() => {
+                onOpenChange(false);
+                onReviewActions();
+              }}>Review meeting actions</Button>}
+            </div>}
             <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
               <Button variant="ghost"
                 type="button"
@@ -200,6 +227,22 @@ export function ToDoExportPreview({
                         disabled={!row.include}
                         className="h-auto shadow-none md:text-sm disabled:opacity-100 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed"
                       />
+                      {reviewIds.has(row.localId) && (
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <p className="text-sm text-warning">
+                            An earlier task with this title may already exist in the destination. Check the destination, then deselect if already there, or add it as a new action in Meeting actions.
+                          </p>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-auto shrink-0 px-2 py-0.5 text-xs text-muted-foreground"
+                            onClick={() => update(index, { include: false })}
+                          >
+                            Dismiss
+                          </Button>
+                        </div>
+                      )}
                       <label className="block space-y-1.5">
                         <span className="text-xs font-medium text-muted-foreground">
                           To Do task notes

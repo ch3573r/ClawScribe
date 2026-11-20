@@ -383,6 +383,41 @@ impl WhisperEngine {
         audio_data: Vec<f32>,
         language: Option<String>,
     ) -> Result<(String, Option<f32>, bool)> {
+        Ok(self
+            .transcribe_with_backend(audio_data, language, false)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn transcribe_with_backend(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+        observe_backend: bool,
+    ) -> Result<((String, Option<f32>, bool), Option<WhisperCompiledBackend>)> {
+        let (transcript, backend, _) = self.decode(audio_data, language, observe_backend).await?;
+        Ok((transcript, backend))
+    }
+
+    pub(crate) async fn transcribe_live(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+    ) -> Result<((String, Option<f32>, bool), Option<&'static str>)> {
+        let (transcript, _, detected) = self.decode(audio_data, language, false).await?;
+        Ok((transcript, detected))
+    }
+
+    async fn decode(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+        observe_backend: bool,
+    ) -> Result<(
+        (String, Option<f32>, bool),
+        Option<WhisperCompiledBackend>,
+        Option<&'static str>,
+    )> {
         let ctx_lock = self.current_context.clone().read_owned().await;
         crate::audio::inference::run(move |cancelled| {
             let ctx = ctx_lock
@@ -456,14 +491,18 @@ impl WhisperEngine {
 
             // PERFORMANCE: Suppress verbose C library logs during transcription
             // This hides whisper_full_with_state debug logs and beam search details
-            let (num_segments, state) = {
+            let (num_segments, state, backend) = {
                 // let _suppressor = crate::whisper_engine::StderrSuppressor::new();
 
-                let mut state = ctx.create_state()?;
+                let (mut state, backend) = if observe_backend {
+                    super::acceleration::create_observed_state(ctx)?
+                } else {
+                    (ctx.create_state()?, None)
+                };
                 state.full(params, &audio_data)?;
                 let num_segments = state.full_n_segments();
 
-                (num_segments, state)
+                (num_segments, state, backend)
                 // Suppressor dropped here, stderr restored
             };
             let mut result = String::new();
@@ -507,7 +546,22 @@ impl WhisperEngine {
 
             let avg_confidence = mean_token_probability(token_prob_sum, token_count);
 
-            Ok((cleaned_result, avg_confidence, is_partial))
+            // A forced prompt also sets the state's language ID. Only count an
+            // actual automatic multilingual decode as acoustic evidence.
+            let detected = if language_code.is_none() && !should_translate && ctx.is_multilingual()
+            {
+                state
+                    .full_lang_id_from_state()
+                    .ok()
+                    .and_then(whisper_rs::get_lang_str)
+            } else {
+                None
+            };
+            Ok((
+                (cleaned_result, avg_confidence, is_partial),
+                backend,
+                detected,
+            ))
         })
         .await
     }

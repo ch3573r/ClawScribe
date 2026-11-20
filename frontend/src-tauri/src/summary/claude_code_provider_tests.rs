@@ -346,14 +346,14 @@ async fn relative_missing_directory_and_unsupported_program_paths_are_status_err
             },
         };
         assert!(
-            matches!(provider.status().await, ClaudeCodeStatus::Error { message } if message == "Choose the full path to the Claude Code program")
+            matches!(provider.status().await, ClaudeCodeStatus::Error { message } if message == INVALID_PROGRAM)
         );
         assert_eq!(
             provider
                 .generate("sonnet", "system", "synthetic", &CancellationToken::new())
                 .await
                 .unwrap_err(),
-            "Choose the full path to the Claude Code program"
+            INVALID_PROGRAM
         );
     }
     let relative_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -391,7 +391,7 @@ async fn unix_nonexecutable_program_override_is_a_status_error() {
         },
     };
     assert!(
-        matches!(provider.status().await, ClaudeCodeStatus::Error { message } if message == "Choose the full path to the Claude Code program")
+        matches!(provider.status().await, ClaudeCodeStatus::Error { message } if message == INVALID_PROGRAM)
     );
 }
 
@@ -630,6 +630,7 @@ async fn generic_summary_dispatch_never_forwards_the_supplied_api_key() {
         None,
         Some(&data),
         Some(&CancellationToken::new()),
+        None,
     )
     .await
     .unwrap();
@@ -776,4 +777,91 @@ async fn child_environment_excludes_secrets_inherited_from_the_test_process() {
     let observed = fixture.observed();
     assert_eq!(observed["secretKeys"], json!([]));
     assert_eq!(observed["preservedTestVariable"], "preserved");
+}
+
+#[test]
+fn network_and_device_program_paths_are_refused_in_every_slash_mix_without_touching_them() {
+    for path in [
+        r"\\server\share\claude.exe",
+        r"\/server/share/claude.exe",
+        r"/\server\share\claude.exe",
+        r"\??\UNC\server\share\claude.exe",
+        r"\\?\UNC\server\share\claude.exe",
+        r"\\?\C:\claude.exe",
+        r"\\.\pipe\claude",
+        "//host/share/claude",
+        r"C:claude.exe",
+        r"claude.exe",
+    ] {
+        let error = resolve_program(&ClaudeCodeConfig {
+            program_path: Some(path.to_string()),
+        })
+        .unwrap_err();
+        assert_eq!(error, INVALID_PROGRAM, "{path}");
+    }
+}
+
+#[test]
+fn only_a_file_named_claude_is_accepted_as_the_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = if cfg!(windows) { "claude.exe" } else { "claude" };
+    let good = dir.path().join(name);
+    std::fs::write(&good, b"synthetic").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let accepted = resolve_program(&ClaudeCodeConfig { program_path: Some(good.to_string_lossy().into_owned()) });
+    assert!(accepted.unwrap().is_some());
+    for other in ["cmd.exe", "powershell.exe", "claude-helper.exe", "notclaude.exe", "claude.exe.txt", "sh"] {
+        let path = dir.path().join(other);
+        std::fs::write(&path, b"synthetic").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            resolve_program(&ClaudeCodeConfig { program_path: Some(path.to_string_lossy().into_owned()) }).unwrap_err(),
+            INVALID_PROGRAM,
+            "{other}"
+        );
+    }
+    // A directory named claude, and a missing file, are not programs.
+    let directory = dir.path().join("sub").join(name);
+    std::fs::create_dir_all(&directory).unwrap();
+    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(directory.to_string_lossy().into_owned()) }).is_err());
+    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(dir.path().join("missing").join(name).to_string_lossy().into_owned()) }).is_err());
+    #[cfg(windows)]
+    {
+        let shouted = dir.path().join("shout").join("CLAUDE.CMD");
+        std::fs::create_dir_all(shouted.parent().unwrap()).unwrap();
+        std::fs::write(&shouted, b"synthetic").unwrap();
+        let accepted = resolve_program(&ClaudeCodeConfig { program_path: Some(shouted.to_string_lossy().into_owned()) });
+        assert!(accepted.is_ok(), "the file name's case does not matter on Windows: {accepted:?}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_project_local_shim_is_refused_and_a_global_npm_shim_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    // <project>/node_modules/.bin/claude.cmd
+    let local = dir.path().join("project").join("node_modules").join(".bin").join("claude.cmd");
+    // <npm prefix>\claude.cmd (global installs put the shim in the prefix folder itself)
+    let global = dir.path().join("npm").join("claude.cmd");
+    for shim in [&local, &global] {
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(shim, b"@echo off").unwrap();
+    }
+    assert!(is_project_local_shim(&local));
+    assert!(!is_project_local_shim(&global));
+    assert_eq!(
+        resolve_program(&ClaudeCodeConfig { program_path: Some(local.to_string_lossy().into_owned()) }).unwrap_err(),
+        INVALID_PROGRAM
+    );
+    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(global.to_string_lossy().into_owned()) }).is_ok());
+    // The shim of the real package inside node_modules is not a shim: only scripts are judged.
+    assert!(!is_project_local_shim(&dir.path().join("npm").join("node_modules").join("x").join("claude.exe")));
 }

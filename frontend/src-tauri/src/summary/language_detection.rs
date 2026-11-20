@@ -116,7 +116,7 @@ fn meaningful_char_count(text: &str) -> usize {
     text.chars().filter(|c| c.is_alphabetic()).count()
 }
 
-fn summary_code_from_whatlang(lang: Lang) -> Option<&'static str> {
+pub(crate) fn summary_code_from_whatlang(lang: Lang) -> Option<&'static str> {
     match lang {
         Lang::Eng => Some("en"),
         Lang::Cmn => Some("zh"),

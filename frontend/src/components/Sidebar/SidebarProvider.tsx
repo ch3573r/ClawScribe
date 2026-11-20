@@ -26,14 +26,6 @@ export interface CurrentMeeting {
   updated_at?: string;
 }
 
-// Search result type for transcript search
-interface TranscriptSearchResult {
-  id: string;
-  title: string;
-  matchContext: string;
-  timestamp: string;
-};
-
 interface SidebarContextType {
   projectTags: MeetingTag[];
   projectTagsError: string | null;
@@ -51,21 +43,24 @@ interface SidebarContextType {
   setIsSidebarResizing: (resizing: boolean) => void;
   toggleCollapse: () => void;
   meetings: CurrentMeeting[];
+  /** Why the library could not be loaded, or null. Retry with refetchMeetings. */
+  meetingsError: string | null;
+  /** A load of the library is running (the first one, a retry or a refresh). */
+  meetingsLoading: boolean;
   setMeetings: React.Dispatch<React.SetStateAction<CurrentMeeting[]>>;
   isMeetingActive: boolean;
   setIsMeetingActive: (active: boolean) => void;
   handleRecordingToggle: () => void;
-  searchTranscripts: (query: string) => Promise<void>;
-  searchResults: TranscriptSearchResult[];
-  isSearching: boolean;
   setServerAddress: (address: string) => void;
   serverAddress: string;
   transcriptServerAddress: string;
   setTranscriptServerAddress: (address: string) => void;
   // Summary polling management
   activeSummaryPolls: Map<string, NodeJS.Timeout>;
-  startSummaryPolling: (meetingId: string, processId: string, onUpdate: (result: any) => void) => void;
-  stopSummaryPolling: (meetingId: string) => void;
+  startSummaryPolling: (meetingId: string, processId: string, onUpdate: (result: any) => void, options?: { background?: boolean }) => void;
+  stopSummaryPolling: (meetingId: string, options?: { keepBackground?: boolean }) => void;
+  /** Listen to the running poll for a meeting (or start one); returns the way to let go. */
+  attachSummaryPolling: (meetingId: string, onUpdate: (result: any) => void | Promise<void>) => () => void;
   // Refetch meetings from backend
   refetchMeetings: () => Promise<void>;
 
@@ -123,13 +118,15 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     return () => compact.removeEventListener('change', update);
   }, []);
   const [meetings, setMeetings] = useState<CurrentMeeting[]>([]);
+  // Set when the library could not be loaded, so a failure is not shown as an empty library.
+  const [meetingsError, setMeetingsError] = useState<string | null>(null);
+  const [meetingsLoading, setMeetingsLoading] = useState(false);
+  const meetingLoads = React.useRef(0);
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
-  const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling } = useSummaryPolling();
+  const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSummaryPolling();
 
   // Use recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
@@ -141,6 +138,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
     if (serverAddress) {
+      meetingLoads.current++;
+      setMeetingsLoading(true);
       try {
         const meetings = await invoke('api_get_meetings') as Array<{
           id: string;
@@ -155,11 +154,16 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
           updated_at: meeting.updated_at,
         }));
         setMeetings(transformedMeetings);
+        setMeetingsError(null);
         Analytics.trackBackendConnection(true);
       } catch (error) {
         console.error('Error fetching meetings:', error);
-        setMeetings([]);
+        // Keep what was loaded before; an empty list would pass for an empty library.
+        setMeetingsError('Could not load your meetings.');
         Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
+      } finally {
+        meetingLoads.current--;
+        if (meetingLoads.current === 0) setMeetingsLoading(false);
       }
     }
   }, [serverAddress]);
@@ -230,38 +234,14 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       // Track recording initiation from sidebar
       Analytics.trackButtonClick('start_recording', 'sidebar');
     } else {
-      // Already recording - clicking the indicator stops the recording.
-      // The recording screen is the home route, so navigate there if needed
-      // so the stop handler (mounted on Home) can process the stop.
+      // Already recording - clicking the indicator stops the recording. The
+      // app-wide RecordingPostProcessingProvider handles it, so it works from
+      // any page without navigating.
       console.log('Stopping recording from sidebar');
-      if (pathname !== '/') {
-        router.push('/');
-      }
       window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
       Analytics.trackButtonClick('stop_recording', 'sidebar');
     }
-    // The actual recording start/stop is handled in the Home component
-  };
-
-  // Function to search through meeting transcripts
-  const searchTranscripts = async (query: string) => {
-    if (!query.trim()) {
-      setSearchResults([]);
-      return;
-    }
-
-    try {
-      setIsSearching(true);
-
-
-      const results = await invoke('api_search_transcripts', { query }) as TranscriptSearchResult[];
-      setSearchResults(results);
-    } catch (error) {
-      console.error('Error searching transcripts:', error);
-      setSearchResults([]);
-    } finally {
-      setIsSearching(false);
-    }
+    // Starting is handled by the Home component; stopping by the provider.
   };
 
   return (
@@ -282,13 +262,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       setIsSidebarResizing,
       toggleCollapse,
       meetings,
+      meetingsError,
+      meetingsLoading,
       setMeetings,
       isMeetingActive,
       setIsMeetingActive,
       handleRecordingToggle,
-      searchTranscripts,
-      searchResults,
-      isSearching,
       setServerAddress,
       serverAddress,
       transcriptServerAddress,
@@ -296,6 +275,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       activeSummaryPolls,
       startSummaryPolling,
       stopSummaryPolling,
+      attachSummaryPolling,
       refetchMeetings: fetchMeetings,
 
     }}>

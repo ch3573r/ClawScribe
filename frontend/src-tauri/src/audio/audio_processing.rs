@@ -48,6 +48,8 @@ pub fn create_meeting_folder(base_path: &PathBuf, meeting_name: &str) -> Result<
     }
 
     log::info!("Created meeting folder");
+    // The core made this folder: a later save may attach it to a meeting.
+    crate::database::meeting_files::register_core_folder(&meeting_folder);
 
     Ok(meeting_folder)
 }

@@ -43,15 +43,21 @@ pub mod api;
 pub mod audio;
 pub mod cli_control;
 pub mod config;
-pub mod console_utils;
+pub mod behavior_settings;
 pub(crate) mod credentials;
+pub(crate) mod file_grants;
+pub(crate) mod trusted_roots;
+pub(crate) mod local_path;
 pub mod database;
 pub mod diagnostics;
+pub mod exit_guard;
 pub mod exports;
 mod external_url;
 pub mod groq;
+mod ical_sources;
 pub mod knowledge;
 pub mod library;
+pub mod mcp;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
 pub mod notifications;
@@ -61,7 +67,10 @@ pub mod openai;
 pub mod openclaw;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod power;
+pub mod self_test;
 pub mod shortcuts;
+pub mod start_request;
 pub mod state;
 pub mod summary;
 pub mod teams_detection;
@@ -69,6 +78,8 @@ pub mod tray;
 pub mod updates;
 pub mod utils;
 pub mod whisper_engine;
+#[cfg(windows)]
+mod windows_lifecycle;
 
 use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
 use log::{error as log_error, info as log_info};
@@ -99,6 +110,9 @@ async fn start_recording<R: Runtime>(
 ) -> Result<(), String> {
     log_info!("Recording start requested");
 
+    if !tray::check_can_record(&app).await {
+        return Err("recording_setup_incomplete".into());
+    }
     if is_recording().await {
         return Err("Recording already in progress".to_string());
     }
@@ -224,6 +238,8 @@ async fn resolve_meeting_audio_file(
     state: tauri::State<'_, state::AppState>,
     meeting_folder: String,
 ) -> Result<Option<String>, String> {
+    // The trusted roots (a network recordings folder included) decide what may be looked at.
+    let _ = audio::recording_preferences::recording_roots(&app).await;
     let Some(folder) = canonicalize_existing_dir(&meeting_folder)? else {
         return Ok(None);
     };
@@ -259,13 +275,23 @@ async fn resolve_meeting_audio_file(
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
     let path = path.as_ref();
+    // A network or device path is never looked at unless its own spelling is
+    // inside a root the user trusted: even asking whether it is a folder would
+    // contact the remote machine.
+    let roots = trusted_roots::snapshot();
+    if !trusted_roots::text_allowed(&path.to_string_lossy(), &roots) {
+        return Ok(None);
+    }
     if !path.is_dir() {
         return Ok(None);
     }
 
-    path.canonicalize()
-        .map(Some)
-        .map_err(|e| format!("Failed to resolve meeting folder {}: {}", path.display(), e))
+    let resolved = path
+        .canonicalize()
+        .map_err(|_| "Failed to resolve the meeting folder".to_string())?;
+    // A mapped network drive resolves to a UNC path: fine inside a trusted root.
+    Ok((local_path::is_local_canonical(&resolved) || trusted_roots::canonical_inside(&resolved, &roots))
+        .then_some(resolved))
 }
 
 fn canonical_folder_is_registered<'a>(
@@ -341,26 +367,6 @@ mod tests {
     }
 }
 
-#[tauri::command]
-async fn save_transcript(file_path: String, content: String) -> Result<(), String> {
-    log_info!("Saving transcript to: {}", file_path);
-
-    // Ensure parent directory exists
-    if let Some(parent) = std::path::Path::new(&file_path).parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
-        }
-    }
-
-    // Write content to file
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write transcript: {}", e))?;
-
-    log_info!("Transcript saved successfully");
-    Ok(())
-}
-
 // Audio level monitoring commands
 #[tauri::command]
 async fn start_audio_level_monitoring<R: Runtime>(
@@ -386,11 +392,6 @@ async fn stop_audio_level_monitoring() -> Result<(), String> {
         .map_err(|e| format!("Failed to stop audio level monitoring: {}", e))
 }
 
-#[tauri::command]
-async fn is_audio_level_monitoring() -> bool {
-    audio::simple_level_monitor::is_monitoring()
-}
-
 // Whisper commands are now handled by whisper_engine::commands module
 
 #[tauri::command]
@@ -400,19 +401,30 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
         .map_err(|e| format!("Failed to list audio devices: {}", e))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingDeviceInventory {
+    devices: Vec<AudioDevice>,
+    default_microphone: Option<String>,
+    default_output: Option<String>,
+}
+
+#[tauri::command]
+async fn get_recording_device_inventory() -> Result<RecordingDeviceInventory, String> {
+    let devices = get_audio_devices().await?;
+    Ok(RecordingDeviceInventory {
+        devices,
+        default_microphone: audio::default_input_device().ok().map(|device| device.name),
+        default_output: audio::default_output_device()
+            .ok()
+            .map(|device| device.name),
+    })
+}
+
 #[tauri::command]
 async fn trigger_microphone_permission() -> Result<bool, String> {
     trigger_audio_permission()
         .map_err(|e| format!("Failed to trigger microphone permission: {}", e))
-}
-
-#[tauri::command]
-async fn start_recording_with_devices<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-) -> Result<(), String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
 }
 
 #[tauri::command]
@@ -421,33 +433,64 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+    use_default_microphone: Option<bool>,
+    calendar_link: Option<library::calendar::CalendarLink>,
+    summary_language: Option<String>,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    let request = request_id
+        .as_deref()
+        .map(start_request::claim)
+        .transpose()?;
+    let result = if !tray::check_can_record(&app).await {
+        Err("recording_setup_incomplete".into())
+    } else if let Err(error) = request.as_ref().map(|claim| claim.check_call()).transpose() {
+        Err(error)
+    } else {
+        start_named_session(
+            app,
+            mic_device_name,
+            system_device_name,
+            meeting_name,
+            audio::recording_commands::SelectedStart {
+                use_default_microphone: use_default_microphone.unwrap_or(false),
+                calendar_link,
+                summary_language,
+                request: request.as_ref(),
+            },
+        )
+        .await
+    };
+    if let Some(request) = request {
+        request.complete(&result);
+    }
+    result
+}
+
+async fn start_named_session<R: Runtime>(
+    app: AppHandle<R>,
+    mic_device_name: Option<String>,
+    system_device_name: Option<String>,
+    meeting_name: Option<String>,
+    options: audio::recording_commands::SelectedStart<'_>,
+) -> Result<String, String> {
     log_info!("Recording start requested");
 
     // Clone meeting_name for notification use later
     let meeting_name_for_notification = meeting_name.clone();
 
     // Call the recording module functions that support meeting names
-    let recording_result = match (mic_device_name.clone(), system_device_name.clone()) {
-        (None, None) => {
-            log_info!("Starting recording with default devices");
-            audio::recording_commands::start_recording_with_meeting_name(app.clone(), meeting_name)
-                .await
-        }
-        _ => {
-            log_info!("Starting recording with selected devices");
-            audio::recording_commands::start_recording_with_devices_and_meeting(
-                app.clone(),
-                mic_device_name,
-                system_device_name,
-                meeting_name,
-            )
-            .await
-        }
-    };
+    let recording_result = audio::recording_commands::start_selected_session(
+        app.clone(),
+        mic_device_name,
+        system_device_name,
+        meeting_name,
+        options,
+    )
+    .await;
 
     match recording_result {
-        Ok(_) => {
+        Ok(session_id) => {
             log_info!("Recording started successfully via tauri command");
 
             // Notification work must not hold up the command response; capture
@@ -467,7 +510,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 }
             });
 
-            Ok(())
+            Ok(session_id)
         }
         Err(e) => {
             log_error!("Failed to start recording via tauri command: {}", e);
@@ -476,13 +519,42 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 }
 
+/// Sets the language the running core uses, without persisting it. Used when
+/// the stored settings are applied at start-up, before any window exists.
+pub(crate) fn set_language_runtime(language: &str) {
+    if let Ok(mut lang_pref) = LANGUAGE_PREFERENCE.lock() {
+        *lang_pref = language.to_string();
+    }
+}
+
+/// The language is owned by the core: a change is stored first, then applied.
 #[tauri::command]
-async fn set_language_preference(language: String) -> Result<(), String> {
-    let mut lang_pref = LANGUAGE_PREFERENCE
-        .lock()
-        .map_err(|e| format!("Failed to set language preference: {}", e))?;
+async fn set_language_preference(app: AppHandle, language: String) -> Result<(), String> {
+    let _change = behavior_settings::CHANGE_LOCK.lock().await;
+    apply_language(&app, &language).await
+}
+
+/// The change itself, shared by the command and the hand-over of the webview's
+/// old value: stored first, then applied, and live transcription starts over
+/// for the new language. The caller holds `behavior_settings::CHANGE_LOCK`.
+pub(crate) async fn apply_language(app: &AppHandle, language: &str) -> Result<(), String> {
+    let language = language.to_string();
+    {
+        let lang_pref = LANGUAGE_PREFERENCE
+            .lock()
+            .map_err(|e| format!("Failed to set language preference: {}", e))?;
+        if *lang_pref == language {
+            return Ok(());
+        }
+    }
+    let stored = app.clone();
+    let stored_language = language.clone();
+    tauri::async_runtime::spawn_blocking(move || behavior_settings::save_language(&stored, &stored_language))
+        .await
+        .map_err(|_| "Could not save the language".to_string())??;
     log_info!("Setting language preference to: {}", language);
-    *lang_pref = language;
+    set_language_runtime(&language);
+    audio::transcription::worker::reset_live_source_languages(&app);
     Ok(())
 }
 
@@ -567,30 +639,63 @@ pub fn run() {
                 })
                 .build(),
         )
-        .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
-        .manage(audio::init_system_audio_state())
-        .manage(audio::init_system_audio_capture_state())
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
+        .manage(diagnostics::DiagnosticsReportState::default())
+        .manage(ical_sources::CalendarStore::default())
         .manage(summary::edit_exit::SummaryEditsState::default())
         .manage(knowledge::KnowledgeState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
+            // Settings that change how the core behaves come from the core's own
+            // storage, before anything can start a recording or an import.
+            behavior_settings::load_and_apply(_app.handle());
             audio::com_anchor::ensure_device_enumerator();
             audio::transcription::queue::cleanup_abandoned_transcription_spools();
+
+            // The database comes first. If it cannot be opened, nothing else is
+            // set up: no tray, no global shortcuts and no engine start-up, so
+            // nothing can show the window or start a recording behind the
+            // error dialog. Closing the dialog exits with code 1.
+            if let Err(error) = tauri::async_runtime::block_on(async {
+                database::setup::initialize_database_on_startup(&_app.handle()).await
+            }) {
+                database::setup::report_startup_failure(&_app.handle(), &error);
+                return Ok(());
+            }
             log::info!("Application setup complete");
+            #[cfg(windows)]
+            windows_lifecycle::install(_app.handle());
+
+            // What an earlier version already had becomes trusted, once, before
+            // any window exists and after the database is open: the recordings
+            // folders, the folders saved meetings live in, and a custom Codex
+            // profile folder.
+            tauri::async_runtime::block_on(async {
+                audio::recording_preferences::take_over_registered_folders(_app.handle()).await;
+                let _ = audio::recording_preferences::recording_roots(_app.handle()).await;
+            });
+            summary::codex_provider::mark_custom_home_once(_app.handle());
 
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
+            // Tray icon and tooltip follow the recorder, and the PC is kept
+            // awake only while audio is captured. Independent of the tray
+            // itself, so the power request works even without one.
+            tray::start_lifecycle(_app.handle());
 
             // Register global recording shortcuts (persisted or defaults).
             shortcuts::init_from_storage(_app.handle());
+
+            // Call detection runs here, on the core's own schedule, so a window
+            // hidden in the tray cannot slow it down.
+            teams_detection::monitor::spawn(_app.handle().clone());
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
@@ -668,12 +773,6 @@ pub fn run() {
             //     });
             // }
 
-            // Initialize database (handles first launch detection and conditional setup)
-            tauri::async_runtime::block_on(async {
-                database::setup::initialize_database_on_startup(&_app.handle()).await
-            })
-            .expect("Failed to initialize database");
-
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");
             if let Ok(resource_path) = _app.handle().path().resource_dir() {
@@ -687,9 +786,27 @@ pub fn run() {
                 log::warn!("Failed to resolve resource directory for templates");
             }
 
+            if let Some(state) = _app.try_state::<state::AppState>() {
+                let pool = state.db_manager.pool().clone();
+                let app = _app.handle().clone();
+                tauri::async_runtime::spawn(summary::automatic::resume_at_startup(app, pool));
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Files dropped on the window: the core saw the drop, so it is the
+            // user's choice. The audio files are granted for import here, then
+            // the window is told; the webview never supplies these paths.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if window.label() == "main" {
+                    let audio = file_grants::grant_dropped_audio(paths);
+                    let _ = window.emit(
+                        "files-dropped",
+                        serde_json::json!({ "audio": audio, "other": paths.len() - audio.len() }),
+                    );
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
@@ -705,16 +822,35 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             library::context::get_meeting_context,
             library::context::set_meeting_context,
+            library::calendar::get_meeting_calendar,
+            library::calendar::set_meeting_calendar,
+            library::calendar::migrate_legacy_meeting_calendars,
+            library::calendar::get_meeting_series_template,
+            library::calendar::set_meeting_series_template,
+            library::recording_calendar::get_active_recording_calendar,
+            library::recording_calendar::set_active_recording_calendar,
             library::list_meeting_tags,
             library::set_meeting_tags,
             library::list_meeting_bookmarks,
+            library::list_live_recording_bookmarks,
+            library::set_live_summary_bookmarks,
+            library::pending_recording_notes::list_pending_recording_notes,
+            library::pending_recording_notes::delete_pending_recording_notes,
             library::add_meeting_bookmark,
             library::delete_meeting_bookmark,
             library::rename_meeting_bookmark,
+            library::summary_bookmarks::get_meeting_summary_bookmarks,
+            library::summary_bookmarks::set_meeting_summary_bookmarks,
             library::export_local_word,
             library::backup::backup_library,
             library::backup::restore_library,
+            library::archive::list_archive_rows,
+            library::archive::storage::measure_archive_storage,
+            library::archive::storage::inspect_archive_audio,
+            library::archive::storage::remove_archive_audio,
             updates::get_update_channel,
+            updates::download_app_update,
+            updates::install_app_update,
             updates::set_update_channel,
             updates::check_app_update,
             start_recording,
@@ -724,7 +860,6 @@ pub fn run() {
             get_transcription_status,
             audio::outcome::get_recording_outcome,
             resolve_meeting_audio_file,
-            save_transcript,
             whisper_engine::commands::whisper_init,
             whisper_engine::commands::whisper_get_acceleration_status,
             whisper_engine::commands::whisper_get_available_models,
@@ -764,38 +899,26 @@ pub fn run() {
             nemotron_engine::commands::nemotron_download_model,
             nemotron_engine::commands::nemotron_cancel_download,
             // Parallel processing commands
-            whisper_engine::parallel_commands::initialize_parallel_processor,
-            whisper_engine::parallel_commands::start_parallel_processing,
-            whisper_engine::parallel_commands::pause_parallel_processing,
-            whisper_engine::parallel_commands::resume_parallel_processing,
-            whisper_engine::parallel_commands::stop_parallel_processing,
-            whisper_engine::parallel_commands::get_parallel_processing_status,
-            whisper_engine::parallel_commands::get_system_resources,
-            whisper_engine::parallel_commands::check_resource_constraints,
-            whisper_engine::parallel_commands::calculate_optimal_workers,
-            whisper_engine::parallel_commands::prepare_audio_chunks,
-            whisper_engine::parallel_commands::test_parallel_processing_setup,
             get_audio_devices,
+            get_recording_device_inventory,
+            audio::transcription::engine::get_live_transcription_readiness,
             trigger_microphone_permission,
-            start_recording_with_devices,
+            audio::recording_commands::stop_detected_call_recording,
+            audio::transcription::worker::get_live_source_languages,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
             stop_audio_level_monitoring,
-            is_audio_level_monitoring,
             // Global keyboard shortcuts
             shortcuts::get_shortcuts,
             shortcuts::set_shortcuts,
             // Recording pause/resume commands
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,
-            audio::recording_commands::is_recording_paused,
             audio::recording_commands::get_recording_state,
             audio::recording_commands::get_meeting_folder_path,
             // Source attribution (Beta, opt-in): Me/Participants labelling
             audio::recording_commands::set_source_attribution_enabled,
-            audio::recording_commands::get_source_attribution_enabled,
             audio::recording_commands::set_cloud_transcription_enabled,
-            audio::recording_commands::get_cloud_transcription_enabled,
             // Reload sync commands (retrieve transcript history and meeting name)
             audio::recording_commands::get_transcript_history,
             audio::recording_commands::get_recording_meeting_name,
@@ -804,28 +927,43 @@ pub fn run() {
             audio::recording_commands::get_reconnection_status,
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
-            audio::recording_commands::get_active_audio_output,
             // OpenClaw handoff commands
             diagnostics::get_diagnostics_snapshot,
+            diagnostics::save_diagnostics_report,
+            audio::pc_test::run_transcription_pc_test,
+            mcp::settings::get_mcp_access,
+            mcp::settings::set_mcp_access,
             openclaw::get_openclaw_config_status,
-            openclaw::get_openclaw_submission_status,
             openclaw::save_openclaw_config,
-            openclaw::submit_meeting_folder_to_openclaw,
+            openclaw::clear_openclaw_bearer_token,
             // Teams meeting detection commands
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,
+            teams_detection::calls::get_call_detection_status,
+            teams_detection::monitor::get_call_detection_settings,
+            teams_detection::monitor::set_call_detection_settings,
+            teams_detection::monitor::get_pending_call_prompt,
+            teams_detection::monitor::confirm_call_detection_prompt,
+            start_request::finish_recording_start,
+            start_request::get_pending_start_request,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,
             audio::incremental_saver::release_recovered_capture,
             audio::incremental_saver::has_audio_checkpoints,
-            console_utils::show_console,
-            console_utils::hide_console,
-            console_utils::toggle_console,
+            file_grants::pick_transcription_test_audio,
+            file_grants::pick_reference_document,
+            file_grants::pick_backup_save_path,
+            file_grants::pick_backup_restore_path,
+            file_grants::pick_word_save_path,
+            audio::interrupted::find_interrupted_recordings,
+            audio::interrupted::preview_interrupted_recording,
+            audio::interrupted::discard_interrupted_recording,
+            audio::interrupted::keep_interrupted_recording,
+            audio::interrupted::repair_saved_recording,
             ollama::get_ollama_models,
             ollama::pull_ollama_model,
             ollama::delete_ollama_model,
-            ollama::get_ollama_model_context,
             openai::auth::api_get_openai_auth_status,
             openai::auth::api_save_openai_auth_config,
             openai::auth::api_clear_openai_auth_config,
@@ -835,32 +973,29 @@ pub fn run() {
             summary::claude_code_provider::claude_code_save_config,
             summary::claude_code_provider::claude_code_check_status,
             summary::codex_provider::codex_save_config,
+            summary::codex_provider::pick_codex_home_folder,
             summary::codex_provider::codex_check_installation,
             summary::codex_provider::codex_list_models,
             summary::codex_provider::codex_find_automatically,
-            summary::codex_provider::codex_browse_for_binary,
             summary::codex_provider::codex_prepare_install_command,
             summary::codex_provider::codex_login_browser,
             summary::codex_provider::codex_login_device,
             summary::codex_provider::codex_logout,
             summary::codex_provider::codex_test_app_server,
             summary::codex_provider::codex_test_processing,
-            summary::codex_provider::codex_process_meeting,
             anthropic::anthropic::get_anthropic_models,
             groq::groq::get_groq_models,
             api::api_get_meetings,
             api::api_search_transcripts,
-            api::api_get_profile,
-            api::api_save_profile,
-            api::api_update_profile,
+            api::api_search_library,
             api::api_get_model_config,
             api::api_save_model_config,
-            api::api_get_api_key,
-            // api::api_get_auto_generate_setting,
-            // api::api_save_auto_generate_setting,
+            api::api_get_api_key_status,
+            api::api_clear_api_key,
             api::api_get_transcript_config,
             api::api_save_transcript_config,
-            api::api_get_transcript_api_key,
+            api::api_get_transcript_api_key_status,
+            api::api_clear_transcript_api_key,
             api::api_test_transcript_provider,
             api::api_delete_meeting,
             api::api_get_meeting,
@@ -871,21 +1006,23 @@ pub fn run() {
             api::api_save_meeting_title,
             api::api_save_transcript,
             api::open_meeting_folder,
-            api::test_backend_connection,
-            api::debug_backend_connection,
             api::open_external_url,
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
+            api::api_clear_custom_openai_api_key,
             api::api_test_custom_openai_connection,
             api::api_test_custom_openai_processing,
             // Summary commands
             summary::commands::api_process_transcript,
+            summary::commands::api_generate_meeting_summary,
+            summary::automatic::get_automatic_summary_preference,
+            summary::automatic::migrate_automatic_summary_preference,
+            summary::automatic::get_automatic_summary_destination,
+            summary::automatic::set_automatic_summary_preference,
+            summary::automatic::start_recording_summary,
             summary::commands::polish_planner_tasks,
             // Meeting chat (transcript-grounded)
-            summary::chat_commands::api_chat_send,
-            summary::chat_commands::api_chat_history,
-            summary::chat_commands::api_chat_clear,
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
             summary::commands::api_restore_previous_summary,
@@ -900,8 +1037,6 @@ pub fn run() {
             summary::commands::api_cancel_summary,
             // Template commands
             summary::template_commands::api_list_templates,
-            summary::template_commands::api_get_template_details,
-            summary::template_commands::api_validate_template,
             summary::template_commands::api_get_default_template,
             summary::template_commands::api_save_default_template,
             summary::template_commands::api_get_template_editor,
@@ -934,47 +1069,25 @@ pub fn run() {
             audio::recording_preferences::get_default_recordings_folder_path,
             audio::recording_preferences::open_recordings_folder,
             audio::recording_preferences::select_recording_folder,
-            audio::recording_preferences::get_available_audio_backends,
             audio::recording_preferences::get_current_audio_backend,
             audio::recording_preferences::set_audio_backend,
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
             set_language_preference,
+            behavior_settings::get_behavior_settings,
+            behavior_settings::migrate_legacy_behavior_settings,
+            behavior_settings::set_recording_notification_preference,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
-            notifications::commands::request_notification_permission,
-            notifications::commands::show_notification,
-            notifications::commands::show_test_notification,
-            notifications::commands::is_dnd_active,
-            notifications::commands::get_system_dnd_status,
-            notifications::commands::set_manual_dnd,
-            notifications::commands::set_notification_consent,
-            notifications::commands::clear_notifications,
-            notifications::commands::is_notification_system_ready,
-            notifications::commands::initialize_notification_manager_manual,
-            notifications::commands::test_notification_with_auto_consent,
-            notifications::commands::get_notification_stats,
             // System audio capture commands
-            audio::system_audio_commands::start_system_audio_capture_command,
-            audio::system_audio_commands::stop_system_audio_capture_command,
-            audio::system_audio_commands::get_system_audio_capture_status,
-            audio::system_audio_commands::list_system_audio_devices_command,
-            audio::system_audio_commands::check_system_audio_permissions_command,
-            audio::system_audio_commands::start_system_audio_monitoring,
-            audio::system_audio_commands::stop_system_audio_monitoring,
-            audio::system_audio_commands::get_system_audio_monitoring_status,
             // Screen Recording permission commands
             audio::permissions::check_screen_recording_permission_command,
             audio::permissions::request_screen_recording_permission_command,
             audio::permissions::trigger_system_audio_permission_command,
             // Database import commands
             database::commands::check_first_launch,
-            database::commands::select_legacy_database_path,
-            database::commands::detect_legacy_database,
-            database::commands::check_default_legacy_database,
-            database::commands::check_homebrew_database,
-            database::commands::import_and_initialize_database,
+            database::commands::import_legacy_database_if_present,
             knowledge::indexer::knowledge_search,
             knowledge::commands::knowledge_ask,
             knowledge::commands::knowledge_live_snapshot,
@@ -995,6 +1108,7 @@ pub fn run() {
             knowledge::commands::knowledge_resolve_evidence,
             knowledge::commands::knowledge_create_library_conversation,
             knowledge::commands::knowledge_list_library_conversations,
+            knowledge::commands::knowledge_library_conversation_scope,
             knowledge::commands::knowledge_clear_history,
             knowledge::indexer::knowledge_index_status,
             knowledge::indexer::knowledge_reindex,
@@ -1011,7 +1125,6 @@ pub fn run() {
             // Onboarding commands
             onboarding::get_onboarding_status,
             onboarding::save_onboarding_status_cmd,
-            onboarding::reset_onboarding_status_cmd,
             onboarding::complete_onboarding,
             // System settings commands
             #[cfg(target_os = "macos")]
@@ -1019,18 +1132,16 @@ pub fn run() {
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,
-            audio::retranscription::is_retranscription_in_progress_command,
             // Speaker diarization commands
             audio::diarization::start_speaker_diarization_command,
             audio::diarization::active_speaker_diarization_command,
             audio::diarization::cancel_speaker_diarization_command,
-            audio::diarization::is_speaker_diarization_in_progress_command,
             // Import audio commands
             audio::import::select_and_validate_audio_command,
+            audio::import::select_audio_files_command,
             audio::import::validate_audio_file_command,
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
-            audio::import::is_import_in_progress_command,
             // Microsoft Graph export commands
             exports::commands::microsoft_sign_in,
             exports::commands::microsoft_cancel_sign_in,
@@ -1040,15 +1151,15 @@ pub fn run() {
             exports::commands::export_to_planner,
             exports::commands::export_meeting_markdown_to_onenote,
             exports::commands::export_meeting_to_onenote_section,
+            exports::commands::list_onenote_resumes,
+            exports::commands::get_meeting_export_history,
             exports::commands::export_meeting_markdown_to_planner,
             exports::commands::summary_has_action_items,
             exports::commands::list_onenote_notebooks,
-            exports::commands::list_onenote_sections,
             exports::commands::list_planner_plans,
             exports::commands::list_planner_buckets,
             exports::commands::list_todo_lists,
             exports::commands::create_onenote_notebook,
-            exports::commands::create_onenote_section,
             exports::commands::create_planner_bucket,
             exports::commands::create_todo_list,
             exports::commands::list_onedrive_destinations,
@@ -1056,8 +1167,16 @@ pub fn run() {
             exports::commands::create_onedrive_destination_folder,
             exports::commands::export_meeting_to_onedrive_files,
             exports::commands::list_calendar_events,
+            ical_sources::list_ical_sources,
+            ical_sources::add_ical_file,
+            ical_sources::add_ical_subscription,
+            ical_sources::read_ical_source,
+            ical_sources::remove_ical_source,
             exports::commands::current_or_next_meeting,
             exports::commands::preview_planner_tasks,
+            exports::actions::get_reviewed_meeting_actions,
+            exports::actions::suggest_meeting_actions,
+            exports::actions::save_reviewed_meeting_actions,
             exports::commands::export_selected_planner_tasks,
             exports::commands::preview_todo_tasks,
             exports::commands::export_selected_todo_tasks,
@@ -1076,14 +1195,28 @@ pub fn run() {
                     tray::focus_main_window(_app_handle);
                 }
                 tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    // Unsaved summary edits come first: the user confirms (or
+                    // keeps the app open) before an active recording is
+                    // stopped. Once that exit is allowed, a recording is
+                    // stopped and saved before the exit proceeds.
                     if summary::edit_exit::request_exit(_app_handle, code.unwrap_or(0), || {
                         api.prevent_exit()
                     }) {
+                        exit_guard::exit_deferred_elsewhere();
                         tray::focus_main_window(_app_handle);
+                        return;
                     }
+                    exit_guard::handle_exit_request(_app_handle, code, || api.prevent_exit());
                 }
                 tauri::RunEvent::Exit => {
+                    #[cfg(windows)]
+                    if windows_lifecycle::session_ending() {
+                        // Tao can dispatch Exit synchronously from WM_ENDSESSION.
+                        // Windows will release the wake lease with the process.
+                        return;
+                    }
                     log::info!("Application exiting, cleaning up resources...");
+                    power::release();
                     tauri::async_runtime::block_on(async {
                         // Clean up database connection and checkpoint WAL
                         if let Some(app_state) = _app_handle.try_state::<state::AppState>() {

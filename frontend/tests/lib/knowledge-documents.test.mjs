@@ -194,6 +194,7 @@ for(const [provider,selectedDocumentIds] of [['codex',[]],['builtin-ai',['select
     const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
       react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
       'lucide-react':{Info:'info',MoreHorizontal:'more'},
+      '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
       '@/services/knowledgeService':{knowledgeService:{}},
       '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},
       '@/components/ui/scroll-area':{ScrollArea:'scroll-area'},
@@ -222,7 +223,7 @@ test('document evidence opens the actual page and paragraph without transcript o
 const element=tag=>({children,asChild,...props})=>React.createElement(tag,props,children);
 test('document anchors remain readable in a map above 64 without changing small transcript maps',()=>{
   const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
-    'lucide-react':{Info:element('span'),MoreHorizontal:element('span')},'@/services/knowledgeService':{knowledgeService:{}},
+    'lucide-react':{Copy:element('span'),Info:element('span'),MoreHorizontal:element('span')},'@/services/knowledgeService':{knowledgeService:{}},
     '@/components/ui/button':{Button:element('button')},'@/components/ui/textarea':{Textarea:element('textarea')},'@/components/ui/scroll-area':{ScrollArea:element('div')},
     '@/components/ui/tooltip':Object.fromEntries(['Tooltip','TooltipTrigger','TooltipContent','TooltipProvider'].map(name=>[name,element('span')])),
     '@/components/ui/dropdown-menu':Object.fromEntries(['DropdownMenu','DropdownMenuContent','DropdownMenuItem','DropdownMenuTrigger','DropdownMenuSeparator','DropdownMenuLabel'].map(name=>[name,element('div')])),

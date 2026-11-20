@@ -121,6 +121,36 @@ struct SourceAttributionHistory {
 }
 
 impl SourceAttributionHistory {
+    // A language hint may affect later words, so require consistent speech on
+    // one input. The optional speaker labels use their existing, looser rule.
+    fn confidently_matches(&self, source: &DeviceType, start_ms: f64, end_ms: f64) -> bool {
+        let duration = end_ms - start_ms;
+        if duration <= 0.0 {
+            return false;
+        }
+        let mut clear_ms = 0.0;
+        let mut covered_ms = 0.0;
+        for window in &self.windows {
+            let overlap =
+                end_ms.min(window.end_timestamp_ms) - start_ms.max(window.start_timestamp_ms);
+            if overlap <= 0.0 {
+                continue;
+            }
+            covered_ms += overlap;
+            let (signal, other) = match source {
+                DeviceType::Microphone => (window.mic_snr, window.sys_snr),
+                DeviceType::System => (window.sys_snr, window.mic_snr),
+            };
+            if !signal.is_finite() || !other.is_finite() || other >= 3.0 {
+                return false;
+            }
+            if signal >= 3.0 && signal >= other * 4.0 {
+                clear_ms += overlap;
+            }
+        }
+        covered_ms >= 0.9 * duration && clear_ms >= 0.5 * duration
+    }
+
     fn record_window(&mut self, sample_count: usize, sample_rate: u32, mic_snr: f32, sys_snr: f32) {
         if sample_count == 0 {
             return;
@@ -849,6 +879,9 @@ impl AudioCapture {
 
     /// Handle stream errors with enhanced disconnect detection
     pub fn handle_stream_error(&self, error: cpal::StreamError) {
+        if !self.state.is_recording() {
+            return;
+        }
         error!("Audio stream error for {}: {}", self.device.name, error);
 
         let error_str = error.to_string().to_lowercase();
@@ -874,7 +907,15 @@ impl AudioCapture {
             AudioError::StreamFailed
         };
 
-        self.state.report_error(audio_error);
+        if matches!(audio_error, AudioError::DeviceDisconnected)
+            || (self.device_type == DeviceType::System
+                && self.state.get_microphone_device().is_some())
+        {
+            self.state
+                .mark_source_missing(self.device.clone(), self.device_type.clone());
+        } else {
+            self.state.report_error(audio_error);
+        }
     }
 }
 
@@ -902,6 +943,8 @@ pub struct AudioPipeline {
     recording_buffer: Vec<f32>,
     recording_buffer_timestamp: f64,
     queue_write_failures: QueueWriteFailureTracker,
+    // Live input levels for the UI meters, folded from the chunks seen here.
+    levels: super::recording_levels::LevelMeter,
 }
 
 impl AudioPipeline {
@@ -1001,11 +1044,21 @@ impl AudioPipeline {
             recording_buffer_timestamp: 0.0,
             recording_sender_for_mixed: None, // Will be set by manager
             queue_write_failures: QueueWriteFailureTracker::default(),
+            levels: super::recording_levels::LevelMeter::new(std::time::Instant::now()),
         }
     }
 
     async fn enqueue_transcription_chunk(&mut self, chunk: AudioChunk) -> bool {
-        match self.transcription_sender.send(chunk).await {
+        let start_ms = chunk.timestamp * 1000.0;
+        let end_ms = start_ms + 1000.0 * chunk.data.len() as f64 / f64::from(chunk.sample_rate);
+        let clear_source =
+            self.attribution_history
+                .confidently_matches(&chunk.device_type, start_ms, end_ms);
+        match self
+            .transcription_sender
+            .send_with_source(chunk, clear_source)
+            .await
+        {
             Ok(()) => {
                 self.queue_write_failures.record_success();
                 true
@@ -1047,6 +1100,9 @@ impl AudioPipeline {
         // Previous bug: Loop checked `while self.state.is_recording()` which caused early exit when
         // stop_recording() was called, losing flush signals and remaining chunks in the pipeline
         loop {
+            if self.state.live_transcription_disabled() {
+                self.vad_processor = None;
+            }
             // Receive audio chunks with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_millis(50), // Shorter timeout for responsiveness
@@ -1092,6 +1148,25 @@ impl AudioPipeline {
                         && self.state.is_recording()
                     {
                         self.state.clear_warning(SYSTEM_AUDIO_SILENCE_WARNING);
+                    }
+
+                    // Live meters: one snapshot per ~100 ms, none while paused
+                    // or stopping. This is the pipeline task, not the capture
+                    // callback, and the meter does not allocate.
+                    let state = &self.state;
+                    if let Some(levels) = self.levels.observe(
+                        &chunk.device_type,
+                        &chunk.data,
+                        std::time::Instant::now(),
+                        state.is_recording() && !state.is_paused(),
+                        || {
+                            (
+                                state.get_microphone_device().is_some(),
+                                state.get_system_device().is_some(),
+                            )
+                        },
+                    ) {
+                        state.report_levels(&levels);
                     }
 
                     // STEP 1: Add raw audio to ring buffer for mixing
@@ -1294,6 +1369,9 @@ impl AudioPipeline {
     }
 
     async fn flush_remaining_audio(&mut self) -> Result<()> {
+        if self.state.live_transcription_disabled() {
+            self.vad_processor = None;
+        }
         info!(
             "Flushing remaining audio from pipeline (processed {} chunks)",
             self.processed_chunks
@@ -1502,6 +1580,20 @@ mod live_segment_cap_tests {
 #[cfg(test)]
 mod source_attribution_tests {
     use super::{DeviceType, SourceAttributionHistory};
+
+    #[test]
+    fn language_attribution_requires_coverage_and_rejects_overlap_or_a_change_of_source() {
+        let mut history = SourceAttributionHistory::default();
+        for (mic, system) in [(10., 1.), (10., 1.), (1., 10.), (8., 7.), (1., 1.)] {
+            history.record_window(16_000, 16_000, mic, system);
+        }
+        assert!(history.confidently_matches(&DeviceType::Microphone, 0., 2000.));
+        assert!(history.confidently_matches(&DeviceType::System, 2000., 3000.));
+        assert!(!history.confidently_matches(&DeviceType::Microphone, 0., 3000.));
+        assert!(!history.confidently_matches(&DeviceType::System, 2000., 4000.));
+        assert!(!history.confidently_matches(&DeviceType::Microphone, 4000., 5000.));
+        assert!(!history.confidently_matches(&DeviceType::System, 5000., 6000.));
+    }
 
     #[test]
     fn segments_emitted_together_use_their_own_source_windows() {

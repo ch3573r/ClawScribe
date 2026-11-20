@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.63.0
+
+- A device reconnect no longer holds the lock that every recording action needs. Stop gives up after 20 seconds with a message when an audio driver does not answer, and a failed Stop is shown. When a reconnect fails for one source, the other keeps recording.
+- A recording does not start when less than about 1.6 GB is free where recordings are saved, and a notice appears once when less than about 780 MB is left.
+- Home shows real levels for the microphone and the meeting audio during a recording.
+- Recovery also lists interrupted recordings found in the recording folders. Settings → General → Storage reopens the list.
+- The interface no longer receives stored keys or tokens. A stored key is only sent to the address it was saved for; after changing that address the key has to be entered again.
+- Files and folders are used when you chose them in a dialog that the core opened. The recordings folder is chosen with a folder dialog; a folder configured earlier stays in use, including on a network share.
+- The Claude Code program must be a local file named claude, outside a project's node_modules folder. The Codex profile folder is chosen with a folder dialog.
+- GPU use, the separate transcription process, cloud transcription, source labels and the transcription language are stored by the core and loaded before anything can record.
+- A database that cannot be opened is reported in a dialog. A background summary shows as running on its meeting. A failed meeting list load shows an error with Retry.
+- 65 unused commands and 27 unused interface files were removed.
+- The Windows GPU installers and updater use version 0.63.0. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Checked with automated tests, not in an installed build, with real audio devices or with real keys.
+
+## 0.62.0
+
+- A manually started recording now uses the title and the microphone and system-audio devices you chose. Before, they were dropped and the defaults were used.
+- Starting a recording stops a running retranscription, import, speaker detection or PC test instead of failing. The previous transcript and speaker labels are kept. Speaker detection on long audio may need a second attempt.
+- Stop in the sidebar works from every page. After a stop the app opens the new meeting only if Home is open; the automatic summary starts either way.
+- Quit in the tray menu during a recording stops it and saves the meeting first, waiting up to two minutes. A capture failure is shown in a notice, and a capture failure while the speech model loads cancels the start.
+- The random bars on Home during a recording are replaced by a still recording mark, and one elapsed-time clock is shown instead of two.
+- Notices follow the light or dark theme and appear at the bottom right.
+- Settings → Transcription has a language setting for Whisper and Nemotron. Parakeet and hosted transcription detect the language themselves.
+- Translated summaries keep English working terms such as rollout or review. Not measured on real meetings.
+- Settings → Appearance adds Inter, Geist and Source Serif 4, a separate transcript and summary font, any installed font by name, and a text size setting.
+- The Windows GPU installers and updater use version 0.62.0. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Checked with automated tests and page renders, not in an installed build with a real recording.
+
+## 0.61.1
+
+- With live transcription, audio capture starts while the speech model loads. Loading took 2 to 5 seconds on a test PC, and speech during that time was neither recorded nor transcribed. If the model cannot be loaded, the start is cancelled and the seconds captured so far are deleted.
+- Parakeet dropped speech from quiet audio. Quiet segments are raised to a normal level before they are transcribed. Audio at a normal level is not changed.
+- Known issue: with the Lightning model, a very short first speech segment can still come back empty in retranscription. The cause is not established.
+- The Windows GPU installers and updater use version 0.61.1. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Both changes were checked against recordings on a development PC, not in an installed build.
+
+## 0.61.0
+
+- Settings is reorganised into one page per topic. Add-ons is split into Microsoft 365, Calendars, Confluence and Assistant access, and the Beta switches moved to Transcription. Links to the old pages open the new ones.
+- A Privacy page lists what stays on this PC and what leaves it, derived from the current settings, including OpenClaw handoff. Unreadable settings are shown as such.
+- Call detection moved to Recording, next to a live microphone level. It recognises Teams calls whose controls are labelled Leave and Mute mic or Unmute mic.
+- Parakeet models are shown in a table. Test this PC keeps its result for the model it measured.
+- Summary settings and shortcuts apply as you change them. Choosing another summary provider only previews it until you choose Use. Live assistance moved to Summary.
+- The sidebar shows the next timed calendar event and groups meetings by date. Diagnostics lists health with problems first.
+- Calendar files and subscriptions can be up to 16 MiB. Descriptions, comments and attachments are dropped before a calendar is stored or shown.
+- The Windows GPU installers and updater use version 0.61.0. Version numbers continue from 0.61.0. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Every settings page in the installed app, call detection in a real Teams call, real calendar subscriptions, the signal check with real devices and updating an existing installation still need real-device acceptance.
+
+## 0.5.60
+
+- Import local iCalendar files or subscribe to a read-only HTTPS or webcal feed. Upcoming meetings combines these events with Microsoft meetings. Choose an event to prefill the next recording title and review the invitees. iCalendar works while signed out of Microsoft.
+- Windows call detection supports Teams, Zoom, Webex and Google Meet. Optional automatic stop applies to the recording started for the detected call.
+- With source attribution enabled, supported multilingual transcription models track microphone and system-audio languages separately. Test this PC measures an installed model on German and English speech samples.
+- Enable local assistant access to let an MCP client search and read saved meeting information. Live assistance stays hidden when live transcript sharing is off.
+- The Windows GPU installers and updater use version 0.5.60. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Installed upgrade and update discovery, real calendar subscriptions, dual-source recording and playback, call start and stop on target devices, and two-hour meeting performance still need real-device acceptance.
+
 ## 0.5.59
 
 - Speaker detection defaults to the NeMo TitaNet small voice model with a grouping threshold of 1.15, and fallback models are ordered by measured accuracy. On seven four-person AMI meetings the mean error in Auto fell from 54% to 23% and the detected speaker count from 10–114 to 3–9. Add an accuracy evaluation harness; evaluation audio, models and results stay outside the repository.

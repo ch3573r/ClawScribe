@@ -10,6 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -39,6 +40,7 @@ interface TranscriptButtonGroupProps {
   transcribeOpen: boolean;
   onTranscribeOpenChange: (open: boolean) => void;
   onCopyTranscript: () => void;
+  onFind?: () => void;
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
@@ -51,6 +53,7 @@ export function TranscriptButtonGroup({
   transcribeOpen,
   onTranscribeOpenChange,
   onCopyTranscript,
+  onFind,
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
@@ -252,7 +255,8 @@ export function TranscriptButtonGroup({
             <TooltipContent>No recording folder is attached to this meeting.</TooltipContent>
           </Tooltip>}
           {meetingId && meetingFolderPath && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
-          {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark</DropdownMenuItem>}
+          {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>Ctrl+F</DropdownMenuShortcut></DropdownMenuItem>}
+          {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>B</DropdownMenuShortcut></DropdownMenuItem>}
           {correctionActions?.canUndo && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.undo}>Undo last correction</DropdownMenuItem>}
           {correctionActions?.canRestore && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.restore}>Restore previous transcript</DropdownMenuItem>}
           {meetingId && canDetectSpeakers(hasRecordingFolder, transcriptCount) && <>

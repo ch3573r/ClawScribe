@@ -313,7 +313,7 @@ async fn delete_meeting_with_transaction(
     }
 
     // Live bookmarks may not have been associated by the library view yet.
-    sqlx::query("DELETE FROM meeting_bookmarks WHERE meeting_id = ? OR folder_path IN (SELECT folder_path FROM meetings WHERE id = ?)")
+    sqlx::query("DELETE FROM meeting_bookmarks WHERE meeting_id = ? OR (meeting_id IS NULL AND recording_id IS NULL AND folder_path IN (SELECT folder_path FROM meetings WHERE id = ?))")
         .bind(meeting_id).bind(meeting_id).execute(&mut *transaction).await?;
 
     // Delete from related tables in proper order

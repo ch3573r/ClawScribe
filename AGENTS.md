@@ -61,9 +61,10 @@ This is a public repository.
   files, or installer output unless the task requires that exact change.
 - Do not use destructive Git commands, rewrite published history, or discard
   uncommitted work.
-- Commit every completed workspace change after validation. Use a short,
-  descriptive commit message and leave the worktree clean. Do not amend an
-  unrelated existing commit.
+- Commit only when the user asks, or as checkpoints when the user has given
+  you ownership of the work. Validate first, stage explicit reviewed paths
+  rather than everything, and use a short, descriptive commit message. Do not
+  amend an unrelated existing commit.
 - Push when the user requests it or when the requested workflow explicitly
   includes publishing/releasing. Never force-push unless explicitly authorized.
 - Do not bump versions, tag, publish, or create a release unless the user asks

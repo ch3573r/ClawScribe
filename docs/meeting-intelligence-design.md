@@ -327,12 +327,13 @@ Ollama is treated as a separately running provider, with visible
 resource guidance; enabling it does not certify concurrent notebook performance.
 
 The live panel uses a backend snapshot of finalized transcript segments.
-Default context is the last 10 minutes; selected saved references may supplement
-it. Backend context is capped at 1,024 finalized segments and 256 KiB, with
+Context is a fixed window (no setting) of up to the last 10 minutes of recording
+time, ending at the finalized-through time; selected saved references may
+supplement it. Backend context is capped at 1,024 finalized segments and 256 KiB, with
 2,048-byte segment bodies and disclosed capacity truncation. Saved references
 require explicit meeting IDs and canonical document membership. Audio-only mode
 explains that no live transcript is available. Provide
-Ask, Summarize so far, and List open questions actions. Each action requires a
+Ask, Summarize the last 10 minutes, and List open questions actions. Each action requires a
 user submission, allows one request in flight, and offers Cancel. The request
 deadline is 30 seconds.
 

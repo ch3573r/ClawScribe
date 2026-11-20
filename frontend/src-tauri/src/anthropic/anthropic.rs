@@ -71,7 +71,24 @@ fn is_chat_model(model_id: &str) -> bool {
 /// # Returns
 /// Vector of available models, or fallback models on error
 #[command]
-pub async fn get_anthropic_models(api_key: Option<String>) -> Result<Vec<AnthropicModel>, String> {
+pub async fn get_anthropic_models(
+    state: tauri::State<'_, crate::state::AppState>,
+    api_key: Option<String>,
+) -> Result<Vec<AnthropicModel>, String> {
+    // The webview sends a key only when the user just typed one; otherwise the
+    // stored key is used here and never leaves the core.
+    let api_key = crate::database::repositories::setting::SettingsRepository::effective_api_key(
+        state.db_manager.pool(),
+        "claude",
+        api_key,
+    )
+    .await
+    .map_err(|_| "Failed to read the saved API key".to_string())?;
+    fetch_anthropic_models(api_key).await
+}
+
+/// The model list for a key the core already holds.
+pub async fn fetch_anthropic_models(api_key: Option<String>) -> Result<Vec<AnthropicModel>, String> {
     // Return fallback if no API key provided
     let api_key = match api_key {
         Some(key) if !key.trim().is_empty() => key.trim().to_string(),

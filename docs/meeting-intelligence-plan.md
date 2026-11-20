@@ -38,7 +38,7 @@ document parsers only through the compatibility tasks below.
 - Retrieval uses 64 candidates per channel, reciprocal rank fusion constant 60, and at most 12 passages.
 - One embedding input at a time, at most two inference threads, a 32-entry coalesced notification queue, and 60-second idle unload.
 - Reference limits: 25 MiB input, 2 MiB extracted text, 500 PDF pages, 10-second extraction, 512 MiB child memory, 32 MiB DOCX decompression, and 5 MiB per XML entry.
-- Live context defaults to 10 minutes; one request in flight; request deadline is 30 seconds.
+- Live context is a fixed window of up to 10 minutes with no setting (this plan once called it a default; the shipped build does not offer another value); one request in flight; request deadline is 30 seconds.
 - Preserve current histories, summary-source identifiers, provider isolation, credential storage, and backup restore compatibility.
 - Add migrations; never edit shipped migrations. Commit neither models nor private runtime data.
 - Run CI, builds, and native Windows diagnostics only on the trusted runner configured by `CLAWSCRIBE_BUILD_RUNNER`.
@@ -354,7 +354,7 @@ changes. Use Task 7 session IDs and snapshot/reply DTOs; reuse existing
 recording/transcript context state and cleanup patterns.
 
 - [x] Add tests `route_change_does_not_duplicate_listener`, `stop_clears_live_messages`, `second_session_cannot_receive_first_reply`, `repeated_action_sends_once`, and `backlog_timestamp_stays_visible`. Run the new tests and confirm failure before implementation. The designated runner observed fifteen owner-contract failures before implementation, then five panel/provider/first-Stop failures before UI wiring; existing tests passed.
-- [x] Add a collapsible panel with Ask, Summarize so far, List open questions, Cancel, selected references, provider, and finalized-transcript time. Make live sharing opt-in and distinguish provider/resource errors from recording health.
+- [x] Add a collapsible panel with Ask, Summarize (labelled "Summarize so far" in this historical plan, now "Summarize the last 10 minutes"), List open questions, Cancel, selected references, provider, and finalized-transcript time. Make live sharing opt-in and distinguish provider/resource errors from recording health.
 - [x] Add unavailable states for audio-only mode and Built-in AI while recording. Keep focus, keyboard, dark/light/accent, and narrow-layout behavior consistent with existing recording controls. Installed visual and keyboard acceptance remains pending.
 - [x] Run frontend typecheck/tests/build and relevant Rust tests on the designated runner. Automated regressions exercise provider failure, cancellation, navigation, repeated Stop and a second recording; installed acceptance remains pending.
 - [ ] Perform a release-like two-hour dual-source smoke with features enabled and a comparable disabled baseline. Record engine/model/language/backend, memory trend, transcription elapsed time/backlog, search/answer times, stop timing, saved audio playback, and second-start behavior. Accept only if assistance creates no capture gaps/unbounded memory and Stop never waits on its backlog.

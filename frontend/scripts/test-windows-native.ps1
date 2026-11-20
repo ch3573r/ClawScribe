@@ -92,19 +92,33 @@ try {
         "audio::async_logger::tests",
         "audio::hardware_detector::tests",
         "updates::tests",
+        "diagnostics::report::tests",
         "audio::recording_mode::tests",
+        "onboarding::tests",
+        "audio::pc_test::tests",
+        "mcp::",
         "audio::pipeline::queue_failure_tests",
+        "audio::pipeline::source_attribution_tests",
         "audio::recording_saver::snapshot_tests",
         "audio::audio_spool::tests",
         "audio::incremental_saver::tests",
         "audio::audio_processing::folder_tests",
         "audio::recording_state::tests",
-        "audio::recording_commands::stop_tests",
+        "audio::recording_manager::reconnect_recovery_tests",
+        "audio::recording_commands::",
+        "audio::interrupted::tests",
+        "start_request::tests",
+        "tray::tests",
+        "power::tests",
+        "windows_lifecycle::tests",
         "audio::transcription::queue::tests",
+        "audio::transcription::source_language::tests",
         "audio::transcription::worker::metrics_lifecycle_tests",
+        "audio::transcription::worker::transcript_delivery_tests",
         "audio::outcome::tests",
         "audio::retranscription::tests",
         "audio::import::tests",
+        "audio::import::phase_tests",
         "audio::diarization::tests",
         "api::",
         "external_url::tests",
@@ -115,9 +129,10 @@ try {
         "database::repositories::meeting::tests",
         "database::repositories::summary::tests",
         "database::manager::tests",
-        "teams_detection::tests",
+        "teams_detection::",
         "database::meeting_files::tests",
         "credentials::tests",
+        "ical_sources::",
         "exports::",
         "openclaw::tests",
         "openai::",
@@ -127,7 +142,8 @@ try {
         "audio::common::tests",
         "audio::inference::tests",
         "audio::transcription::nemotron_provider::tests",
-        "audio::transcription::cloud::"
+        "audio::transcription::cloud::",
+        "self_test::tests"
     )) {
         $listing = & $testExecutable $filter --list
         if ($LASTEXITCODE -ne 0) { throw "Native test discovery failed for '$filter'." }
@@ -136,6 +152,22 @@ try {
         Write-Host "Running $testCount required native tests: $filter"
         & $testExecutable $filter --test-threads=1
         if ($LASTEXITCODE -ne 0) { throw "Native tests failed for '$filter'." }
+    }
+
+    if ($env:CLAWSCRIBE_MEASURE_MAI -eq "true") {
+        $fixture = "audio::transcription::cloud::tests::mai_conversion_and_upload_stream_measurements"
+        $listing = & $testExecutable $fixture --exact --ignored --list
+        if ($LASTEXITCODE -ne 0 -or "${fixture}: test" -notin $listing) {
+            throw "The synthetic MAI performance fixture is missing."
+        }
+        $previousDuration = $env:CLAWSCRIBE_MAI_PERF_SECONDS
+        try {
+            $env:CLAWSCRIBE_MAI_PERF_SECONDS = "600"
+            & $testExecutable $fixture --exact --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw "Synthetic MAI audio measurements failed." }
+        } finally {
+            $env:CLAWSCRIBE_MAI_PERF_SECONDS = $previousDuration
+        }
     }
 } finally {
     $env:PATH = $previousPath

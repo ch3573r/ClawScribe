@@ -1,6 +1,7 @@
 //! Saved-answer orchestration and bounded evidence prompts.
 use super::types::*;
 use super::{conversations, retrieval, store};
+use crate::library::calendar::{stored_title_policy, WITHHELD_TITLE};
 use crate::summary::llm_client::{self, ConfiguredTextReply, ResolvedText, TextEnvironment};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -62,6 +63,8 @@ impl AnswerRegistry {
         request: &AskRequest,
     ) -> Result<RequestLease, String> {
         let owner = conversations::owner_key(&request.owner)?;
+        // An installer restart would cut off the provider call and its durable record.
+        let install = crate::updates::admit_work()?;
         let mut active = self
             .active
             .lock()
@@ -87,6 +90,7 @@ impl AnswerRegistry {
             entry,
             operation_deadline: None,
             settled: false,
+            install: Some(install),
         })
     }
     #[cfg(test)]
@@ -114,6 +118,7 @@ struct RequestLease {
     entry: Arc<ActiveAnswer>,
     operation_deadline: Option<tokio::time::Instant>,
     settled: bool,
+    install: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
 }
 impl RequestLease {
     fn cleanup_deadline(&self) -> tokio::time::Instant {
@@ -132,10 +137,13 @@ impl Drop for RequestLease {
             let pool = self.pool.clone();
             let id = self.id.clone();
             let registry = self.registry.clone();
+            // The cancellation write is durable work too: keep the gate until it ends.
+            let install = self.install.take();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 // The bounded registry entry owns pending durable cancellation
                 // even when the invoking task disappears while the DB is busy.
                 runtime.spawn(async move {
+                    let _install = install;
                     let _ = conversations::cancel(&pool, &id).await;
                     if let Ok(mut active) = registry.active.lock() {
                         active.remove(&id);
@@ -592,11 +600,15 @@ async fn selection_prompt(
         if passages.iter().any(|row| &row.meeting_id == meeting) {
             continue;
         }
-        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN json_valid(s.result) THEN substr(COALESCE(json_extract(s.result,'$.markdown'),json_extract(s.result,'$.summary'),''),1,?) END FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=? ORDER BY s.updated_at DESC LIMIT 1"
+        let row: Option<(String, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
+            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN json_valid(s.result) THEN substr(COALESCE(json_extract(s.result,'$.markdown'),json_extract(s.result,'$.summary'),''),1,?) END,m.calendar_link,length(m.title)>128 FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=? ORDER BY s.updated_at DESC LIMIT 1"
         ).bind(summary_limit as i64).bind(meeting).fetch_optional(pool).await
             .map_err(|_| "Saved meeting overview unavailable")?;
-        if let Some((title, date, text)) = row {
+        if let Some((title, date, text, link, clipped)) = row {
+            // A title that came from an unreviewed invitation stays on this device.
+            let title = stored_title_policy(link.as_deref())
+                .for_clipped(title, clipped != 0)
+                .unwrap_or_else(|| WITHHELD_TITLE.to_string());
             overviews.push(
                 serde_json::json!({"kind":"saved_summary_overview", "title":title,
                 "date":date, "text":text.filter(|text| !text.trim().is_empty()), "citable":false}),
@@ -655,10 +667,10 @@ fn prompt_row(passage: &Passage, tag: usize) -> serde_json::Value {
     } = &passage.evidence.locator
     {
         return serde_json::json!({"kind":"reference_document","tag":format!("[K{tag}]"),
-            "title":passage.title,"added_at":passage.date,"page":page,"paragraph":paragraph,"spans":spans,
+            "title":passage.provider_title.as_deref().unwrap_or(WITHHELD_TITLE),"added_at":passage.date,"page":page,"paragraph":paragraph,"spans":spans,
             "metadata_incomplete":passage.metadata_truncated,"text":passage.text});
     }
-    serde_json::json!({"tag":format!("[K{tag}]"),"title":passage.title,
+    serde_json::json!({"tag":format!("[K{tag}]"),"title":passage.provider_title.as_deref().unwrap_or(WITHHELD_TITLE),
         "date":passage.date,"speaker":passage.speaker,"metadata_incomplete":passage.metadata_truncated,
         "text":passage.text,"preceding_question_tag":null})
 }
@@ -734,6 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn document_candidates_do_not_satisfy_selected_meeting_transcript_coverage() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, mut request, _dir) = document_answer_fixture().await;
         request.search.query = "meeting_budget".into();
         let frozen = retrieval::freeze_search_in_connection(
@@ -804,6 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_reference_answer_is_distinct_and_deselection_omits_prior_context() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, dir) = document_answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
         let reply = ask_resolved(
@@ -867,6 +881,7 @@ mod tests {
 
     #[tokio::test]
     async fn reference_permission_prevents_dispatch_and_revocation_cancels_generation() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, dir) = document_answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
         let mut external = resolved(&pool, dir.path()).await;
@@ -1289,6 +1304,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_budget_preserves_both_complete_long_meetings_in_date_order() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, mut request, dir) = long_selection_fixture().await;
         request.search.query = "What were these meetings about?".into();
         let mut configuration = resolved(&pool, dir.path()).await;
@@ -1327,6 +1343,7 @@ mod tests {
 
     #[tokio::test]
     async fn small_provider_budget_reserves_matches_for_each_long_meeting() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, mut request, dir) = long_selection_fixture().await;
         request.search.query = "Launch".into();
         let mut configuration = resolved(&pool, dir.path()).await;
@@ -1364,6 +1381,7 @@ mod tests {
 
     #[tokio::test]
     async fn unmatched_selected_meeting_has_a_non_citable_saved_overview() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, mut request, dir) = long_selection_fixture().await;
         sqlx::query("UPDATE transcripts SET transcript='Budget discussion without the query term' WHERE meeting_id='second-long'")
             .execute(&pool).await.unwrap();
@@ -1407,6 +1425,7 @@ mod tests {
     }
     #[tokio::test]
     async fn public_saved_ask_exposes_verified_question_context_before_dispatch() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, dir) = answer_fixture().await;
         let reply = ask_resolved(
             &pool,
@@ -1438,6 +1457,7 @@ mod tests {
     }
     #[tokio::test]
     async fn saved_ask_terminal_status_wait_respects_overall_cleanup_deadline() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, _) = answer_fixture().await;
         let runtime = Arc::new(super::super::KnowledgeState::default());
         *runtime.answers.cleanup_budget.lock().unwrap() = Some(Duration::from_millis(50));
@@ -1504,6 +1524,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_request_signals_owned_generation_before_database_release() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, _) = answer_fixture().await;
         let runtime = Arc::new(super::super::KnowledgeState::default());
         *runtime.answers.cleanup_budget.lock().unwrap() = Some(Duration::from_millis(50));
@@ -1557,6 +1578,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_public_ask_returns_original_after_provider_disconnect_or_change() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, dir) = answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
         let first = ask_resolved(
@@ -1619,6 +1641,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_ask_reads_ready_legacy_and_imported_sources_without_index_jobs() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, mut request, dir) = answer_fixture().await;
         sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('imported-fixture','Public imported fixture','2026-09-02T10:15:00Z','2026-09-02T10:15:00Z'),('excluded-fixture','Excluded fixture','2026-09-03','2026-09-03')")
             .execute(&pool).await.unwrap();
@@ -1727,6 +1750,7 @@ mod tests {
     }
     #[tokio::test]
     async fn saved_ask_uses_canonical_small_context_and_returns_one_durable_reply() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, dir) = answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
         let first = ask_resolved(
@@ -1803,6 +1827,7 @@ mod tests {
     }
     #[tokio::test]
     async fn saved_ask_discards_generation_after_metadata_scope_clear_or_cancel() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for mutation in ["title", "date", "scope", "clear", "cancel"] {
             let (pool, mut request, dir) = answer_fixture().await;
             sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES ('answer-fixture','public-project')").execute(&pool).await.unwrap();
@@ -1839,6 +1864,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_before_reserve_cannot_recreate_cleared_history() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, dir) = answer_fixture().await;
         let runtime = super::super::KnowledgeState::default();
         let token = CancellationToken::new();
@@ -1862,6 +1888,21 @@ mod tests {
             "Clear must win before the user turn is reserved"
         );
     }
+    #[test]
+    fn a_withheld_title_never_reaches_the_provider_prompt() {
+        let mut automatic = passage("automatic", "2026-09-01", "Public text");
+        automatic.title = "Quarterly planning with an unchecked invitee".into();
+        automatic.provider_title = None;
+        let reviewed = passage("reviewed", "2026-09-02", "More public text");
+        let (prompt, selected) =
+            build_prompt("What was decided?", &[automatic, reviewed], "", 16 * 1024).unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(!prompt.contains("Quarterly planning"));
+        assert!(prompt.contains(WITHHELD_TITLE));
+        // A reviewed or personally chosen title is still shared.
+        assert!(prompt.contains("Public reviewed"));
+    }
+
     fn passage(id: &str, date: &str, text: &str) -> Passage {
         Passage {
             evidence: EvidenceRef {
@@ -1883,6 +1924,7 @@ mod tests {
             },
             meeting_id: id.into(),
             title: format!("Public {id}"),
+            provider_title: Some(format!("Public {id}")),
             date: date.into(),
             speaker: Some("Public speaker".into()),
             metadata_truncated: false,

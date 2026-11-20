@@ -1,5 +1,8 @@
 param(
-    [string]$TauriRoot = (Join-Path $PSScriptRoot "..\src-tauri")
+    [string]$TauriRoot = (Join-Path $PSScriptRoot "..\src-tauri"),
+    # Validation runs can reuse the two pinned executables and version manifest.
+    # A full packaging run stages the complete vendor directory afresh.
+    [switch]$SkipIfCurrent
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +42,27 @@ $sidecarPath = Join-Path $binariesDir "codex-app-server-$target.exe"
 $metadataPath = Join-Path $binariesDir "codex-app-server-runtime.json"
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "clawscribe-codex-runtime-$runtimeVersion-$target"
 $extractDir = Join-Path $tempRoot "extract"
+
+if ($SkipIfCurrent) {
+    $stagedRuntimeExe = Join-Path $runtimeDir "vendor\$target\bin\codex.exe"
+    $isStaged = (Test-Path -LiteralPath $sidecarPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $metadataPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $stagedRuntimeExe -PathType Leaf)
+    if ($isStaged) {
+        $stagedSidecarSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $sidecarPath).Hash.ToLowerInvariant()
+        $stagedRuntimeSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedRuntimeExe).Hash.ToLowerInvariant()
+        try {
+            $stagedMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $stagedMetadata = $null
+        }
+        if ($stagedSidecarSha -eq $runtimeSha256 -and $stagedRuntimeSha -eq $runtimeSha256 -and
+            $stagedMetadata.runtime_version -eq $runtimeVersion) {
+            Write-Host "Codex app-server runtime $runtimeVersion is already staged and matches the pinned hash; skipping the download."
+            return
+        }
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $binariesDir | Out-Null
 Remove-Item -Recurse -Force -LiteralPath $tempRoot -ErrorAction SilentlyContinue

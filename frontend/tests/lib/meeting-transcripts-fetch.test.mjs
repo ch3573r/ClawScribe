@@ -71,7 +71,7 @@ function caller(kind, failOffset = -1) {
   const invoke = async (command, args) => {
     if (command === 'api_get_meeting_transcripts') return pageSource.invoke(command, args);
     if (command === 'api_get_summary') return { data: {} };
-    if (command === 'api_process_transcript') { generated.push(args.text); return { process_id: 'synthetic-process' }; }
+    if (command === 'api_generate_meeting_summary') { generated.push(args); return { process_id: 'synthetic-process' }; }
     throw new Error(`Unexpected command: ${command}`);
   };
   const mocks = {
@@ -86,6 +86,8 @@ function caller(kind, failOffset = -1) {
     '@/lib/openExternal': {},
     '@/lib/utils': {},
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
+    // The real formatters; only the browser clipboard write is replaced.
+    '@/lib/clipboard-format': { ...loadTsModule(sourcePath('lib/clipboard-format')), writeClipboard: async content => { copied.push(content.text); return 'text'; } },
     '@/lib/meetingCalendar': { getMeetingCalendar: () => null },
     '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: 'de' }) },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ startSummaryPolling() {}, stopSummaryPolling() {} }) },
@@ -114,26 +116,35 @@ function caller(kind, failOffset = -1) {
   return { hooks, action, errors, copied, generated, calls: pageSource.calls };
 }
 
-for (const kind of ['copy', 'generate', 'regenerate']) {
-  test(`${kind} uses all 2500 saved lines instead of the loaded 100`, async () => {
+test('copy uses all 2500 saved lines instead of the loaded 100', async () => {
+  const view = caller('copy');
+  await view.action();
+  assert.deepEqual(view.errors, []);
+  const actual = [...view.copied[0].matchAll(/Synthetic line (\d+)\./g)].map(match => Number(match[1]));
+  assert.deepEqual(actual, Array.from({ length: 2500 }, (_, index) => index));
+  assert.equal(view.calls.length, 3);
+  view.hooks.unmount();
+});
+
+test('copy stops with one fetch-error toast when page two fails', async () => {
+  const view = caller('copy', 1000);
+  await view.action();
+  assert.deepEqual(view.errors, ['Failed to fetch transcripts for copying']);
+  assert.equal(view.copied.length, 0);
+  assert.equal(view.calls.length, 2);
+  view.hooks.unmount();
+});
+
+for (const kind of ['generate', 'regenerate']) {
+  test(kind + ' asks the core for the saved meeting by ID without copying transcript pages', async () => {
     const view = caller(kind);
     await view.action();
     assert.deepEqual(view.errors, []);
-    const results = kind === 'copy' ? view.copied : view.generated;
-    assert.equal(results.length, 1);
-    const actual = [...results[0].matchAll(/Synthetic line (\d+)\./g)].map(match => Number(match[1]));
-    assert.deepEqual(actual, Array.from({ length: 2500 }, (_, index) => index));
-    assert.equal(view.calls.length, 3);
-    view.hooks.unmount();
-  });
-
-  test(`${kind} stops with one fetch-error toast when page two fails`, async () => {
-    const view = caller(kind, 1000);
-    await view.action();
-    assert.deepEqual(view.errors, [kind === 'copy' ? 'Failed to fetch transcripts for copying' : 'Failed to fetch transcripts for summary generation']);
-    assert.equal(view.copied.length, 0);
-    assert.equal(view.generated.length, 0);
-    assert.equal(view.calls.length, 2);
+    assert.equal(view.generated.length, 1);
+    assert.equal(view.generated[0].meetingId, 'synthetic-meeting');
+    assert.equal(view.generated[0].summaryLanguage, 'de');
+    assert.equal('text' in view.generated[0], false);
+    assert.equal(view.calls.length, 0);
     view.hooks.unmount();
   });
 }

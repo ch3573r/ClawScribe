@@ -3,7 +3,7 @@ use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use zip::write::SimpleFileOptions;
 #[path = "backup/documents.rs"]
 mod archive_documents;
+#[path = "backup/exports.rs"]
+mod archive_exports;
 
 const TABLES: &[&str] = &[
     "meetings",
@@ -25,6 +27,7 @@ const TABLES: &[&str] = &[
     "transcript_file_sync",
     "meeting_tags",
     "meeting_bookmarks",
+    "meeting_summary_bookmarks",
     "knowledge_owners",
     "knowledge_requests",
     "knowledge_messages",
@@ -48,6 +51,8 @@ struct Manifest {
     incomplete_audio: BTreeMap<usize, IncompleteAudio>,
     #[serde(default)]
     document_files: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    export_ledgers: BTreeMap<usize, crate::exports::ExportLedger>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -71,6 +76,8 @@ pub struct BackupReport {
     pub meetings: usize,
     pub skipped: usize,
     pub files: usize,
+    /// Meetings restored without a calendar link that could not be read.
+    pub unreadable_calendar_links: usize,
     pub incomplete_meetings: Vec<IncompleteMeeting>,
 }
 
@@ -158,10 +165,18 @@ async fn snapshot_impl(
     with_documents: bool,
 ) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     super::attach_bookmarks(pool).await.map_err(failure)?;
+    snapshot_tables(pool, TABLES, with_documents).await
+}
+
+async fn snapshot_tables(
+    pool: &SqlitePool,
+    meeting_tables: &[&str],
+    with_documents: bool,
+) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut tables = BTreeMap::new();
     let mut budget = MAX_MANIFEST;
-    for table in TABLES
+    for table in meeting_tables
         .iter()
         .chain(archive_documents::TABLES.iter().filter(|_| with_documents))
     {
@@ -228,6 +243,7 @@ async fn snapshot_impl(
         .retain(|row| row.get("meeting_id").is_some_and(Value::is_string));
     for row in tables.get_mut("meeting_bookmarks").unwrap() {
         row.insert("folder_path".into(), Value::Null);
+        row.remove("recording_id");
     }
     Ok((
         Manifest {
@@ -237,6 +253,7 @@ async fn snapshot_impl(
             files: BTreeMap::new(),
             incomplete_audio: BTreeMap::new(),
             document_files: BTreeMap::new(),
+            export_ledgers: BTreeMap::new(),
         },
         folders,
     ))
@@ -267,6 +284,7 @@ fn write_archive_impl(
         .large_file(true);
     let mut files = 0;
     let mut total = 0u64;
+    let mut history_budget = archive_exports::remaining_budget(&manifest.export_ledgers)?;
     let pending_audio: HashSet<String> = manifest.tables["recording_outcomes"]
         .iter()
         .filter(|row| {
@@ -371,6 +389,17 @@ fn write_archive_impl(
             if !entry.file_type().map_err(failure)?.is_file() {
                 return Err("Recording file links are not supported in backups.".into());
             }
+            if name == crate::exports::ledger::LEDGER_FILENAME {
+                archive_exports::capture_legacy_folder(
+                    &mut manifest.export_ledgers,
+                    index,
+                    text_field(meeting, "id")?,
+                    folder,
+                    &mut history_budget,
+                )
+                .map_err(|_| meeting_failure(meeting, archive_exports::UNREADABLE_HISTORY))?;
+                continue;
+            }
             let mut input = File::open(entry.path()).map_err(failure)?;
             let size = input.metadata().map_err(failure)?.len();
             has_audio |= size > 0
@@ -408,6 +437,7 @@ fn write_archive_impl(
         &mut files,
         &mut total,
     )?;
+    archive_exports::validate(&manifest)?;
     let bytes = serde_json::to_vec(&manifest).map_err(failure)?;
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Meeting metadata exceeds the archive limit.".into());
@@ -421,6 +451,7 @@ fn write_archive_impl(
         meetings: manifest.tables["meetings"].len(),
         skipped: 0,
         files,
+        unreadable_calendar_links: 0,
         incomplete_meetings: incomplete_meetings(&manifest, None),
     })
 }
@@ -443,7 +474,9 @@ fn unpack(
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Archive metadata is too large.".into());
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(failure)?;
+    let legacy_history_budget = MAX_MANIFEST - bytes.len() as u64;
+    let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(failure)?;
+    drop(bytes);
     if !matches!(manifest.version, 1 | 2)
         || manifest.format != "ClawScribe meeting archive"
         || !manifest.tables.contains_key("meetings")
@@ -464,6 +497,7 @@ fn unpack(
         if id.is_empty() || !known.insert(id) {
             return Err("Duplicate meeting identity in archive.".into());
         }
+        validate_reviewed_actions(row)?;
     }
     let documents = archive_documents::validate(&manifest)?;
     if manifest
@@ -512,6 +546,8 @@ fn unpack(
             return Err("Archive exceeds 100 GiB.".into());
         }
     }
+    archive_exports::read_legacy(&mut manifest, &mut zip, legacy_history_budget)?;
+    archive_exports::validate(&manifest)?;
     // Verify every original before creating any stage or publishing any rows.
     archive_documents::verify_zip(&mut zip, &documents)?;
     std::fs::create_dir_all(root).map_err(failure)?;
@@ -542,6 +578,13 @@ fn unpack(
     }
     archive_documents::extract_originals(&mut zip, &documents, stage.path())?;
     Ok((manifest, stage))
+}
+
+fn validate_reviewed_actions(row: &Map<String, Value>) -> Result<(), String> {
+    if let Some(actions) = row.get("reviewed_actions").filter(|value| !value.is_null()) {
+        crate::exports::actions::decode(actions.as_str().ok_or("Invalid saved meeting actions.")?)?;
+    }
+    Ok(())
 }
 
 fn text_field<'a>(row: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
@@ -1131,20 +1174,23 @@ async fn import_manifest(
     manifest: Manifest,
     stage: tempfile::TempDir,
 ) -> Result<BackupReport, String> {
-    import_manifest_impl(pool, manifest, stage, None).await
+    import_manifest_impl(pool, manifest, stage, None, None).await
 }
 
 async fn import_manifest_impl(
     pool: &SqlitePool,
-    manifest: Manifest,
+    mut manifest: Manifest,
     stage: tempfile::TempDir,
     reference_root: Option<&Path>,
+    app_data: Option<&Path>,
 ) -> Result<BackupReport, String> {
     let documents = archive_documents::validate(&manifest)?;
+    archive_exports::validate(&manifest)?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut selected = HashSet::new();
     let mut known = HashSet::new();
     let mut skipped = 0;
+    let mut unreadable_calendar_links = 0;
     for row in &manifest.tables["meetings"] {
         let id = row
             .get("id")
@@ -1164,6 +1210,20 @@ async fn import_manifest_impl(
             selected.insert(id.to_string());
         }
     }
+    // Meetings restored without a recording folder (the archive carried no
+    // files for them). No transcript or metadata file can ever be written for
+    // these, so pending file work from the source computer is inapplicable.
+    let folderless: HashMap<String, usize> = manifest.tables["meetings"]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !manifest.files.contains_key(index))
+        .filter_map(|(index, row)| {
+            let id = row.get("id")?.as_str()?;
+            selected.contains(id).then(|| (id.to_string(), index))
+        })
+        .collect();
+    let mut dropped_file_work = HashSet::new();
+    let mut summary_content_revisions = Vec::new();
     for table in TABLES {
         if table.starts_with("knowledge_") {
             continue;
@@ -1184,6 +1244,9 @@ async fn import_manifest_impl(
             if source.keys().any(|key| !columns.contains(key)) {
                 return Err("Archive contains unsupported data columns.".into());
             }
+            if *table == "meetings" {
+                validate_reviewed_actions(source)?;
+            }
             let parent = source
                 .get(if *table == "meetings" {
                     "id"
@@ -1198,8 +1261,45 @@ async fn import_manifest_impl(
             if !selected.contains(parent) {
                 continue;
             }
+            let folderless_meeting = folderless.get(parent).copied();
+            if let Some(meeting_index) = folderless_meeting {
+                if *table == "transcript_file_sync" {
+                    // A retry marker here could never finish and would fail forever.
+                    dropped_file_work.insert(meeting_index);
+                    continue;
+                }
+            }
             let mut row = source.clone();
+            if let Some(meeting_index) = folderless_meeting {
+                if *table == "recording_outcomes"
+                    && row.get("recording_files_incomplete").is_some_and(|value| {
+                        value.as_i64() == Some(1) || value.as_bool() == Some(true)
+                    })
+                {
+                    // Only the file-retry flag is inapplicable. Capture gaps and the
+                    // other recorded outcomes are restored exactly as archived.
+                    row.insert("recording_files_incomplete".into(), Value::from(0));
+                    dropped_file_work.insert(meeting_index);
+                }
+            }
             if *table == "meetings" {
+                if let Some(revision) = row.remove("summary_content_revision") {
+                    let revision = revision
+                        .as_i64()
+                        .ok_or("Invalid summary content revision.")?;
+                    summary_content_revisions.push((parent, revision));
+                }
+                // One unreadable link must not block the restore. The meeting is
+                // kept and only its link is cleared; the title then stays local.
+                let readable = match row.get("calendar_link") {
+                    Some(Value::String(link)) => super::calendar::decode(link).is_ok(),
+                    None | Some(Value::Null) => true,
+                    _ => false,
+                };
+                if !readable {
+                    row.insert("calendar_link".into(), Value::String("null".into()));
+                    unreadable_calendar_links += 1;
+                }
                 if manifest.files.contains_key(&index)
                     && !stage.path().join(index.to_string()).is_dir()
                 {
@@ -1226,15 +1326,23 @@ async fn import_manifest_impl(
             }
             if *table == "meeting_bookmarks" {
                 row.insert("folder_path".into(), Value::Null);
+                row.remove("recording_id");
             }
-            // Interrupted remote summary jobs cannot resume on the destination machine.
-            if *table == "summary_processes"
-                && row
+            if *table == "summary_processes" {
+                // A matching destination on this profile does not authorize a restored job.
+                row.insert("automatic_request_fingerprint".into(), Value::Null);
+                if row
                     .get("status")
                     .and_then(Value::as_str)
-                    .is_some_and(|s| !matches!(s, "completed" | "failed" | "cancelled"))
-            {
-                row.insert("status".into(), Value::String("cancelled".into()));
+                    .is_some_and(|status| {
+                        !matches!(
+                            status.to_ascii_lowercase().as_str(),
+                            "completed" | "failed" | "cancelled" | "skipped"
+                        )
+                    })
+                {
+                    row.insert("status".into(), Value::String("cancelled".into()));
+                }
             }
             let names = row
                 .keys()
@@ -1262,13 +1370,29 @@ async fn import_manifest_impl(
                     _ => return Err("Invalid archive field type.".into()),
                 }
             }
+            query.push(")");
+            if *table == "meeting_summary_bookmarks" {
+                // The meeting insert can already have transferred local consent
+                // from the same interrupted recording.
+                query.push(" ON CONFLICT (meeting_id) DO NOTHING");
+            }
             query
-                .push(")")
                 .build()
                 .execute(&mut *tx)
                 .await
                 .map_err(failure)?;
         }
+    }
+    // Replaying transcripts fires the revision triggers. Reinstate the saved
+    // counter so both current and stale partials retain their original state.
+    // Archives without this column keep the revision built by the triggers.
+    for (meeting_id, revision) in summary_content_revisions {
+        sqlx::query("UPDATE meetings SET summary_content_revision = ? WHERE id = ?")
+            .bind(revision)
+            .bind(meeting_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(failure)?;
     }
     let document_restore = archive_documents::restore_rows(
         &mut tx,
@@ -1302,6 +1426,15 @@ async fn import_manifest_impl(
                          ON CONFLICT(meeting_id) DO UPDATE SET recovery_files_elsewhere = 1")
                 .bind(meeting_id).execute(&mut *tx).await.map_err(failure)?;
         }
+    }
+    // Missing audio is reported from what the archive lacked, independently of
+    // the retry flag that was dropped above.
+    for index in dropped_file_work {
+        manifest
+            .incomplete_audio
+            .entry(index)
+            .or_default()
+            .audio_unavailable = true;
     }
     // Delete skipped meetings' extracted files before committing any rows or
     // keeping the stage. Cleanup failure rolls back the complete import.
@@ -1340,7 +1473,10 @@ async fn import_manifest_impl(
         .fold((0, 0), |(files, folders), (_, names)| {
             (files + names.len(), folders + 1)
         });
-    let (originals, stage) = tokio::task::spawn_blocking(move || {
+    let ledgers = archive_exports::selected(&manifest, &selected);
+    let app_data = app_data.map(Path::to_path_buf);
+    let (originals, history, stage) = tokio::task::spawn_blocking(move || {
+        let history = archive_exports::publish(ledgers, app_data.as_deref())?;
         let originals = document_restore.publish()?;
         // Only recording folders survive a successful restore. The originals
         // have their own app-owned publication guard and need no staging copy.
@@ -1349,7 +1485,7 @@ async fn import_manifest_impl(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(failure(error)),
         }
-        Ok((originals, stage))
+        Ok((originals, history, stage))
     })
     .await
     .map_err(failure)??;
@@ -1359,6 +1495,7 @@ async fn import_manifest_impl(
     tokio::spawn(async move {
         tx.commit().await.map_err(failure)?;
         originals.keep();
+        history.keep();
         if folders > 0 {
             stage.keep();
         }
@@ -1370,6 +1507,7 @@ async fn import_manifest_impl(
         meetings: selected.len(),
         skipped,
         files: files + document_files,
+        unreadable_calendar_links,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
     })
 }
@@ -1395,7 +1533,7 @@ async fn import_manifest_with_documents(
     stage: tempfile::TempDir,
     reference_root: &Path,
 ) -> Result<BackupReport, String> {
-    import_manifest_impl(pool, manifest, stage, Some(reference_root)).await
+    import_manifest_impl(pool, manifest, stage, Some(reference_root), None).await
 }
 
 #[cfg(test)]
@@ -1404,25 +1542,39 @@ mod document_tests;
 
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
-    if !Path::new(&path)
+    // Only a path the user chose in the save dialog the core opened
+    // (`pick_backup_save_path`), once.
+    let granted = crate::file_grants::take(crate::file_grants::Purpose::BackupSave, &path)?;
+    let result = backup_library_to(app, granted.path.clone()).await;
+    if result.is_err() {
+        crate::file_grants::give_back(crate::file_grants::Purpose::BackupSave, &granted);
+    }
+    result
+}
+
+async fn backup_library_to(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
+    if !path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
     {
         return Err("Choose a .zip backup file.".into());
     }
+    crate::file_grants::save_target_parent_exists(&path)?;
     let _guard = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
     let _audio = crate::audio::inference::claim_job()?;
-    let reference_root = app
-        .path()
-        .app_data_dir()
-        .map_err(failure)?
-        .join("reference-documents");
-    let (manifest, folders) =
+    let _export = crate::exports::commands::EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Finish the Microsoft export before working with an archive.")?;
+    let app_data = app.path().app_data_dir().map_err(failure)?;
+    let reference_root = app_data.join("reference-documents");
+    let (mut manifest, folders) =
         snapshot_with_documents(app.state::<AppState>().db_manager.pool()).await?;
     tokio::task::spawn_blocking(move || {
-        write_archive_with_documents(Path::new(&path), manifest, folders, &reference_root)
+        let _permits = (_guard, _audio, _export);
+        archive_exports::capture(&mut manifest, &app_data)?;
+        write_archive_with_documents(&path, manifest, folders, &reference_root)
     })
     .await
     .map_err(failure)?
@@ -1430,20 +1582,38 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
 
 #[tauri::command]
 pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
+    // Only an archive the user chose in the file dialog the core opened
+    // (`pick_backup_restore_path`), once.
+    let granted = crate::file_grants::take(crate::file_grants::Purpose::BackupOpen, &path)?;
+    let result = restore_library_from(app, granted.path.clone()).await;
+    if result.is_err() {
+        crate::file_grants::give_back(crate::file_grants::Purpose::BackupOpen, &granted);
+    }
+    result
+}
+
+async fn restore_library_from(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
     let _guard = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
     let _audio = crate::audio::inference::claim_job()?;
-    let reference_root = app
-        .path()
-        .app_data_dir()
-        .map_err(failure)?
-        .join("reference-documents");
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(failure)?
-        .join("restored-recordings");
+    let _export = crate::exports::commands::EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Finish the Microsoft export before working with an archive.")?;
+    // Keep archive, audio and export ownership until any detached restore has
+    // committed or rolled back, even if the invoking window stops waiting.
+    tokio::spawn(async move {
+        let _permits = (_guard, _audio, _export);
+        restore_library_locked(app, path).await
+    })
+    .await
+    .map_err(failure)?
+}
+
+async fn restore_library_locked(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
+    let app_data = app.path().app_data_dir().map_err(failure)?;
+    let reference_root = app_data.join("reference-documents");
+    let root = app_data.join("restored-recordings");
     let existing_ids: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT id FROM meetings")
         .fetch_all(app.state::<AppState>().db_manager.pool())
         .await
@@ -1451,14 +1621,15 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
         .into_iter()
         .collect();
     let (manifest, stage) =
-        tokio::task::spawn_blocking(move || unpack(Path::new(&path), &root, &existing_ids))
+        tokio::task::spawn_blocking(move || unpack(&path, &root, &existing_ids))
             .await
             .map_err(failure)??;
-    let report = import_manifest_with_documents(
+    let report = import_manifest_impl(
         app.state::<AppState>().db_manager.pool(),
         manifest,
         stage,
-        &reference_root,
+        Some(&reference_root),
+        Some(&app_data),
     )
     .await?;
     let _ = app.emit("library-changed", ());
@@ -1468,6 +1639,239 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restores_app_data_export_history_and_prevents_duplicate_remote_creates() {
+        use crate::exports::{
+            client::{GraphClient, RetryPolicy, TokioSleeper},
+            exporter::{export_planner, ExportContext},
+            ledger::{meeting_dir, task_key, ExportLedger},
+            model::ExportStatus,
+            planner::{action_hash, dedupe_key, task_scope, PlannerDestination},
+            transport::{GraphResponse, MockGraphTransport},
+        };
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('portable','Portable meeting','2026-11-20','2026-11-20')")
+            .execute(&source).await.unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "portable");
+        let mut ledger = ExportLedger::load_or_new(&profile_dir, "portable").unwrap();
+        let meeting = crate::exports::markdown_notes::meeting_export_for_planner(
+            "portable",
+            "Portable meeting",
+            None,
+            "## Action items\n- Send draft\n- Call venue\n- Share report",
+        );
+        let destination = PlannerDestination {
+            plan_id: "plan".into(),
+            bucket_id: "bucket".into(),
+        };
+        let key = |index: usize| {
+            dedupe_key(
+                "tenant",
+                "user",
+                &destination,
+                &meeting,
+                &meeting.action_items[index],
+            )
+        };
+        ledger.record_success(&key(0), Some("old-task".into()), None, None);
+        ledger.begin_attempt(&key(1), None);
+        let mut shifted = meeting.clone();
+        shifted.action_items.truncate(1);
+        let action = &mut shifted.action_items[0];
+        action.local_action_id = "action-5".into();
+        action.task = "File evidence".into();
+        let hash = action_hash(action);
+        let scope = task_scope("tenant", "user", &destination);
+        ledger.record_success(
+            &format!("{scope}:1234567890abcdef:action-4:{hash}"),
+            Some("previous-task".into()),
+            None,
+            None,
+        );
+        let pending_key = task_key(&scope, "portable", "action-6", &hash);
+        ledger.begin_attempt(&pending_key, None);
+        let saved_id = "00000000-0000-4000-8000-000000000001";
+        ledger.record_failure(
+            &task_key(&scope, "portable", saved_id, &hash),
+            ExportStatus::Failed,
+            None,
+            None,
+        );
+        ledger.checkpoint().await.unwrap();
+
+        let calendar = super::super::calendar::tests::sample();
+        super::super::calendar::write(&source, "portable", Some(calendar.clone()), false)
+            .await
+            .unwrap();
+        let actions = crate::exports::actions::suggest_meeting_actions(
+            "## Aufgaben\n- Bericht senden".into(),
+        );
+        assert_eq!(actions.len(), 1);
+        let actions_json = serde_json::to_string(&actions).unwrap();
+        sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = 'portable'")
+            .bind(&actions_json)
+            .execute(&source)
+            .await
+            .unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        assert_eq!(folders, vec![None]);
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let history = manifest.export_ledgers.get_mut(&0).unwrap();
+        history.meeting_id = "different".into();
+        assert!(archive_exports::validate(&manifest).is_err());
+        manifest.export_ledgers.get_mut(&0).unwrap().meeting_id = "portable".into();
+        let archive = profile.path().join("portable.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        let rejected = tempfile::tempdir().unwrap();
+        let rejected_pool = empty_conversation_destination().await;
+        sqlx::query("CREATE TABLE public_fixture_export_commit_failure(parent_id TEXT REFERENCES meetings(id) DEFERRABLE INITIALLY DEFERRED)")
+            .execute(&rejected_pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER public_fixture_fail_export_commit AFTER INSERT ON meetings BEGIN INSERT INTO public_fixture_export_commit_failure VALUES ('missing-public-fixture-parent'); END")
+            .execute(&rejected_pool).await.unwrap();
+        let (manifest, stage) = unpack(
+            &archive,
+            &rejected.path().join("recordings"),
+            &HashSet::new(),
+        )
+        .unwrap();
+        let stage_path = stage.path().to_path_buf();
+        assert!(
+            import_manifest_impl(&rejected_pool, manifest, stage, None, Some(rejected.path()))
+                .await
+                .is_err()
+        );
+        assert!(!stage_path.exists());
+        assert!(
+            ExportLedger::read(&meeting_dir(rejected.path(), "portable"))
+                .unwrap()
+                .is_none()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM meetings")
+            .fetch_one(&rejected_pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let fresh = tempfile::tempdir().unwrap();
+        let restored = empty_conversation_destination().await;
+        let (manifest, stage) =
+            unpack(&archive, &fresh.path().join("recordings"), &HashSet::new()).unwrap();
+        import_manifest_impl(&restored, manifest, stage, None, Some(fresh.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::calendar::read(&restored, "portable")
+                .await
+                .unwrap(),
+            Some(calendar)
+        );
+        let restored_actions: String =
+            sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = 'portable'")
+                .fetch_one(&restored)
+                .await
+                .unwrap();
+        assert_eq!(
+            crate::exports::actions::decode(&restored_actions).unwrap(),
+            actions
+        );
+        let mut ledger =
+            ExportLedger::load_or_new(&meeting_dir(fresh.path(), "portable"), "portable").unwrap();
+        let transport = MockGraphTransport::new();
+        let url = "https://graph.microsoft.com/v1.0/planner/tasks";
+        transport.queue_for_url(url, [GraphResponse::success(201, r#"{"id":"new-task"}"#)]);
+        let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        let report = export_planner(&client, &mut ledger, &meeting, &destination, &account, None)
+            .await
+            .unwrap();
+        assert_eq!(report.items[0].resource_id.as_deref(), Some("old-task"));
+        assert!(!report.items[0].graph_called);
+        assert_eq!(report.items[1].status, ExportStatus::UnknownAfterSubmit);
+        assert!(!report.items[1].graph_called);
+        assert!(report.items[2].graph_called);
+        assert_eq!(
+            ledger.entry(&pending_key).unwrap().status,
+            ExportStatus::UnknownAfterSubmit
+        );
+        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account, None)
+            .await
+            .unwrap();
+        assert_eq!(report.items[0].local_id, "action-5");
+        assert_eq!(
+            report.items[0].code.as_deref(),
+            Some("task_identity_review_required")
+        );
+        assert!(!report.items[0].graph_called);
+        let action = &mut shifted.action_items[0];
+        action.legacy_action = Some(crate::exports::actions::LegacyAction {
+            id: action.local_action_id.clone(),
+            title_hash: hash,
+        });
+        action.local_action_id = saved_id.into();
+        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.items[0].code.as_deref(),
+            Some("task_identity_review_required")
+        );
+        assert!(!report.items[0].graph_called);
+        assert_eq!(client.transport().calls_for(url), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_folder_history_restores_without_creating_a_recording_folder() {
+        use crate::exports::ledger::{meeting_dir, ExportLedger, LEDGER_FILENAME};
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let (mut manifest, _) = snapshot(&source).await.unwrap();
+        manifest.files.insert(0, vec![LEDGER_FILENAME.into()]);
+        let ledger = ExportLedger::new("review-test");
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("legacy-export.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        for (name, bytes) in [
+            (
+                "manifest.json".to_string(),
+                serde_json::to_vec(&manifest).unwrap(),
+            ),
+            (
+                format!("recordings/0/{LEDGER_FILENAME}"),
+                serde_json::to_vec(&ledger).unwrap(),
+            ),
+        ] {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let restored = empty_conversation_destination().await;
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        let report = import_manifest_impl(&restored, manifest, stage, None, Some(root.path()))
+            .await
+            .unwrap();
+        assert_eq!(report.files, 0);
+        let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings")
+            .fetch_one(&restored)
+            .await
+            .unwrap();
+        assert!(folder.is_none());
+        assert_eq!(
+            ExportLedger::read(&meeting_dir(root.path(), "review-test")).unwrap(),
+            Some(ledger)
+        );
+    }
 
     pub(super) async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest)
     {
@@ -1573,7 +1977,207 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_archive_preserves_partial_validity_and_excludes_imported_startup_retries() {
+        use crate::database::repositories::summary::SummaryProcessesRepository as Summaries;
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        for meeting in ["matching", "stale", "existing"] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Archived meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(meeting).execute(&source).await.unwrap();
+            sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES (?1, ?1, 'Original passage', '00:00')")
+                .bind(meeting).execute(&source).await.unwrap();
+        }
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Corrected passage' WHERE id = 'matching'",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+        let fingerprint = "synthetic-approved-destination";
+        assert!(
+            Summaries::create_automatic_process(&source, "matching", "import", fingerprint)
+                .await
+                .unwrap()
+        );
+        // Make the synthetic job eligible through the same interruption path as startup.
+        Summaries::fail_interrupted_processes(&source)
+            .await
+            .unwrap();
+        let (interrupted, _) = Summaries::get_summary_status_data(&source, "matching")
+            .await
+            .unwrap()
+            .unwrap();
+        let reason = interrupted.error.unwrap();
+        assert!(
+            Summaries::fail_with_partial(&source, "matching", &reason, 2, "Matching partial")
+                .await
+                .unwrap()
+        );
+        let saved = serde_json::json!({"markdown": "Saved notes"}).to_string();
+        sqlx::query("UPDATE summary_processes SET result = ? WHERE meeting_id = 'matching'")
+            .bind(&saved)
+            .execute(&source)
+            .await
+            .unwrap();
+        Summaries::create_or_reset_process(&source, "stale")
+            .await
+            .unwrap();
+        assert!(Summaries::fail_with_partial(
+            &source,
+            "stale",
+            "Generation failed",
+            1,
+            "Stale partial"
+        )
+        .await
+        .unwrap());
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Edited after generation' WHERE id = 'stale'",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+        Summaries::record_automatic_outcome(
+            &source,
+            "existing",
+            "skipped",
+            "Disabled",
+            "recording",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            Summaries::automatic_resume_candidates(&source, fingerprint)
+                .await
+                .unwrap(),
+            vec!["matching"]
+        );
+
+        let destination = empty_conversation_destination().await;
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('existing', 'Local meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .execute(&destination).await.unwrap();
+        sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES ('existing', 'existing', 'Local passage', '00:00')")
+            .execute(&destination).await.unwrap();
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Edited local passage' WHERE id = 'existing'",
+        )
+        .execute(&destination)
+        .await
+        .unwrap();
+        assert!(Summaries::create_automatic_process(
+            &destination,
+            "existing",
+            "recording",
+            fingerprint
+        )
+        .await
+        .unwrap());
+        assert!(Summaries::fail_with_partial(
+            &destination,
+            "existing",
+            &reason,
+            2,
+            "Local partial"
+        )
+        .await
+        .unwrap());
+
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        let (manifest, folders) = snapshot(&source).await.unwrap();
+        write_archive(&archive, manifest, folders).unwrap();
+        let existing = HashSet::from(["existing".to_string()]);
+        let (manifest, stage) = unpack(&archive, root.path(), &existing).unwrap();
+        let report = import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
+        assert_eq!((report.meetings, report.skipped), (2, 1));
+
+        let (matching, partial) = Summaries::get_summary_status_data(&destination, "matching")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(matching.status, "failed");
+        assert_eq!(matching.error.as_deref(), Some(reason.as_str()));
+        assert_eq!(matching.result.as_deref(), Some(saved.as_str()));
+        assert_eq!(partial.as_deref(), Some("Matching partial"));
+
+        let (stale, partial) = Summaries::get_summary_status_data(&destination, "stale")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stale.metadata.unwrap().contains("Stale partial"));
+        assert!(partial.is_none());
+
+        let existing_transcript: String =
+            sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'existing'")
+                .fetch_one(&destination)
+                .await
+                .unwrap();
+        assert_eq!(existing_transcript, "Edited local passage");
+        let (_, partial) = Summaries::get_summary_status_data(&destination, "existing")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.as_deref(), Some("Local partial"));
+        assert_eq!(
+            Summaries::automatic_resume_candidates(&destination, fingerprint)
+                .await
+                .unwrap(),
+            vec!["existing"]
+        );
+        assert!(
+            !Summaries::claim_automatic_resume(&destination, "matching", fingerprint)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_summary_archive_retains_a_partial_with_its_original_revision_check() {
+        use crate::database::repositories::summary::SummaryProcessesRepository as Summaries;
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        manifest.tables.get_mut("meetings").unwrap()[0].remove("summary_content_revision");
+        manifest.tables.get_mut("summary_processes").unwrap().push(
+            serde_json::from_value(serde_json::json!({
+                "meeting_id": "review-test",
+                "status": "FAILED",
+                "created_at": "2026-10-01 00:00:00",
+                "updated_at": "2026-10-01 00:00:00",
+                "metadata": r#"{"partial_notes":"Legacy partial","transcript_revision":3}"#
+            }))
+            .unwrap(),
+        );
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("legacy.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
+        let (summary, partial) = Summaries::get_summary_status_data(&destination, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.status, "FAILED");
+        assert_eq!(partial.as_deref(), Some("Legacy partial"));
+        let content_revision: i64 = sqlx::query_scalar(
+            "SELECT summary_content_revision FROM meetings WHERE id = 'review-test'",
+        )
+        .fetch_one(&destination)
+        .await
+        .unwrap();
+        assert_eq!(content_revision, 2);
+    }
+
+    #[tokio::test]
     async fn conversation_question_context_round_trips_and_rejects_invalid_links() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, types::SearchMode};
         let (source, request, frozen, passages) =
             conversations::tests::question_pair_fixture("Nein.").await;
@@ -1660,6 +2264,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_evidence_upgrade_preserves_populated_schema_and_old_backup() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, store, types::*};
         async fn counts(pool: &SqlitePool) -> Vec<(String, i64)> {
             let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'knowledge_%' ORDER BY name").fetch_all(pool).await.unwrap();
@@ -1773,7 +2378,31 @@ mod tests {
         let before_counts = counts(&source).await;
         let before_schema = schema(&source).await;
         assert!(before_schema.len() > 10);
-        let (old_backup, _) = snapshot(&source).await.unwrap();
+        // Export exactly the archive tables available before the evidence upgrade.
+        // The current writer also attaches recording-ID bookmarks, introduced later.
+        const HISTORICAL_TABLES: &[&str] = &[
+            "meetings",
+            "transcripts",
+            "summary_processes",
+            "transcript_chunks",
+            "meeting_notes",
+            "ai_chat_messages",
+            "recording_outcomes",
+            "transcript_revisions",
+            "transcript_edit_batches",
+            "transcript_file_sync",
+            "meeting_tags",
+            "meeting_bookmarks",
+            "knowledge_owners",
+            "knowledge_requests",
+            "knowledge_messages",
+            "knowledge_request_evidence",
+            "knowledge_request_sources",
+        ];
+        let (old_backup, _) = snapshot_tables(&source, HISTORICAL_TABLES, false)
+            .await
+            .unwrap();
+        assert!(!old_backup.tables.contains_key("meeting_summary_bookmarks"));
         let mut histories = Vec::new();
         for owner in &owners {
             histories.push(conversations::history(&source, owner).await.unwrap());
@@ -1844,6 +2473,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_round_trip_keeps_seven_hundred_evidence_entries() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, store, types::*};
         let (source, mut request) = conversation_fixture().await;
         let text = "Launch plan remains approved.";
@@ -1915,6 +2545,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_round_trip_preserves_stale_refs_when_revision_counters_match() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, evidence};
         let (source, request) = conversation_fixture().await;
         let original = conversations::history(&source, &request.owner)
@@ -1974,6 +2605,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_keeps_library_owner_and_interrupts_pending_work() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::conversations;
         let (source, mut request) = conversation_fixture().await;
         let empty_owner = conversations::create_library(&source).await.unwrap();
@@ -2007,6 +2639,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_skips_colliding_owner_without_overwriting_history() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::conversations;
         let (pool, request) = conversation_fixture().await;
         let (manifest, _) = snapshot(&pool).await.unwrap();
@@ -2020,6 +2653,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_redacts_changed_skipped_source_but_keeps_identical_source() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, types::SearchMode};
         for changed in [false, true] {
             let (source, request) = conversation_fixture().await;
@@ -2091,6 +2725,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_library_only_answer_round_trips_without_meetings() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, types::*};
         let source = empty_conversation_destination().await;
         let request = AskRequest {
@@ -2152,6 +2787,7 @@ mod tests {
     #[tokio::test]
     async fn conversation_restore_rejects_changed_input_atomically_and_accepts_prefeature_archive()
     {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (source, _) = conversation_fixture().await;
         let (mut malformed, _) = snapshot(&source).await.unwrap();
         malformed.tables.get_mut("knowledge_requests").unwrap()[0]
@@ -2183,6 +2819,7 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_restore_keeps_only_new_meetings_audio() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('new', 'New meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
             .execute(&pool).await.unwrap();
@@ -2250,6 +2887,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_folder_does_not_block_other_audio_and_restores_without_a_folder() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join("missing");
@@ -2308,7 +2946,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_without_files_drops_the_inapplicable_retry_but_reports_missing_audio() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let available = root.path().join("available");
+        std::fs::create_dir(&available).unwrap();
+        std::fs::write(available.join("audio.wav"), b"synthetic audio").unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('available', 'Available audio', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(available.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        let payload = serde_json::json!({
+            "retranscribed_at": "2026-01-01T00:00:00Z", "duration_seconds": 2.0,
+            "audio_filename": "audio.wav", "provider": "localWhisper", "model": "tiny",
+            "source_language": "de",
+        })
+        .to_string();
+        // Both meetings have a committed retranscription whose files are unpublished.
+        for meeting in ["review-test", "available"] {
+            sqlx::query(
+                "INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES (?, ?)",
+            )
+            .bind(meeting)
+            .bind(&payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO recording_outcomes (meeting_id, capture_incomplete, recording_files_incomplete) VALUES (?, 1, 1)")
+                .bind(meeting).execute(&pool).await.unwrap();
+        }
+        // 'review-test' has no recording folder, so the archive carries no files for it.
+        let (manifest, folders) = snapshot(&pool).await.unwrap();
+        let archive = root.path().join("backup.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
+        sqlx::query("DELETE FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let restored = import_manifest(&pool, manifest, stage).await.unwrap();
+        assert_eq!(restored.meetings, 2);
+
+        let state = |meeting: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM transcript_file_sync WHERE meeting_id = ?",
+                )
+                .bind(meeting)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                let flags: (bool, bool) = sqlx::query_as("SELECT recording_files_incomplete, capture_incomplete FROM recording_outcomes WHERE meeting_id = ?")
+                    .bind(meeting).fetch_one(&pool).await.unwrap();
+                (rows, flags)
+            }
+        };
+        // No folder: nothing to retry. The capture gap is preserved as archived.
+        assert_eq!(state("review-test").await, (0, (false, true)));
+        crate::database::transcript_edits::sync_file(&pool, "review-test", &[])
+            .await
+            .unwrap();
+        // With files the retry stays pending until it succeeds.
+        assert_eq!(state("available").await, (1, (true, true)));
+        // Missing audio is reported from what the archive lacked, not from the flag.
+        assert_eq!(restored.incomplete_meetings.len(), 1);
+        let warning = &restored.incomplete_meetings[0];
+        assert_eq!(warning.meeting_id, "review-test");
+        assert!(warning.audio.audio_unavailable && !warning.audio.recovery_files_excluded);
+        let folder: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(folder, None);
+    }
+
+    #[tokio::test]
     async fn unreadable_folder_names_meeting_and_preserves_previous_backup() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
         let not_a_folder = root.path().join("not-a-folder");
@@ -2326,6 +3042,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_a_meeting_during_restore_requires_retry_instead_of_importing_without_audio() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("audio.wav"), b"synthetic audio").unwrap();
@@ -2359,6 +3076,7 @@ mod tests {
 
     #[tokio::test]
     async fn v1_omission_metadata_is_optional_and_references_are_validated() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (manifest, _) = snapshot(&pool).await.unwrap();
         let mut json = serde_json::to_value(&manifest).unwrap();
@@ -2396,8 +3114,9 @@ mod tests {
 
     #[tokio::test]
     async fn saved_recovery_releases_registered_spool_and_clears_backup_exclusion() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::audio::incremental_saver::{
-            recover_audio_from_checkpoints, release_registered_capture,
+            recover_audio_in_folder, release_registered_capture,
         };
         use crate::audio::recording_state::{AudioChunk, DeviceType};
         for gap_marker in [false, true] {
@@ -2421,9 +3140,7 @@ mod tests {
                 std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap();
             }
             let folder = root.path().to_string_lossy().into_owned();
-            let recovered = recover_audio_from_checkpoints(folder.clone())
-                .await
-                .unwrap();
+            let recovered = recover_audio_in_folder(folder.clone()).await.unwrap();
             assert!(recovered
                 .audio_file_path
                 .unwrap()
@@ -2462,6 +3179,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_originals_are_reported_without_blocking_backup_or_being_deleted() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('review-test', 1, 0)").execute(&pool).await.unwrap();
         for directory in [".checkpoints", ".audio-spool"] {
@@ -2545,12 +3263,14 @@ mod tests {
 
     #[tokio::test]
     async fn older_v1_tables_are_optional_but_unknown_tables_and_missing_meetings_are_rejected() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
         let archive = root.path().join("backup.zip");
         let (mut manifest, folders) = snapshot(&pool).await.unwrap();
         manifest.tables.remove("meeting_tags");
         manifest.tables.remove("meeting_bookmarks");
+        manifest.tables.remove("meeting_summary_bookmarks");
         write_archive(&archive, manifest, folders).unwrap();
         let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
         sqlx::query("DELETE FROM meetings")
@@ -2596,7 +3316,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_preserves_meeting_summary_bookmark_consent() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO meeting_summary_bookmarks (meeting_id) SELECT id FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        let (manifest, folders) = snapshot(&pool).await.unwrap();
+        write_archive(&archive, manifest, folders).unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        sqlx::query("DELETE FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            import_manifest(&pool, manifest, stage)
+                .await
+                .unwrap()
+                .meetings,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM meeting_summary_bookmarks")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn skipped_folder_cleanup_failure_rolls_back_import() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (mut manifest, _) = snapshot(&pool).await.unwrap();
         let mut new_meeting = manifest.tables["meetings"][0].clone();
@@ -2639,7 +3393,95 @@ mod tests {
         assert!(allowed_file("exports.json"));
     }
     #[tokio::test]
+    async fn calendar_and_recording_facts_round_trip_and_older_archives_still_restore() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let link = super::super::calendar::tests::sample();
+        super::super::calendar::write(&pool, "review-test", Some(link.clone()), false)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE meetings SET recording_source = 'import', recording_duration_s = 93.5
+             WHERE id = 'review-test'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for legacy in [false, true] {
+            let (mut manifest, folders) = snapshot(&pool).await.unwrap();
+            if legacy {
+                let row = &mut manifest.tables.get_mut("meetings").unwrap()[0];
+                for column in ["calendar_link", "recording_source", "recording_duration_s"] {
+                    row.remove(column);
+                }
+            }
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("calendar.zip");
+            write_archive(&archive, manifest, folders).unwrap();
+            sqlx::query("DELETE FROM meetings")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+            import_manifest(&pool, manifest, stage).await.unwrap();
+            assert_eq!(
+                super::super::calendar::read(&pool, "review-test")
+                    .await
+                    .unwrap(),
+                (!legacy).then(|| link.clone())
+            );
+            let facts: (Option<String>, Option<f64>) = sqlx::query_as(
+                "SELECT recording_source, recording_duration_s FROM meetings WHERE id = 'review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                facts,
+                (
+                    (!legacy).then(|| "import".into()),
+                    (!legacy).then_some(93.5)
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_calendar_link_does_not_block_a_restore() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for unreadable in ["{not json", "{\"eventId\": \"two words\"}"] {
+            let (mut manifest, folders) = snapshot(&pool).await.unwrap();
+            manifest.tables.get_mut("meetings").unwrap()[0]
+                .insert("calendar_link".into(), Value::String(unreadable.into()));
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("calendar.zip");
+            write_archive(&archive, manifest, folders).unwrap();
+            sqlx::query("DELETE FROM meetings")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+            let report = import_manifest(&pool, manifest, stage).await.unwrap();
+            assert_eq!(report.meetings, 1);
+            assert_eq!(report.unreadable_calendar_links, 1);
+            assert!(super::super::calendar::read(&pool, "review-test")
+                .await
+                .unwrap()
+                .is_none());
+            let transcripts: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM transcripts WHERE meeting_id = 'review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(transcripts > 0);
+        }
+    }
+
+    #[tokio::test]
     async fn context_round_trip_accepts_older_archives_and_is_deleted_with_the_meeting() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for legacy in [false, true] {
             let pool = crate::database::transcript_edits::tests::fixture().await;
             super::super::context::write(&pool, "review-test", "Synthetic summary context", false)
@@ -2685,6 +3527,7 @@ mod tests {
 
     #[tokio::test]
     async fn restored_recovery_location_preserves_flags_and_accepts_legacy_archives() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         // Metadata can be absent in old archives, explicitly false, or true.
         for excluded in [None, Some(false), Some(true)] {
             for archived_outcome in [false, true] {
@@ -2746,6 +3589,7 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_is_additive_and_excludes_credentials() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let folder = tempfile::tempdir().unwrap();
         std::fs::write(folder.path().join("audio.wav"), b"synthetic audio").unwrap();
@@ -2800,6 +3644,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_rows_roll_back_the_whole_import_and_remove_staged_files() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (mut manifest, _) = snapshot(&pool).await.unwrap();
         sqlx::query("DELETE FROM meetings")
@@ -2830,6 +3675,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_traversal_is_rejected_before_extraction() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (mut manifest, _) = snapshot(&pool).await.unwrap();
         manifest.files.insert(0, vec!["../escape.wav".into()]);
@@ -2852,5 +3698,184 @@ mod tests {
         )
         .is_err());
         assert!(!destination.exists());
+    }
+
+    // ── export-history merge + rollback ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn fresh_db_with_leftover_ledger_merges_instead_of_aborting() {
+        use crate::exports::ledger::{meeting_dir, task_key, ExportLedger};
+        use crate::exports::model::ExportStatus;
+
+        const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
+        let key1 = task_key(SCOPE, "m-merge", "11111111-1111-1111-1111-111111111111", "");
+        let key2 = task_key(SCOPE, "m-merge", "22222222-2222-2222-2222-222222222222", "");
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES \
+             ('m-merge','Merge test','2026-11-20','2026-11-20')",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+
+        // Build an archive with one succeeded entry for the meeting.
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "m-merge");
+        let mut archive_ledger = ExportLedger::load_or_new(&profile_dir, "m-merge").unwrap();
+        archive_ledger.record_success(&key1, Some("task-archive".into()), None, None);
+        archive_ledger.checkpoint().await.unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let archive = profile.path().join("m-merge.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        // Simulate a fresh DB that has a leftover ledger from a previous partial
+        // restore (a different entry for the same meeting).
+        let fresh = tempfile::tempdir().unwrap();
+        let leftover_dir = meeting_dir(fresh.path(), "m-merge");
+        let mut leftover = ExportLedger::load_or_new(&leftover_dir, "m-merge").unwrap();
+        leftover.record_failure(&key2, ExportStatus::Failed, Some("timeout".into()), None);
+        leftover.checkpoint().await.unwrap();
+
+        let restored = empty_conversation_destination().await;
+        let (manifest, stage) =
+            unpack(&archive, &fresh.path().join("recordings"), &HashSet::new()).unwrap();
+        // Should succeed even though a leftover ledger file already exists.
+        import_manifest_impl(&restored, manifest, stage, None, Some(fresh.path()))
+            .await
+            .unwrap();
+
+        // Merged ledger must contain both entries.
+        let merged =
+            ExportLedger::load_or_new(&meeting_dir(fresh.path(), "m-merge"), "m-merge").unwrap();
+        assert_eq!(merged.entry(&key1).unwrap().status, ExportStatus::Succeeded);
+        assert_eq!(merged.entry(&key2).unwrap().status, ExportStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn ledger_rollback_on_db_commit_failure_restores_previous_content() {
+        use crate::exports::ledger::{meeting_dir, task_key, ExportLedger};
+        use crate::exports::model::ExportStatus;
+
+        const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
+        let key1 = task_key(
+            SCOPE,
+            "m-rollback",
+            "11111111-1111-1111-1111-111111111111",
+            "",
+        );
+        let key2 = task_key(
+            SCOPE,
+            "m-rollback",
+            "22222222-2222-2222-2222-222222222222",
+            "",
+        );
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES \
+             ('m-rollback','Rollback test','2026-11-20','2026-11-20')",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+
+        // Archive has entry key1 (succeeded).
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "m-rollback");
+        let mut ledger = ExportLedger::load_or_new(&profile_dir, "m-rollback").unwrap();
+        ledger.record_success(&key1, Some("task-orig".into()), None, None);
+        ledger.checkpoint().await.unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let archive = profile.path().join("m-rollback.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        // Destination has leftover ledger with a different entry.
+        let dest_dir = tempfile::tempdir().unwrap();
+        let leftover_dir = meeting_dir(dest_dir.path(), "m-rollback");
+        let mut leftover = ExportLedger::load_or_new(&leftover_dir, "m-rollback").unwrap();
+        leftover.record_failure(&key2, ExportStatus::Failed, None, None);
+        leftover.checkpoint().await.unwrap();
+        let prev_bytes =
+            std::fs::read(leftover_dir.join(crate::exports::ledger::LEDGER_FILENAME)).unwrap();
+
+        // Use a DB that will reject the commit (FK violation trigger).
+        let rejected_pool = empty_conversation_destination().await;
+        sqlx::query("CREATE TABLE rollback_fixture_fail(x TEXT REFERENCES meetings(id) DEFERRABLE INITIALLY DEFERRED)")
+            .execute(&rejected_pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER rollback_fixture_trigger AFTER INSERT ON meetings BEGIN INSERT INTO rollback_fixture_fail VALUES ('no-parent'); END")
+            .execute(&rejected_pool).await.unwrap();
+
+        let (manifest, stage) = unpack(
+            &archive,
+            &dest_dir.path().join("recordings"),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            import_manifest_impl(&rejected_pool, manifest, stage, None, Some(dest_dir.path()))
+                .await
+                .is_err()
+        );
+
+        // After rollback the ledger file must be restored to its previous content.
+        let after_rollback =
+            std::fs::read(leftover_dir.join(crate::exports::ledger::LEDGER_FILENAME)).unwrap();
+        assert_eq!(after_rollback, prev_bytes);
+    }
+
+    #[tokio::test]
+    async fn same_profile_restore_is_idempotent() {
+        use crate::exports::ledger::{meeting_dir, task_key, ExportLedger};
+
+        const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
+        let key1 = task_key(SCOPE, "m-idem", "11111111-1111-1111-1111-111111111111", "");
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES \
+             ('m-idem','Idempotent test','2026-11-20','2026-11-20')",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "m-idem");
+        let mut ledger = ExportLedger::load_or_new(&profile_dir, "m-idem").unwrap();
+        ledger.record_success(&key1, Some("task".into()), None, None);
+        ledger.checkpoint().await.unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let archive = profile.path().join("m-idem.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        // First restore succeeds.
+        let fresh = tempfile::tempdir().unwrap();
+        let dest1 = empty_conversation_destination().await;
+        let (manifest, stage) =
+            unpack(&archive, &fresh.path().join("recordings"), &HashSet::new()).unwrap();
+        import_manifest_impl(&dest1, manifest, stage, None, Some(fresh.path()))
+            .await
+            .unwrap();
+
+        // Second restore into the same DB (meeting already exists) succeeds
+        // without touching the ledger file or reporting an error.
+        let (manifest2, stage2) =
+            unpack(&archive, &fresh.path().join("recordings2"), &HashSet::new()).unwrap();
+        let report = import_manifest_impl(&dest1, manifest2, stage2, None, Some(fresh.path()))
+            .await
+            .unwrap();
+        assert_eq!(report.meetings, 0);
+        assert_eq!(report.skipped, 1);
     }
 }

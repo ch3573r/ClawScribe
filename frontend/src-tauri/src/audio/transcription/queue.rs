@@ -38,6 +38,7 @@ pub struct TranscriptionMetricsSnapshot {
 
 #[derive(Debug, Default)]
 pub struct TranscriptionMetrics {
+    pub(super) source_languages: Mutex<Option<super::source_language::SourceLanguages>>,
     queued_chunks: AtomicU64,
     completed_chunks: AtomicU64,
     failed_chunks: AtomicU64,
@@ -179,7 +180,7 @@ pub struct TranscriptionQueueReceiver {
 /// A bounded handoff keeps filesystem latency out of the capture/mixing task.
 /// One worker owns the disk producer, preserving sequence order.
 pub(crate) struct BufferedSpool {
-    sender: Option<tokio::sync::mpsc::Sender<AudioChunk>>,
+    sender: Option<tokio::sync::mpsc::Sender<(AudioChunk, bool)>>,
     worker: Option<tokio::task::JoinHandle<()>>,
     metrics: Arc<TranscriptionMetrics>,
     state: Arc<crate::audio::recording_state::RecordingState>,
@@ -201,8 +202,8 @@ impl BufferedSpool {
         let worker_state = state.clone();
         let worker_warned = warned.clone();
         let worker = tokio::spawn(async move {
-            while let Some(chunk) = receiver.recv().await {
-                if writer.send(chunk).await.is_err() {
+            while let Some((chunk, clear_source)) = receiver.recv().await {
+                if writer.send_with_source(chunk, clear_source).await.is_err() {
                     Self::report_loss(&worker_state, capture, &worker_warned);
                 }
             }
@@ -239,10 +240,18 @@ impl BufferedSpool {
     }
 
     pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
+        self.send_with_source(chunk, false).await
+    }
+
+    pub(crate) async fn send_with_source(
+        &self,
+        chunk: AudioChunk,
+        clear_source: bool,
+    ) -> io::Result<()> {
         if self
             .sender
             .as_ref()
-            .is_some_and(|sender| sender.try_send(chunk).is_ok())
+            .is_some_and(|sender| sender.try_send((chunk, clear_source)).is_ok())
         {
             return Ok(());
         }
@@ -280,6 +289,7 @@ impl Drop for BufferedSpool {
 #[derive(Debug)]
 pub struct QueuedAudioChunk {
     pub chunk: AudioChunk,
+    pub clear_source: bool,
     audio_ms: u64,
     spool_bytes: u64,
 }
@@ -416,6 +426,10 @@ fn cleanup_stale_spools(spool_root: &Path) {
 
 impl TranscriptionQueueSender {
     pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
+        self.send_with_source(chunk, false).await
+    }
+
+    async fn send_with_source(&self, chunk: AudioChunk, clear_source: bool) -> io::Result<()> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -435,11 +449,12 @@ impl TranscriptionQueueSender {
                 .saturating_mul(std::mem::size_of::<f32>() as u64),
         );
 
-        let written =
-            tokio::task::spawn_blocking(move || write_chunk(&temp_path, &final_path, &chunk))
-                .await
-                .map_err(|error| io::Error::other(format!("queue writer task failed: {error}")))
-                .and_then(|result| result);
+        let written = tokio::task::spawn_blocking(move || {
+            write_chunk(&temp_path, &final_path, &chunk, clear_source)
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("queue writer task failed: {error}")))
+        .and_then(|result| result);
         if let Err(error) = written {
             self.shared.metrics.mark_failed();
             if self.shared.retain_files {
@@ -500,9 +515,12 @@ impl TranscriptionQueueReceiver {
         let path = queue_path(&self.shared.spool_dir, self.next_read);
         let spool_bytes = fs::metadata(&path).map(|metadata| metadata.len())?;
         let read_path = path.clone();
-        let chunk = tokio::task::spawn_blocking(move || read_chunk(&read_path))
-            .await
-            .map_err(|error| io::Error::other(format!("queue reader task failed: {error}")))??;
+        let (chunk, clear_source) =
+            tokio::task::spawn_blocking(move || read_chunk_with_source(&read_path))
+                .await
+                .map_err(|error| {
+                    io::Error::other(format!("queue reader task failed: {error}"))
+                })??;
         if !self.shared.retain_files {
             fs::remove_file(path)?;
         }
@@ -510,6 +528,7 @@ impl TranscriptionQueueReceiver {
         let audio_ms = chunk_audio_ms(&chunk);
         Ok(QueuedAudioChunk {
             chunk,
+            clear_source,
             audio_ms,
             spool_bytes,
         })
@@ -529,17 +548,25 @@ fn chunk_audio_ms(chunk: &AudioChunk) -> u64 {
         .max(0.0) as u64
 }
 
-fn write_chunk(temp_path: &Path, final_path: &Path, chunk: &AudioChunk) -> io::Result<()> {
+fn write_chunk(
+    temp_path: &Path,
+    final_path: &Path,
+    chunk: &AudioChunk,
+    clear_source: bool,
+) -> io::Result<()> {
     let file = File::create(temp_path)?;
     let mut writer = BufWriter::new(file);
     writer.write_all(QUEUE_MAGIC)?;
     writer.write_all(&chunk.sample_rate.to_le_bytes())?;
     writer.write_all(&chunk.timestamp.to_le_bytes())?;
     writer.write_all(&chunk.chunk_id.to_le_bytes())?;
-    writer.write_all(&[match chunk.device_type {
+    // The low bit retains the historical channel encoding. The high bit marks a
+    // confident single-source VAD segment. Raw recovery spools never set it.
+    let device = match chunk.device_type {
         DeviceType::Microphone => 0,
         DeviceType::System => 1,
-    }])?;
+    };
+    writer.write_all(&[device | if clear_source { 0x80 } else { 0 }])?;
     writer.write_all(
         &u64::try_from(chunk.data.len())
             .unwrap_or(u64::MAX)
@@ -565,6 +592,10 @@ fn retry_publish(mut publish: impl FnMut() -> io::Result<()>) -> io::Result<()> 
 }
 
 pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
+    read_chunk_with_source(path).map(|(chunk, _)| chunk)
+}
+
+fn read_chunk_with_source(path: &Path) -> io::Result<(AudioChunk, bool)> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut magic = [0u8; 4];
@@ -581,7 +612,8 @@ pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
     let chunk_id = read_u64(&mut reader)?;
     let mut device = [0u8; 1];
     reader.read_exact(&mut device)?;
-    let device_type = match device[0] {
+    let clear_source = device[0] & 0x80 != 0;
+    let device_type = match device[0] & 0x7f {
         0 => DeviceType::Microphone,
         1 => DeviceType::System,
         _ => {
@@ -602,13 +634,16 @@ pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
     let mut data = vec![0.0f32; sample_count];
     reader.read_exact(bytemuck::cast_slice_mut(&mut data))?;
 
-    Ok(AudioChunk {
-        data,
-        sample_rate,
-        timestamp,
-        chunk_id,
-        device_type,
-    })
+    Ok((
+        AudioChunk {
+            data,
+            sample_rate,
+            timestamp,
+            chunk_id,
+            device_type,
+        },
+        clear_source,
+    ))
 }
 
 fn read_u32(reader: &mut impl Read) -> io::Result<u32> {
@@ -632,6 +667,16 @@ fn read_f64(reader: &mut impl Read) -> io::Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn multiple_queued_segments_retain_their_own_source_certainty() {
+        let root = tempfile::tempdir().unwrap();
+        let (writer, mut reader, _) = transcription_queue_in(root.path()).unwrap();
+        writer.send_with_source(chunk(1), true).await.unwrap();
+        writer.send(chunk(2)).await.unwrap();
+        assert!(reader.recv().await.unwrap().unwrap().clear_source);
+        assert!(!reader.recv().await.unwrap().unwrap().clear_source);
+    }
 
     #[test]
     fn startup_removes_only_abandoned_queue_directories() {

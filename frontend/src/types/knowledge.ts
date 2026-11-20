@@ -17,7 +17,14 @@ export interface ModelDownloadStatus {
   stage:'idle'|'checking'|'downloading'|'verifying'|'cancelling'|'ready'|'cancelled'|'error';
   downloaded_bytes:number;total_bytes:number;current_file:string|null;error:string|null;
 }
-export interface ModelStatus {enabled:boolean;ready:boolean;installed:boolean;model:string;download:ModelDownloadStatus}
+export interface ModelStatus {
+  enabled: boolean;
+  ready: boolean;
+  installed: boolean;
+  verification: "inactive" | "pending" | "verifying" | "verified" | "unavailable" | "updating";
+  model: string;
+  download: ModelDownloadStatus;
+}
 export interface SearchRequest {scope:KnowledgeScope;query:string;document_ids:string[];mode:SearchMode}
 export interface SearchResponse {passages:Passage[];mode:SearchMode;index_status:IndexStatus}
 export interface AskRequest {request_id:string;owner:ConversationOwner;search:SearchRequest}

@@ -2,7 +2,7 @@ use ndarray::{Array, Array1, Array2, Array3, ArrayD, ArrayViewD, IxDyn};
 use once_cell::sync::Lazy;
 use ort::execution_providers::CPUExecutionProvider;
 #[cfg(feature = "directml")]
-use ort::execution_providers::DirectMLExecutionProvider;
+use ort::execution_providers::{DirectMLExecutionProvider, ExecutionProvider};
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -28,6 +28,57 @@ pub struct TimestampedResult {
     pub text: String,
     pub timestamps: Vec<f32>,
     pub tokens: Vec<String>,
+}
+
+/// Segments quieter than this (about -26 dBFS) are raised before decoding.
+const QUIET_SEGMENT_RMS: f32 = 0.05;
+/// Level a quiet segment is raised to (-20 dBFS).
+const TARGET_SEGMENT_RMS: f32 = 0.1;
+/// Below this (-60 dBFS) a segment is silence or noise and is left alone.
+const SILENT_SEGMENT_RMS: f32 = 0.001;
+/// Never amplify by more than this (about +30 dB).
+const MAX_SEGMENT_GAIN: f32 = 32.0;
+/// The gain keeps all but the loudest 0.1% of samples at or below this level.
+const LOUD_PART_CEILING: f32 = 0.9;
+
+/// Raises a quiet segment to a normal speech level.
+///
+/// The models drop speech from quiet audio: on a recording at about -37 dBFS
+/// the same clear sentences came back complete, cut in half or empty depending
+/// on where the segment began, and complete once the level was raised. A
+/// segment at a normal average level is not touched, so its results do not
+/// change.
+///
+/// A segment can be quiet on average and still hold louder sound, such as one
+/// loud remark next to a quiet speaker. The gain is limited so that at most
+/// 0.1% of the samples reach full scale and are clipped. That bounds the damage
+/// to the louder part without ruling it out: speech peaks well above its
+/// typical level, so the clipped samples can all fall inside one remark. The
+/// same limit lets a click or tone longer than 0.1% of the segment hold the
+/// gain back for the quiet speech around it. Neither effect has been measured
+/// with the model.
+fn raise_quiet_segment(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let rms =
+        (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt();
+    // A NaN or infinite level fails this check too, so every sample below is finite.
+    if !(SILENT_SEGMENT_RMS..QUIET_SEGMENT_RMS).contains(&rms) {
+        return;
+    }
+    let mut magnitudes: Vec<f32> = samples.iter().map(|sample| sample.abs()).collect();
+    let loud_index = (magnitudes.len() * 999 / 1000).min(magnitudes.len() - 1);
+    let (_, loud_part, _) = magnitudes.select_nth_unstable_by(loud_index, f32::total_cmp);
+    let gain = (TARGET_SEGMENT_RMS / rms)
+        .min(MAX_SEGMENT_GAIN)
+        .min(LOUD_PART_CEILING / *loud_part);
+    if gain <= 1.0 {
+        return;
+    }
+    for sample in samples.iter_mut() {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
 }
 
 fn shift_timestamps(timestamps: &mut [f32], padding_seconds: f32) {
@@ -126,6 +177,7 @@ pub struct ParakeetModel {
     vocab: Vec<String>,
     blank_idx: i32,
     vocab_size: usize,
+    pub(crate) directml_registered: bool,
 }
 
 impl Drop for ParakeetModel {
@@ -145,14 +197,14 @@ impl ParakeetModel {
     ) -> Result<Self, ParakeetError> {
         let decoder_use_directml = Self::decoder_directml_enabled(precision_suffix, use_directml);
 
-        let encoder = Self::init_session(
+        let (encoder, encoder_directml) = Self::init_session(
             &model_dir,
             "encoder-model",
             None,
             precision_suffix,
             use_directml,
         )?;
-        let decoder_joint = Self::init_session(
+        let (decoder_joint, decoder_directml) = Self::init_session(
             &model_dir,
             "decoder_joint-model",
             None,
@@ -160,7 +212,7 @@ impl ParakeetModel {
             decoder_use_directml,
         )?;
         // Preprocessor is tiny — keep it on CPU to avoid DirectML transfer overhead.
-        let preprocessor = Self::init_session(&model_dir, "nemo128", None, None, false)?;
+        let (preprocessor, _) = Self::init_session(&model_dir, "nemo128", None, None, false)?;
 
         let (vocab, blank_idx) = Self::load_vocab(&model_dir)?;
         let vocab_size = vocab.len();
@@ -178,6 +230,7 @@ impl ParakeetModel {
             vocab,
             blank_idx,
             vocab_size,
+            directml_registered: encoder_directml || decoder_directml,
         })
     }
 
@@ -225,19 +278,21 @@ impl ParakeetModel {
         intra_threads: Option<usize>,
         precision_suffix: Option<&str>,
         use_directml: bool,
-    ) -> Result<Session, ParakeetError> {
-        // DirectML (Windows GPU) when compiled in and enabled; CPU is always the
-        // fallback so unsupported ops and non-directml builds still run.
-        let mut providers = Vec::new();
-        let using_directml = cfg!(feature = "directml") && use_directml;
+    ) -> Result<(Session, bool), ParakeetError> {
+        let mut builder =
+            Session::builder()?.with_optimization_level(GraphOptimizationLevel::Level3)?;
+        // ORT normally hides registration failures and proceeds with CPU.
+        // Keep that fallback but retain the actual session providers.
         #[cfg(feature = "directml")]
-        if use_directml {
-            log::info!("Parakeet: registering DirectML execution provider for {model_name}");
-            providers.push(DirectMLExecutionProvider::default().build());
-        }
+        let using_directml = use_directml
+            && DirectMLExecutionProvider::default()
+                .register(&mut builder)
+                .is_ok();
         #[cfg(not(feature = "directml"))]
-        let _ = use_directml;
-        providers.push(CPUExecutionProvider::default().build());
+        let using_directml = false;
+        if use_directml && !using_directml {
+            log::warn!("Parakeet: DirectML unavailable for {model_name}, using CPU");
+        }
 
         let model_filename = if let Some(suffix) = precision_suffix {
             let precision_name = format!("{model_name}.{suffix}.onnx");
@@ -257,9 +312,7 @@ impl ParakeetModel {
             regular_name
         };
 
-        let mut builder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_execution_providers(providers)?;
+        builder = builder.with_execution_providers([CPUExecutionProvider::default().build()])?;
 
         if using_directml {
             // DirectML requires sequential execution and disabled memory pattern
@@ -288,7 +341,7 @@ impl ParakeetModel {
             );
         }
 
-        Ok(session)
+        Ok((session, using_directml))
     }
 
     fn load_vocab<P: AsRef<Path>>(model_dir: P) -> Result<(Vec<String>, i32), ParakeetError> {
@@ -634,8 +687,9 @@ impl ParakeetModel {
 
     pub fn transcribe_samples(
         &mut self,
-        samples: Vec<f32>,
+        mut samples: Vec<f32>,
     ) -> Result<TimestampedResult, ParakeetError> {
+        raise_quiet_segment(&mut samples);
         let batch_size = 1;
         let samples_len = samples.len();
 
@@ -663,9 +717,77 @@ impl ParakeetModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        shift_timestamps, transcribe_with_empty_retry, ParakeetError,
+        raise_quiet_segment, shift_timestamps, transcribe_with_empty_retry, ParakeetError,
         TimestampedResult, SAMPLE_RATE,
     };
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn quiet_segments_are_raised_and_normal_or_silent_ones_are_left_alone() {
+        // Quiet speech level (about -37 dBFS) is raised to -20 dBFS.
+        let mut quiet: Vec<f32> = (0..SAMPLE_RATE)
+            .map(|i| 0.02 * (i as f32 * 0.05).sin())
+            .collect();
+        raise_quiet_segment(&mut quiet);
+        assert!((rms(&quiet) - 0.1).abs() < 0.005, "rms {}", rms(&quiet));
+
+        // A normal level and near-silence are returned bit for bit.
+        for amplitude in [0.2f32, 0.0005] {
+            let original: Vec<f32> = (0..SAMPLE_RATE)
+                .map(|i| amplitude * (i as f32 * 0.05).sin())
+                .collect();
+            let mut samples = original.clone();
+            raise_quiet_segment(&mut samples);
+            assert_eq!(samples, original);
+        }
+
+        // A loud click in a quiet segment is clipped, never wrapped or left above full scale.
+        let mut click = vec![0.01f32; SAMPLE_RATE];
+        click[100] = 0.9;
+        raise_quiet_segment(&mut click);
+        assert!(click.iter().all(|sample| sample.abs() <= 1.0));
+        assert_eq!(click[100], 1.0);
+
+        let mut empty: Vec<f32> = Vec::new();
+        raise_quiet_segment(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn quiet_segment_gain_is_capped_and_spares_a_normal_level_stretch() {
+        // Very quiet audio (-54 dBFS) would need a gain of 50; it gets 32.
+        let mut faint = vec![0.002f32; SAMPLE_RATE];
+        raise_quiet_segment(&mut faint);
+        assert!((faint[0] - 0.064).abs() < 1e-5, "sample {}", faint[0]);
+
+        // Ten seconds, quiet on average, with 0.2 s at a normal level: at most
+        // 0.1% of the samples may reach full scale (none for this sine, whose
+        // peak is close to its typical level), and the quiet part is still raised.
+        let mut mixed: Vec<f32> = (0..SAMPLE_RATE * 10)
+            .map(|i| {
+                let amplitude = if i < SAMPLE_RATE / 5 { 0.4 } else { 0.005 };
+                amplitude * (i as f32 * 0.05).sin()
+            })
+            .collect();
+        let quiet_before = rms(&mixed[SAMPLE_RATE..]);
+        raise_quiet_segment(&mut mixed);
+        let loudest = mixed.iter().fold(0.0f32, |max, sample| max.max(sample.abs()));
+        assert!(loudest < 1.0, "loudest {loudest}");
+        let clipped = mixed.iter().filter(|sample| sample.abs() >= 1.0).count();
+        assert!(clipped <= mixed.len() / 1000);
+        assert!(rms(&mixed[SAMPLE_RATE..]) > quiet_before * 1.5);
+
+        // Infinite or NaN input is left alone.
+        let mut broken = vec![0.01f32, f32::NAN, f32::INFINITY, 0.01];
+        raise_quiet_segment(&mut broken);
+        assert_eq!(broken[0], 0.01);
+        assert!(broken[1].is_nan());
+        assert_eq!(broken[2], f32::INFINITY);
+        assert_eq!(broken[3], 0.01);
+    }
 
     fn result(text: &str) -> TimestampedResult {
         TimestampedResult {

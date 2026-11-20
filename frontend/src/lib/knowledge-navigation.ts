@@ -10,6 +10,13 @@ export function evidenceIntent(token:string,meetingId:string) {
 }
 export function finishEvidenceIntent(token:string) {if(intent?.token===token)intent=null;}
 
+export function transcriptPassageUrl(reference: EvidenceRef, fromArchive = false): string | null {
+  if (reference.locator.kind !== "transcript") return null;
+  const params = new URLSearchParams({ id: reference.locator.meeting_id, evidence: createEvidenceIntent(reference, false) });
+  if (fromArchive) params.set("from", "archive");
+  return `/meeting-details?${params}`;
+}
+
 /** Every awaited stage carries the route/action generation to the existing paginator and player. */
 export async function navigateEvidence(reference:EvidenceRef,play:boolean,operations:{
   current:()=>boolean;resolve:(reference:EvidenceRef)=>Promise<ResolvedEvidence>;
@@ -20,7 +27,7 @@ export async function navigateEvidence(reference:EvidenceRef,play:boolean,operat
   if(!current())return;
   if(contextReference){const context=await operations.resolve(contextReference);if(!current())return;if(context.status!=='current'||!context.navigation)throw Error('The originating citation changed. Ask again for fresh question context.');}
   const resolved=await operations.resolve(reference);if(!current())return;
-  if(resolved.status!=='current'||!resolved.navigation||!resolved.passage)throw Error(resolved.status==='stale'?'This reference is historical or changed. Ask again for fresh evidence.':'This source is missing or could not be verified.');
+  if(resolved.status!=='current'||!resolved.navigation||!resolved.passage)throw Error(resolved.status==='stale'?'This passage is historical or changed. Run your search or question again.':'This source is missing or could not be verified.');
   const target=resolved.navigation;
   if(reference.locator.kind!=='transcript'||target.meeting_id!==reference.locator.meeting_id||!Number.isInteger(target.transcript_index)||target.transcript_index<0)throw Error('The current source position could not be verified.');
   await operations.reveal(target.transcript_id,target.transcript_index,current);if(!current())return;

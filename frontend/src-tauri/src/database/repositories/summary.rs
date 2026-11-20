@@ -1,14 +1,298 @@
 use crate::database::models::SummaryProcess;
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::{FromRow, Row, SqlitePool};
 use tracing::{error, info as log_info};
 
 pub struct SummaryProcessesRepository;
+const INTERRUPTED: &str = "Summary generation was interrupted when ClawScribe closed";
+pub(crate) const RECOVERY_NEEDED: &str =
+    "Review or retranscribe this meeting before generating notes.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn repaired_recording_can_claim_only_the_recoverable_skip_once() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            RECOVERY_NEEDED,
+            "recording",
+        )
+        .await
+        .unwrap();
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool, meeting, "import", "approved"
+        )
+        .await
+        .unwrap());
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+        sqlx::query("UPDATE summary_processes SET status = 'skipped', error = 'Automatic summaries are off.' WHERE meeting_id = ?")
+            .bind(meeting).execute(&pool).await.unwrap();
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn record_automatic_outcome_replaces_only_the_recoverable_skip() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+
+        // A RECOVERY_NEEDED skip is the recoverable state; subsequent skip reasons
+        // (disabled, review required) replace it so the UI shows the current reason.
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            RECOVERY_NEEDED,
+            "recording",
+        )
+        .await
+        .unwrap();
+        const DISABLED: &str = "Automatic summaries are off. You can generate notes here.";
+        const REVIEW_REQUIRED: &str =
+            "Review the summary provider in Settings to allow automatic notes at this destination.";
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            DISABLED,
+            "recording",
+        )
+        .await
+        .unwrap();
+        let row = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.error.as_deref(), Some(DISABLED));
+
+        // A second new reason must NOT overwrite the already-updated non-recoverable skip.
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            REVIEW_REQUIRED,
+            "recording",
+        )
+        .await
+        .unwrap();
+        let row2 = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row2.error.as_deref(), Some(DISABLED));
+
+        // A completed summary must never be overwritten.
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
+        SummaryProcessesRepository::update_process_completed(
+            &pool,
+            meeting,
+            serde_json::json!({"markdown": "Real notes"}),
+            1,
+            0.0,
+        )
+        .await
+        .unwrap();
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            RECOVERY_NEEDED,
+            "recording",
+        )
+        .await
+        .unwrap();
+        let completed = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn startup_retries_only_interrupted_background_jobs_once_without_resetting_results() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        sqlx::query("DELETE FROM summary_processes WHERE meeting_id = ?")
+            .bind(meeting)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+        sqlx::query("UPDATE summary_processes SET result = 'previous', metadata = 'partial' WHERE meeting_id = ?")
+            .bind(meeting).execute(&pool).await.unwrap();
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+                .await
+                .unwrap(),
+            vec![meeting.to_owned()]
+        );
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "different")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "different")
+                .await
+                .unwrap()
+        );
+        assert!(
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
+                .await
+                .unwrap()
+        );
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
+                .await
+                .unwrap()
+        );
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.result.as_deref(), Some("previous"));
+        assert_eq!(row.metadata.as_deref(), Some("partial"));
+    }
+
+    #[tokio::test]
+    async fn full_and_partial_notes_follow_transcript_content_across_metadata_edits() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let snapshot =
+            crate::summary::sources::prepare_snapshot(&pool, meeting, String::new(), true)
+                .await
+                .unwrap();
+        let revision = snapshot.revision.unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE meetings SET title = 'Renamed', created_at = '2026-10-20T12:00:00Z' WHERE id = ?")
+            .bind(meeting).execute(&pool).await.unwrap();
+        let result = serde_json::json!({"markdown": "Current notes"});
+        assert!(SummaryProcessesRepository::complete_for_revision(
+            &pool,
+            meeting,
+            result.clone(),
+            1,
+            0.0,
+            Some(revision)
+        )
+        .await
+        .unwrap());
+        SummaryProcessesRepository::fail_with_partial(&pool, meeting, "Failed", revision, "Äpfel")
+            .await
+            .unwrap();
+        assert_eq!(
+            SummaryProcessesRepository::get_summary_status_data(&pool, meeting)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("Äpfel")
+        );
+
+        sqlx::query("UPDATE transcripts SET transcript = 'Edited' WHERE id = 'a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!SummaryProcessesRepository::complete_for_revision(
+            &pool,
+            meeting,
+            result,
+            1,
+            0.0,
+            Some(revision)
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::fail_with_partial(
+            &pool,
+            meeting,
+            "Failed",
+            revision,
+            "Stale partial"
+        )
+        .await
+        .unwrap());
+        assert!(
+            SummaryProcessesRepository::get_summary_status_data(&pool, meeting)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .is_none()
+        );
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.result.unwrap().contains("Current notes"));
+        assert!(row.metadata.unwrap().contains("Äpfel"));
+    }
 
     #[tokio::test]
     async fn completion_keeps_one_previous_version_and_restore_swaps_both_ways() {
@@ -225,12 +509,125 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
-        sqlx::query_as::<_, SummaryProcess>(
-            "SELECT p.* FROM summary_processes p JOIN transcript_chunks t ON p.meeting_id = t.meeting_id WHERE p.meeting_id = ?",
+        Self::get_summary_status_data(pool, meeting_id)
+            .await
+            .map(|row| row.map(|(process, _)| process))
+    }
+
+    pub(crate) async fn get_summary_status_data(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Option<(SummaryProcess, Option<String>)>, sqlx::Error> {
+        // Return notes, status, and revision validity from the same snapshot.
+        // Legacy partials keep their original revision check until regenerated.
+        let row = sqlx::query(r#"
+            SELECT p.*, CASE WHEN LOWER(p.status) = 'failed' AND json_valid(p.metadata) THEN CASE
+                WHEN json_type(p.metadata, '$.partial_notes') = 'text' AND (
+                    json_extract(p.metadata, '$.transcript_content_revision') = m.summary_content_revision
+                    OR (json_type(p.metadata, '$.transcript_content_revision') IS NULL AND EXISTS (
+                        SELECT 1 FROM knowledge_sources s WHERE s.meeting_id = p.meeting_id AND s.kind = 'meeting'
+                          AND s.revision = json_extract(p.metadata, '$.transcript_revision')
+                    ))
+                ) THEN json_extract(p.metadata, '$.partial_notes') END END AS current_partial_notes
+            FROM summary_processes p LEFT JOIN meetings m ON m.id = p.meeting_id
+            WHERE p.meeting_id = ? AND (m.id IS NOT NULL OR EXISTS (
+                SELECT 1 FROM transcript_chunks t WHERE t.meeting_id = p.meeting_id
+            ))
+        "#).bind(meeting_id).fetch_optional(pool).await?;
+        row.as_ref()
+            .map(|row| {
+                Ok((
+                    SummaryProcess::from_row(row)?,
+                    row.try_get("current_partial_notes")?,
+                ))
+            })
+            .transpose()
+    }
+
+    pub(crate) async fn can_start_automatic_process(
+        pool: &SqlitePool,
+        meeting: &str,
+        origin: &str,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT NOT EXISTS (
+                SELECT 1 FROM summary_processes WHERE meeting_id = ?
+                AND NOT (? = 'recording' AND status = 'skipped'
+                    AND error IS ? AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
+                    AND result IS NULL AND result_backup IS NULL AND metadata IS NULL)
+            )
+        "#,
         )
-        .bind(meeting_id)
-        .fetch_optional(pool)
+        .bind(meeting)
+        .bind(origin)
+        .bind(RECOVERY_NEEDED)
+        .fetch_one(pool)
         .await
+    }
+
+    pub(crate) async fn create_automatic_process(
+        pool: &SqlitePool,
+        meeting: &str,
+        origin: &str,
+        fingerprint: &str,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query(r#"
+            INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, start_time, automatic_origin, automatic_request_fingerprint)
+            SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ? FROM meetings WHERE id = ?
+            ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = NULL,
+                start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = NULL,
+                automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint
+            WHERE excluded.automatic_origin = 'recording' AND summary_processes.status = 'skipped'
+              AND summary_processes.error = ? AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
+              AND summary_processes.result IS NULL AND summary_processes.result_backup IS NULL
+              AND summary_processes.metadata IS NULL
+        "#).bind(origin).bind(fingerprint).bind(meeting).bind(RECOVERY_NEEDED).execute(pool).await?.rows_affected() == 1)
+    }
+
+    pub(crate) async fn automatic_resume_candidates(
+        pool: &SqlitePool,
+        fingerprint: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT meeting_id FROM summary_processes WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ? AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ? ORDER BY start_time DESC, meeting_id LIMIT 3")
+            .bind(fingerprint).bind(INTERRUPTED).fetch_all(pool).await
+    }
+
+    pub(crate) async fn claim_automatic_resume(
+        pool: &SqlitePool,
+        meeting: &str,
+        fingerprint: &str,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query("UPDATE summary_processes SET status = 'pending', automatic_resume_attempted = 1, error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP WHERE meeting_id = ? AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ? AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ?")
+            .bind(meeting).bind(fingerprint).bind(INTERRUPTED).execute(pool).await?.rows_affected() == 1)
+    }
+
+    pub(crate) async fn record_automatic_outcome(
+        pool: &SqlitePool,
+        meeting: &str,
+        status: &str,
+        reason: &str,
+        origin: &str,
+    ) -> Result<(), sqlx::Error> {
+        // Atomically replace the recoverable skip (RECOVERY_NEEDED, no results) with
+        // the new reason. Any other existing state — manual, completed, another skip
+        // reason — is preserved by the WHERE guard on the DO UPDATE.
+        sqlx::query(r#"
+            INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, end_time, automatic_origin)
+            SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM meetings WHERE id = ?
+            ON CONFLICT(meeting_id) DO UPDATE SET
+                status = excluded.status, error = excluded.error,
+                updated_at = excluded.updated_at, end_time = excluded.end_time,
+                automatic_origin = excluded.automatic_origin
+            WHERE summary_processes.status = 'skipped'
+                AND summary_processes.error = ?
+                AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
+                AND summary_processes.result IS NULL
+                AND summary_processes.result_backup IS NULL
+                AND summary_processes.metadata IS NULL
+        "#)
+            .bind(status).bind(reason).bind(origin).bind(meeting).bind(RECOVERY_NEEDED).execute(pool).await?;
+        Ok(())
     }
 
     pub async fn create_or_reset_process(
@@ -250,6 +647,12 @@ impl SummaryProcessesRepository {
                 status = 'PENDING',
                 updated_at = excluded.updated_at,
                 start_time = excluded.start_time,
+                end_time = NULL,
+                chunk_count = 0,
+                metadata = NULL,
+                automatic_origin = NULL,
+                automatic_request_fingerprint = NULL,
+                automatic_resume_attempted = 0,
                 result_backup = result,
                 result_backup_timestamp = excluded.updated_at,
                 result = result,
@@ -272,10 +675,23 @@ impl SummaryProcessesRepository {
     pub async fn update_process_completed(
         pool: &SqlitePool,
         meeting_id: &str,
-        mut result: Value, // Keep this as Value to handle both old and new formats if needed
+        result: Value,
         chunk_count: i64,
         processing_time: f64,
     ) -> Result<(), sqlx::Error> {
+        Self::complete_for_revision(pool, meeting_id, result, chunk_count, processing_time, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn complete_for_revision(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        mut result: Value,
+        chunk_count: i64,
+        processing_time: f64,
+        revision: Option<i64>,
+    ) -> Result<bool, sqlx::Error> {
         let now = Utc::now();
         if let Some(object) = result.as_object_mut() {
             object.remove("user_edited_at");
@@ -283,13 +699,13 @@ impl SummaryProcessesRepository {
         let result_str = serde_json::to_string(&result)
             .map_err(|e| sqlx::Error::Protocol(format!("Failed to serialize result: {}", e)))?;
 
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
             UPDATE summary_processes
             SET previous_result = CASE WHEN result IS NOT NULL AND TRIM(result) NOT IN ('', 'null', '{}') THEN result ELSE previous_result END,
                 previous_result_at = CASE WHEN result IS NOT NULL AND TRIM(result) NOT IN ('', 'null', '{}') THEN CURRENT_TIMESTAMP ELSE previous_result_at END,
-                status = 'completed', result = ?, updated_at = ?, end_time = ?, chunk_count = ?, processing_time = ?, error = NULL, result_backup = NULL, result_backup_timestamp = NULL
-            WHERE meeting_id = ?
+                status = 'completed', result = ?, updated_at = ?, end_time = ?, chunk_count = ?, processing_time = ?, error = NULL, metadata = NULL, result_backup = NULL, result_backup_timestamp = NULL
+            WHERE meeting_id = ? AND (? IS NULL OR ? = (SELECT summary_content_revision FROM meetings WHERE id = summary_processes.meeting_id))
             "#
         )
         .bind(result_str)
@@ -298,13 +714,15 @@ impl SummaryProcessesRepository {
         .bind(chunk_count)
         .bind(processing_time)
         .bind(meeting_id)
+        .bind(revision)
+        .bind(revision)
         .execute(pool)
         .await?;
         log_info!(
             "Summary completed and backup cleared for meeting_id: {}",
             meeting_id
         );
-        Ok(())
+        Ok(updated.rows_affected() == 1)
     }
 
     pub async fn restore_previous_summary(
@@ -360,9 +778,32 @@ impl SummaryProcessesRepository {
 
     pub(crate) async fn fail_interrupted_processes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         let now = Utc::now();
-        sqlx::query("UPDATE summary_processes SET status = 'failed', error = 'Summary generation was interrupted when ClawScribe closed', updated_at = ?, end_time = ?, result = COALESCE(result_backup, result), result_backup = NULL, result_backup_timestamp = NULL WHERE LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating')")
-            .bind(now).bind(now).execute(pool).await?;
+        sqlx::query("UPDATE summary_processes SET status = 'failed', error = ?, updated_at = ?, end_time = ?, result = CASE WHEN automatic_origin IS NULL THEN COALESCE(result_backup, result) ELSE result END, result_backup = CASE WHEN automatic_origin IS NOT NULL THEN result_backup END, result_backup_timestamp = CASE WHEN automatic_origin IS NOT NULL THEN result_backup_timestamp END WHERE LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating')")
+            .bind(INTERRUPTED).bind(now).bind(now).execute(pool).await?;
         Ok(())
+    }
+
+    pub(crate) async fn fail_with_partial(
+        pool: &SqlitePool,
+        meeting: &str,
+        reason: &str,
+        revision: i64,
+        notes: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let metadata = serde_json::json!({
+            "partial_notes": notes,
+            "transcript_content_revision": revision,
+        });
+        Ok(sqlx::query(r#"
+            UPDATE summary_processes SET status = 'failed', error = ?1,
+                updated_at = CURRENT_TIMESTAMP, end_time = CURRENT_TIMESTAMP,
+                metadata = CASE WHEN automatic_resume_attempted = 1 AND json_valid(metadata) THEN CASE
+                    WHEN json_extract(metadata, '$.transcript_content_revision') = ?4
+                      AND length(json_extract(metadata, '$.partial_notes')) >= length(json_extract(?2, '$.partial_notes'))
+                    THEN metadata ELSE ?2 END ELSE ?2 END,
+                result = COALESCE(result_backup, result), result_backup = NULL, result_backup_timestamp = NULL
+            WHERE meeting_id = ?3 AND ?4 = (SELECT summary_content_revision FROM meetings WHERE id = summary_processes.meeting_id)
+        "#).bind(reason).bind(metadata.to_string()).bind(meeting).bind(revision).execute(pool).await?.rows_affected() == 1)
     }
 
     pub async fn update_process_cancelled(

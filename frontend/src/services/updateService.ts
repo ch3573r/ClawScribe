@@ -1,6 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
-import { Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
+import { Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 
 export type UpdateChannel = 'stable' | 'preview';
@@ -13,6 +13,9 @@ export interface UpdateInfo {
   date?: string;
   body?: string;
 }
+type DownloadEvent =
+  | { event: 'Started'; data: { contentLength?: number | null } }
+  | { event: 'Progress'; data: { chunkLength: number } };
 export interface UpdateProgress {
   downloaded: number;
   total: number;
@@ -179,25 +182,32 @@ export class UpdateService {
     const candidate = this.candidate;
     this.publish({ isInstalling: true, error: null });
     try {
-      const assertIdle = async () => {
+      const assertRecordingIdle = async () => {
         if (!canInstall() || await invoke<boolean>('is_recording')) {
           throw new Error('Finish recording and saving your meeting before installing an update.');
         }
       };
-      await assertIdle();
+      // Capture and background work stay available during a slow download. The
+      // native side owns the verified installer and, only for the installer
+      // hand-off, the exclusion that keeps jobs from starting. Neither lives in
+      // this page, so a reload cannot strand or drop them.
+      await assertRecordingIdle();
       let downloaded = 0;
       let total = 0;
-      await candidate.download((event: DownloadEvent) => {
+      const events = new Channel<DownloadEvent>();
+      events.onmessage = event => {
         if (event.event === 'Started') total = event.data.contentLength ?? 0;
         if (event.event === 'Progress') downloaded += event.data.chunkLength;
         onProgress({ downloaded, total, percentage: total > 0 ? Math.min(100, Math.round(downloaded / total * 100)) : 0, phase: 'downloading' });
-      }, { timeout: 300_000 });
-      await assertIdle();
+      };
+      await invoke('download_app_update', { rid: candidate.rid, onEvent: events });
+      await assertRecordingIdle();
       onProgress({ downloaded, total, percentage: 100, phase: 'installing' });
-      await candidate.install();
+      await invoke('install_app_update', { rid: candidate.rid });
       await relaunch();
     } catch (error) {
-      await this.closeCandidate();
+      // Cleanup must never replace the error the user needs to see.
+      await this.closeCandidate().catch(() => {});
       this.lastSuccess = 0;
       this.publish({ updateInfo: null, error: updateErrorMessage(error) });
       throw error;

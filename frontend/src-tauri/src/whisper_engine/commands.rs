@@ -333,74 +333,38 @@ pub async fn whisper_validate_model_ready() -> Result<String, String> {
     }
 }
 
-/// Internal version of whisper_validate_model_ready that respects user's transcript config
-pub async fn whisper_validate_model_ready_with_config<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Result<String, String> {
+/// Load the chosen model, or another available model from the same engine.
+pub(crate) async fn whisper_validate_model_ready_for(
+    configured_model: Option<String>,
+) -> Result<String, crate::audio::transcription::engine::LiveModelFailure> {
+    use crate::audio::transcription::engine::{
+        check_model_files, LiveModelFailure, ModelFileState,
+    };
     let engine = {
         let guard = WHISPER_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
     };
 
     if let Some(engine) = engine {
-        // No model loaded - try to load user's configured model from transcript config
-        let model_to_load = match crate::api::api::api_get_transcript_config(
-            app.clone(),
-            app.state(),
-            None,
-        )
-        .await
-        {
-            Ok(Some(config)) => {
-                log::info!(
-                    "Got transcript config from API - provider: {}, model: {}",
-                    config.provider,
-                    config.model
-                );
-                if config.provider == "localWhisper" && !config.model.is_empty() {
-                    log::info!("Using user's configured model: {}", config.model);
-                    Some(config.model)
-                } else {
-                    log::info!(
-                        "API config uses non-local provider ({}) or empty model, will auto-select",
-                        config.provider
-                    );
-                    None
-                }
-            }
-            Ok(None) => {
-                log::info!("No transcript config found in API, will auto-select model");
-                None
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to get transcript config from API: {}, will auto-select model",
-                    e
-                );
-                None
-            }
-        };
-
         // Check available models
         let models = engine
             .discover_models()
             .await
-            .map_err(|e| format!("Failed to discover models: {}", e))?;
+            .map_err(|_| LiveModelFailure::LoadFailed)?;
 
         let available_models: Vec<_> = models
             .iter()
             .filter(|model| matches!(model.status, crate::whisper_engine::ModelStatus::Available))
             .collect();
 
-        if available_models.is_empty() {
-            return Err(
-                "No Whisper models are available. Please download a model to enable transcription."
-                    .to_string(),
-            );
-        }
+        check_model_files(
+            models
+                .iter()
+                .map(|model| ModelFileState::from(&model.status)),
+        )?;
 
         // Try to load user's configured model if specified
-        let model_name = if let Some(configured_model) = model_to_load {
+        let model_name = if let Some(configured_model) = configured_model {
             // Check if configured model is available
             if available_models.iter().any(|m| m.name == configured_model) {
                 log::info!("Loading user's configured model: {}", configured_model);
@@ -422,14 +386,14 @@ pub async fn whisper_validate_model_ready_with_config<R: tauri::Runtime>(
             available_models[0].name.clone()
         };
 
-        engine
-            .load_model(&model_name)
-            .await
-            .map_err(|e| format!("Failed to load model {}: {}", model_name, e))?;
+        engine.load_model(&model_name).await.map_err(|error| {
+            log::warn!("Live model load failed: {error}");
+            LiveModelFailure::LoadFailed
+        })?;
 
         Ok(model_name)
     } else {
-        Err("Whisper engine not initialized".to_string())
+        Err(LiveModelFailure::LoadFailed)
     }
 }
 
@@ -586,10 +550,7 @@ pub async fn open_models_folder() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+        crate::local_path::open_in_explorer(std::path::Path::new(&folder_path))?;
     }
 
     #[cfg(target_os = "macos")]

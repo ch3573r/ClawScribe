@@ -53,7 +53,7 @@ export function getStatusLabel(status: BuiltInModelStatus): string {
   switch (status.type) {
     case 'available': return 'Available';
     case 'downloading': return `Downloading ${status.progress}%`;
-    case 'not_downloaded': return 'Not Downloaded';
+    case 'not_downloaded': return 'Not downloaded';
     case 'corrupted': return 'Corrupted';
     case 'error': return 'Error';
     default: return 'Unknown';

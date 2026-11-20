@@ -48,6 +48,11 @@ on:
         required: true
         type: boolean
         default: false
+      measure-mai:
+        description: Compare local audio preparation time and memory on a synthetic ten-minute recording
+        required: false
+        type: boolean
+        default: false
       build-ref:
         description: Commit, branch, or tag to build
         required: false
@@ -81,6 +86,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CLAWSCRIBE_MEASURE_MAI: ${{ inputs['measure-mai'] && 'true' || 'false' }}
 
 jobs:
   build:
@@ -279,43 +285,14 @@ jobs:
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PATH=$llvmBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install Vulkan SDK prerequisites
+      # Reuses a matching SDK found by its content. Otherwise stages it in its own
+      # per-version folder; the runner's own SDK is never overwritten.
+      - name: Use the pinned Vulkan SDK
         if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          choco install 7zip -y --no-progress
-
-      - name: Install Vulkan SDK
-        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
-        uses: humbletim/install-vulkan-sdk@v1.2
+        uses: ./.github/actions/vulkan-sdk
         with:
           version: 1.4.309.0
-          cache: false
-
-      - name: Verify and Configure Vulkan SDK
-        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $vulkanSdk = $env:VULKAN_SDK
-          Write-Host "VULKAN_SDK: $vulkanSdk"
-          if (-not $vulkanSdk -or -not (Test-Path $vulkanSdk)) {
-            throw "VULKAN_SDK not set or path does not exist"
-          }
-          $binDir = Join-Path $vulkanSdk "Bin"
-          $libDir = Join-Path $vulkanSdk "Lib"
-          $includeDir = Join-Path $vulkanSdk "Include"
-          foreach ($path in @($binDir, $libDir, $includeDir)) {
-            if (-not (Test-Path $path)) {
-              throw "Required Vulkan SDK path missing: $path"
-            }
-          }
-          "PATH=$binDir;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Vulkan_LIBRARY=$libDir\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Vulkan_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          install-missing: 'true'
 
       # SDK extraction does not execute Helpers/VulkanRT.exe. Hosted Windows
       # images have no Vulkan loader, so GPU-linked test executables otherwise
@@ -415,6 +392,29 @@ jobs:
           $featureArgs = @()
           if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
           .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",")
+
+      # Unpacks the NSIS installer just built (nothing is installed) and runs the
+      # packaged executable's headless self-test on a synthetic profile in two
+      # processes. It does not capture audio, load speech models, drive the
+      # interface or run the installer; those acceptance checks stay manual.
+      - name: Run packaged-binary acceptance
+        if: ${{ !inputs['check-only'] }}
+        shell: pwsh
+        env:
+          EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $expectedNsis = "ClawScribe_$($env:CLAWSCRIBE_INSTALLER_VERSION)_x64-setup.exe"
+          $installer = $null
+          foreach ($folder in @("target\release\bundle\nsis", "frontend\src-tauri\target\release\bundle\nsis")) {
+            $candidate = Join-Path $folder $expectedNsis
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $installer = (Resolve-Path -LiteralPath $candidate).Path; break }
+          }
+          if (-not $installer) {
+            throw "No current-version NSIS setup '$expectedNsis' was found for packaged-binary acceptance."
+          }
+          .\frontend\scripts\test-packaged-acceptance.ps1 -Installer $installer
 
       - name: Write build metadata
         if: ${{ !inputs['check-only'] }}

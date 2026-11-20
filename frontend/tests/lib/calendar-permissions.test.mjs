@@ -23,7 +23,11 @@ test('upcoming meetings skip calendar requests on mount, timer, focus and visibi
     const { UpcomingMeetings } = loadTsModule('src/components/UpcomingMeetings.tsx', {
       react: hooks.react,
       'lucide-react': {},
+      '@/components/ui/button': { Button: 'button' },
+      sonner: { toast: { error() {} } },
       '@/lib/openExternal': { openExternal: async () => {} },
+      '@/hooks/useICalendar': { useICalendar: () => ({ events: [], sources: [] }) },
+      '@/hooks/usePendingCalendar': { usePendingCalendar: () => null },
       '@/services/microsoftExportService': { microsoftExportService: {
         connectionStatus: async () => status,
         listCalendarEvents: async () => { reads++; return []; },
@@ -64,7 +68,7 @@ test('settings calendar skips both event and current-meeting calls until permiss
       listCalendarEvents: async () => { calls.push('events'); return []; },
       currentOrNextMeeting: async () => { calls.push('current'); return null; },
     }, isOneNoteLargeLibraryError: () => false },
-    '@/lib/meetingCalendar': { clearAllCalendarLinks: () => {} },
+    '@/lib/meetingCalendar': { clearMicrosoftCalendarLinks: () => {} },
   });
   const render = () => hooks.render(useMicrosoftExport);
   for (let attempt = 0; attempt < 3; attempt++) await render().loadCalendar();

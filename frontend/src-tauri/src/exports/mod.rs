@@ -8,6 +8,7 @@
 //! - `docs/integrations/onenote-export.md`
 //! - `docs/integrations/planner-export.md`
 
+pub mod actions;
 pub mod auth;
 pub mod calendar;
 pub mod client;
@@ -24,6 +25,7 @@ pub mod markdown_notes;
 pub mod model;
 pub mod ms_auth_state;
 pub mod onenote;
+mod onenote_resume;
 pub mod planner;
 pub mod reqwest_transport;
 pub mod todo;
@@ -74,6 +76,7 @@ pub fn meeting_export_from_notes(
             owner: a.owner.clone(),
             due_date: a.due_date.clone(),
             details: None,
+            legacy_action: None,
         })
         .collect();
     planner::ensure_local_action_ids(&mut action_items);

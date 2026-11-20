@@ -1,3 +1,4 @@
+import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
 "use client";
 
 import { Input } from '@/components/ui/input';
@@ -16,7 +17,7 @@ import { TextReplaceDialog } from './TextReplaceDialog';
 import { SummarySources, ResolvedSummarySource } from './SummarySources';
 import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
-import { Languages, ChevronDown, ChevronUp, Search, X } from 'lucide-react';
+import { Languages, ChevronDown, ChevronUp, Search, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -65,6 +66,7 @@ interface SummaryPanelProps {
   onSummaryChange: (summary: Summary) => void;
   onDirtyChange: (isDirty: boolean) => void;
   summaryError: string | null;
+  jobSnapshot: SummaryJobSnapshot | null;
   onRegenerateSummary: (customPrompt?: string) => Promise<void>;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
   availableTemplates: Array<{ id: string, name: string, description: string }>;
@@ -105,6 +107,7 @@ export function SummaryPanel({
   onSummaryChange,
   onDirtyChange,
   summaryError,
+  jobSnapshot,
   onRegenerateSummary,
   getSummaryStatusMessage,
   availableTemplates,
@@ -124,6 +127,9 @@ export function SummaryPanel({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  // The empty view offers the same generate action as the toolbar.
+  const generateRef = useRef<(() => void) | null>(null);
+  const [checkingModels, setCheckingModels] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [dockTarget, setDockTarget] = useState<HTMLDivElement | null>(null);
   const [chatDocked, setChatDocked] = useState(false);
@@ -261,6 +267,12 @@ export function SummaryPanel({
   };
 
   const isSummaryLoading = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
+  const progress = jobSnapshot?.progress;
+  const jobState = jobSnapshot?.status;
+  const jobNotice = jobState && ['skipped', 'failed', 'cancelled', 'unavailable'].includes(jobState)
+    ? jobState === 'unavailable' ? 'Could not check summary progress. Trying again…' : jobSnapshot?.error
+    : null;
+
   const collectSummaryMatches = (query: string): SummaryTextMatch[] => {
     const root = summarySearchRootRef.current;
     const normalizedQuery = query.trim().toLowerCase();
@@ -379,7 +391,7 @@ export function SummaryPanel({
   );
 
   return (
-    <div tabIndex={0} onKeyDown={event => {
+    <div id="meeting-summary-panel" tabIndex={0} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h' && aiSummary && !isSummaryLoading) { event.preventDefault(); setReplaceOpen(true); }
     }} className="flex-1 min-h-[24rem] min-w-0 flex flex-col bg-card overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
       <div ref={toolbarRef} className="meeting-summary-toolbar shrink-0 border-b border-border px-3 py-2">
@@ -390,7 +402,7 @@ export function SummaryPanel({
               {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}
             </span>}
           </div>
-          <SummaryGeneratorButtonGroup compact={compactToolbar} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
+          <SummaryGeneratorButtonGroup compact={compactToolbar} generateRef={generateRef} onCheckingChange={setCheckingModels} secondaryGenerate={!aiSummary && !isSummaryLoading && transcripts.length > 0} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
             onActionsCloseAutoFocus={event => {
               if (retainFindFocusRef.current) event.preventDefault();
               retainFindFocusRef.current = false;
@@ -457,7 +469,12 @@ export function SummaryPanel({
           {isSummaryLoading ? <div role="status" className="flex h-full min-h-48 items-center justify-center gap-3 p-8 text-sm text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />Generating summary…</div>
           : !aiSummary ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
               <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>
-              <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Choose a template and generate meeting notes using the toolbar above.' : 'Transcribe the recording first, then generate a summary.'}</p>
+              <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Notes use the template and AI model chosen in the toolbar.' : 'Transcribe the recording first, then generate a summary.'}</p>
+              {transcripts.length > 0 && (
+                <Button className="mt-2" disabled={checkingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_empty'); generateRef.current?.(); }}>
+                  <Sparkles className="h-4 w-4" />{jobState === 'failed' || jobState === 'cancelled' ? 'Retry summary' : 'Generate summary'}
+                </Button>
+              )}
             </div>
           : <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
@@ -467,7 +484,23 @@ export function SummaryPanel({
                   meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
               </SummarySources>
             </div>}
-          {summaryStatus === 'error' && <p role="alert" className="m-4 rounded border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{summaryError || getSummaryStatusMessage(summaryStatus)}</p>}
+          {isSummaryLoading && progress && progress.total > 0 && (
+            <p role="status" className="px-4 py-2 text-sm text-muted-foreground">
+              Excerpts processed {progress.completed} of {progress.total} (pass {progress.level})
+            </p>
+          )}
+          {(jobNotice || summaryStatus === 'error') && (
+            <p role={jobState === 'failed' || summaryStatus === 'error' ? 'alert' : 'status'} className="mx-4 mb-3 text-sm text-muted-foreground">
+              {jobNotice || summaryError || getSummaryStatusMessage(summaryStatus)}
+            </p>
+          )}
+          {jobState === 'failed' && jobSnapshot?.partial_notes && (
+            <section className="mx-4 mb-4 rounded-md border p-3">
+              <h3 className="text-sm font-semibold">Recovered excerpt notes</h3>
+              <p className="my-2 text-xs text-muted-foreground">These notes cover the excerpts that finished.</p>
+              <p className="whitespace-pre-wrap break-words text-sm">{jobSnapshot.partial_notes}</p>
+            </section>
+          )}
         </div>
         <div ref={setDockTarget} role="complementary" aria-label="Meeting chat panel" className={chatDocked ? 'flex w-[25rem] shrink-0 flex-col border-l border-border' : 'hidden'} />
       </div>

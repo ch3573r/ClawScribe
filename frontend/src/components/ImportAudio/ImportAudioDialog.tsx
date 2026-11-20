@@ -26,6 +26,7 @@ import {
 } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { Checkbox } from '../ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -35,8 +36,12 @@ import {
 } from '../ui/select';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
-import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
+import { importSummarySelection, useSummaryDestination, type ImportSummaryChoice } from '@/hooks/useSummaryDestination';
+import { providerLabel } from '@/components/settings/provider-data';
+import { useImportAudio, ImportResult, type AudioFileInfo } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
+import { invoke } from '@tauri-apps/api/core';
+import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
@@ -75,9 +80,16 @@ export function ImportAudioDialog({
 }: ImportAudioDialogProps) {
   const router = useRouter();
   const { refetchMeetings } = useSidebar();
-  const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedLanguage, transcriptModelConfig, modelConfig, isAutoSummary } = useConfig();
 
   const [title, setTitle] = useState('');
+  const [meetingDate, setMeetingDate] = useState('');
+  const [useFileDate, setUseFileDate] = useState(false);
+  const { destination, error: destinationError } = useSummaryDestination(open, modelConfig, isAutoSummary);
+  const [summaryChoice, setSummaryChoice] = useState<ImportSummaryChoice>('default');
+  const summarySelection = importSummarySelection(summaryChoice, isAutoSummary, destination);
+  const summarize = summarySelection !== null;
+  const [remainingFiles, setRemainingFiles] = useState<AudioFileInfo[]>([]);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [titleModifiedByUser, setTitleModifiedByUser] = useState(false);
@@ -90,9 +102,11 @@ export function ImportAudioDialog({
     audioSeconds: number;
     processingSeconds: number;
     modelLabel: string;
+    summaryRequested: boolean;
   } | null>(null);
   const importStartedAtRef = useRef<number | null>(null);
   const importedModelLabelRef = useRef<string>('Default model');
+  const summaryRequested = useRef(false);
   // Tracks the last preselected path we validated so a file dropped onto an
   // already-open dialog gets picked up without re-validating on every re-render.
   const lastValidatedPathRef = useRef<string | null>(null);
@@ -121,6 +135,7 @@ export function ImportAudioDialog({
       audioSeconds: result.duration_seconds,
       processingSeconds,
       modelLabel: importedModelLabelRef.current,
+      summaryRequested: summaryRequested.current,
     });
     toast.success(`Import complete — ${result.segments_count} segments created.`);
 
@@ -147,7 +162,8 @@ export function ImportAudioDialog({
     isProcessing,
     isCancelling,
     isBusy,
-    selectFile,
+    selectFiles,
+    chooseFile,
     validateFile,
     startImport,
     cancelImport,
@@ -169,6 +185,10 @@ export function ImportAudioDialog({
       reset();
       resetSelection();
       setTitle('');
+      setMeetingDate('');
+      setUseFileDate(false);
+      setSummaryChoice('default');
+      setRemainingFiles([]);
       setTitleModifiedByUser(false);
       setStats(null);
       setSelectedLang(selectedLanguage || 'auto');
@@ -187,14 +207,18 @@ export function ImportAudioDialog({
       lastValidatedPathRef.current = null;
       return;
     }
-    if (!preselectedFile || lastValidatedPathRef.current === preselectedFile) return;
+    if (!preselectedFile || lastValidatedPathRef.current === preselectedFile || isBusy) return;
     lastValidatedPathRef.current = preselectedFile;
+    setRemainingFiles([]);
+    setMeetingDate('');
+    setUseFileDate(false);
+    setSummaryChoice('default');
     setTitleModifiedByUser(false);
     setStats(null);
     validateFile(preselectedFile).then((info) => {
       if (info) setTitle(info.filename);
     });
-  }, [open, preselectedFile, validateFile]);
+  }, [open, preselectedFile, validateFile, isBusy]);
 
   // Update title when fileInfo changes
   useEffect(() => {
@@ -220,35 +244,73 @@ export function ImportAudioDialog({
   }, [isParakeetModel, selectedLang]);
 
   const handleSelectFile = async () => {
-    const info = await selectFile();
-    if (info) {
-      setTitle(info.filename);
-    }
+    const [first, ...rest] = await selectFiles();
+    if (!first) return;
+    setTitle(first.filename);
+    setMeetingDate('');
+    setUseFileDate(false);
+    setSummaryChoice('default');
+    setRemainingFiles(rest);
   };
 
   const handleStartImport = async () => {
-    if (!fileInfo) return;
+    if (!fileInfo || isBusy) return;
+    const date = meetingDate ? new Date(meetingDate) : null;
+    if (date && Number.isNaN(date.getTime())) {
+      toast.error('Choose a valid meeting date and time');
+      return;
+    }
 
     importStartedAtRef.current = performance.now();
     importedModelLabelRef.current = selectedModel?.displayName || 'Default model';
+    summaryRequested.current = summarize;
 
     await startImport(
       fileInfo.path,
       title || fileInfo.filename,
       isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
       selectedModel?.name || null,
-      selectedModel?.provider || null
+      selectedModel?.provider || null,
+      {
+        meetingAt: date?.toISOString() ?? null,
+        useFileDate,
+        summarize,
+        summaryDestinationFingerprint: summarySelection?.fingerprint ?? null,
+        summaryUseAutomaticPreference: summarySelection?.useAutomaticPreference ?? false,
+      },
     );
   };
 
-  const handleImportAnother = () => {
-    reset();
-    resetSelection();
+  const handleImportAnother = async () => {
+    if (stats?.summaryRequested) {
+      try {
+        const job = await invoke<SummaryJobSnapshot>('api_get_summary', { meetingId: stats.meetingId });
+        if (isActiveSummary(job.status)) {
+          toast.info('Notes are still generating for the last import', {
+            description: 'Open that meeting to see progress, or continue when its notes are ready.',
+          });
+          return;
+        }
+      } catch {
+        toast.error('Could not check summary status');
+        return;
+      }
+    }
+    const [next, ...rest] = remainingFiles;
+    if (next) {
+      chooseFile(next);
+      setRemainingFiles(rest);
+    } else {
+      reset();
+      resetSelection();
+    }
     setStats(null);
-    setTitle('');
+    setTitle(next?.filename ?? '');
+    setMeetingDate('');
+    setUseFileDate(false);
+    setSummaryChoice('default');
     setTitleModifiedByUser(false);
     importStartedAtRef.current = null;
-    lastValidatedPathRef.current = null;
   };
 
   const handleOpenImportedMeeting = () => {
@@ -288,7 +350,7 @@ export function ImportAudioDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        className="sm:max-w-[500px]"
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-[500px]"
         onEscapeKeyDown={handleEscapeKeyDown}
         onInteractOutside={handleInteractOutside}
       >
@@ -317,7 +379,7 @@ export function ImportAudioDialog({
             ) : (
               <>
                 <Upload className="h-5 w-5 text-primary" />
-                Import audio file
+                Import audio or video
               </>
             )}
           </DialogTitle>
@@ -329,8 +391,8 @@ export function ImportAudioDialog({
               : error
               ? 'An error occurred during import'
               : status === 'complete'
-              ? 'Your meeting is ready. Transcription benchmark below.'
-              : 'Import an audio file to create a new meeting with transcripts'}
+              ? stats?.summaryRequested ? 'Open the saved meeting to check summary status.' : 'Your meeting is ready.'
+              : 'Create one meeting per audio or video file'}
           </DialogDescription>
         </DialogHeader>
 
@@ -360,8 +422,9 @@ export function ImportAudioDialog({
 
                   {/* Editable title */}
                   <div className="space-y-1">
-                    <label className="text-sm font-medium text-muted-foreground">Meeting title</label>
+                    <label htmlFor="import-title" className="text-sm font-medium text-muted-foreground">Meeting title</label>
                     <Input
+                      id="import-title"
                       value={title}
                       onChange={(e) => {
                         setTitle(e.target.value);
@@ -371,8 +434,43 @@ export function ImportAudioDialog({
                     />
                   </div>
 
+                  <div className="space-y-1">
+                    <label htmlFor="import-meeting-date" className="text-sm font-medium text-muted-foreground">Meeting date and time (local)</label>
+                    <Input id="import-meeting-date" type="datetime-local" value={meetingDate} disabled={useFileDate}
+                      onChange={event => setMeetingDate(event.target.value)} aria-describedby="import-date-help" />
+                    <p id="import-date-help" className="text-xs text-muted-foreground">
+                      {useFileDate && fileInfo.modified_at ? 'Using the file’s modified time, ' + new Date(fileInfo.modified_at).toLocaleString() : 'Uses the import time if left blank.'}
+                    </p>
+                    {fileInfo.modified_at && (
+                      <Button type="button" variant="ghost" size="sm" className="h-auto px-0"
+                        onClick={() => setUseFileDate(value => !value)}>
+                        {useFileDate ? 'Choose another date' : 'Use file modified time'}
+                      </Button>
+                    )}
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <Checkbox id="import-summarize" checked={summarize}
+                      disabled={!destination}
+                      onCheckedChange={value => setSummaryChoice(value === true && destination ? { fingerprint: destination.fingerprint } : 'off')}
+                      aria-describedby="import-summary-help" />
+                    <div>
+                      <label htmlFor="import-summarize" className="text-sm font-medium">Generate a summary after transcription</label>
+                      <p id="import-summary-help" className="break-all text-xs text-muted-foreground">
+                        {destination ? destination.external
+                          ? 'Sends this transcript and notes context to ' + providerLabel(destination.provider) + ' (' + destination.endpoint + ') using ' + destination.model + '.'
+                          : 'Generates notes locally with ' + providerLabel(destination.provider) + ' using ' + destination.model + '.'
+                          : destinationError ?? 'Checking the selected summary provider…'}
+                        {destination?.external && destination.unencrypted && ' This connection uses unencrypted HTTP.'}
+                        {summarySelection?.useAutomaticPreference && ' Selected by your automatic notes setting. You can clear it for this file.'}
+                      </p>
+                    </div>
+                  </div>
+                  {remainingFiles.length > 0 && <p className="text-xs text-muted-foreground">
+                    {remainingFiles.length} more {remainingFiles.length === 1 ? 'file' : 'files'} selected. Review each one after this import.
+                  </p>}
+
                   <Button variant="outline" size="sm" onClick={handleSelectFile} className="w-full">
-                    Choose different file
+                    Choose different files
                   </Button>
                 </div>
               ) : (
@@ -387,7 +485,7 @@ export function ImportAudioDialog({
                     ) : (
                       <>
                         <Upload className="h-4 w-4 mr-2" />
-                        Select audio file
+                        Select audio files
                       </>
                     )}
                   </Button>
@@ -563,17 +661,17 @@ export function ImportAudioDialog({
               <Button
                 onClick={handleStartImport}
                 className="bg-primary hover:bg-primary/90"
-                disabled={!fileInfo}
+                disabled={!fileInfo || isBusy}
               >
                 <Upload className="h-4 w-4 mr-2" />
-                Import
+                {summarize ? 'Import and summarize' : 'Import'}
               </Button>
             </>
           )}
           {status === 'complete' && (
             <>
               <Button variant="outline" onClick={handleImportAnother}>
-                Import another
+                {remainingFiles.length > 0 ? 'Review next file' : 'Import another'}
               </Button>
               <Button onClick={handleOpenImportedMeeting} className="bg-primary hover:bg-primary/90">
                 Open meeting

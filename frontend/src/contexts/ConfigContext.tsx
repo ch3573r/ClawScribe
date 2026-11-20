@@ -8,6 +8,10 @@ import {
 } from '@/lib/audioDevicePreferences';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
+import { NO_SECRET, withRefreshedKeyStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
+import { loadBehaviorSettings, mirrorLegacyBehavior, refreshBehaviorSettings } from '@/lib/behaviorSettings';
+import { toast } from 'sonner';
+import { useAudioDeviceInventory } from '@/hooks/useAudioDeviceInventory';
 
 export interface OllamaModel {
   name: string;
@@ -15,6 +19,9 @@ export interface OllamaModel {
   size: string;
   modified: string;
 }
+
+export type KeyProvider = 'claude' | 'groq' | 'openai' | 'openrouter';
+const KEY_PROVIDERS: KeyProvider[] = ['claude', 'groq', 'openai', 'openrouter'];
 
 export interface StorageLocations {
   database: string;
@@ -55,14 +62,13 @@ interface ConfigContextType {
   // Device configuration
   selectedDevices: SelectedDevices;
   setSelectedDevices: (devices: SelectedDevices) => void;
+  audioDeviceInventory: ReturnType<typeof useAudioDeviceInventory>;
+  devicePreferencesStatus: 'loading' | 'ready' | 'error';
+  refreshDevicePreferences: () => Promise<void>;
 
   // Language preference
   selectedLanguage: string;
   setSelectedLanguage: (lang: string) => void;
-
-  // UI preferences
-  showConfidenceIndicator: boolean;
-  toggleConfidenceIndicator: (checked: boolean) => void;
 
   // Ollama models
   models: OllamaModel[];
@@ -71,16 +77,12 @@ interface ConfigContextType {
 
   // Summary configuration
   isAutoSummary: boolean;
-  toggleIsAutoSummary: (checked: boolean) => void;
+  automaticSummaryBusy: boolean;
+  toggleIsAutoSummary: (checked: boolean, fingerprint?: string) => Promise<boolean>;
 
-  // Provider-specific API keys
-  providerApiKeys: {
-    claude: string | null;
-    groq: string | null;
-    openai: string | null;
-    openrouter: string | null;
-  };
-  updateProviderApiKey: (provider: string, apiKey: string | null) => void;
+  // Which providers have a stored API key. The keys themselves stay in the core.
+  providerKeyStatus: Record<KeyProvider, SecretStatus>;
+  refreshProviderKeyStatus: (provider: string) => Promise<void>;
 
   // Preference settings (lazy loaded)
   notificationSettings: NotificationSettings | null;
@@ -111,18 +113,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     apiKey: null
   });
 
-  // Provider-specific API keys (loaded once at startup)
-  // Note: Gemini omitted for now - add when UI support is added
-  const [providerApiKeys, setProviderApiKeys] = useState<{
-    claude: string | null;
-    groq: string | null;
-    openai: string | null;
-    openrouter: string | null;
-  }>({
-    claude: null,
-    groq: null,
-    openai: null,
-    openrouter: null,
+  // Whether each provider has a stored key (loaded at startup). The keys stay in the core.
+  const [providerKeyStatus, setProviderKeyStatus] = useState<Record<KeyProvider, SecretStatus>>({
+    claude: NO_SECRET,
+    groq: NO_SECRET,
+    openai: NO_SECRET,
+    openrouter: NO_SECRET,
   });
 
   // Ollama models list and error state
@@ -130,37 +126,41 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string>('');
 
   // Device configuration state
-  const [selectedDevices, setSelectedDevices] = useState<SelectedDevices>({
+  const [selectedDevices, updateSelectedDevices] = useState<SelectedDevices>({
     micDevice: null,
     systemDevice: null
   });
+  const [devicePreferencesStatus, setDevicePreferencesStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const devicePreferencesRevision = useRef(0);
+  const audioDeviceInventory = useAudioDeviceInventory();
+  const setSelectedDevices = useCallback((devices: SelectedDevices) => {
+    devicePreferencesRevision.current++;
+    updateSelectedDevices(devices);
+    setDevicePreferencesStatus('ready');
+  }, []);
 
   // Language preference state
-  const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('primaryLanguage');
-      return saved || 'auto';
-    }
-    return 'auto';
-  });
-
-  // UI preferences state
-  const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('showConfidenceIndicator');
-      return saved !== null ? saved === 'true' : true;
-    }
-    return true;
-  });
+  // The core owns the language: it applies it at start-up and the value shown
+  // here is read back from it (`loadBehaviorSettings`), never from localStorage.
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('auto');
 
   // Summary configs
-  const [isAutoSummary, setisAutoSummary] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('isAutoSummary');
-      return saved !== null ? saved === 'true' : false
-    }
-    return false;
-  });
+  const [isAutoSummary, setIsAutoSummary] = useState(false);
+  const [automaticSummaryBusy, setAutomaticSummaryBusy] = useState(true);
+  useEffect(() => {
+    let active = true;
+    let legacyEnabled: boolean | null = null;
+    try {
+      const legacy = localStorage.getItem('isAutoSummary');
+      if (legacy === 'true' || legacy === 'false') legacyEnabled = legacy === 'true';
+    } catch { /* The native preference still loads without webview storage. */ }
+    void invoke<boolean>('migrate_automatic_summary_preference', { legacyEnabled })
+      .catch(() => invoke<boolean>('get_automatic_summary_preference'))
+      .then(enabled => { if (active) setIsAutoSummary(enabled); })
+      .catch(() => { if (active) toast.error('Could not read automatic summary settings'); })
+      .finally(() => { if (active) setAutomaticSummaryBusy(false); });
+    return () => { active = false; };
+  }, []);
 
   // Preference settings state (lazy loaded)
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
@@ -198,11 +198,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       try {
         const config = await configService.getTranscriptConfig();
         if (config) {
-          console.log('[ConfigContext] Loaded saved transcript config:', config);
+          console.log('[ConfigContext] Loaded saved transcript config');
           setTranscriptModelConfig({
-            provider: config.provider || 'parakeet',
-            model: config.model || 'parakeet-tdt-0.6b-v3-int8',
-            apiKey: config.apiKey || null,
+            // A saved config with a blank provider runs Whisper in the core (the
+            // Settings page reads it the same way); only no saved config means Parakeet.
+            provider: config.provider || 'localWhisper',
+            model: config.model || (config.provider ? 'parakeet-tdt-0.6b-v3-int8' : 'large-v3'),
             baseUrl: config.baseUrl || null,
             allowUnencrypted: config.allowUnencrypted ?? false,
             endpoint: config.endpoint || null,
@@ -216,18 +217,15 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadTranscriptConfig();
   }, []);
 
-  // Sync language preference to Rust on mount (fixes startup desync bug)
+  // Read the language from the core. The first time, the old webview value is
+  // handed to the core (which keeps its own if it has one).
   useEffect(() => {
-    if (selectedLanguage) {
-      invoke('set_language_preference', { language: selectedLanguage })
-        .then(() => {
-          console.log('[ConfigContext] Synced language preference to Rust on startup:', selectedLanguage);
-        })
-        .catch(err => {
-          console.error('[ConfigContext] Failed to sync language preference to Rust on startup:', err);
-        });
-    }
-  }, []); 
+    let active = true;
+    loadBehaviorSettings()
+      .then(settings => { if (active) setSelectedLanguage(settings.language); })
+      .catch(err => console.error('[ConfigContext] Failed to read the language from the core:', err));
+    return () => { active = false; };
+  }, []);
 
   // Load model configuration on mount
   useEffect(() => {
@@ -253,7 +251,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
                   whisperModel: data.whisperModel || prev.whisperModel,
                   customOpenAIEndpoint: customConfig.endpoint,
                   customOpenAIModel: customConfig.model,
-                  customOpenAIApiKey: customConfig.apiKey,
+                  customOpenAIKeyStatus: customConfig.apiKeyStatus,
                   maxTokens: customConfig.maxTokens,
                   contextWindow: customConfig.contextWindow,
                   temperature: customConfig.temperature,
@@ -281,6 +279,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             model: data.model || prev.model,
             whisperModel: data.whisperModel || prev.whisperModel,
             ollamaEndpoint: data.ollamaEndpoint,
+            apiKeyStatus: data.apiKeyStatus,
           }));
 
           // Seed per-provider model cache from DB
@@ -297,31 +296,25 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     fetchModelConfig();
   }, []);
 
-  // Load all provider API keys on mount
+  // Load which providers have a stored key on mount
   useEffect(() => {
-    const loadAllApiKeys = async () => {
+    const loadAllKeyStatus = async () => {
       try {
-        const providers = ['claude', 'groq', 'openai', 'openrouter'];
-        const keys = await Promise.all(
-          providers.map(p =>
-            invoke<string>('api_get_api_key', { provider: p })
-              .catch(() => null) // Gracefully handle missing keys
-          )
+        const statuses = await Promise.all(
+          KEY_PROVIDERS.map(p => configService.getApiKeyStatus(p).catch(() => NO_SECRET))
         );
-
-        setProviderApiKeys({
-          claude: keys[0],
-          groq: keys[1],
-          openai: keys[2],
-          openrouter: keys[3],
+        setProviderKeyStatus({
+          claude: statuses[0],
+          groq: statuses[1],
+          openai: statuses[2],
+          openrouter: statuses[3],
         });
-        console.log('[ConfigContext] Loaded provider API keys');
       } catch (error) {
-        console.error('[ConfigContext] Failed to load provider API keys:', error);
+        console.error('[ConfigContext] Failed to load provider key status');
       }
     };
 
-    loadAllApiKeys();
+    loadAllKeyStatus();
   }, []);
 
   // Listen for model config updates from other components
@@ -329,13 +322,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('[ConfigContext] Received model-config-updated event:', event.payload);
-        setModelConfig(event.payload);
+        console.log('[ConfigContext] Received model-config-updated event');
+        // Never keep a typed key: the core has it now.
+        setModelConfig(withoutSecrets(event.payload));
 
-        // Update provider-specific key when config changes
-        if (event.payload.apiKey && event.payload.provider !== 'custom-openai') {
-          updateProviderApiKey(event.payload.provider, event.payload.apiKey);
-        }
+        // The key may have changed with this save.
+        void refreshProviderKeyStatus(event.payload.provider);
       });
       return unlisten;
     };
@@ -349,20 +341,20 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Load device preferences on mount
+  const refreshDevicePreferences = useCallback(async () => {
+    const request = ++devicePreferencesRevision.current;
+    setDevicePreferencesStatus('loading');
+    try {
+      const prefs = await configService.getRecordingPreferences();
+      if (request === devicePreferencesRevision.current) setSelectedDevices(selectedDevicesFromPreferences(prefs));
+    } catch {
+      if (request === devicePreferencesRevision.current) setDevicePreferencesStatus('error');
+    }
+  }, [setSelectedDevices]);
   useEffect(() => {
-    const loadDevicePreferences = async () => {
-      try {
-        const prefs = await configService.getRecordingPreferences();
-        if (prefs && (prefs.preferred_mic_device || prefs.preferred_system_device)) {
-          setSelectedDevices(selectedDevicesFromPreferences(prefs));
-          console.log('Loaded device preferences:', prefs);
-        }
-      } catch (error) {
-        console.log('No device preferences found or failed to load:', error);
-      }
-    };
-    loadDevicePreferences();
-  }, []);
+    void refreshDevicePreferences();
+    return () => { devicePreferencesRevision.current++; };
+  }, [refreshDevicePreferences]);
 
   // Calculate model options based on available models
   const modelOptions: Record<ModelConfig['provider'], string[]> = {
@@ -378,26 +370,38 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     'claude-code': ['sonnet', 'opus', 'haiku'],
   };
 
-  // Toggle confidence indicator with localStorage persistence
-  const toggleConfidenceIndicator = useCallback((checked: boolean) => {
-    setShowConfidenceIndicator(checked);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('showConfidenceIndicator', checked.toString());
+  const toggleIsAutoSummary = useCallback(async (enabled: boolean, fingerprint?: string) => {
+    setAutomaticSummaryBusy(true);
+    try {
+      await invoke('set_automatic_summary_preference', { enabled, fingerprint });
+      setIsAutoSummary(enabled);
+      return true;
+    } catch (reason) {
+      toast.error(typeof reason === 'string' ? reason : 'Could not save the automatic summary setting');
+      return false;
+    } finally {
+      setAutomaticSummaryBusy(false);
     }
-    // Trigger a custom event to notify other components
-    window.dispatchEvent(new CustomEvent('confidenceIndicatorChanged', { detail: checked }));
   }, []);
 
-  const toggleIsAutoSummary = useCallback((checked: boolean) => {
-    setisAutoSummary(checked);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('isAutoSummary', checked.toString());
+  // Ask the core again whether a provider has a stored key (after a save or a removal)
+  // The shared model configuration carries the status too, so a removal shows
+  // at once for the provider in use, not only in the per-provider map.
+  const refreshProviderKeyStatus = useCallback(async (provider: string) => {
+    try {
+      if (provider === 'custom-openai') {
+        const config = await configService.getCustomOpenAIConfig();
+        const status = config?.apiKeyStatus ?? NO_SECRET;
+        setModelConfig(prev => withRefreshedKeyStatus(prev, provider, status));
+        return;
+      }
+      if (!KEY_PROVIDERS.includes(provider as KeyProvider)) return;
+      const status = await configService.getApiKeyStatus(provider);
+      setProviderKeyStatus(prev => ({ ...prev, [provider]: status }));
+      setModelConfig(prev => withRefreshedKeyStatus(prev, provider, status));
+    } catch {
+      console.error('[ConfigContext] Failed to read provider key status');
     }
-  }, [])
-
-  // Update individual provider API key
-  const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
-    setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
   }, []);
 
   // Lazy load preference settings (only loads if not already cached)
@@ -460,33 +464,39 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Wrapper for setSelectedLanguage that persists to localStorage and syncs to Rust
+  // The core stores the language first. A failed save leaves the language as
+  // it was and says so; nothing is shown as changed that the core did not accept.
   const handleSetSelectedLanguage = useCallback((lang: string) => {
-    setSelectedLanguage(lang);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('primaryLanguage', lang);
-    }
-    // Sync with Rust in-memory state for live recording
-    invoke('set_language_preference', { language: lang }).catch(err =>
-      console.error('Failed to sync language preference to Rust:', err)
-    );
+    invoke('set_language_preference', { language: lang })
+      .then(async () => {
+        // LEGACY mirror, so a downgrade to 0.62.0 sees the current value.
+        mirrorLegacyBehavior('language', lang);
+        const settings = await refreshBehaviorSettings();
+        setSelectedLanguage(settings.language);
+      })
+      .catch(err => {
+        console.error('Failed to save the language in the core:', err);
+        toast.error('Could not save the language');
+      });
   }, []);
 
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
     setModelConfig,
     isAutoSummary,
+    automaticSummaryBusy,
     toggleIsAutoSummary,
-    providerApiKeys,
-    updateProviderApiKey,
+    providerKeyStatus,
+    refreshProviderKeyStatus,
     transcriptModelConfig,
     setTranscriptModelConfig,
     selectedDevices,
     setSelectedDevices,
+    audioDeviceInventory,
+    devicePreferencesStatus,
+    refreshDevicePreferences,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     models,
     modelOptions,
     error,
@@ -498,15 +508,18 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }), [
     modelConfig,
     isAutoSummary,
+    automaticSummaryBusy,
     toggleIsAutoSummary,
-    providerApiKeys,
-    updateProviderApiKey,
+    providerKeyStatus,
+    refreshProviderKeyStatus,
     transcriptModelConfig,
     selectedDevices,
+    setSelectedDevices,
+    audioDeviceInventory,
+    devicePreferencesStatus,
+    refreshDevicePreferences,
     selectedLanguage,
     handleSetSelectedLanguage,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     models,
     modelOptions,
     error,

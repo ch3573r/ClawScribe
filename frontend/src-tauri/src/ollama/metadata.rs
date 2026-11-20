@@ -88,7 +88,7 @@ impl ModelMetadataCache {
 
         // Cache miss or expired - fetch from API
         tracing::info!("Fetching metadata for model: {}", model_name);
-        let metadata = fetch_model_info(model_name, endpoint).await?;
+        let metadata = fetch_model_info(&Client::new(), model_name, endpoint).await?;
 
         // Store in cache
         {
@@ -137,13 +137,13 @@ const ULTIMATE_FALLBACK: usize = 4000;
 ///
 /// # Returns
 /// ModelMetadata on success, error string on failure
-async fn fetch_model_info(
+pub(crate) async fn fetch_model_info(
+    client: &Client,
     model_name: &str,
     endpoint: Option<&str>,
 ) -> Result<ModelMetadata, String> {
-    let client = Client::new();
     let base_url = endpoint.unwrap_or("http://localhost:11434");
-    let url = format!("{}/api/show", base_url);
+    let url = format!("{}/api/show", base_url.trim_end_matches('/'));
 
     let payload = serde_json::json!({
         "name": model_name,

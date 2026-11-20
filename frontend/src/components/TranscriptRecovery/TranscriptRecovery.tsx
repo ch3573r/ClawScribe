@@ -20,15 +20,19 @@ import {
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
+import { StoredTranscript } from '@/services/indexedDBService';
+import { errorText } from '@/lib/errorText';
+import { describeDuration, describeSize, type RecoveryCandidate } from '@/lib/interruptedRecordings';
 import { cn } from '@/lib/utils';
 
 interface TranscriptRecoveryProps {
   isOpen: boolean;
   onClose: () => void;
-  recoverableMeetings: MeetingMetadata[];
+  recoverableMeetings: RecoveryCandidate[];
   onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
+  /** "Keep, do not ask again" for a recording found on disk. */
+  onKeep?: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
 }
 
@@ -38,6 +42,7 @@ export function TranscriptRecovery({
   recoverableMeetings,
   onRecover,
   onDelete,
+  onKeep,
   onLoadPreview,
 }: TranscriptRecoveryProps) {
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
@@ -96,6 +101,18 @@ export function TranscriptRecovery({
     }
   };
 
+  const handleKeep = async () => {
+    if (!selectedMeetingId || !onKeep || isRecovering || isDeleting) return;
+    try {
+      await onKeep(selectedMeetingId);
+      setSelectedMeetingId(null);
+      setPreviewTranscripts([]);
+    } catch (error) {
+      console.error('Keeping the recording failed:', error);
+      toast.error(errorText(error, 'Could not keep the recording. Try again.'));
+    }
+  };
+
   const handleDelete = async () => {
     if (!deleteTargetId || isDeleting || isRecovering) return;
 
@@ -114,6 +131,13 @@ export function TranscriptRecovery({
   };
 
   const selectedMeeting = recoverableMeetings.find(m => m.meetingId === selectedMeetingId);
+  // A recording found on disk says why it counts as interrupted. One that is
+  // already saved in the library cannot be deleted from here.
+  const diskDetails = selectedMeeting?.disk
+    ? [describeDuration(selectedMeeting.disk.approxDurationSeconds), describeSize(selectedMeeting.disk.sizeBytes)].filter(Boolean).join(' · ')
+    : '';
+  const deleteTarget = recoverableMeetings.find(m => m.meetingId === deleteTargetId);
+  const deleteBlocked = !!selectedMeeting?.disk?.registeredMeetingId;
 
   return (
     <Dialog open={isOpen} onOpenChange={open => { if (!open && !isRecovering && !isDeleting) onClose(); }}>
@@ -200,6 +224,12 @@ export function TranscriptRecovery({
                         </span>
                       )}
                     </div>
+                    {selectedMeeting.disk && (
+                      <p className="text-sm text-muted-foreground mt-2">
+                        {selectedMeeting.disk.reason}{diskDetails ? ` (${diskDetails})` : ''}
+                        {deleteBlocked ? '. It is saved in your library.' : ''}
+                      </p>
+                    )}
                   </div>
 
                   {/* Transcript Preview */}
@@ -274,12 +304,17 @@ export function TranscriptRecovery({
           >
             Cancel
           </Button>
+          {onKeep && selectedMeeting?.disk && (
+            <Button variant="ghost" onClick={handleKeep} disabled={isRecovering || isDeleting}>
+              Keep, do not ask again
+            </Button>
+          )}
           <Button
             ref={deleteButtonRef}
             variant="outline"
             className="text-destructive"
             onClick={() => setDeleteTargetId(selectedMeetingId)}
-            disabled={!selectedMeetingId || isRecovering || isDeleting}
+            disabled={!selectedMeetingId || isRecovering || isDeleting || deleteBlocked}
           >
             {isDeleting ? (
               <>
@@ -317,7 +352,11 @@ export function TranscriptRecovery({
           >
             <DialogHeader>
               <DialogTitle>Delete interrupted meeting?</DialogTitle>
-              <DialogDescription>This deletes the selected meeting&apos;s recovery data. This cannot be undone.</DialogDescription>
+              <DialogDescription>
+                {deleteTarget?.source === 'disk'
+                  ? "This deletes the recording folder, including its audio, from this PC. This cannot be undone."
+                  : "This deletes the selected meeting's recovery data. This cannot be undone."}
+              </DialogDescription>
             </DialogHeader>
             <DialogFooter>
               <Button ref={cancelDeleteRef} variant="outline" onClick={() => setDeleteTargetId(null)} disabled={isDeleting}>Cancel</Button>

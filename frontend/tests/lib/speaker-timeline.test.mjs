@@ -26,7 +26,8 @@ function timeline(props = {}) {
     '@/components/ui/button': { Button: 'button' },
     './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
-    'lucide-react': { Activity: 'Activity', Pause: 'Pause', Play: 'Play' },
+    'lucide-react': { Activity: 'Activity', Bookmark: 'Bookmark', Pause: 'Pause', Play: 'Play' },
+    './PlaybackOptions': { PlaybackOptions: 'PlaybackOptions' },
   });
   const sought = [], played = [];
   const tree = hooks.render(() => SpeakerLaneTimeline({
@@ -158,7 +159,8 @@ test('an open lane rename survives optimistic merge until explicitly closed', ()
     '@/components/ui/button': { Button: 'button' },
     './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
-    'lucide-react': { Pause: 'Pause', Play: 'Play' },
+    'lucide-react': { Bookmark: 'Bookmark', Pause: 'Pause', Play: 'Play' },
+    './PlaybackOptions': { PlaybackOptions: 'PlaybackOptions' },
   });
   const props = { segments: [
     { id: 'first', timestamp: 0, endTime: 1, speaker: 'A', text: 'Synthetic speech.' },
@@ -201,7 +203,9 @@ async function page(attribution, segments, updatedSegments) {
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
     '@/components/MeetingDetails/MeetingHeader': { MeetingHeader: 'MeetingHeader' },
+    '@/components/MeetingAttendance': { SavedMeetingAttendance: 'SavedMeetingAttendance' },
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
+    '@/components/ui/button': { Button: 'button' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
   });
   const props = { meeting: { id: 'synthetic-meeting', folder_path: 'synthetic-folder' }, summaryData: null, segments: segments.slice(0, 100), timelineSegments: segments, totalCount: segments.length };
@@ -274,6 +278,7 @@ test('meeting header metadata displays the total segment count', () => {
     './ActionIcon': { ActionIcon: 'icon-button' },
     './ProjectTags': { ProjectTags: 'tags' },
     './MeetingExportButtons': { MeetingExportButtons: 'exports' },
+    './ReviewedActions': { ReviewedActions: 'reviewed-actions' },
     '@/components/ui/dropdown-menu': {},
   });
   try {

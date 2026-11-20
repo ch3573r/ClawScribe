@@ -362,6 +362,7 @@ pub async fn confluence_export_page(
     title: String,
     body_storage: String,
 ) -> Result<ConfluenceExportResponse, String> {
+    let _work = crate::updates::admit_work()?;
     let token = load_pat_from_keyring()
         .map_err(|e| e.to_string())?
         .ok_or(ConfluenceError::MissingToken)

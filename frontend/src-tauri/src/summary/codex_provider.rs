@@ -392,6 +392,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         assert!(
             once.contains("# Keep this comment") && once.contains("[features]\nshell_tool = false")
         );
+        claim_codex_home(temp.path()).unwrap();
         remove_legacy_auth_after_keyring_signin(temp.path(), false);
         assert!(temp.path().join("auth.json").exists());
         remove_legacy_auth_after_keyring_signin(temp.path(), true);
@@ -1271,10 +1272,12 @@ impl CodexProviderConfig {
 
     pub fn effective_codex_home(&self) -> Option<PathBuf> {
         match self.effective_home_mode() {
+            // A saved value that does not pass the checks (an older save, or a
+            // file edited by hand) is not used: the default folder is.
             CodexHomeMode::ClawscribeIsolated => self
                 .codex_home_path
                 .as_ref()
-                .map(expand_windows_style_appdata)
+                .and_then(|value| validate_codex_home(value).ok())
                 .or_else(|| Some(default_isolated_codex_home())),
             CodexHomeMode::ExistingUserCodexSession => None,
         }
@@ -1450,6 +1453,20 @@ impl CodexAppServerProvider {
         &self,
         request: CodexMeetingProcessRequest,
     ) -> Result<CodexProcessingResult, String> {
+        self.process_meeting_with_progress(
+            request,
+            None,
+            &super::context_budget::Reduction::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn process_meeting_with_progress(
+        &self,
+        request: CodexMeetingProcessRequest,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+        reduction: &super::context_budget::Reduction,
+    ) -> Result<CodexProcessingResult, String> {
         let overhead = build_meeting_prompt().len()
             + output_schema_json().len()
             + request.custom_prompt.as_ref().map_or(0, String::len)
@@ -1474,12 +1491,17 @@ impl CodexAppServerProvider {
             &request.transcript,
             budget,
             piece_budget,
+            reduction,
+            cancellation,
             |chunk| async move {
                 self.run_text_prompt(&format!(
                     "{}\n\n<excerpt>{chunk}</excerpt>",
                     super::context_budget::EXTRACT_FACTS
                 ))
                 .await
+                .and_then(|text| {
+                    super::processor::require_summary_markdown(&text, "Meeting excerpt")
+                })
             },
         )
         .await?;
@@ -1505,7 +1527,6 @@ impl CodexAppServerProvider {
         let prompt_path = scratch_dir.join("prompt.md");
         let output_path = scratch_dir.join("codex-output.json");
         let final_path = scratch_dir.join("codex-final.md");
-        let events_path = scratch_dir.join("codex-events.jsonl");
 
         fs::write(
             &transcript_path,
@@ -1553,7 +1574,6 @@ impl CodexAppServerProvider {
                     stderr: session.take_stderr().await,
                     message: redact_secrets(&e),
                 };
-                write_safe_events(&events_path, &status)?;
                 write_processing_log(&scratch_dir, &status, started.elapsed(), "failed")?;
                 return Err(redact_secrets(&e));
             }
@@ -1590,7 +1610,6 @@ impl CodexAppServerProvider {
             stderr: session.take_stderr().await,
             message: "Codex app-server meeting processing succeeded.".to_string(),
         };
-        write_safe_events(&events_path, &status)?;
         write_processing_log(&output_dir, &status, started.elapsed(), "completed")?;
         Ok(CodexProcessingResult {
             meeting_id: request.meeting_id,
@@ -1671,9 +1690,36 @@ pub async fn codex_save_config<R: Runtime>(
     app: AppHandle<R>,
     config: CodexProviderConfig,
 ) -> Result<ClawScribeProcessingConfig, String> {
+    // The isolated profile folder is the one setting that names a place on disk:
+    // it is created, and a `config.toml` is written in it. It must be a local
+    // folder that is neither the user's own Codex profile nor a system folder.
     let mut full = load_processing_config(&app).unwrap_or_default();
+    let mut config = config;
+    let mut taken = None;
+    if let Some(value) = config.codex_home_path.clone().filter(|value| !value.trim().is_empty()) {
+        let validated = validate_codex_home(&value)?;
+        let unchanged = full.processing.codex.codex_home_path.as_deref().is_some_and(|saved| {
+            codex_path_key(&expand_windows_style_appdata(&saved.to_string())) == codex_path_key(&validated)
+        });
+        if !unchanged && codex_path_key(&validated) != codex_path_key(&default_isolated_codex_home()) {
+            // A different folder is accepted only if the user chose it in the
+            // core's folder picker (`pick_codex_home_folder`) in this session.
+            let grant = crate::file_grants::take(crate::file_grants::Purpose::CodexHome, &value)?;
+            if let Err(message) = codex_home_usable(&grant.path) {
+                crate::file_grants::give_back(crate::file_grants::Purpose::CodexHome, &grant);
+                return Err(message);
+            }
+            config.codex_home_path = Some(grant.path.to_string_lossy().into_owned());
+            taken = Some(grant);
+        }
+    }
     full.processing.codex = normalize_codex_config(config);
-    save_processing_config(&app, &full)?;
+    if let Err(error) = save_processing_config(&app, &full) {
+        if let Some(grant) = &taken {
+            crate::file_grants::give_back(crate::file_grants::Purpose::CodexHome, grant);
+        }
+        return Err(error);
+    }
     Ok(full)
 }
 
@@ -1709,13 +1755,6 @@ pub async fn codex_find_automatically<R: Runtime>(
     );
     config.codex_binary_path = None;
     codex_installation_status_for_config(&app, config).await
-}
-
-#[tauri::command]
-pub async fn codex_browse_for_binary<R: Runtime>(
-    _app: AppHandle<R>,
-) -> Result<Option<String>, String> {
-    Err("Browsing to a global codex.exe is no longer supported. Codex app-server mode uses a bundled/pinned ClawScribe runtime or a controlled ClawScribe runtime installer.".to_string())
 }
 
 #[tauri::command]
@@ -1765,50 +1804,6 @@ pub async fn codex_test_processing<R: Runtime>(
 ) -> Result<CodexCommandStatus, String> {
     let provider = provider_from_app(&app)?;
     provider.test_processing(None).await
-}
-
-#[tauri::command]
-pub async fn codex_process_meeting<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, crate::state::AppState>,
-    meeting_id: String,
-) -> Result<CodexProcessingResult, String> {
-    let pool = state.db_manager.pool();
-    let meeting =
-        crate::database::repositories::meeting::MeetingsRepository::get_meeting(pool, &meeting_id)
-            .await
-            .map_err(|e| format!("Failed to load meeting: {e}"))?
-            .ok_or_else(|| format!("Meeting not found: {meeting_id}"))?;
-    let transcript = meeting
-        .transcripts
-        .iter()
-        .map(|t| {
-            let stamp = t
-                .audio_start_time
-                .map(format_seconds)
-                .unwrap_or_else(|| t.timestamp.clone());
-            format!("[{stamp}] {}", t.text)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let data = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "Could not locate meeting output storage")?;
-    let output_dir =
-        Some(ensure_meeting_output_dir(state.db_manager.pool(), &meeting_id, &data).await?);
-    let provider = provider_from_app(&app)?;
-    provider
-        .process_meeting(CodexMeetingProcessRequest {
-            sources: Vec::new(),
-            meeting_id,
-            meeting_title: Some(meeting.title),
-            transcript,
-            custom_prompt: None,
-            output_dir,
-            scratch_root: None,
-        })
-        .await
 }
 
 pub fn provider_from_app<R: Runtime>(
@@ -2006,6 +2001,194 @@ fn processing_config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Str
     Ok(dir.join("processing-config.json"))
 }
 
+const CODEX_HOME_REFUSED: &str =
+    "Choose a folder on a local drive for ClawScribe's own Codex profile, not your Codex profile or a system folder";
+
+fn codex_path_key(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    let text = text.to_ascii_lowercase();
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') { text } else { trimmed.to_string() }
+}
+
+/// The path with links resolved as far as it exists (the rest is kept as given).
+fn codex_resolved_key(path: &Path) -> String {
+    let mut existing = path.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match (existing.file_name().map(ToOwned::to_owned), existing.parent().map(Path::to_path_buf)) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => break,
+        }
+    }
+    let mut resolved = crate::database::meeting_files::plain_path(&existing.canonicalize().unwrap_or(existing));
+    for name in rest.into_iter().rev() {
+        resolved.push(name);
+    }
+    codex_path_key(&resolved)
+}
+
+/// The `CODEX_HOME` the user may choose for ClawScribe's own profile: a local
+/// absolute path (checked as text before any filesystem call, after `%APPDATA%`
+/// is expanded), not the user's own Codex profile (`~/.codex`, or `CODEX_HOME`
+/// of the environment) nor a folder containing or inside it, and not a profile,
+/// application-data or system folder itself.
+fn validate_codex_home(value: &str) -> Result<PathBuf, String> {
+    let expanded = expand_windows_style_appdata(&value.trim().to_string());
+    if !crate::local_path::is_local_path_text(&expanded.to_string_lossy()) {
+        return Err(CODEX_HOME_REFUSED.into());
+    }
+    let resolved_key = codex_resolved_key(&expanded);
+    let own_profiles: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| home.join(".codex"))
+        .into_iter()
+        .chain(std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .collect();
+    for profile in own_profiles {
+        let profile_key = codex_resolved_key(&profile);
+        let inside = resolved_key == profile_key
+            || resolved_key.starts_with(&format!("{profile_key}/"))
+            || profile_key.starts_with(&format!("{resolved_key}/"));
+        if inside {
+            return Err(CODEX_HOME_REFUSED.into());
+        }
+    }
+    let protected = crate::audio::recording_preferences::protected_folders(None);
+    let is_protected = protected.exact.iter().any(|folder| codex_resolved_key(folder) == resolved_key)
+        || protected.trees.iter().any(|folder| {
+            let key = codex_resolved_key(folder);
+            resolved_key == key || resolved_key.starts_with(&format!("{key}/"))
+        });
+    if is_protected {
+        return Err(CODEX_HOME_REFUSED.into());
+    }
+    Ok(expanded)
+}
+
+/// The file the core writes into a Codex profile folder it has claimed. A folder
+/// without it is never modified, so a folder that merely looks like a Codex home
+/// (or the user's real one) cannot be rewritten or emptied.
+const CODEX_HOME_MARKER: &str = ".clawscribe-codex-home";
+
+#[derive(Debug, PartialEq, Eq)]
+enum HomeState {
+    /// Does not exist yet: it will be created.
+    New,
+    /// Exists with nothing in it.
+    Empty,
+    /// Carries the marker: it is ClawScribe's.
+    Marked,
+    /// Holds other files and no marker: not ours.
+    Foreign,
+}
+
+fn codex_home_state(home: &Path) -> HomeState {
+    let Ok(metadata) = fs::symlink_metadata(home) else { return HomeState::New };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return HomeState::Foreign;
+    }
+    let marker = fs::symlink_metadata(home.join(CODEX_HOME_MARKER)).is_ok_and(|m| m.is_file());
+    if marker {
+        return HomeState::Marked;
+    }
+    match fs::read_dir(home) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                HomeState::Empty
+            } else {
+                HomeState::Foreign
+            }
+        }
+        Err(_) => HomeState::Foreign,
+    }
+}
+
+/// A folder the user may pick as ClawScribe's Codex profile: it passes the
+/// path rules and is new, empty or already ClawScribe's.
+fn codex_home_usable(home: &Path) -> Result<(), String> {
+    validate_codex_home(&home.to_string_lossy())?;
+    if codex_home_state(home) == HomeState::Foreign {
+        return Err("That folder already holds other files. Choose a new or empty folder for ClawScribe's Codex profile.".into());
+    }
+    Ok(())
+}
+
+/// Claims a profile folder on first use: creates it and writes the marker. The
+/// default folder (ClawScribe's own location since earlier versions) is
+/// claimed even if it predates the marker; any other folder must be new, empty
+/// or already marked. Nothing in a folder that is not ClawScribe's is touched.
+fn claim_codex_home(home: &Path) -> Result<(), String> {
+    let is_default = codex_path_key(home) == codex_path_key(&default_isolated_codex_home());
+    match codex_home_state(home) {
+        HomeState::Marked => return Ok(()),
+        HomeState::Foreign if !is_default => {
+            return Err("The Codex profile folder holds other files and is not ClawScribe's. Choose a new or empty folder.".into())
+        }
+        _ => {}
+    }
+    fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile".to_string())?;
+    fs::write(home.join(CODEX_HOME_MARKER), "This folder is ClawScribe's own Codex profile.\n")
+        .map_err(|_| "Failed to mark the isolated Codex profile".to_string())
+}
+
+/// A custom Codex profile folder of an earlier version holds files and has no
+/// marker, so it would be refused. The marker is written into it, and nothing
+/// else in it is touched, when it passes the path rules. Returns whether a
+/// marker was written.
+fn mark_custom_home(home: &Path) -> Result<bool, String> {
+    validate_codex_home(&home.to_string_lossy())?;
+    match codex_home_state(home) {
+        HomeState::Foreign | HomeState::Empty => {
+            fs::write(home.join(CODEX_HOME_MARKER), "This folder is ClawScribe's own Codex profile.\n")
+                .map_err(|_| "Failed to mark the Codex profile".to_string())?;
+            Ok(true)
+        }
+        HomeState::Marked | HomeState::New => Ok(false),
+    }
+}
+
+/// The first start of this build: the custom Codex home configured by an earlier
+/// version is marked once, so Codex summaries keep working and the folder can be
+/// chosen again. Recorded in the core-owned trust state.
+pub(crate) fn mark_custom_home_once<R: Runtime>(app: &AppHandle<R>) {
+    use tauri_plugin_store::StoreExt;
+    let Ok(store) = app.store(crate::trusted_roots::STORE_FILE) else { return };
+    if crate::trusted_roots::read(store.as_ref()).codex_done {
+        return;
+    }
+    let configured = load_processing_config(app)
+        .ok()
+        .and_then(|full| full.processing.codex.codex_home_path)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| expand_windows_style_appdata(&value));
+    if let Some(home) = configured.filter(|home| codex_path_key(home) != codex_path_key(&default_isolated_codex_home())) {
+        if let Err(message) = mark_custom_home(&home) {
+            log::warn!("The custom Codex profile folder was not marked: {message}");
+        }
+    }
+    let _ = crate::trusted_roots::mark_codex_done(store.as_ref());
+}
+
+/// Opens the folder dialog for ClawScribe's Codex profile. Returns the chosen
+/// folder, which `codex_save_config` then accepts once.
+#[tauri::command]
+pub async fn pick_codex_home_folder<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let chosen = tokio::task::spawn_blocking(move || {
+        app.dialog().file().blocking_pick_folder().and_then(|path| path.into_path().ok())
+    })
+    .await
+    .map_err(|_| "The folder dialog failed".to_string())?;
+    let Some(folder) = chosen else { return Ok(None) };
+    codex_home_usable(&folder)?;
+    crate::file_grants::grant(crate::file_grants::Purpose::CodexHome, &folder)?;
+    Ok(Some(folder.to_string_lossy().into_owned()))
+}
+
 fn default_isolated_codex_home() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -2143,7 +2326,7 @@ fn expand_windows_style_appdata(value: &String) -> PathBuf {
 }
 
 fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
-    fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile")?;
+    claim_codex_home(home)?;
     let path = home.join("config.toml");
     let existing = if path.exists() {
         fs::read_to_string(&path).map_err(|_| "Failed to read isolated Codex configuration")?
@@ -2178,7 +2361,9 @@ fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
 }
 
 fn remove_legacy_auth_after_keyring_signin(home: &Path, authenticated: bool) {
-    if authenticated {
+    // Only in a profile that is ClawScribe's: nothing is deleted from a folder
+    // without the marker.
+    if authenticated && fs::symlink_metadata(home.join(CODEX_HOME_MARKER)).is_ok_and(|m| m.is_file()) {
         if let Err(error) = fs::remove_file(home.join("auth.json")) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("Could not remove obsolete Codex credential file");
@@ -3655,22 +3840,6 @@ pub(crate) fn render_follow_up_email(email: &FollowUpEmail) -> String {
     )
 }
 
-fn write_safe_events(path: &Path, output: &CodexCommandStatus) -> Result<(), String> {
-    let mut lines = Vec::new();
-    if !output.stdout.trim().is_empty() {
-        lines.push(serde_json::json!({ "stream": "stdout", "text": output.stdout }));
-    }
-    if !output.stderr.trim().is_empty() {
-        lines.push(serde_json::json!({ "stream": "stderr", "text": output.stderr }));
-    }
-    let body = lines
-        .into_iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(path, body).map_err(|e| format!("Failed to write Codex events: {e}"))
-}
-
 fn write_processing_log(
     scratch_dir: &Path,
     output: &CodexCommandStatus,
@@ -3698,8 +3867,8 @@ fn write_processing_log_at(
         "status": status,
         "exit_code": output.exit_code,
         "duration_seconds": duration.as_secs_f64(),
-        "stdout_excerpt": truncate_for_log(&output.stdout),
-        "stderr_excerpt": truncate_for_log(&output.stderr),
+        "stdout_present": !output.stdout.trim().is_empty(),
+        "stderr_present": !output.stderr.trim().is_empty(),
         "scratch_dir": scratch_dir.map(|p| p.to_string_lossy().to_string()),
     });
     fs::write(
@@ -3749,18 +3918,6 @@ fn sanitize_path_segment(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn format_seconds(seconds: f64) -> String {
-    let total = seconds.max(0.0).round() as u64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let secs = total % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{secs:02}")
-    } else {
-        format!("{minutes:02}:{secs:02}")
-    }
 }
 
 #[cfg(all(test, any()))]
@@ -4118,7 +4275,7 @@ exit 2
     }
 
     #[tokio::test]
-    async fn fake_codex_nonzero_redacts_stderr() {
+    async fn fake_codex_nonzero_does_not_persist_stderr_content() {
         let temp = tempfile::tempdir().unwrap();
         let provider = provider_with_fake_scenario(&temp, "exec-nonzero");
         let err = provider
@@ -4141,7 +4298,8 @@ exit 2
                 .join("processing-log.json"),
         )
         .unwrap();
-        assert!(log.contains("[REDACTED]"));
+        assert!(log.contains("\"stderr_present\": true"));
+        assert!(!log.contains("stderr_excerpt"));
         assert!(!log.contains("secret-token-value"));
     }
 
@@ -4196,5 +4354,124 @@ mod unicode_log_tests {
         let diagnostic = format!("{}😀", "a".repeat(3999));
         let truncated = super::truncate_for_log(&diagnostic);
         assert_eq!(truncated, format!("{}…", "a".repeat(3999)));
+    }
+}
+
+#[cfg(test)]
+mod codex_home_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_folder_and_a_subfolder_of_the_profile_are_accepted() {
+        assert!(validate_codex_home(&default_isolated_codex_home().to_string_lossy()).is_ok());
+        let temp = tempfile::tempdir().unwrap();
+        assert!(validate_codex_home(&temp.path().join("codex-home").to_string_lossy()).is_ok());
+        if let Some(home) = dirs::home_dir() {
+            assert!(validate_codex_home(&home.join("ClawScribeCodex").to_string_lossy()).is_ok());
+        }
+    }
+
+    #[test]
+    fn network_device_relative_and_drive_relative_paths_are_refused() {
+        for refused in [
+            r"\\h\s\codex", r"\/h/s/codex", r"/\h\s\codex", r"\??\UNC\h\s\codex",
+            r"\\?\C:\codex", "codex", r"C:codex", "", "../codex",
+        ] {
+            assert_eq!(validate_codex_home(refused).unwrap_err(), CODEX_HOME_REFUSED, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn the_users_own_codex_profile_and_system_folders_are_refused() {
+        if let Some(home) = dirs::home_dir() {
+            let own = home.join(".codex");
+            for refused in [own.clone(), own.join("sub"), home.clone()] {
+                assert!(validate_codex_home(&refused.to_string_lossy()).is_err(), "{}", refused.display());
+            }
+        }
+        #[cfg(windows)]
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            assert!(validate_codex_home(&PathBuf::from(&root).join("codex").to_string_lossy()).is_err());
+        }
+        // A saved value that does not pass is not used: the default folder is.
+        let mut config = CodexProviderConfig::default();
+        config.codex_home_path = dirs::home_dir().map(|home| home.join(".codex").to_string_lossy().into_owned());
+        if config.codex_home_path.is_some() {
+            assert_eq!(config.effective_codex_home(), Some(default_isolated_codex_home()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod codex_home_marker_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_or_empty_folder_is_claimed_with_a_marker_and_a_marked_one_is_reused() {
+        let base = tempfile::tempdir().unwrap();
+        let new = base.path().join("new-profile");
+        assert_eq!(codex_home_state(&new), HomeState::New);
+        claim_codex_home(&new).unwrap();
+        assert_eq!(codex_home_state(&new), HomeState::Marked);
+        let empty = base.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(codex_home_state(&empty), HomeState::Empty);
+        claim_codex_home(&empty).unwrap();
+        // Used again: other files in a marked folder are fine, they are ClawScribe's.
+        fs::write(new.join("config.toml"), "model = \"x\"\n").unwrap();
+        assert_eq!(codex_home_state(&new), HomeState::Marked);
+        claim_codex_home(&new).unwrap();
+    }
+
+    #[test]
+    fn a_folder_with_files_and_no_marker_is_never_claimed_modified_or_emptied() {
+        let base = tempfile::tempdir().unwrap();
+        let foreign = base.path().join("someone-elses-codex");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("config.toml"), "approval_policy = \"never\"\n").unwrap();
+        fs::write(foreign.join("auth.json"), "{}").unwrap();
+        assert_eq!(codex_home_state(&foreign), HomeState::Foreign);
+        assert!(claim_codex_home(&foreign).is_err());
+        assert!(codex_home_usable(&foreign).is_err());
+        assert!(prepare_isolated_codex_home(&foreign, "model").is_err());
+        // Signing in must not delete a credential file from a folder that is not ClawScribe's.
+        remove_legacy_auth_after_keyring_signin(&foreign, true);
+        assert_eq!(fs::read_to_string(foreign.join("config.toml")).unwrap(), "approval_policy = \"never\"\n");
+        assert!(foreign.join("auth.json").exists());
+        assert!(!foreign.join(CODEX_HOME_MARKER).exists());
+    }
+
+    #[test]
+    fn a_custom_home_of_an_earlier_version_is_marked_and_nothing_else_in_it_is_touched() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("custom-codex");
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join("config.toml"), "model = \"x\"\n").unwrap();
+        fs::write(home.join("auth.json"), "{}").unwrap();
+        assert_eq!(codex_home_state(&home), HomeState::Foreign);
+        assert!(mark_custom_home(&home).unwrap());
+        assert_eq!(codex_home_state(&home), HomeState::Marked);
+        assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), "model = \"x\"\n");
+        assert!(home.join("auth.json").exists());
+        assert!(prepare_isolated_codex_home(&home, "model").is_ok(), "Codex summaries work again");
+        assert!(!mark_custom_home(&home).unwrap(), "already marked");
+        // A folder that does not exist yet is left for first use; one that fails the rules is refused.
+        assert!(!mark_custom_home(&base.path().join("not-yet")).unwrap());
+        if let Some(own) = dirs::home_dir().map(|home| home.join(".codex")) {
+            assert!(mark_custom_home(&own).is_err());
+            assert!(!own.join(CODEX_HOME_MARKER).exists());
+        }
+    }
+
+    #[test]
+    fn deletion_of_the_old_credential_file_happens_only_in_a_marked_folder() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("mine");
+        claim_codex_home(&home).unwrap();
+        fs::write(home.join("auth.json"), "{}").unwrap();
+        remove_legacy_auth_after_keyring_signin(&home, false);
+        assert!(home.join("auth.json").exists());
+        remove_legacy_auth_after_keyring_signin(&home, true);
+        assert!(!home.join("auth.json").exists());
     }
 }

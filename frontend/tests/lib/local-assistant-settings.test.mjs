@@ -1,0 +1,56 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
+import { loadTsModule } from './load-ts-module.mjs';
+
+const jsx = (type, props) => ({ type, props });
+function nodes(root) {
+  if (Array.isArray(root)) return root.flatMap(nodes);
+  return root?.props ? [root, ...nodes(root.props.children)] : [];
+}
+
+test('local assistant configuration appears only after a successful opt-in and disappears on revocation', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  let grant = false;
+  const save = deferred();
+  const calls = [];
+  const command = String.raw`C:\Audio tools\Übung\ClawScribe.exe`;
+  const { LocalMcpSettings } = loadTsModule('src/components/LocalMcpSettings.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'Button' }, '@/components/ui/label': { Label: 'Label' },
+    '@/components/ui/select': { Select: 'Select', SelectTrigger: 'SelectTrigger', SelectValue: 'SelectValue', SelectContent: 'SelectContent', SelectItem: 'SelectItem' },
+    '@/components/ui/page-section': { PageSection: 'PageSection' }, '@/components/ui/switch': { Switch: 'Switch' },
+    '@/components/ui/textarea': { Textarea: 'Textarea' }, '@/components/ui/input': { Input: 'Input' }, 'lucide-react': {},
+    '@tauri-apps/api/core': { invoke: async (name, args) => {
+      calls.push(name);
+      if (name === 'set_mcp_access') {
+        if (args.enabled) await save.promise;
+        grant = args.enabled;
+      }
+      return { enabled: grant, command };
+    } },
+  });
+  const find = kind => nodes(hooks.render(LocalMcpSettings)).find(node => node.type === kind);
+  assert.equal(find('Switch').props.disabled, true);
+  await flush();
+  assert.equal(find('Textarea'), undefined);
+  assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => /only setting that lets other apps read your library/.test(String(node.props.children))), 'warning note stays next to the opt-in');
+  const enable = find('Switch').props.onCheckedChange;
+  enable(true);
+  enable(true);
+  assert.equal(find('Textarea'), undefined);
+  assert.equal(calls.filter(name => name === 'set_mcp_access').length, 1);
+  save.resolve();
+  await flush();
+  const config = JSON.parse(find('Textarea').props.value);
+  assert.deepEqual(config.mcpServers.clawscribe, { command, args: ['--mcp-stdio'] });
+  find('Select').props.onValueChange('codex');
+  const toml = find('Textarea').props.value.split('\n');
+  assert.deepEqual(toml, ['[mcp_servers.clawscribe]', 'command = ' + JSON.stringify(command), 'args = ["--mcp-stdio"]']);
+  assert.equal(calls.filter(name => name === 'set_mcp_access').length, 1);
+  find('Switch').props.onCheckedChange(false);
+  await flush();
+  assert.equal(find('Switch').props.checked, false);
+  assert.equal(find('Textarea'), undefined);
+});

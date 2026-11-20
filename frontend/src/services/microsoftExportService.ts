@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { MeetingExportOptions } from "@/lib/meetingExportContent";
 
 export interface MicrosoftConnectionInfo {
   state:
@@ -32,6 +33,30 @@ export interface ExportReport {
   overall: string;
   connectionState: string | null;
   items: ExportItemResult[];
+}
+
+export const TASK_IDENTITY_REVIEW_CODE = "task_identity_review_required";
+export const TASK_IDENTITY_REVIEW_MESSAGE =
+  "These tasks may already exist in the destination. Check the destination for each marked task. Deselect tasks that are already there. For genuinely new tasks, add them in Meeting actions with Add action, save, and re-export.";
+
+export function taskIdentityReviewIds(report: ExportReport): Set<string> {
+  return new Set(report.items.filter((item) => item.code === TASK_IDENTITY_REVIEW_CODE).map((item) => item.localId));
+}
+
+export interface OneNoteResume {
+  id: string;
+  sectionName: string;
+  pageTitle: string;
+  options: MeetingExportOptions | null;
+  startedAt: string;
+  canResume: boolean;
+}
+
+export interface MeetingExportHistory {
+  destination: string;
+  status: string;
+  at: string | null;
+  webUrl: string | null;
 }
 
 export interface NotebookInfo {
@@ -91,6 +116,8 @@ export interface CalendarAttendee {
 }
 export interface CalendarEvent {
   id: string;
+  /** Opaque identity shared by occurrences and exceptions in the same account. */
+  seriesId?: string;
   subject: string | null;
   /** ISO-8601 UTC, e.g. "2026-06-19T21:00:00Z". */
   start: string | null;
@@ -99,14 +126,30 @@ export interface CalendarEvent {
   joinUrl: string | null;
   organizer: CalendarAttendee | null;
   attendees: CalendarAttendee[];
+  allDay?: boolean;
+  isCancelled?: boolean;
 }
 
 export interface PlannerTaskPreview {
   localId: string;
   title: string;
+  originalTitleHash?: string | null;
   details: string;
   owner: string | null;
   dueDate: string | null;
+}
+
+export interface TaskPreviewCandidate {
+  readonly localId: string;
+  readonly originalTitleHash: string;
+}
+
+export function taskPreviewCandidates(
+  items: readonly Pick<PlannerTaskPreview, "localId" | "originalTitleHash">[],
+): readonly TaskPreviewCandidate[] {
+  return items.flatMap(({ localId, originalTitleHash }) =>
+    originalTitleHash ? [{ localId, originalTitleHash }] : [],
+  );
 }
 
 export interface PlannerTaskInput {
@@ -114,6 +157,7 @@ export interface PlannerTaskInput {
   // backend dedupe key survives reordering/deselection and re-exports don't
   // create duplicate tasks.
   localId: string;
+  originalTitleHash?: string | null;
   title: string;
   owner: string | null;
   dueDate: string | null;
@@ -123,6 +167,7 @@ export interface PlannerTaskInput {
 
 export interface ToDoTaskInput {
   localId: string;
+  originalTitleHash?: string | null;
   title: string;
   owner: string | null;
   dueDate: string | null;
@@ -225,6 +270,8 @@ export const microsoftExportService = {
     markdown: string,
     notebookId: string,
     sectionName: string,
+    options: MeetingExportOptions,
+    resumeId: string | null,
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_meeting_to_onenote_section", {
       meetingId,
@@ -232,7 +279,17 @@ export const microsoftExportService = {
       markdown,
       notebookId,
       sectionName,
+      options,
+      resumeId,
     });
+  },
+
+  async listOneNoteResumes(meetingId: string): Promise<OneNoteResume[]> {
+    return invoke("list_onenote_resumes", { meetingId });
+  },
+
+  async getMeetingExportHistory(meetingId: string): Promise<MeetingExportHistory[]> {
+    return invoke("get_meeting_export_history", { meetingId });
   },
 
   async exportMeetingMarkdownToPlanner(
@@ -304,8 +361,9 @@ export const microsoftExportService = {
   async listCalendarEvents(
     startIso: string,
     endIso: string,
+    requireComplete = false,
   ): Promise<CalendarEvent[]> {
-    return invoke<CalendarEvent[]>("list_calendar_events", { startIso, endIso });
+    return invoke<CalendarEvent[]>("list_calendar_events", { startIso, endIso, requireComplete });
   },
 
   async currentOrNextMeeting(): Promise<CalendarEvent | null> {
@@ -329,12 +387,14 @@ export const microsoftExportService = {
     meetingTitle: string,
     planId: string,
     tasks: PlannerTaskInput[],
+    previewCandidates: readonly TaskPreviewCandidate[],
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_selected_planner_tasks", {
       meetingId,
       meetingTitle,
       planId,
       tasks,
+      previewCandidates,
     });
   },
 
@@ -355,12 +415,14 @@ export const microsoftExportService = {
     meetingTitle: string,
     listId: string,
     tasks: ToDoTaskInput[],
+    previewCandidates: readonly TaskPreviewCandidate[],
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_selected_todo_tasks", {
       meetingId,
       meetingTitle,
       listId,
       tasks,
+      previewCandidates,
     });
   },
 

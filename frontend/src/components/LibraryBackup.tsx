@@ -1,6 +1,5 @@
 'use client';
 import { useRef, useState } from 'react';
-import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -8,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { flushMeetingContexts } from '@/lib/meetingContext';
+import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore';
 import type { LibraryArchiveReport } from '@/lib/library';
 
 export function LibraryBackup() {
@@ -22,15 +22,19 @@ export function LibraryBackup() {
     if (pending.current) return;
     pending.current = true; setBusy(restore ? 'Restoring…' : 'Backing up…');
     try {
-      const filters = [{ name: 'ClawScribe meeting archive', extensions: ['zip'] }];
-      const path = restore ? await open({ filters, multiple: false, directory: false }) : await save({ filters, defaultPath: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
+      // The core opens the dialog and only accepts the path it chose here.
+      const path = restore
+        ? await invoke<string | null>('pick_backup_restore_path')
+        : await invoke<string | null>('pick_backup_save_path', { suggestedName: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
       if (!path) return;
       setResult(null);
+      await migrateLegacyMeetingCalendars();
       if (!restore) await flushMeetingContexts();
       const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path });
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;
-      const description = `${report.meetings} meetings, ${report.files} recording files.${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}`;
+      const unreadable = report.unreadable_calendar_links ?? 0;
+      const description = `${report.meetings} meetings, ${report.files} recording files.${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${unreadable ? ` ${unreadable} saved calendar links could not be read and were left unlinked.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}`;
       if (incomplete) toast.warning(restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio', { description });
       else toast.success(restore ? 'Restore complete' : 'Backup saved', { description });
       if (restore) {

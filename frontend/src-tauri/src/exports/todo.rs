@@ -148,15 +148,16 @@ pub fn dedupe_key(
     meeting: &MeetingExport,
     action: &ExportActionItem,
 ) -> String {
-    format!(
-        "todo:{tenant}:{user}:{list}:{meeting_hash}:{action_id}:{action_hash}",
-        tenant = tenant_id,
-        user = user_id,
-        list = destination.list_id,
-        meeting_hash = meeting.artifact_hash(),
-        action_id = action.local_action_id,
-        action_hash = action_hash(action),
+    crate::exports::ledger::task_key_for_action(
+        &task_scope(tenant_id, user_id, destination),
+        &meeting.meeting_id,
+        action,
+        &action_hash(action),
     )
+}
+
+pub(crate) fn task_scope(tenant_id: &str, user_id: &str, destination: &ToDoDestination) -> String {
+    format!("todo:{tenant_id}:{user_id}:{}", destination.list_id)
 }
 
 #[cfg(test)]
@@ -189,6 +190,7 @@ mod tests {
             owner: Some("Sam".into()),
             due_date: Some("2026-07-01".into()),
             details: None,
+            legacy_action: None,
         }
     }
 

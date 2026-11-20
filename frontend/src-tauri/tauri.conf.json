@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "ClawScribe",
-    "version": "0.5.59",
+    "version": "0.63.0",
     "identifier": "net.rismondo.openclaw.clawscribe",
     "build": {
         "frontendDist": "../out",
@@ -57,13 +57,10 @@
                         "core:window:allow-start-dragging",
                         "core:window:allow-set-title",
                         "core:window:allow-toggle-maximize",
-                        "store:default",
+                        "core:webview:allow-set-webview-zoom",
                         "notification:default",
                         "notification:allow-is-permission-granted",
-                        "dialog:allow-open",
-                        "dialog:allow-save",
                         "dialog:allow-message",
-                        "updater:default",
                         "process:default"
                     ]
                 }

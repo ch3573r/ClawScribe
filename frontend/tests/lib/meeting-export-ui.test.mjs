@@ -13,7 +13,7 @@ function nodes(root) {
 const text = root => typeof root === 'string' ? root : Array.isArray(root) ? root.map(text).join('') : text(root?.props?.children ?? '');
 const find = (root, type, label) => nodes(root).find(node => node.type === type && (label === undefined || text(node) === label));
 
-async function setup({ connected = true, rest = false, restFailure = false, save = async () => 'export.docx', readFailure = false } = {}) {
+async function setup({ connected = true, rest = false, restFailure = false, save = async () => 'export.docx', readFailure = false, resumes = [], history = [] } = {}) {
   const harness = createHookHarness();
   const calls = [], errors = [];
   const draft = loadTsModule('src/lib/confluenceDraft.ts');
@@ -32,13 +32,17 @@ async function setup({ connected = true, rest = false, restFailure = false, save
     './PlannerExportPreview': names('PlannerExportPreview'),
     './ToDoExportPreview': names('ToDoExportPreview'),
     '@tauri-apps/api/core': { invoke: async (command, args) => {
+      if (command === 'pick_word_save_path') {
+        // The core opens the dialog: this is the one place the user picks the file.
+        calls.push({ kind: 'save', args });
+        return save();
+      }
       calls.push({ kind: command, args });
       if (command === 'api_get_meeting') {
         if (readFailure) throw new Error('Synthetic read failure');
         return { transcripts: [{ id: 'saved', timestamp: '09:10:11', speaker: 'Speaker A', text: 'Saved words.' }] };
       }
     } },
-    '@tauri-apps/plugin-dialog': { save: async args => { calls.push({ kind: 'save', args }); return save(); } },
     sonner: { toast: { success() {}, info() {}, warning() {}, error: (...args) => errors.push(args) } },
     '@/lib/exportDestinations': {
       getExportDestinations: () => ({ notebookId: 'notebook', notebookName: 'Saved notebook', confluenceMode: rest ? 'rest' : 'draft', confluenceBaseUrl: 'https://confluence.example.com', confluenceSpaceKey: 'TEST' }),
@@ -48,8 +52,10 @@ async function setup({ connected = true, rest = false, restFailure = false, save
       isOneNoteLargeLibraryError: () => false,
       microsoftExportService: {
         connectionStatus: async () => ({ state: connected ? 'connected' : 'not_connected' }),
-        summaryHasActionItems: async () => true,
+        listOneNoteResumes: async () => resumes,
+        getMeetingExportHistory: async () => history,
         listNotebooks: async () => [],
+
         exportMeetingToOneNoteSection: async (...args) => { calls.push({ kind: 'onenote', args }); return { overall: 'succeeded', items: [] }; },
         exportMeetingToOneDriveFiles: async args => { calls.push({ kind: 'onedrive', args }); return { files: [], destination: { name: 'Folder' } }; },
       },
@@ -170,4 +176,34 @@ test('summary-only controls hide speakers and keep timestamps enabled without cl
     assert.equal(inputs.at(-1).props.checked, false);
     if (content !== 'summary') assert.equal(inputs[0].props.checked, true);
   }
+});
+
+test('OneNote resumes with the saved content options and explicit section identity', async () => {
+  const options = { content: 'transcript', speakers: false, timestamps: false };
+  const view = await setup({ resumes: [{
+    id: 'saved-section-attempt', pageTitle: 'Original title', sectionName: 'Original section',
+    startedAt: '2026-01-01T12:00:00Z', options, canResume: true,
+  }] });
+  await find(view.render(), 'DropdownMenuItem', 'OneNote').props.onClick();
+  const dialog = nodes(view.render()).find(node => node.type === 'Dialog' && node.props.open);
+  assert.ok(find(dialog, 'SelectItem', 'Create another section'));
+  assert.equal(find(dialog, 'ExportContentOptions'), undefined);
+  await find(dialog, 'Button', 'Resume export').props.onClick();
+  const call = view.calls.find(call => call.kind === 'onenote');
+  assert.equal(call.args[1], 'Original title');
+  assert.equal(call.args[2], '## Transcript\n\nSaved words.');
+  assert.deepEqual(call.args.slice(5), [options, 'saved-section-attempt']);
+});
+
+test('offline export history shows results and offers safe available links', async () => {
+  const view = await setup({ connected: false, history: [
+    { destination: 'OneNote', status: 'succeeded', at: '2026-01-01T12:00:00Z', webUrl: 'https://www.onenote.com/page' },
+    { destination: 'Microsoft To Do', status: 'unknown_after_submit', at: null, webUrl: null },
+  ] });
+  find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
+  await flush();
+  const dialog = nodes(view.render()).find(node => node.type === 'Dialog' && node.props.open);
+  assert.match(text(dialog), /OneNote · Exported/);
+  assert.match(text(dialog), /Microsoft To Do · Outcome unknown/);
+  assert.equal(find(dialog, 'Button', 'Open').props['aria-label'], 'Open in OneNote');
 });

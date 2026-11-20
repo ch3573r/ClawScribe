@@ -74,6 +74,11 @@ export function LiveAssistancePanel() {
   const locator = source?.passage?.evidence.locator;
   const selectedNames = meetings.filter(meeting => state.meetingIds.includes(meeting.id)).map(meeting => meeting.title);
   const selectedDocuments = state.documents.filter(row => state.documentIds.includes(row.attachment.id));
+  // Nothing here works without transcript sharing, so the panel stays out of the
+  // recording screen until it is switched on in Settings. It remains while open
+  // (the switch inside it can be turned back on) and while it carries the only
+  // visible recording status error.
+  if (!state.transcriptSharing && !expanded && !statusError) return null;
   return <PageSection className="mb-5" aria-label="Live assistance">
     <div className="space-y-2 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -138,7 +143,7 @@ export function LiveAssistancePanel() {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(question); }
           }} />
         <div className="flex flex-wrap items-center gap-2"><Button type="submit" disabled={!ready || !question.trim()}>Ask</Button>
-          <Button type="button" variant="outline" disabled={!ready} onClick={() => submit('Summarize the finalized conversation so far. Identify decisions and uncertainty, and acknowledge missing or delayed speech.')}>Summarize so far</Button>
+          <Button type="button" variant="outline" disabled={!ready} onClick={() => submit('Summarize the last 10 minutes of finalized speech. Identify decisions and uncertainty, and acknowledge missing or delayed speech.')}>Summarize the last 10 minutes</Button>
           <Button type="button" variant="outline" disabled={!ready} onClick={() => submit('List open questions from the finalized conversation. Do not invent answers, owners or commitments.')}>List open questions</Button>
           {state.pending && <Button type="button" variant="outline" onClick={actions.cancel}>Cancel</Button>}
         </div>

@@ -84,30 +84,41 @@ test('Claude Code settings ignore late checks and never expose raw invoke failur
   assert.equal(calls.filter(([name]) => /login|install|api_key/.test(name)).length, 0);
 });
 
-test('Claude Code checks use the draft path, coalesce clicks and save only when requested', async () => {
+test('Claude Code checks save the path first, check only the saved configuration and coalesce clicks', async () => {
   const hooks = createHookHarness();
   const calls = [];
   let fail = false;
+  let refuseSave = null;
   const { useClaudeCodeSettings } = loadTsModule('src/components/ClaudeCodeProviderCard.tsx', {
     ...controls, react: hooks.react, '@/lib/openExternal': { openExternal() {} },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
       if (command === 'claude_code_get_config') return { programPath: null };
+      if (command === 'claude_code_save_config' && refuseSave) throw refuseSave;
       if (fail) throw new Error('synthetic private CLI output');
+      if (command === 'claude_code_save_config') return args.config;
       return { state: 'ready', version: '2.1.0', plan: 'Pro' };
     } },
   });
   const render = () => hooks.render(() => useClaudeCodeSettings(true));
   render(); await flush();
-  render().setProgramPath('  custom program.cmd  ');
+  assert.equal(calls.find(([command]) => command === 'claude_code_check_status')[1], undefined, 'the saved configuration is checked, nothing is sent');
+  render().setProgramPath('  C:\Tools\claude.exe  ');
   const settings = render();
   const count = calls.length;
   await Promise.all([settings.check(), settings.check()]);
-  assert.equal(calls.length, count + 1);
-  assert.equal(calls.at(-1)[1].config.programPath, 'custom program.cmd');
-  assert.equal(calls.some(([command]) => command === 'claude_code_save_config'), false);
-  await render().save();
-  assert.equal(calls.at(-1)[0], 'claude_code_save_config');
+  assert.equal(calls.length, count + 2, 'one save and one check, not two');
+  assert.equal(calls.at(-2)[0], 'claude_code_save_config');
+  assert.equal(calls.at(-2)[1].config.programPath, 'C:\Tools\claude.exe');
+  assert.equal(calls.at(-1)[0], 'claude_code_check_status');
+  assert.equal(calls.at(-1)[1], undefined, 'a draft path is never passed to the check');
+  // A path the core refuses is reported and nothing is checked.
+  refuseSave = 'Choose the Claude Code program: a local file named claude, claude.exe, claude.cmd or claude.bat';
+  const before = calls.length;
+  await render().check();
+  assert.equal(calls.length, before + 1, 'only the refused save was attempted');
+  assert.match(render().status.message, /Choose the Claude Code program/);
+  refuseSave = null;
   fail = true;
   await render().check();
   assert.equal(render().status.state, 'error');
@@ -115,9 +126,9 @@ test('Claude Code checks use the draft path, coalesce clicks and save only when 
   hooks.unmount();
 });
 
-test('summary settings and meeting details never request an API key for Claude Code', async () => {
+test('summary settings never request an API key, for Claude Code or any other provider', async () => {
   for (const provider of ['claude-code', 'claude']) {
-    for (const surface of ['settings', 'meeting']) {
+    for (const surface of ['settings']) {
       const hooks = createHookHarness();
       const calls = [];
       const mocks = {
@@ -136,15 +147,11 @@ test('summary settings and meeting details never request an API key for Claude C
         '@/lib/analytics': { __esModule: true, default: {} },
         sonner: { toast: { error() {}, success() {} } },
       };
-      if (surface === 'settings') {
-        const { SummaryModelSettings } = loadTsModule('src/components/SummaryModelSettings.tsx', mocks);
-        hooks.render(() => SummaryModelSettings({}));
-      } else {
-        const { useModelConfiguration } = loadTsModule('src/hooks/meeting-details/useModelConfiguration.ts', mocks);
-        hooks.render(() => useModelConfiguration({ serverAddress: null }));
-      }
+      const { SummaryModelSettings } = loadTsModule('src/components/SummaryModelSettings.tsx', mocks);
+      hooks.render(() => SummaryModelSettings({}));
       await flush();
-      assert.equal(calls.includes('api_get_api_key'), provider === 'claude');
+      // No provider's key is ever requested: the core reports only a status, and never to this screen.
+      assert.equal(calls.includes('api_get_api_key'), false);
       hooks.unmount();
     }
   }

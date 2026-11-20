@@ -42,6 +42,31 @@ pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<ConversationOwner>,
         })
         .collect())
 }
+
+pub async fn library_scope(
+    pool: &SqlitePool,
+    owner: &ConversationOwner,
+) -> Result<Option<MeetingFilter>, String> {
+    if !matches!(owner, ConversationOwner::Library(_)) {
+        return Err("Choose a saved library conversation".into());
+    }
+    let scope: Option<String> = sqlx::query_scalar(
+        "SELECT scope_json FROM knowledge_requests WHERE owner_id=? ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(owner_key(owner)?)
+    .fetch_optional(pool)
+    .await
+    .map_err(failure)?;
+    match scope {
+        None => Ok(None),
+        // Backup restore redacts scopes that refer to unavailable sources.
+        Some(json) if json == "{}" => Ok(None),
+        Some(json) => match serde_json::from_str(&json) {
+            Ok(KnowledgeScope::Library { filter }) => Ok(Some(filter)),
+            _ => Err("Could not read this conversation's saved scope".into()),
+        },
+    }
+}
 pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
     if request.live_reference_scope.is_some()
         || uuid::Uuid::parse_str(&request.request_id)
@@ -61,7 +86,13 @@ pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
         {
             Ok(())
         }
-        (ConversationOwner::Library(_), KnowledgeScope::Library { .. }) => Ok(()),
+        (ConversationOwner::Library(_), KnowledgeScope::Library { filter }) => {
+            if filter.all_meetings || !filter.meeting_ids.is_empty() {
+                Ok(())
+            } else {
+                Err("Choose saved meetings or explicitly allow all saved meetings".into())
+            }
+        }
         _ => Err("Conversation owner and scope do not match".into()),
     }
 }
@@ -567,6 +598,52 @@ pub async fn history(
     Ok(messages)
 }
 
+/// Titles of the turn's meetings that must stay on this device.
+async fn withheld_titles(
+    pool: &SqlitePool,
+    sources: &[sqlx::sqlite::SqliteRow],
+) -> Result<Vec<String>, String> {
+    let meetings: std::collections::BTreeSet<String> = sources
+        .iter()
+        .filter_map(|source| source.get::<Option<String>, _>("meeting_id"))
+        .collect();
+    let mut titles = Vec::new();
+    for meeting in meetings {
+        let row: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT substr(title,1,1024),calendar_link FROM meetings WHERE id=?")
+                .bind(&meeting)
+                .fetch_optional(pool)
+                .await
+                .map_err(failure)?;
+        let Some((title, link)) = row else { continue };
+        let shown = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !shown.is_empty()
+            && crate::library::calendar::stored_title_policy(link.as_deref())
+                .for_provider(title)
+                .is_none()
+            && !titles.contains(&shown)
+        {
+            titles.push(shown);
+        }
+    }
+    Ok(titles)
+}
+
+/// Replaces every case-insensitive ASCII match of a withheld title.
+fn redact_title(text: &str, title: &str) -> String {
+    let (haystack, needle) = (text.to_ascii_lowercase(), title.to_ascii_lowercase());
+    let mut redacted = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(&needle) {
+        let start = from + found;
+        redacted.push_str(&text[from..start]);
+        redacted.push_str(crate::library::calendar::WITHHELD_TITLE);
+        from = start + needle.len();
+    }
+    redacted.push_str(&text[from..]);
+    redacted
+}
+
 /// Only verifiable completed turns within the new frozen selection may be sent.
 pub async fn eligible_history(
     pool: &SqlitePool,
@@ -616,7 +693,12 @@ pub async fn eligible_history(
             continue;
         }
         let messages=sqlx::query("SELECT role,content FROM knowledge_messages WHERE request_id=? ORDER BY CASE role WHEN 'user' THEN 0 ELSE 1 END").bind(&id).fetch_all(pool).await.map_err(failure)?;
-        let turn=serde_json::to_string(&messages.iter().map(|message|serde_json::json!({"role":message.get::<String,_>("role"),"content":message.get::<String,_>("content").replace("[K","[previous citation ")})).collect::<Vec<_>>()).map_err(|_|"Invalid saved history")?;
+        // An earlier answer may quote a title that is no longer shared with providers.
+        let withheld = withheld_titles(pool, &sources).await?;
+        let turn=serde_json::to_string(&messages.iter().map(|message|{
+            let content = message.get::<String,_>("content").replace("[K","[previous citation ");
+            serde_json::json!({"role":message.get::<String,_>("role"),"content":withheld.iter().fold(content, |text, title| redact_title(&text, title))})
+        }).collect::<Vec<_>>()).map_err(|_|"Invalid saved history")?;
         if used + turn.len() + 1 > budget {
             continue;
         }
@@ -634,6 +716,20 @@ pub async fn eligible_history(
 pub(crate) mod tests {
     use super::*;
     #[test]
+    fn earlier_answers_lose_a_title_that_is_no_longer_shared() {
+        assert_eq!(
+            redact_title(
+                "The QUARTERLY planning call decided. Quarterly Planning again.",
+                "Quarterly planning"
+            ),
+            "The Untitled meeting call decided. Untitled meeting again."
+        );
+        assert_eq!(
+            redact_title("Nothing to hide ä", "Quarterly planning"),
+            "Nothing to hide ä"
+        );
+    }
+    #[test]
     fn meeting_and_library_request_boundaries_remain_separate() {
         let mut input = request(ConversationOwner::Meeting("fixture".into()));
         assert!(
@@ -649,6 +745,13 @@ pub(crate) mod tests {
             validate_request(&input).is_err(),
             "library owner cannot use meeting scope"
         );
+        input.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                tags: vec!["Fixture".into()],
+                ..Default::default()
+            },
+        };
+        assert!(validate_request(&input).is_err());
         input.search.scope = KnowledgeScope::Library {
             filter: MeetingFilter {
                 all_meetings: true,
@@ -714,6 +817,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn preceding_question_context_persists_without_rewriting_literal_citations() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, frozen, passages) = question_pair_fixture("Nein.").await;
         prepare(
             &pool,
@@ -761,6 +865,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn question_context_uses_complete_selected_rows_and_utf8_reply_limit() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for (reply, selected_question, expected) in [
             ("ä".repeat(32), true, Some(1)),
             ("ä".repeat(33), true, None),
@@ -788,6 +893,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn saved_context_rejects_forged_map_links() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for tag in [0, 2, 999] {
             let (pool, request, frozen, passages) = question_pair_fixture("Ja.").await;
             prepare(
@@ -824,6 +930,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn title_and_date_edits_invalidate_prompt_metadata_snapshot() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let before: i64 =
             sqlx::query_scalar("SELECT revision FROM knowledge_sources WHERE meeting_id='fixture'")
@@ -862,6 +969,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn durable_library_history_has_authoritative_tables_without_cache_foreign_keys() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         for table in [
             "knowledge_owners",
@@ -905,6 +1013,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn deleted_source_redacts_dependent_request_before_associations_disappear() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         pending_request(&pool).await;
         sqlx::query("DELETE FROM meetings WHERE id='fixture'")
@@ -935,6 +1044,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn cancelled_request_cannot_commit() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         pending_request(&pool).await;
         sqlx::query("UPDATE knowledge_requests SET status='cancelled' WHERE id='00000000-0000-4000-8000-000000000001'").execute(&pool).await.unwrap();
@@ -985,6 +1095,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn meeting_and_expanded_library_histories_remain_independently_readable() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let library = create_library(&pool).await.unwrap();
         let meeting = ConversationOwner::Meeting("fixture".into());
@@ -1034,6 +1145,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn duplicate_request_returns_same_reply() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (mut request, frozen) = active(&pool).await;
         let first = finish(
@@ -1061,6 +1173,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn history_keeps_user_before_assistant_when_timestamps_tie() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         finish(
@@ -1079,6 +1192,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn deleted_source_aborts_queued_dispatch() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         sqlx::query("DELETE FROM meetings WHERE id='fixture'")
@@ -1092,6 +1206,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn deletion_invalidates_a_preparing_request_before_retrieval_finishes() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let request = request(create_library(&pool).await.unwrap());
         reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
@@ -1107,6 +1222,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn deleted_source_discards_completed_answer() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         sqlx::query("DELETE FROM meetings WHERE id='fixture'")
@@ -1130,6 +1246,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn metadata_change_during_generation_rejects_late_answer() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for statement in [
             "UPDATE meetings SET title='Edited title' WHERE id='fixture'",
             "UPDATE meetings SET created_at='2026-09-05' WHERE id='fixture'",
@@ -1153,6 +1270,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn clear_removes_legacy_and_new_and_prevents_late_commit() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let mut request = request(ConversationOwner::Meeting("fixture".into()));
         request.search.scope = KnowledgeScope::Meeting {
@@ -1189,6 +1307,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn filter_change_omits_prior_turn_without_erasing_readable_history() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         finish(
@@ -1228,6 +1347,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn inherited_dependencies_redact_a_later_uncited_answer() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (prior, frozen) = active(&pool).await;
         finish(

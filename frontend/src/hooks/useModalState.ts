@@ -2,19 +2,14 @@ import { useState, useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
+import type { LiveModelFailure } from '@/lib/start-error';
 
 export type ModalType =
-  | 'modelSettings'
-  | 'deviceSettings'
-  | 'languageSettings'
   | 'modelSelector'
   | 'errorAlert'
   | 'chunkDropWarning';
 
 interface ModalState {
-  modelSettings: boolean;
-  deviceSettings: boolean;
-  languageSettings: boolean;
   modelSelector: boolean;
   errorAlert: boolean;
   chunkDropWarning: boolean;
@@ -32,6 +27,8 @@ interface UseModalStateReturn {
   showModal: (name: ModalType, message?: string) => void;
   hideModal: (name: ModalType) => void;
   hideAllModals: () => void;
+  modelStartFailure: LiveModelFailure | null;
+  dismissModelStartFailure: () => void;
 }
 
 /**
@@ -44,11 +41,20 @@ interface UseModalStateReturn {
  * - Auto-close on model download completion
  */
 export function useModalState(transcriptModelConfig?: TranscriptModelProps): UseModalStateReturn {
+  const [modelStartFailure, setModelStartFailure] = useState<LiveModelFailure | null>(null);
+  useEffect(() => {
+    let active = true;
+    const subscription = listen<LiveModelFailure>('live-model-start-failed', ({ payload }) => {
+      if (active) setModelStartFailure(payload);
+    });
+    void subscription.catch(() => {});
+    return () => {
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
+    };
+  }, []);
   // Modal visibility state
   const [modals, setModals] = useState<ModalState>({
-    modelSettings: false,
-    deviceSettings: false,
-    languageSettings: false,
     modelSelector: false,
     errorAlert: false,
     chunkDropWarning: false,
@@ -84,9 +90,6 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
   // Hide all modals
   const hideAllModals = useCallback(() => {
     setModals({
-      modelSettings: false,
-      deviceSettings: false,
-      languageSettings: false,
       modelSelector: false,
       errorAlert: false,
       chunkDropWarning: false,
@@ -175,7 +178,7 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
 
         // Auto-close modal if the downloaded model matches the selected one
         if (transcriptModelConfig?.provider === 'localWhisper' && transcriptModelConfig?.model === modelName) {
-          toast.success('Model ready! Closing window...', { duration: 1500 });
+          toast.success('Model ready, closing this window', { duration: 1500 });
           setTimeout(() => hideModal('modelSelector'), 1500);
         }
       });
@@ -195,5 +198,7 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
     showModal,
     hideModal,
     hideAllModals,
+    modelStartFailure,
+    dismissModelStartFailure: () => setModelStartFailure(null),
   };
 }

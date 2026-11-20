@@ -77,6 +77,13 @@ window titles are returned only when the settings diagnostics panel requests the
 - MAI-Transcribe uses Azure Speech Fast Transcription with its own Cognitive
   Services key or Azure Speech credential. Microsoft Graph sign-in/export
   scopes are not reused for Azure Speech.
+- MAI-Transcribe streams WAV, MP3, and FLAC from disk. Other supported media
+  are converted to 16 kHz mono PCM16 WAV in an unnamed temporary file. The
+  operating system removes it when its handle closes, including after a crash or
+  kill, so no staging file persists and none is swept. Each upload attempt
+  replays it from the start in 64 KiB positional reads. The 300 MB cap applies to
+  the audio submitted to Azure. Cancelling stops local conversion or the
+  multipart request and leaves the source audio intact.
 - MAI sentence-level timing is never promoted to word timestamps. If Azure
   returns a combined-only or single-phrase transcript, ClawScribe can remap the
   cloud text onto the local VAD speech grid for readable rows, but those row
@@ -92,6 +99,19 @@ window titles are returned only when the settings diagnostics panel requests the
   draft export remains available when SSO, proxy, or tenant policy blocks REST.
 - OpenClaw handoff is optional and sends completed recording artifacts only to
   the configured operator endpoint.
+
+### Diagnostics report
+
+**Settings → Diagnostics → Save report** uses the last completed Diagnostics
+snapshot. ClawScribe builds a separate, versioned JSON report from allowlisted
+app and platform fields, CPU and memory capacity, audio device counts,
+transcription and speaker separation status, and fixed failure categories.
+When the last recorded OpenClaw handoff failed, the report includes its failure
+category. The file is limited to 4 KiB.
+
+The save command works offline with the report held in memory. The Tauri core
+opens the native save dialog and writes the report atomically to the chosen
+file. The webview receives the outcome of the save.
 
 ## Recording And Inference Lifetimes
 
@@ -121,7 +141,14 @@ Unknown source language remains unset instead of being inferred from the engine
 name. Whisper's text normalization collapses whitespace and preserves words.
 
 Custom vocabulary is a local Tauri store preference (`custom_vocabulary.json`),
-exposed by `get_custom_vocabulary` and `set_custom_vocabulary`. Set normalizes
+exposed by `get_custom_vocabulary` and `set_custom_vocabulary`. Settings → Transcription
+→ Custom vocabulary has an opt-in switch, **Suggest words from my corrections**, kept in
+webview storage and off by default. When it is on, a saved transcript correction or
+find-and-replace that swaps words for a name or term (a capitalised word, a word with
+a digit or inner capital, up to three words, not already in the list) shows a notice
+offering to add that spelling. Nothing is written until the notice's **Add** is chosen,
+the add goes through `set_custom_vocabulary` with its normal limits, and the
+confirmation offers **Undo**. Set normalizes
 whitespace at entry edges, removes empty and case-insensitive duplicate entries,
 and rejects more than 500 unique entries, entries over 64 Unicode characters,
 control characters, and entries without a letter or number. Matching is adapted
@@ -165,9 +192,17 @@ the available PCM spool in one pass with a duration-scaled deadline and recovers
 it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
 unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
-element. Periodic transcript snapshots continue during silence; the library-save
-command reads the backend snapshot when saving a finished recording, falling
-back to the UI transcript with a warning if that snapshot is unavailable. New
+element. The speech worker delivers each completed decode directly to its
+session's transcript saver before emitting the UI event. The saver accepts
+remaining results during Stop's bounded drain and closes intake before final
+publication. A coalescing worker writes transcript snapshots during recording
+and silence. Transcript ingestion never waits for snapshot disk I/O. Native Stop
+commits its finalized transcript and outcome to SQLite before announcing the
+saved meeting. The recording ID in the original folder marker makes that handoff
+idempotent. Interrupted recordings can finish a handoff after a crash or a
+database error. The library records deleted recording IDs in the same transaction
+as deletion, so retained folders and stale recovery cache entries stay out of
+the recovery list. New
 capture creates no checkpoint folder or periodic AAC encodes. The legacy
 checkpoint reader and merge fallback remain available for older meetings. The
 recovery dialog probes raw chunks (including a readable temporary tail), recovered
@@ -179,8 +214,12 @@ persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have
 separate persistent flags. File warnings reflect final write results. Spool cleanup
 requires published audio, complete raw encoding, and a saved outcome; independent
-transcript/metadata failures do not retain redundant audio. Retranscription updates repaired flags in the transcript
-transaction and mirrors the outcome afterwards; capture gaps remain informational.
+transcript/metadata failures do not retain redundant audio. Retranscription commits
+the previous revision, replacement text, and pending recording-file update in one
+SQLite transaction. It then publishes the transcript, metadata, and recording
+status from committed data. A failed folder write leaves the new transcript usable
+in the library. Retry file update on the meeting rebuilds the folder copy after a
+restart, using the recorded provider, model, and source language.
 Its audio resolver checks retained raw chunks and the saved outcome on a blocking
 worker, even when reusing recovered audio, so older partial recoveries also set
 the permanent capture-gap flag. Unreadable saved status is treated as unknown;
@@ -192,9 +231,10 @@ The check uses the same preferred recovery file as playback/retranscription; a
 longer alternate file cannot authorize cleanup. Publishing a recovered format
 removes the superseded recovery format only after the new file is safely written. Frontend release requests require a canonical registered meeting
 folder; incomplete chunks retain their originals.
-Shared stop ownership suppresses duplicate completion
-events, and a SQLite write reservation protects the folder lookup and insert
-against concurrent saves.
+Shared stop ownership suppresses duplicate completion events. Quit waits on the
+same native Stop with a deadline. The webview associates its cleanup with the
+stopped recording ID. If a new recording starts, delayed work from the earlier
+Stop leaves the new session's state and navigation alone.
 `audio/outcome.rs` persists recording failures before the completion event;
 meeting/transcript/outcome database writes share a transaction. New schema is
 added through a migration; shipped migrations remain unchanged.
@@ -237,6 +277,47 @@ mode always enables the recording saver, omits VAD/model validation and the live
 recognition worker, and skips automatic summary/OpenClaw handoff. Capture and the
 retained audio spool use the existing paths. Later transcription uses the existing
 reviewed retranscription flow and its configured local/cloud preference.
+If model validation fails after capture opens and audio saving is enabled, the
+session continues in audio-only mode with its captured prefix. A failed capture
+source can be retried without reopening the other stream. The saved meeting
+retains a capture-gap warning even when the missing source reconnects.
+
+On first launch, **Record audio now** opens Home in audio-only mode without
+starting a download. Live transcription setup requires an available speech
+model. Local notes use a separate download action and save a local summary
+provider only after the chosen model is available. Completing setup with a
+model deferred does not mark it downloaded. Completed installations keep
+their existing mode and provider preferences.
+
+The core resolves the live engine for both recording startup and Home.
+Hosted file transcription uses a separate preference, and live recording
+uses Parakeet when a supported hosted provider is configured. Home checks
+model files before recording. Startup still validates that the engine can
+load and returns distinct failures for missing, downloading, unusable, and
+unsupported models. Home offers audio-only recording and routes to the
+appropriate engine settings.
+
+Calendar choices and attendance edits are staged by the native recording ID
+in the local library database. Automatic matching uses the capture request
+time and starts after native startup. The live session ID and an edit revision
+guard each update. Native Stop closes edit admission and saves the calendar,
+transcript, recording outcome, timestamped notes and note-sharing choice in one
+transaction. Interrupted recording recovery uses the same handoff. Existing IDs
+and library-local deletion records prevent duplicate registration.
+If startup fails, the staged invitation is removed once the recorder confirms
+its empty folder was deleted. Retained folders keep the draft for recovery.
+
+The core wakes automatic notes after a live recording's transaction commits
+and releases the recording job. Recovery can wake the same job after it
+registers or repairs the saved recording. The summary worker reads the
+committed calendar and notes under their existing review and consent rules.
+
+Home and Recording settings share one device inventory, refreshed on device
+change, window focus, and manual recheck. Home distinguishes unavailable
+preferred devices from an absent default system output, which permits
+microphone-only recording. Device preferences are published to the UI after
+the core saves them. Audio-only mode always saves audio and leaves the live
+audio-saving and source attribution preferences in place.
 
 `database/transcript_edits.rs` applies corrections with optimistic text checks in
 one transaction. The first recognized text is retained in `original_transcript`;
@@ -254,6 +335,16 @@ transcript swaps the current rows with the latest archived revision, preserving
 every original ID and field. It archives the replaced version, retires old edit
 batches, and queues the file mirror in one transaction. Active summaries block
 restoration; regenerated notes are needed to refresh source links.
+
+Each archived revision stores the provider, model, language and time that
+produced its text, taken from the unpublished retry payload or the recording
+folder's `metadata.json`. Restore rewrites `metadata.json` with the restored
+text's own provenance. Revisions that never recorded one, including those
+archived before this was stored, are marked `transcription_provenance: unknown`
+and lose the provider, model, language and time fields instead of keeping the
+newer revision's. The pending payload for the replaced text is superseded. Capture
+gaps are never cleared, and the file-retry flag clears only after publication.
+A meeting with no recording folder keeps no retry marker.
 
 `summary/sources.rs` prepares summaries from the complete saved transcript and
 annotates passages with stable content-derived source links. Reduction prompts
@@ -292,9 +383,16 @@ and uses the editor's normal undo and save flow.
 
 Meeting saves write only dirty content, preserve later edits while a write is in
 flight, and report title failures without claiming success. Summary loads are
-scoped to the current meeting. Automatic generation waits for the saved summary
-lookup and requires a configured provider; it never installs a default cloud
-configuration. API summary response readers enforce an 8 MiB limit, reject
+scoped to the current meeting. Both the meeting view and the automatic worker
+submit a saved meeting ID. The core reads the canonical transcript and its
+revision in one snapshot, then checks that revision again when saving notes. The
+legacy raw-text command still accepts its original request shape. Automatic
+recording summaries require a core-owned opt-in and a configured Built-in AI
+model. The import form can explicitly request the same local summary after
+releasing the transcription slot. The worker uses saved per-meeting context and
+language and emits a notes-ready notification after the result commits, subject
+to notification preferences. It records a skip reason when disabled or when
+the saved transcript or model needs review. API summary response readers enforce an 8 MiB limit, reject
 reported output truncation, and keep cancellation active while reading the body.
 Chat and reviewed task polishing share provider configuration resolution.
 
@@ -396,8 +494,16 @@ the schema once, with an inline schema only for strict-JSON fallback.
 Summary status polling has one shared timer owner across meetings. Starting or
 finishing one poll keeps other meetings' polls alive; stopped or replaced requests
 cannot publish late responses. Missing jobs and completed jobs without saved
-content surface retry errors. Status checks do not overlap, and the polling limit
-reports an unconfirmed status without claiming that provider work was cancelled.
+content surface retry errors. Status checks do not overlap or expire after a fixed
+number of polls. Native status events refresh the open meeting, and a reopened
+meeting attaches to the persisted job. The local path retries a failed excerpt
+once and keeps successful excerpts in local recovery metadata if the run fails.
+An incomplete excerpt set never replaces a complete summary or reaches exports.
+
+Import records the selected, file-modified, or import timestamp as the meeting
+date and preserves the import time and chosen date source in meeting metadata.
+Multiple selected files are reviewed and submitted individually through the
+existing single-job transcription slot.
 
 ## Microsoft Export Persistence
 
@@ -491,19 +597,36 @@ Live-transcript IndexedDB copies are removed after SQLite save and library
 deletion. Startup cleanup runs once from the root layout and removes only aged
 saved copies; unsaved recovery data never expires automatically.
 
-Startup removes unattached live bookmarks only when their recording folder is
-gone and no saved meeting owns that folder. Existing recovery folders and
-attached bookmarks are retained, and cleanup skips active recordings.
+Live bookmarks use the durable recording ID from the folder marker. The meeting
+insert attaches pending bookmarks in the same SQLite transaction. Legacy
+folder-based bookmarks still attach by path and are cleaned up at startup when
+the folder is gone. Per-meeting summary consent is stored in SQLite and included
+in library backups. The shared core summary context reads consent and notes in
+one query.
+Pending notes and consent for an unsaved recording are retained across missing
+or moved folders. Storage settings can explicitly remove the reviewed metadata
+for one recording ID. The library transaction rechecks the identity, pending
+state, and absence of a saved meeting before removing it.
 
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not
 recommend retranscribing unavailable audio. Older archives default this flag to false.
 
+A meeting restored without its recording files has no folder to publish to. Its
+archived pending file-sync rows are not imported and its file-retry flag is
+cleared, because the retry could never finish. Capture gaps and other recorded
+outcomes are restored as archived. The restore report lists the meeting as
+having unavailable saved audio, independent of those flags.
+
 ## Local Knowledge Embedding Foundation
 
-The optional knowledge state is disabled on startup and does not load/download
-models implicitly. Its CPU ONNX candidate and SHA-256 manifest live under
-`knowledge/`; explicit downloads use the existing resumable transfer registry.
+Semantic search is off by default. With the saved opt-in enabled, startup and
+repeated enable calls register the local model path without reading the model
+files. The first semantic query or indexing input that needs the model checks
+the pinned sizes and SHA-256 hashes on the blocking worker before loading ONNX
+or the tokenizer. The check yields to foreground work between 64 KiB reads.
+Its CPU ONNX model and SHA-256 manifest live under `knowledge/`; explicit
+downloads use the existing resumable transfer registry.
 The embedding-space identity includes the model revision, both artifact hashes,
 tokenizer version, prefixes, pooling version, and CPU loading policy. The revised
 candidate disables graph optimizations and weight prepacking while keeping the
@@ -524,8 +647,14 @@ returns. Foreground recording/import claims cancel knowledge first and prevent
 new knowledge claims while waiting up to two seconds; local-summary preemption
 retains its existing behavior. Index notifications coalesce by source revision
 in a 32-entry queue; a full queue reports busy so persistent indexing can retry.
-The resident model unloads after 60 seconds idle. Provider/inference errors
-carry categories only, without source text or raw native responses.
+The resident model unloads after 60 seconds idle. A successful integrity check
+stays in memory for that activation, including across idle reloads. Disabling
+semantic search or exiting discards it. This proof assumes the files stay
+unchanged within the activation. Explicit verification or repair suspends model
+use, rehashes installed files even when their sizes match, and replaces the
+in-memory proof on success. A failed check leaves index jobs available for
+retry after repair. Provider/inference errors carry categories only, without
+source text or raw native responses.
 
 The manual knowledge input of the summary regression workflow runs on the
 configured trusted runner, using an exact reviewed commit. Ordinary regression
@@ -656,8 +785,10 @@ Lexical rank transfers to a published semantic chunk only when that chunk
 covers the complete match. Containment deduplication stays within one source
 revision and preserves distinct dated meetings. Missing models or recording
 contention return keyword results with a visible fallback reason.
-The saved semantic opt-in is distinct from runtime readiness: an enabled
-preference with missing model files reports `model_unavailable`, not `disabled`.
+The saved semantic opt-in is distinct from runtime readiness. Settings show
+installation and verification separately. Index status distinguishes a pending
+or active check from a failed check. Once the worker discovers missing or
+invalid files, semantic requests fall back with `model_unavailable`.
 
 The command surface also includes `knowledge_index_status`, `knowledge_reindex`,
 `knowledge_cancel_index`, `knowledge_model_enable`, `knowledge_model_status`,
@@ -744,9 +875,11 @@ Producer ingestion preserves partial/final status: only non-empty finalized
 segments enter live context, including short, low-confidence responses. A failed
 start clears only its own session. The snapshot comes from the backend manager,
 with finalized-through recording time, transcript availability, and capture or
-transcription backlog/incompleteness. Context covers the latest ten minutes of
-finalized text, capped at 1,024 segments and 256 KiB; segment bodies are at most
-2,048 UTF-8 bytes. Capacity truncation is disclosed.
+transcription backlog/incompleteness. Context is a fixed window (not a setting)
+of up to ten minutes of recording time ending at the finalized-through time,
+capped at 1,024 segments and 256 KiB; segment bodies are at most 2,048 UTF-8
+bytes. The window is shorter early in a recording or when a cap applies; capacity
+truncation is disclosed.
 
 `knowledge_ask` accepts matching Live owner/scope IDs and one request UUID. It
 permits one request per recording in flight, limits setup through delivery to
@@ -807,7 +940,7 @@ state, and later canonical reloads can recover a fresh producer.
 
 The collapsible Home panel sits within the existing transcript scroll view,
 preserving recording controls and the global recording health banner. Ask,
-Summarize so far and List open questions are manual actions with one flight and
+Summarize the last 10 minutes and List open questions are manual actions with one flight and
 Cancel. Current metadata stays visible while collapsed; each answer retains its
 own finalized-through/incomplete snapshot and actual provider. Saved meetings
 and documents require explicit selection. The remembered live-transcript switch

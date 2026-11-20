@@ -344,7 +344,7 @@ pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
         return find_existing_audio_file(folder);
     }
     if folder.join(".audio-spool").is_dir() {
-        let status = recover_audio_from_checkpoints(folder.to_string_lossy().to_string())
+        let status = recover_audio_in_folder(folder.to_string_lossy().to_string())
             .await
             .map_err(anyhow::Error::msg)?;
         if let Some(path) = status.audio_file_path {
@@ -354,7 +354,7 @@ pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
     match find_existing_audio_file(folder) {
         Ok(path) => Ok(path),
         Err(initial_error) => {
-            let recovery = recover_audio_from_checkpoints(folder.to_string_lossy().to_string())
+            let recovery = recover_audio_in_folder(folder.to_string_lossy().to_string())
                 .await
                 .map_err(|recovery_error| {
                     anyhow!(
@@ -416,8 +416,7 @@ pub async fn resolve_audio_file_or_recover(folder: &Path) -> Result<Option<PathB
     match find_existing_audio_file(folder) {
         Ok(path) => Ok(Some(path)),
         Err(_) => {
-            let recovery =
-                recover_audio_from_checkpoints(folder.to_string_lossy().to_string()).await?;
+            let recovery = recover_audio_in_folder(folder.to_string_lossy().to_string()).await?;
 
             if let Some(audio_file_path) = recovery.audio_file_path {
                 let path = PathBuf::from(audio_file_path);
@@ -438,13 +437,73 @@ pub async fn resolve_audio_file_or_recover(folder: &Path) -> Result<Option<PathB
     }
 }
 
+/// The folder a webview-supplied path refers to, if it is one of the
+/// recordings: strictly inside a recording root (the configured folder, the
+/// defaults, folders configured before, restored backups), or, when
+/// `allow_registered`, a folder saved in the library. A marker file in a folder
+/// never makes it acceptable.
+fn authorize_recording_folder(
+    requested: &Path,
+    roots: &[PathBuf],
+    registered: &[String],
+    allow_registered: bool,
+) -> Result<PathBuf, String> {
+    match crate::database::meeting_files::resolve_recording_folder(requested, roots) {
+        Ok(folder) => Ok(folder),
+        Err(refused) => {
+            if allow_registered {
+                if let Ok(Some(folder)) = crate::canonicalize_existing_dir(requested) {
+                    if crate::canonical_folder_is_registered(
+                        &folder,
+                        registered.iter().map(String::as_str),
+                    ) {
+                        return Ok(folder);
+                    }
+                }
+            }
+            Err(refused)
+        }
+    }
+}
+
+async fn authorized_recording_folder<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    meeting_folder: &str,
+    allow_registered: bool,
+) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let roots = super::recording_preferences::recording_roots(app).await;
+    let mut registered = Vec::new();
+    if allow_registered {
+        if let Some(state) = app.try_state::<crate::state::AppState>() {
+            registered = sqlx::query_scalar::<_, String>(
+                "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
+            )
+            .fetch_all(state.db_manager.pool())
+            .await
+            .unwrap_or_default();
+        }
+    }
+    authorize_recording_folder(Path::new(meeting_folder), &roots, &registered, allow_registered)
+}
+
 /// Recover audio from checkpoint files
 /// This is called by the transcript recovery system to merge audio chunks after a crash
 #[tauri::command]
-pub async fn recover_audio_from_checkpoints(
+pub async fn recover_audio_from_checkpoints<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     meeting_folder: String,
 ) -> Result<AudioRecoveryStatus, String> {
-    if super::recording_commands::is_recording().await {
+    // The webview names the folder; only a recording folder may be touched.
+    let folder = authorized_recording_folder(&app, &meeting_folder, false).await?;
+    recover_audio_in_folder(folder.to_string_lossy().to_string()).await
+}
+
+/// Recovery for a folder the caller has already validated.
+pub(crate) async fn recover_audio_in_folder(
+    meeting_folder: String,
+) -> Result<AudioRecoveryStatus, String> {
+    if super::recording_commands::is_starting() || super::recording_commands::capture_active() {
         return Err("Stop recording before recovering audio.".into());
     }
     let spool_folder = PathBuf::from(&meeting_folder);
@@ -639,10 +698,18 @@ pub(crate) async fn release_registered_capture(
 /// Clean up checkpoint files after successful recording or recovery
 /// This command is called by the frontend after successful save to clean up checkpoint files
 #[tauri::command]
-pub async fn cleanup_checkpoints(meeting_folder: String) -> Result<(), String> {
+pub async fn cleanup_checkpoints<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    meeting_folder: String,
+) -> Result<(), String> {
     info!("Cleaning up saved checkpoints");
 
-    let folder_path = PathBuf::from(&meeting_folder);
+    // The webview names the folder; only a recording folder, or one saved in the
+    // library, may be touched.
+    let folder_path = authorized_recording_folder(&app, &meeting_folder, true).await?;
+    if super::recording_commands::active_recording_folder().protects(&folder_path) {
+        return Err("Stop recording before cleaning up its checkpoints.".into());
+    }
     let checkpoints_dir = folder_path.join(".checkpoints");
 
     if checkpoints_dir.exists() {
@@ -659,7 +726,17 @@ pub async fn cleanup_checkpoints(meeting_folder: String) -> Result<(), String> {
 /// Check for saved/recovered audio or readable raw/legacy recovery data.
 /// The command name is retained for existing recovery-dialog callers.
 #[tauri::command]
-pub async fn has_audio_checkpoints(meeting_folder: String) -> Result<bool, String> {
+pub async fn has_audio_checkpoints<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    meeting_folder: String,
+) -> Result<bool, String> {
+    // Only a recording folder may be probed.
+    let folder = authorized_recording_folder(&app, &meeting_folder, false).await?;
+    has_audio_in_folder(folder.to_string_lossy().to_string()).await
+}
+
+/// The probe for a folder the caller has already validated.
+async fn has_audio_in_folder(meeting_folder: String) -> Result<bool, String> {
     let folder_path = PathBuf::from(&meeting_folder);
     let checkpoints_dir = folder_path.join(".checkpoints");
 
@@ -703,12 +780,12 @@ mod tests {
     async fn recovery_dialog_recognizes_spool_and_temporary_tail() {
         for temporary in [false, true] {
             let root = tempdir().unwrap();
-            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+            assert!(!has_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
             let (sender, _, _) =
                 super::super::transcription::queue::recording_audio_queue(root.path()).unwrap();
-            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+            assert!(!has_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
             sender
@@ -730,11 +807,11 @@ mod tests {
             } else {
                 chunk
             };
-            assert!(has_audio_checkpoints(root.path().to_string_lossy().into())
+            assert!(has_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
             std::fs::write(path, b"torn capture").unwrap();
-            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+            assert!(!has_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
         }
@@ -753,11 +830,11 @@ mod tests {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             // The existing saved-file validator checks that it is a nonempty file.
             std::fs::write(&file, b"synthetic saved audio").unwrap();
-            assert!(has_audio_checkpoints(root.path().to_string_lossy().into())
+            assert!(has_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
             std::fs::write(file, b"").unwrap();
-            assert!(!has_audio_checkpoints(root.path().to_string_lossy().into())
+            assert!(!has_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap());
         }
@@ -769,7 +846,7 @@ mod tests {
             let root = tempdir().unwrap();
             let file = root.path().join(name);
             std::fs::write(&file, b"synthetic nonempty saved audio").unwrap();
-            let status = recover_audio_from_checkpoints(root.path().to_string_lossy().into())
+            let status = recover_audio_in_folder(root.path().to_string_lossy().into())
                 .await
                 .unwrap();
             assert_eq!(status.status, "success");
@@ -997,5 +1074,116 @@ mod tests {
             names,
             vec![".audio_chunk_000.mp4.tmp", "audio_chunk_001.mp4"]
         );
+    }
+}
+
+#[cfg(test)]
+mod folder_authorization_tests {
+    use super::*;
+
+    struct Layout {
+        _base: tempfile::TempDir,
+        root: PathBuf,
+        inside: PathBuf,
+        previous_root: PathBuf,
+        in_previous: PathBuf,
+        saved_elsewhere: PathBuf,
+        stranger: PathBuf,
+    }
+
+    fn layout() -> Layout {
+        let base = tempfile::tempdir().unwrap();
+        let make = |path: PathBuf| {
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        };
+        let root = make(base.path().join("recordings"));
+        let previous_root = make(base.path().join("older-recordings"));
+        let layout = Layout {
+            inside: make(root.join("meeting")),
+            in_previous: make(previous_root.join("meeting")),
+            saved_elsewhere: make(base.path().join("imported").join("meeting")),
+            stranger: make(base.path().join("other").join("meeting")),
+            root,
+            previous_root,
+            _base: base,
+        };
+        // A marker file never makes a folder acceptable.
+        std::fs::write(layout.stranger.join("metadata.json"), b"{}").unwrap();
+        layout
+    }
+
+    #[test]
+    fn a_folder_in_the_configured_or_a_previous_root_is_accepted() {
+        let l = layout();
+        let roots = roots_with(&l);
+        for folder in [&l.inside, &l.in_previous] {
+            for allow in [false, true] {
+                assert_eq!(
+                    authorize_recording_folder(folder, &roots, &[], allow).unwrap(),
+                    folder.canonicalize().unwrap()
+                );
+            }
+        }
+    }
+
+    fn roots_with(l: &Layout) -> Vec<PathBuf> {
+        // The previous folder reaches the roots through `roots_from`, as in the app.
+        crate::audio::recording_preferences::roots_from(
+            vec![l.root.clone(), l.previous_root.clone()],
+            None,
+        )
+    }
+
+    #[test]
+    fn recovery_and_probing_work_in_a_trusted_network_root_and_not_outside_it() {
+        let base = tempfile::tempdir().unwrap();
+        let share = base.path().join("share");
+        let root = share.join("recordings");
+        let inside = root.join("meeting");
+        let outside = share.join("other").join("meeting");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        crate::local_path::mark_remote_for_tests(&share);
+        let roots = crate::audio::recording_preferences::roots_from(vec![root.clone()], None);
+        assert_eq!(
+            authorize_recording_folder(&inside, &roots, &[], false).unwrap(),
+            inside.canonicalize().unwrap()
+        );
+        assert!(authorize_recording_folder(&outside, &roots, &[], false).is_err());
+        let none = crate::audio::recording_preferences::roots_from(vec![], None);
+        assert!(authorize_recording_folder(&inside, &none, &[], false).is_err());
+    }
+
+    #[test]
+    fn without_remembering_the_old_folder_it_is_refused() {
+        let l = layout();
+        let roots = crate::audio::recording_preferences::roots_from(vec![l.root.clone()], None);
+        assert!(authorize_recording_folder(&l.in_previous, &roots, &[], false).is_err());
+    }
+
+    #[test]
+    fn a_library_registered_folder_is_accepted_only_where_registration_is_allowed() {
+        let l = layout();
+        let roots = roots_with(&l);
+        let registered = vec![l.saved_elsewhere.to_string_lossy().to_string()];
+        assert!(authorize_recording_folder(&l.saved_elsewhere, &roots, &registered, true).is_ok());
+        // Recovery and probing do not accept it.
+        assert!(authorize_recording_folder(&l.saved_elsewhere, &roots, &registered, false).is_err());
+    }
+
+    #[test]
+    fn unregistered_outside_folders_traversal_and_marker_files_are_refused() {
+        let l = layout();
+        let roots = roots_with(&l);
+        let registered = vec![l.saved_elsewhere.to_string_lossy().to_string()];
+        // Outside every root and not registered; its marker file does not help.
+        assert!(authorize_recording_folder(&l.stranger, &roots, &registered, true).is_err());
+        // Leaving a root by traversal.
+        let traversal = l.inside.join("..").join("..").join("other").join("meeting");
+        assert!(authorize_recording_folder(&traversal, &roots, &registered, true).is_err());
+        // The root itself and a missing folder.
+        assert!(authorize_recording_folder(&l.root, &roots, &[], true).is_err());
+        assert!(authorize_recording_folder(&l.root.join("missing"), &roots, &[], true).is_err());
     }
 }

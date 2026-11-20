@@ -16,6 +16,7 @@ interface UsePaginatedTranscriptsReturn {
     metadata: MeetingMetadata | null;
     segments: TranscriptSegmentData[];
     timelineSegments: TranscriptSegmentData[];
+    timelineComplete: boolean;
     transcripts: Transcript[];
     isLoading: boolean;
     isLoadingMore: boolean;
@@ -61,6 +62,7 @@ export function usePaginatedTranscripts({
     const [metadata, setMetadata] = useState<MeetingMetadata | null>(null);
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);
     const [timelineSegments, setTimelineSegments] = useState<TranscriptSegmentData[]>([]);
+    const [timelineComplete, setTimelineComplete] = useState(false);
     const [totalCount, setTotalCount] = useState(0);
     const [isLoading, setIsLoading] = useState(true);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -78,6 +80,7 @@ export function usePaginatedTranscripts({
         setMetadata(null);
         setTranscripts([]);
         setTimelineSegments([]);
+        setTimelineComplete(false);
         setTotalCount(0);
         setIsLoading(true);
         setIsLoadingMore(false);
@@ -159,6 +162,7 @@ export function usePaginatedTranscripts({
             const rows = await fetchAllMeetingTranscripts(invoke, meetingId);
             if (generation !== generationRef.current) return;
             setTimelineSegments(convertTranscriptsToSegments(rows));
+            setTimelineComplete(true);
         } catch {
             if (generation !== generationRef.current) return;
             setTimelineSegments([]);
@@ -191,6 +195,8 @@ export function usePaginatedTranscripts({
         setIsLoading(true);
         setIsLoadingMore(false);
         setError(null);
+        setTimelineComplete(false);
+        setTimelineSegments([]);
         try {
             await Promise.all([
                 loadMetadata(generation),
@@ -297,6 +303,7 @@ export function usePaginatedTranscripts({
         metadata,
         segments,
         timelineSegments,
+        timelineComplete,
         transcripts,
         isLoading,
         isLoadingMore,

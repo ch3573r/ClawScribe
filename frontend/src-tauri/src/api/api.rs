@@ -1,12 +1,13 @@
-use log::{debug as log_debug, error as log_error, info as log_info, warn as log_warn};
+use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 use tauri::{AppHandle, Runtime};
 
+use crate::credentials::SecretStatus;
 use crate::{
     audio::transcription::cloud::{
         mai_transcribe::MaiTranscribeProvider, mime_type_for_path,
-        openai_whisper::OpenAiWhisperProvider, validate_provider_upload_size,
+        openai_whisper::OpenAiWhisperProvider, transcribe_mai_file, validate_provider_upload_size,
         CloudTranscriptSegment, CloudTranscriptionProvider, DEFAULT_CLOUD_WHISPER_MODEL,
         DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER, PROVIDER_MAI_TRANSCRIBE,
     },
@@ -20,9 +21,6 @@ use crate::{
     state::AppState,
     summary::CustomOpenAIConfig,
 };
-
-// Hardcoded server URL
-const APP_SERVER_URL: &str = "http://localhost:5167";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
@@ -53,39 +51,21 @@ pub struct TranscriptSearchResult {
     pub timestamp: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProfileRequest {
-    pub email: String,
-    pub license_key: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SaveProfileRequest {
-    pub id: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpdateProfileRequest {
-    pub email: String,
-    pub license_key: String,
-    pub company: String,
-    pub position: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+/// The summary model configuration as the webview sees it. A stored key is
+/// reported only as `apiKeyStatus` (whether there is one, and a short hint).
+#[derive(Debug, Serialize)]
 pub struct ModelConfig {
     pub provider: String,
     pub model: String,
     #[serde(rename = "whisperModel")]
     pub whisper_model: String,
-    #[serde(rename = "apiKey")]
-    pub api_key: Option<String>,
+    #[serde(rename = "apiKeyStatus")]
+    pub api_key_status: SecretStatus,
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SaveModelConfigRequest {
     pub provider: String,
     pub model: String,
@@ -102,13 +82,84 @@ pub struct GetApiKeyRequest {
     pub provider: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// The custom OpenAI-compatible provider settings as the webview sees them:
+/// everything but the key, which is reported as `apiKeyStatus`.
+#[derive(Debug, Serialize)]
+pub struct CustomOpenAIConfigView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_problem: Option<String>,
+    pub allow_unencrypted: bool,
+    pub endpoint: String,
+    #[serde(rename = "apiKeyStatus")]
+    pub api_key_status: SecretStatus,
+    pub model: String,
+    #[serde(rename = "timeoutSeconds")]
+    pub timeout_seconds: Option<u64>,
+    pub organization: Option<String>,
+    pub project: Option<String>,
+    #[serde(rename = "maxTokens")]
+    pub max_tokens: Option<i32>,
+    #[serde(rename = "contextWindow")]
+    pub context_window: Option<usize>,
+    pub temperature: Option<f32>,
+    #[serde(rename = "topP")]
+    pub top_p: Option<f32>,
+}
+
+impl From<CustomOpenAIConfig> for CustomOpenAIConfigView {
+    fn from(config: CustomOpenAIConfig) -> Self {
+        Self {
+            api_key_status: SecretStatus::of(config.api_key.as_deref()),
+            destination_problem: config.destination_problem,
+            allow_unencrypted: config.allow_unencrypted,
+            endpoint: config.endpoint,
+            model: config.model,
+            timeout_seconds: config.timeout_seconds,
+            organization: config.organization,
+            project: config.project,
+            max_tokens: config.max_tokens,
+            context_window: config.context_window,
+            temperature: config.temperature,
+            top_p: config.top_p,
+        }
+    }
+}
+
+/// The key for a custom-provider test: the one typed for this test, else the
+/// stored key, but the stored one only for the endpoint it was saved with.
+async fn custom_openai_test_key(
+    pool: &sqlx::SqlitePool,
+    supplied: Option<String>,
+    endpoint: &str,
+) -> Result<Option<String>, String> {
+    if let Some(key) = clean_string(supplied) {
+        return Ok(Some(key));
+    }
+    let stored = SettingsRepository::get_custom_openai_config(pool)
+        .await
+        .map_err(|_| "Failed to read the saved connection settings".to_string())?;
+    match stored {
+        Some(config) if config.api_key.as_deref().is_some_and(|key| !key.is_empty()) => {
+            if crate::openai::secret_destination::same_destination(&config.endpoint, endpoint) {
+                Ok(config.api_key)
+            } else {
+                Err("Enter the API key to test a different endpoint.".to_string())
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The transcription configuration. `api_key` is never serialised, so a key
+/// cannot reach the webview through this type; the webview reads the key's
+/// status through `api_get_transcript_api_key_status`.
+#[derive(Serialize, Deserialize)]
 pub struct TranscriptConfig {
     #[serde(rename = "allowUnencrypted", default)]
     pub allow_unencrypted: bool,
     pub provider: String,
     pub model: String,
-    #[serde(rename = "apiKey")]
+    #[serde(rename = "apiKey", skip_serializing, default)]
     pub api_key: Option<String>,
     #[serde(rename = "baseUrl", skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -118,7 +169,7 @@ pub struct TranscriptConfig {
     pub region: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SaveTranscriptConfigRequest {
     pub provider: String,
     pub model: String,
@@ -268,102 +319,6 @@ fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
     value.and_then(|json| serde_json::from_str::<Vec<TranscriptWord>>(json).ok())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Profile {
-    pub id: String,
-    pub name: Option<String>,
-    pub email: String,
-    pub license_key: String,
-    pub company: Option<String>,
-    pub position: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub is_licensed: bool,
-}
-
-// Helper function to get server address - now hardcoded
-async fn get_server_address<R: Runtime>(_app: &AppHandle<R>) -> Result<String, String> {
-    log_info!("Using hardcoded server URL: {}", APP_SERVER_URL);
-    Ok(APP_SERVER_URL.to_string())
-}
-
-// Generic API call function with optional authentication
-async fn make_api_request<R: Runtime, T: for<'de> Deserialize<'de>>(
-    app: &AppHandle<R>,
-    endpoint: &str,
-    method: &str,
-    body: Option<&str>,
-    additional_headers: Option<HashMap<String, String>>,
-    auth_token: Option<String>, // Pass auth token from frontend
-) -> Result<T, String> {
-    let client = reqwest::Client::new();
-    let server_url = get_server_address(app).await?;
-
-    let url = format!("{}{}", server_url, endpoint);
-    log_info!("Making {} request to: {}", method, url);
-
-    let mut request = match method.to_uppercase().as_str() {
-        "GET" => client.get(&url),
-        "POST" => client.post(&url),
-        "PUT" => client.put(&url),
-        "DELETE" => client.delete(&url),
-        _ => return Err(format!("Unsupported HTTP method: {}", method)),
-    };
-
-    // Add authorization header if auth token is provided
-    if let Some(token) = auth_token {
-        log_info!("Adding authorization header");
-        request = request.header("Authorization", format!("Bearer {}", token));
-    } else {
-        log_warn!("No auth token provided, making unauthenticated request");
-    }
-
-    request = request.header("Content-Type", "application/json");
-
-    // Add additional headers if provided
-    if let Some(headers) = additional_headers {
-        for (key, value) in headers {
-            request = request.header(&key, &value);
-        }
-    }
-
-    // Add body if provided
-    if let Some(body_str) = body {
-        request = request.body(body_str.to_string());
-    }
-
-    let response = request.send().await.map_err(|e| {
-        let error_msg = format!("Request failed: {}", e);
-        log_error!("Provider request failed");
-        error_msg
-    })?;
-
-    let status = response.status();
-    log_info!("Response status: {}", status);
-
-    if !status.is_success() {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        let error_msg = format!("HTTP {}: {}", status, error_text);
-        log_error!("Provider returned an unsuccessful HTTP status");
-        return Err(error_msg);
-    }
-
-    let response_text = response.text().await.map_err(|e| {
-        let error_msg = format!("Failed to read response: {}", e);
-        log_error!("Failed to read provider response");
-        error_msg
-    })?;
-
-    serde_json::from_str(&response_text).map_err(|e| {
-        let error_msg = format!("Failed to parse JSON: {}", e);
-        log_error!("Failed to parse provider response JSON");
-        error_msg
-    })
-}
-
 // API Commands for Tauri
 
 #[tauri::command]
@@ -428,72 +383,20 @@ pub async fn api_search_transcripts<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn api_get_profile<R: Runtime>(
-    app: AppHandle<R>,
-    email: String,
-    license_key: String,
-    auth_token: Option<String>,
-) -> Result<Profile, String> {
-    log_info!("Loading profile");
-
-    let profile_request = ProfileRequest { email, license_key };
-    let body = serde_json::to_string(&profile_request).map_err(|e| e.to_string())?;
-
-    make_api_request::<R, Profile>(&app, "/get-profile", "POST", Some(&body), None, auth_token)
-        .await
-}
-
-#[tauri::command]
-pub async fn api_save_profile<R: Runtime>(
-    app: AppHandle<R>,
-    id: String,
-    email: String,
-    auth_token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    log_info!("Saving profile");
-
-    let save_request = SaveProfileRequest { id, email };
-    let body = serde_json::to_string(&save_request).map_err(|e| e.to_string())?;
-
-    make_api_request::<R, serde_json::Value>(
-        &app,
-        "/save-profile",
-        "POST",
-        Some(&body),
-        None,
-        auth_token,
+pub(crate) async fn api_search_library(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    scope: Option<crate::knowledge::types::KnowledgeScope>,
+    one_per_meeting: Option<bool>,
+) -> Result<crate::knowledge::store::literal::LinkedHits, String> {
+    crate::knowledge::store::literal::linked(
+        state.db_manager.pool(),
+        &query,
+        scope.as_ref(),
+        one_per_meeting.unwrap_or_default(),
     )
     .await
-}
-
-#[tauri::command]
-pub async fn api_update_profile<R: Runtime>(
-    app: AppHandle<R>,
-    email: String,
-    license_key: String,
-    company: String,
-    position: String,
-    auth_token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    log_info!("Updating profile");
-
-    let update_request = UpdateProfileRequest {
-        email,
-        license_key,
-        company,
-        position,
-    };
-    let body = serde_json::to_string(&update_request).map_err(|e| e.to_string())?;
-
-    make_api_request::<R, serde_json::Value>(
-        &app,
-        "/update-profile",
-        "POST",
-        Some(&body),
-        None,
-        auth_token,
-    )
-    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -503,8 +406,14 @@ pub async fn api_get_model_config<R: Runtime>(
     _auth_token: Option<String>,
 ) -> Result<Option<ModelConfig>, String> {
     log_info!("api_get_model_config called (native)");
-    let pool = state.db_manager.pool();
+    model_config_view(&crate::credentials::platform_store(), state.db_manager.pool()).await
+}
 
+/// The summary model settings as the webview sees them: a key status, never a key.
+pub(crate) async fn model_config_view(
+    store: &crate::credentials::Store,
+    pool: &sqlx::SqlitePool,
+) -> Result<Option<ModelConfig>, String> {
     match SettingsRepository::get_model_config(pool).await {
         Ok(Some(config)) => {
             log_info!(
@@ -514,14 +423,14 @@ pub async fn api_get_model_config<R: Runtime>(
                 &config.whisper_model,
                 &config.ollama_endpoint
             );
-            match SettingsRepository::get_api_key(pool, &config.provider).await {
-                Ok(api_key) => {
-                    log_info!("Successfully retrieved model config and API key.");
+            match SettingsRepository::api_key_status_with(store, pool, &config.provider).await {
+                Ok(api_key_status) => {
+                    log_info!("Successfully retrieved model config.");
                     Ok(Some(ModelConfig {
                         provider: config.provider,
                         model: config.model,
                         whisper_model: config.whisper_model,
-                        api_key,
+                        api_key_status,
                         ollama_endpoint: config.ollama_endpoint,
                     }))
                 }
@@ -544,7 +453,7 @@ pub async fn api_get_model_config<R: Runtime>(
 
 #[tauri::command]
 pub async fn api_save_model_config<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
@@ -553,14 +462,28 @@ pub async fn api_save_model_config<R: Runtime>(
     ollama_endpoint: Option<String>,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
-        &provider,
-        &model,
-        &whisper_model,
-        &ollama_endpoint
-    );
     let pool = state.db_manager.pool();
+    use crate::summary::{automatic, llm_client::LLMProvider};
+    let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
+    let new_provider = LLMProvider::from_str(&provider).ok();
+    let saved = SettingsRepository::get_model_config(pool)
+        .await
+        .map_err(|_| "Could not read the saved summary model settings")?;
+    if saved.as_ref().is_some_and(|old| {
+        LLMProvider::from_str(&old.provider).ok() != new_provider
+            || old.model.trim() != model.trim()
+            || (new_provider == Some(LLMProvider::Ollama)
+                && !automatic::same_endpoint(
+                    old.ollama_endpoint
+                        .as_deref()
+                        .unwrap_or("http://localhost:11434"),
+                    ollama_endpoint
+                        .as_deref()
+                        .unwrap_or("http://localhost:11434"),
+                ))
+    }) {
+        automatic::invalidate_external_review(&app)?;
+    }
 
     if let Err(e) = SettingsRepository::save_model_config(
         pool,
@@ -604,30 +527,20 @@ pub async fn api_save_model_config<R: Runtime>(
     )
 }
 
+/// Whether a summary provider has a stored key, with a short hint. The key
+/// itself is never returned; requests that need it use it inside the core.
 #[tauri::command]
-pub async fn api_get_api_key<R: Runtime>(
+pub async fn api_get_api_key_status<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
-    _auth_token: Option<String>,
-) -> Result<String, String> {
-    log_info!(
-        "api_get_api_key called (native) for provider '{}'",
-        &provider
-    );
-    match SettingsRepository::get_api_key(&state.db_manager.pool(), &provider).await {
-        Ok(key) => {
-            log_info!(
-                "Successfully retrieved API key for provider '{}'.",
-                &provider
-            );
-            Ok(key.unwrap_or_default())
-        }
-        Err(e) => {
-            log_error!("Failed to read provider credential");
-            Err(e.to_string())
-        }
-    }
+) -> Result<SecretStatus, String> {
+    SettingsRepository::api_key_status(state.db_manager.pool(), &provider)
+        .await
+        .map_err(|e| {
+            log_error!("Failed to read provider credential status");
+            e.to_string()
+        })
 }
 
 #[tauri::command]
@@ -637,29 +550,27 @@ pub async fn api_get_transcript_config<R: Runtime>(
     _auth_token: Option<String>,
 ) -> Result<Option<TranscriptConfig>, String> {
     log_info!("api_get_transcript_config called (native)");
-    let pool = state.db_manager.pool();
+    transcript_config_view(state.db_manager.pool()).await
+}
 
+/// The transcription settings as the webview sees them: no key (its status is
+/// read separately).
+pub(crate) async fn transcript_config_view(
+    pool: &sqlx::SqlitePool,
+) -> Result<Option<TranscriptConfig>, String> {
     match SettingsRepository::get_transcript_config(pool).await {
         Ok(Some(config)) => {
             log_info!("Loaded transcription configuration");
-            match SettingsRepository::get_transcript_api_key(pool, &config.provider).await {
-                Ok(api_key) => {
-                    log_info!("Successfully retrieved transcript config and API key.");
-                    Ok(Some(TranscriptConfig {
-                        allow_unencrypted: config.cloud_http_opt_in(&config.provider),
-                        provider: config.provider.clone(),
-                        model: config.model,
-                        api_key,
-                        base_url: config.cloud_whisper_base_url,
-                        endpoint: config.mai_transcribe_endpoint,
-                        region: config.mai_transcribe_region,
-                    }))
-                }
-                Err(e) => {
-                    log_error!("Failed to get transcript API key for provider");
-                    Err(e.to_string())
-                }
-            }
+            // The key stays in the core: the webview gets its status separately.
+            Ok(Some(TranscriptConfig {
+                allow_unencrypted: config.cloud_http_opt_in(&config.provider),
+                provider: config.provider.clone(),
+                model: config.model,
+                api_key: None,
+                base_url: config.cloud_whisper_base_url,
+                endpoint: config.mai_transcribe_endpoint,
+                region: config.mai_transcribe_region,
+            }))
         }
         Ok(None) => {
             log_info!("No transcript config found, returning default.");
@@ -711,11 +622,6 @@ pub async fn api_save_transcript_config<R: Runtime>(
         )?,
         _ => {}
     }
-    if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
-        log_error!("Failed to save transcript config");
-        return Err(e.to_string());
-    }
-
     let clean_base_url = base_url
         .as_deref()
         .map(str::trim)
@@ -728,6 +634,41 @@ pub async fn api_save_transcript_config<R: Runtime>(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let new_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // Refuse before anything is written: a bad new key, or a stored key that
+    // would follow a changed address without being entered again.
+    if let Some(problem) = new_key.and_then(crate::credentials::new_secret_problem) {
+        return Err(problem.to_string());
+    }
+    if let Err(e) = SettingsRepository::require_key_for_new_destination(
+        pool,
+        &provider,
+        clean_base_url,
+        clean_endpoint,
+        new_key.is_some(),
+    )
+    .await
+    {
+        return Err(e.to_string());
+    }
+    if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
+        log_error!("Failed to save transcript config");
+        return Err(e.to_string());
+    }
+
+    // The new key goes first: the address saved next is then the one the new
+    // key was entered for, and a failed key save leaves the old address alone.
+    if let Some(key) = new_key {
+        log_info!("API key provided, saving for transcript provider...");
+        if let Err(e) = SettingsRepository::save_transcript_api_key(pool, &provider, key).await {
+            log_error!("Failed to save transcript API key");
+            return Err(e.to_string());
+        }
+    }
+
     if let Err(e) = SettingsRepository::save_transcript_provider_config(
         pool,
         &provider,
@@ -735,22 +676,12 @@ pub async fn api_save_transcript_config<R: Runtime>(
         clean_endpoint,
         clean_region,
         allow_unencrypted,
+        new_key.is_some(),
     )
     .await
     {
         log_error!("Failed to save transcript provider config");
         return Err(e.to_string());
-    }
-
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            log_info!("API key provided, saving for transcript provider...");
-            if let Err(e) = SettingsRepository::save_transcript_api_key(pool, &provider, &key).await
-            {
-                log_error!("Failed to save transcript API key");
-                return Err(e.to_string());
-            }
-        }
     }
 
     log_info!("Successfully saved transcript configuration.");
@@ -759,32 +690,40 @@ pub async fn api_save_transcript_config<R: Runtime>(
     )
 }
 
+/// Whether a hosted transcription provider has a stored key, with a short
+/// hint. The key itself is never returned.
 #[tauri::command]
-pub async fn api_get_transcript_api_key<R: Runtime>(
+pub async fn api_get_transcript_api_key_status<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
-    _auth_token: Option<String>,
-) -> Result<String, String> {
-    log_info!(
-        "api_get_transcript_api_key called (native) for provider '{}'",
-        &provider
-    );
-    match SettingsRepository::get_transcript_api_key(&state.db_manager.pool(), &provider).await {
-        Ok(key) => {
-            log_info!("Transcription credential loaded");
-            Ok(key.unwrap_or_default())
-        }
-        Err(e) => {
-            log_error!("Failed to read transcription credential");
-            Err(e.to_string())
-        }
-    }
+) -> Result<SecretStatus, String> {
+    SettingsRepository::transcript_api_key_status(state.db_manager.pool(), &provider)
+        .await
+        .map_err(|e| {
+            log_error!("Failed to read transcription credential status");
+            e.to_string()
+        })
+}
+
+/// Removes a hosted transcription provider's stored key.
+#[tauri::command]
+pub async fn api_clear_transcript_api_key<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    provider: String,
+) -> Result<(), String> {
+    SettingsRepository::clear_transcript_api_key(state.db_manager.pool(), &provider)
+        .await
+        .map_err(|e| {
+            log_error!("Failed to remove the transcription credential");
+            e.to_string()
+        })
 }
 
 #[tauri::command]
 pub async fn api_test_transcript_provider<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
@@ -801,7 +740,60 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         "api_test_transcript_provider called (native) for provider '{}'",
         &provider
     );
-    let audio_path = Path::new(&audio_path);
+    // The audio is a file the user chose in the dialog the core opened
+    // (`pick_transcription_test_audio`), once, or one of the user's own recordings.
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    let (audio_path, grant) = {
+        match crate::file_grants::take(crate::file_grants::Purpose::TestAudio, &audio_path) {
+            Ok(granted) => (granted.path.clone(), Some(granted)),
+            Err(_) if crate::file_grants::inside_roots(Path::new(&audio_path), &roots) => {
+                (std::path::PathBuf::from(&audio_path), None)
+            }
+            Err(message) => return Err(message),
+        }
+    };
+    let result = test_transcript_provider_with(
+        &state,
+        provider,
+        model,
+        allow_unencrypted,
+        api_key,
+        base_url,
+        endpoint,
+        &audio_path,
+        language,
+    )
+    .await;
+    if result.is_err() {
+        if let Some(granted) = &grant {
+            crate::file_grants::give_back(crate::file_grants::Purpose::TestAudio, granted);
+        }
+    }
+    result
+}
+
+/// Whether a provider test may use plain HTTP. A request from the webview can
+/// switch it off, but never on over a saved "no"; without a request the saved
+/// setting applies, and only to the saved destination.
+fn test_http_opt_in(requested: Option<bool>, saved: Option<bool>, destination_is_saved: bool) -> bool {
+    match (requested, saved) {
+        (Some(true), Some(false)) => false,
+        (Some(requested), _) => requested,
+        (None, saved) => destination_is_saved && saved == Some(true),
+    }
+}
+
+async fn test_transcript_provider_with(
+    state: &tauri::State<'_, AppState>,
+    provider: String,
+    model: String,
+    allow_unencrypted: Option<bool>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    endpoint: Option<String>,
+    audio_path: &Path,
+    language: Option<String>,
+) -> Result<TranscriptProviderTestResult, String> {
     let audio_size_bytes =
         crate::audio::transcription::cloud::validate_test_audio_path(audio_path).await?;
     let pool = state.db_manager.pool();
@@ -834,17 +826,21 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         requested,
         clean_optional(api_key.as_deref()).is_some(),
     )?;
-    let allow_unencrypted = allow_unencrypted.unwrap_or_else(|| {
+    let saved_opt_in = saved_config
+        .as_ref()
+        .map(|config| config.cloud_http_opt_in(&provider));
+    // A request from the webview can switch plain HTTP off, never on over a
+    // saved "no": the saved setting decides, and an unsaved one is honoured.
+    let allow_unencrypted = test_http_opt_in(
+        allow_unencrypted,
+        saved_opt_in,
         crate::audio::transcription::cloud::test_destination(
             saved_endpoint,
             Some(&destination),
             false,
         )
-        .is_ok()
-            && saved_config
-                .as_ref()
-                .is_some_and(|config| config.cloud_http_opt_in(&provider))
-    });
+        .is_ok(),
+    );
     crate::openai::secret_destination::validate_secret_destination(
         &destination,
         allow_unencrypted,
@@ -901,24 +897,10 @@ pub async fn api_test_transcript_provider<R: Runtime>(
             let endpoint = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
-            validate_provider_upload_size(
-                PROVIDER_MAI_TRANSCRIBE,
-                Some(&endpoint),
-                audio_size_bytes,
-            )
-            .map_err(|error| {
-                format!(
-                    "MAI-Transcribe test failed ({}): {error}",
-                    error.category().as_str()
-                )
-            })?;
-            let audio = tokio::fs::read(audio_path)
-                .await
-                .map_err(|e| format!("Failed to read test audio file: {e}"))?;
             let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone())
                 .with_http_opt_in(allow_unencrypted);
-            let segments = provider_client
-                .transcribe_file(audio, file_name, mime_type, language)
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let segments = transcribe_mai_file(&provider_client, audio_path, language, &cancelled)
                 .await
                 .map_err(|error| {
                     format!(
@@ -1005,27 +987,20 @@ fn clean_optional(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// Removes a summary provider's stored key (and its credential-store entry).
 #[tauri::command]
-pub async fn api_delete_api_key<R: Runtime>(
+pub async fn api_clear_api_key<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
-    _auth_token: Option<String>,
 ) -> Result<(), String> {
-    log_info!(
-        "log_api_delete_api_key called (native) for provider '{}'",
-        &provider
-    );
-    match SettingsRepository::delete_api_key(&state.db_manager.pool(), &provider).await {
-        Ok(_) => {
-            log_info!("Successfully deleted API key for provider '{}'.", &provider);
-            Ok(())
-        }
-        Err(e) => {
-            log_error!("Failed to delete provider credential");
-            Err(e.to_string())
-        }
-    }
+    log_info!("api_clear_api_key called for provider '{}'", &provider);
+    SettingsRepository::delete_api_key(state.db_manager.pool(), &provider)
+        .await
+        .map_err(|e| {
+            log_error!("Failed to remove the provider credential");
+            e.to_string()
+        })
 }
 
 #[tauri::command]
@@ -1049,17 +1024,7 @@ pub async fn api_delete_meeting<R: Runtime>(
             .await
             .map_err(|_| "Could not read the meeting folder")?
             .flatten();
-    let mut roots = Vec::new();
-    roots.push(crate::audio::recording_preferences::get_default_recordings_folder());
-    roots.push(crate::audio::recording_preferences::get_legacy_default_recordings_folder());
-    if let Ok(preferences) =
-        crate::audio::recording_preferences::load_recording_preferences(&app).await
-    {
-        roots.push(preferences.save_folder);
-    }
-    if let Ok(data) = app.path().app_data_dir() {
-        roots.push(data.join("restored-recordings"));
-    }
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
 
     match MeetingsRepository::delete_meeting_with_documents(pool, &meeting_id).await {
         Ok((true, originals)) => {
@@ -1111,6 +1076,7 @@ pub async fn api_delete_meeting<R: Runtime>(
                     )
                     .fetch_all(pool)
                     .await;
+                    let meeting_id_for_files = meeting_id.clone();
                     match other_folders {
                         Ok(others) => {
                             let retained = format!(
@@ -1119,6 +1085,7 @@ pub async fn api_delete_meeting<R: Runtime>(
                             let result = tokio::task::spawn_blocking(move || {
                                 crate::database::meeting_files::remove_recording_folder(
                                     std::path::Path::new(&folder),
+                                    &meeting_id_for_files,
                                     &roots,
                                     &others
                                         .into_iter()
@@ -1504,7 +1471,7 @@ mod recording_snapshot_tests {
 
 #[tauri::command]
 pub async fn api_save_transcript<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_title: String,
     transcripts: Vec<serde_json::Value>,
@@ -1512,9 +1479,86 @@ pub async fn api_save_transcript<R: Runtime>(
     auth_token: Option<String>,
     recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
     use_saved_recording: Option<bool>,
+    calendar_link: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Saving meeting transcript");
+
+    // The webview does not decide where a meeting's files are: the folder must
+    // be one the core created for a recording (the session that just ended), or
+    // a marked recording inside a recording root being recovered. What is
+    // stored and read is the core's own text for it.
+    let (folder_path, recording_id, recovered_live, marker) = match folder_path
+        .filter(|folder| !folder.trim().is_empty())
+    {
+        Some(requested) => {
+            let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+            // A folder this process created for a recording may be saved again (a
+            // retry of the same save finds its meeting). Any other folder, one
+            // from an earlier run being recovered, must not already belong to a
+            // meeting: that one is repaired, not saved a second time.
+            let created_here = crate::database::meeting_files::core_folder_text(std::path::Path::new(&requested)).is_some();
+            let asked = requested.clone();
+            let (authorised, recording_id, stamped_id, transcribes, marker) =
+                tokio::task::spawn_blocking(move || {
+                    use crate::database::meeting_files;
+                    let authorised =
+                        meeting_files::authorize_new_meeting_folder(&requested, &roots)?;
+                    if crate::audio::recording_commands::active_recording_folder()
+                        .protects(std::path::Path::new(&authorised))
+                    {
+                        return Err(
+                            "The recording is still being finalized. Try again after it stops."
+                                .into(),
+                        );
+                    }
+                    let marker = meeting_files::read_marker(std::path::Path::new(&authorised))
+                        .ok_or("The recording folder is no longer available.")?;
+                    if meeting_files::has_invalid_marker_id(&marker) {
+                        return Err("The recording marker has an invalid meeting ID.".into());
+                    }
+                    let recording_id = meeting_files::recording_id(&marker).map(str::to_owned);
+                    let stamped_id = meeting_files::stamped_meeting_id(&marker).map(str::to_owned);
+                    let transcribes = crate::audio::recording_mode::marker_transcribes(&marker);
+                    Ok::<_, String>((authorised, recording_id, stamped_id, transcribes, marker))
+                })
+                .await
+                .map_err(|_| "Could not check the recording folder".to_string())??;
+            if !created_here && stamped_id.is_none() && recording_id.is_none() {
+                let existing: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM meetings WHERE folder_path COLLATE NOCASE IN (?, ?) LIMIT 1",
+                )
+                .bind(&authorised)
+                .bind(&asked)
+                .fetch_optional(state.db_manager.pool())
+                .await
+                .map_err(|_| "Could not check the library".to_string())?;
+                if existing.is_some() {
+                    return Err("This recording is already saved in your library. Use Recover on it to repair that meeting instead of saving it again.".into());
+                }
+            }
+            let deleted: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM recording_library_deletions AS deleted
+                 WHERE meeting_id IN (?, ?) AND NOT EXISTS
+                     (SELECT 1 FROM meetings WHERE id = deleted.meeting_id))",
+            )
+            .bind(stamped_id.as_deref())
+            .bind(recording_id.as_deref())
+            .fetch_one(state.db_manager.pool())
+            .await
+            .map_err(|_| "Could not check the library".to_string())?;
+            if deleted {
+                return Err("This meeting was deleted from this library.".into());
+            }
+            (
+                Some(authorised),
+                recording_id.or(stamped_id),
+                transcribes,
+                Some(marker),
+            )
+        }
+        None => (None, None, false, None),
+    };
 
     let (transcripts_to_save, used_fallback) = if use_saved_recording.unwrap_or(false) {
         let folder = folder_path.clone();
@@ -1529,18 +1573,46 @@ pub async fn api_save_transcript<R: Runtime>(
     };
 
     let mut save_warnings = Vec::new();
+    // Invalid optional calendar metadata must not prevent the recording from being saved.
+    let calendar_link = calendar_link.and_then(|value| {
+        match serde_json::from_value::<crate::library::calendar::CalendarLink>(value)
+            .map_err(|_| "Invalid calendar link.".to_string())
+            .and_then(crate::library::calendar::CalendarLink::normalized)
+            .and_then(|link| link.encoded())
+        {
+            Ok(link) => Some(link),
+            Err(_) => {
+                save_warnings
+                    .push("The calendar event could not be linked. The recording was saved.");
+                None
+            }
+        }
+    });
     let mut recording_outcome = recording_outcome.unwrap_or_default();
     if used_fallback {
         recording_outcome.transcription_incomplete = true;
         save_warnings.push("The final transcript snapshot was unavailable. Saved the transcript visible in the app; review it for missing lines.");
         log_warn!("Library save used the UI transcript because the final snapshot was unavailable");
     }
-    if let Some(folder) = folder_path.as_ref().map(std::path::PathBuf::from) {
+    let mut measured = crate::audio::provenance::RecordingProvenance::default();
+    if let Some((folder, marker)) = folder_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .zip(marker)
+    {
         let saved = tokio::task::spawn_blocking(move || {
-            crate::audio::outcome::RecordingOutcome::read(&folder)
+            let measured = crate::audio::interrupted::recovered_provenance(&folder, &marker, None);
+            (
+                measured,
+                crate::audio::outcome::RecordingOutcome::read(&folder),
+            )
         })
         .await;
-        match saved {
+        let disk_outcome = saved.map(|(provenance, outcome)| {
+            measured = provenance;
+            outcome
+        });
+        match disk_outcome {
             Ok(Ok(Some(saved))) => {
                 recording_outcome.audio_save_failed |= saved.audio_save_failed;
                 recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
@@ -1555,19 +1627,70 @@ pub async fn api_save_transcript<R: Runtime>(
         }
     }
     let pool = state.db_manager.pool();
+    let stamp_target = folder_path.clone();
 
-    // Now, call the repository with the correctly typed data.
-    match TranscriptsRepository::save_transcript_with_outcome(
-        pool,
-        &meeting_title,
-        &transcripts_to_save,
-        folder_path,
-        Some(&recording_outcome),
-    )
-    .await
-    {
+    let saved = match (folder_path, recording_id) {
+        (Some(folder), Some(recording_id)) => {
+            TranscriptsRepository::save_recording_handoff(
+                pool,
+                &recording_id,
+                &meeting_title,
+                &transcripts_to_save,
+                folder,
+                &recording_outcome,
+                measured,
+            )
+            .await
+        }
+        (folder, _) => {
+            TranscriptsRepository::save_recording(
+                pool,
+                &meeting_title,
+                &transcripts_to_save,
+                folder,
+                Some(&recording_outcome),
+                calendar_link,
+                measured,
+            )
+            .await
+        }
+    };
+    match saved {
         Ok(meeting_id) => {
             log_info!("Meeting and transcript saved");
+            // Tie the folder to this meeting, so deleting the meeting later can
+            // verify it removes only its own recording.
+            if let Some(folder) = stamp_target {
+                // An idempotent retry may find this ID under a different
+                // restored path. Do not stamp the redundant copy.
+                let owns_folder: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ? AND folder_path = ?)",
+                )
+                .bind(&meeting_id)
+                .bind(&folder)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(false);
+                if owns_folder {
+                    let id = meeting_id.clone();
+                    let stamped = tokio::task::spawn_blocking(move || {
+                        crate::database::meeting_files::stamp_meeting_id(
+                            std::path::Path::new(&folder),
+                            &id,
+                        )
+                    })
+                    .await;
+                    if !matches!(stamped, Ok(Ok(()))) {
+                        log_warn!("The recording folder could not be marked with its meeting");
+                    }
+                }
+            }
+            if recovered_live {
+                crate::audio::recording_commands::wake_saved_recording_summary(
+                    &app,
+                    meeting_id.clone(),
+                );
+            }
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",
@@ -1586,7 +1709,7 @@ pub async fn api_save_transcript<R: Runtime>(
 /// Opens the meeting's recording folder in the system file explorer
 #[tauri::command]
 pub async fn open_meeting_folder<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<(), String> {
@@ -1608,34 +1731,38 @@ pub async fn open_meeting_folder<R: Runtime>(
             if let Some(folder_path) = m.folder_path {
                 log_info!("Opening meeting folder");
 
-                // Verify folder exists
-                let path = std::path::Path::new(&folder_path);
-                if !path.exists() {
-                    log_warn!("Folder path does not exist");
-                    return Err(format!("Recording folder not found: {}", folder_path));
-                }
+                // Only an existing, unlinked directory inside a recording root is
+                // opened; UNC and extended-length text is refused before any
+                // filesystem call could reach the network.
+                let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+                let folder = tokio::task::spawn_blocking(move || {
+                    crate::database::meeting_files::authorize_folder_to_open(&folder_path, &roots)
+                })
+                .await
+                .map_err(|_| "Could not check the recording folder".to_string())?
+                .map_err(|_| {
+                    log_warn!("The meeting folder is not an allowed recording folder");
+                    "The recording folder is not available".to_string()
+                })?;
 
                 // Open folder based on OS
                 #[cfg(target_os = "macos")]
                 {
                     std::process::Command::new("open")
-                        .arg(&folder_path)
+                        .arg(&folder)
                         .spawn()
                         .map_err(|e| format!("Failed to open folder: {}", e))?;
                 }
 
                 #[cfg(target_os = "windows")]
                 {
-                    std::process::Command::new("explorer")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
+                    crate::local_path::open_in_explorer(&folder)?;
                 }
 
                 #[cfg(target_os = "linux")]
                 {
                     std::process::Command::new("xdg-open")
-                        .arg(&folder_path)
+                        .arg(&folder)
                         .spawn()
                         .map_err(|e| format!("Failed to open folder: {}", e))?;
                 }
@@ -1654,77 +1781,6 @@ pub async fn open_meeting_folder<R: Runtime>(
     }
 }
 
-// Simple test command to check backend connectivity
-#[tauri::command]
-pub async fn test_backend_connection<R: Runtime>(
-    app: AppHandle<R>,
-    auth_token: Option<String>,
-) -> Result<String, String> {
-    log_debug!("Testing backend connection...");
-
-    let client = reqwest::Client::new();
-    let server_url = get_server_address(&app).await?;
-
-    log_debug!("Testing connection to: {}", server_url);
-
-    let mut request = client.get(&format!("{}/docs", server_url));
-
-    if let Some(token) = auth_token {
-        request = request.header("Authorization", format!("Bearer {}", token));
-    }
-
-    match request.send().await {
-        Ok(response) => {
-            let status = response.status();
-            log_debug!("Backend responded with status: {}", status);
-            Ok(format!("Backend is reachable. Status: {}", status))
-        }
-        Err(e) => {
-            let error_msg = format!("Failed to connect to backend: {}", e);
-            log_debug!("{}", error_msg);
-            Err(error_msg)
-        }
-    }
-}
-
-#[tauri::command]
-pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
-    log_debug!("=== DEBUG: Testing backend connection ===");
-
-    // Test 1: Check server address from store
-    let server_url = match get_server_address(&app).await {
-        Ok(url) => {
-            log_debug!("✓ Server URL from store: {}", url);
-            url
-        }
-        Err(e) => {
-            log_error!("✗ Failed to get server URL");
-            return Err(format!("Failed to get server URL: {}", e));
-        }
-    };
-
-    // Test 2: Make a simple HTTP request to the backend
-    let client = reqwest::Client::new();
-    let test_url = format!("{}/docs", server_url); // Try the docs endpoint which should be public
-
-    log_debug!("Testing connection to: {}", test_url);
-
-    match client.get(&test_url).send().await {
-        Ok(response) => {
-            let status = response.status();
-            log_debug!("✓ Backend responded with status: {}", status);
-            Ok(format!(
-                "Backend connection successful! Status: {}, URL: {}",
-                status, server_url
-            ))
-        }
-        Err(e) => {
-            log_error!("✗ Backend connection failed");
-            Err(format!("Backend connection failed: {}", e))
-        }
-    }
-}
-
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     crate::external_url::open_url_in_default_browser(&url)
@@ -1736,7 +1792,7 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 /// This configuration is stored as JSON and includes endpoint, apiKey, model, and optional parameters
 #[tauri::command]
 pub async fn api_save_custom_openai_config<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     endpoint: String,
     allow_unencrypted: Option<bool>,
@@ -1791,6 +1847,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
         destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
         endpoint: endpoint.trim().to_string(),
+        // No key here means "keep the stored one" (see `save_custom_openai_config`).
         api_key: api_key.filter(|k| !k.trim().is_empty()),
         model: model.trim().to_string(),
         timeout_seconds,
@@ -1803,6 +1860,33 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     };
 
     let pool = state.db_manager.pool();
+
+    use crate::summary::{automatic, llm_client::LLMProvider};
+    let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
+    let selected = SettingsRepository::get_model_config(pool)
+        .await
+        .map_err(|_| "Could not read the saved summary model settings")?;
+    if selected.is_some_and(|setting| {
+        matches!(
+            LLMProvider::from_str(&setting.provider),
+            Ok(LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible)
+        )
+    }) {
+        let old = SettingsRepository::get_custom_openai_config(pool)
+            .await
+            .map_err(|_| "Could not read the saved compatible provider settings")?;
+        let same_route = old.is_some_and(|old| {
+            automatic::same_endpoint(&old.endpoint, &config.endpoint)
+                && old.model.trim() == config.model
+                && old.allow_unencrypted == config.allow_unencrypted
+                && old.organization.as_deref().map(str::trim)
+                    == config.organization.as_deref().map(str::trim)
+                && old.project.as_deref().map(str::trim) == config.project.as_deref().map(str::trim)
+        });
+        if !same_route {
+            automatic::invalidate_external_review(&app)?;
+        }
+    }
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
@@ -1824,19 +1908,24 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 pub async fn api_get_custom_openai_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-) -> Result<Option<CustomOpenAIConfig>, String> {
+) -> Result<Option<CustomOpenAIConfigView>, String> {
     log_info!("api_get_custom_openai_config called");
+    custom_openai_config_view(&crate::credentials::platform_store(), state.db_manager.pool()).await
+}
 
-    let pool = state.db_manager.pool();
-
-    match SettingsRepository::get_custom_openai_config(pool).await {
+/// The custom provider settings as the webview sees them: a key status, never a key.
+pub(crate) async fn custom_openai_config_view(
+    store: &crate::credentials::Store,
+    pool: &sqlx::SqlitePool,
+) -> Result<Option<CustomOpenAIConfigView>, String> {
+    match SettingsRepository::get_custom_openai_config_with(store, pool).await {
         Ok(config) => {
             if config.is_some() {
                 log_info!("Found custom OpenAI configuration");
             } else {
                 log_info!("No custom OpenAI config found");
             }
-            Ok(config)
+            Ok(config.map(CustomOpenAIConfigView::from))
         }
         Err(e) => {
             log_error!("❌ Failed to get custom OpenAI config");
@@ -1845,11 +1934,26 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     }
 }
 
+/// Removes the custom provider's stored key; the rest of its settings stay.
+#[tauri::command]
+pub async fn api_clear_custom_openai_api_key<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    SettingsRepository::clear_custom_openai_api_key(state.db_manager.pool())
+        .await
+        .map_err(|e| {
+            log_error!("Failed to remove the custom provider credential");
+            e.to_string()
+        })
+}
+
 /// Tests the connection to a custom OpenAI-compatible endpoint
 /// Makes a minimal request to verify the endpoint is reachable and responds correctly
 #[tauri::command]
 pub async fn api_test_custom_openai_connection<R: Runtime>(
     _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     endpoint: String,
     allow_unencrypted: Option<bool>,
     api_key: Option<String>,
@@ -1869,6 +1973,8 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
         allow_unencrypted.unwrap_or(false),
     )?;
 
+    let api_key =
+        custom_openai_test_key(state.db_manager.pool(), api_key, &endpoint).await?;
     let config = CustomOpenAIConfig {
         destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
@@ -1901,6 +2007,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 #[tauri::command]
 pub async fn api_test_custom_openai_processing<R: Runtime>(
     _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     endpoint: String,
     allow_unencrypted: Option<bool>,
     api_key: Option<String>,
@@ -1913,6 +2020,8 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     organization: Option<String>,
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let api_key =
+        custom_openai_test_key(state.db_manager.pool(), api_key, &endpoint).await?;
     let config = CustomOpenAIConfig {
         destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
@@ -1952,4 +2061,203 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
         "followUpEmailPath": result.follow_up_email_path,
         "processingLogPath": result.processing_log_path
     }))
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    const FAKE_KEY: &str = "fake-api-key-value-7777";
+
+    fn custom_config() -> CustomOpenAIConfig {
+        CustomOpenAIConfig {
+            destination_problem: None,
+            allow_unencrypted: false,
+            endpoint: "https://gateway.example.com/v1".into(),
+            api_key: Some(FAKE_KEY.into()),
+            model: "model-a".into(),
+            timeout_seconds: Some(60),
+            organization: None,
+            project: None,
+            max_tokens: None,
+            context_window: Some(8192),
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn the_summary_model_config_serialises_a_status_and_never_a_key() {
+        let config = ModelConfig {
+            provider: "openai".into(),
+            model: "model-a".into(),
+            whisper_model: "large-v3".into(),
+            api_key_status: SecretStatus::of(Some(FAKE_KEY)),
+            ollama_endpoint: None,
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(!json.to_string().contains(FAKE_KEY));
+        assert!(json.get("apiKey").is_none());
+        assert_eq!(json["apiKeyStatus"], serde_json::json!({"stored": true, "hint": "7777"}));
+        assert!(!format!("{config:?}").contains(FAKE_KEY));
+    }
+
+    #[test]
+    fn the_transcript_config_never_serialises_its_key_even_when_it_holds_one() {
+        let config = TranscriptConfig {
+            allow_unencrypted: false,
+            provider: "cloud-whisper".into(),
+            model: "whisper-1".into(),
+            api_key: Some(FAKE_KEY.into()),
+            base_url: Some("https://api.example.com/v1".into()),
+            endpoint: None,
+            region: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains(FAKE_KEY));
+        assert!(!json.contains("apiKey"));
+    }
+
+    #[test]
+    fn the_custom_provider_view_has_a_status_and_no_key_and_keeps_the_other_fields() {
+        let view = CustomOpenAIConfigView::from(custom_config());
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(!json.to_string().contains(FAKE_KEY));
+        assert!(json.get("apiKey").is_none());
+        assert_eq!(json["apiKeyStatus"], serde_json::json!({"stored": true, "hint": "7777"}));
+        // The names the settings screen reads are unchanged.
+        assert_eq!(json["endpoint"], "https://gateway.example.com/v1");
+        assert_eq!(json["model"], "model-a");
+        assert_eq!(json["timeoutSeconds"], 60);
+        assert_eq!(json["contextWindow"], 8192);
+        assert_eq!(json["allow_unencrypted"], false);
+        let without_key = CustomOpenAIConfigView::from(CustomOpenAIConfig {
+            api_key: None,
+            ..custom_config()
+        });
+        assert_eq!(
+            serde_json::to_value(&without_key).unwrap()["apiKeyStatus"],
+            serde_json::json!({"stored": false, "hint": null})
+        );
+    }
+
+    #[test]
+    fn debug_output_of_the_custom_provider_settings_never_contains_the_key() {
+        assert!(!format!("{:?}", custom_config()).contains(FAKE_KEY));
+    }
+
+    /// Every window of `len` characters of a key: if none appears in what the
+    /// webview receives, no part of the key longer than the hint does.
+    fn windows(key: &str, len: usize) -> Vec<String> {
+        let chars: Vec<char> = key.chars().collect();
+        chars.windows(len).map(|window| window.iter().collect()).collect()
+    }
+
+    fn assert_no_part_of_the_key(output: &str, key: &str, what: &str) {
+        assert!(!output.contains(key), "{what} contains a whole key");
+        for part in windows(key, 5) {
+            assert!(!output.contains(&part), "{what} contains part of a key");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_getter_returns_a_stored_key_or_more_than_its_hint() {
+        use crate::credentials::test_support::MemoryStore;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let memory = MemoryStore::new();
+        let store: crate::credentials::Store = memory.clone();
+
+        // One fake key per place a key can be stored.
+        let mut keys = Vec::new();
+        let mut next_key = |keys: &mut Vec<String>| {
+            let key = format!("zzfakeQ{:02}x7kL9mV4wR8tB5nC1d", keys.len());
+            keys.push(key.clone());
+            key
+        };
+        let summary = ["openai", "claude", "ollama", "groq", "openrouter"];
+        let transcript = ["localWhisper", "deepgram", "elevenLabs", "groq", "openai", "cloud-whisper", "mai-transcribe"];
+        for provider in summary {
+            let key = next_key(&mut keys);
+            SettingsRepository::save_api_key_with(&store, &pool, provider, &key).await.unwrap();
+        }
+        for provider in transcript {
+            let key = next_key(&mut keys);
+            SettingsRepository::save_transcript_api_key_with(&store, &pool, provider, &key).await.unwrap();
+        }
+        let custom_key = next_key(&mut keys);
+        SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &CustomOpenAIConfig { api_key: Some(custom_key), ..custom_config() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(memory.entries(), keys.len(), "every key is in the credential store");
+
+        let mut outputs: Vec<(String, String)> = Vec::new();
+        for provider in summary {
+            SettingsRepository::save_model_config(&pool, provider, "model-a", "large-v3", None).await.unwrap();
+            let view = model_config_view(&store, &pool).await.unwrap().unwrap();
+            outputs.push((format!("model config for {provider}"), serde_json::to_string(&view).unwrap()));
+            let status = SettingsRepository::api_key_status_with(&store, &pool, provider).await.unwrap();
+            assert!(status.stored, "{provider} reports a stored key");
+            outputs.push((format!("summary status for {provider}"), serde_json::to_string(&status).unwrap()));
+        }
+        for provider in transcript {
+            SettingsRepository::save_transcript_config(&pool, provider, "model-a").await.unwrap();
+            let view = transcript_config_view(&pool).await.unwrap().unwrap();
+            outputs.push((format!("transcript config for {provider}"), serde_json::to_string(&view).unwrap()));
+            let status = SettingsRepository::transcript_api_key_status_with(&store, &pool, provider).await.unwrap();
+            assert!(status.stored, "{provider} reports a stored key");
+            outputs.push((format!("transcript status for {provider}"), serde_json::to_string(&status).unwrap()));
+        }
+        let custom_view = custom_openai_config_view(&store, &pool).await.unwrap().unwrap();
+        outputs.push(("custom provider config".into(), serde_json::to_string(&custom_view).unwrap()));
+        // Debug output counts as output too.
+        outputs.push(("custom provider debug".into(), format!("{custom_view:?}")));
+
+        assert!(outputs.len() > 20);
+        for (what, output) in &outputs {
+            for key in &keys {
+                assert_no_part_of_the_key(output, key, what);
+            }
+            // The hint, when there is one, is the last four characters at most.
+            if let Ok(status) = serde_json::from_str::<serde_json::Value>(output) {
+                if let Some(hint) = status.get("hint").and_then(|hint| hint.as_str()) {
+                    assert_eq!(hint, "nC1d");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_cannot_switch_plain_http_on_over_a_saved_no() {
+        // (requested, saved, destination is the saved one) -> allowed
+        for (requested, saved, same, expected) in [
+            (Some(true), Some(false), true, false),
+            (Some(true), Some(false), false, false),
+            (Some(true), Some(true), true, true),
+            (Some(true), None, false, true),
+            (Some(false), Some(true), true, false),
+            (None, Some(true), true, true),
+            (None, Some(true), false, false),
+            (None, Some(false), true, false),
+            (None, None, true, false),
+        ] {
+            assert_eq!(test_http_opt_in(requested, saved, same), expected, "{requested:?} {saved:?} {same}");
+        }
+    }
+
+    #[test]
+    fn a_stored_key_is_only_offered_for_its_own_endpoint() {
+        assert!(crate::openai::secret_destination::same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v1/"));
+        assert!(crate::openai::secret_destination::same_destination(" HTTPS://Gateway.Example.com/v1 ", "https://gateway.example.com/v1"));
+        assert!(!crate::openai::secret_destination::same_destination("https://gateway.example.com/v1", "https://other.example.com/v1"));
+        assert!(!crate::openai::secret_destination::same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v2"));
+    }
 }

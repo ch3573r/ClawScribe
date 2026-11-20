@@ -53,8 +53,10 @@ function createView({ fromRecording = false } = {}) {
 test('a summary that arrives after navigation cannot appear in or overwrite the next meeting', async () => {
   const view = createView();
   view.render();
+  await flush();
   view.navigate('second');
   view.loadMetadata();
+  await flush();
   view.summaries.get('second').resolve({ status: 'completed', data: { markdown: 'Second notes' } });
   await flush();
   view.summaries.get('first').resolve({ status: 'completed', data: { markdown: 'First notes' } });
@@ -65,7 +67,7 @@ test('a summary that arrives after navigation cannot appear in or overwrite the 
   view.unmount();
 });
 
-test('auto-generation waits for saved notes to load and preserves an existing summary', async () => {
+test('opening a recorded meeting displays an existing native summary', async () => {
   const view = createView({ fromRecording: true });
   view.render();
   view.loadMetadata();
@@ -74,22 +76,20 @@ test('auto-generation waits for saved notes to load and preserves an existing su
   assert.equal(view.calls.some(call => call.command === 'api_get_model_config'), false);
   view.summaries.get('first').resolve({ status: 'completed', data: { markdown: 'Already saved' } });
   await flush();
-  assert.equal(view.content().shouldAutoGenerate, false);
+  assert.equal(view.content().summaryData.markdown, 'Already saved');
   await flush();
   assert.equal(view.calls.some(call => call.command === 'api_get_model_config'), false);
   view.unmount();
 });
 
-test('automatic summaries never configure a provider when none was selected', async () => {
+test('reopening a skipped recording displays its reason without starting a second job', async () => {
   const view = createView({ fromRecording: true });
   view.render();
   view.loadMetadata();
-  view.summaries.get('first').resolve({ status: 'idle' });
   await flush();
-  view.render();
+  view.summaries.get('first').resolve({ status: 'skipped', error: 'Automatic summaries are off.' });
   await flush();
-  assert.equal(view.calls.filter(call => call.command === 'api_get_model_config').length, 1);
-  assert.equal(view.calls.some(call => call.command.startsWith('api_save_')), false);
-  assert.equal(view.content().shouldAutoGenerate, false);
+  assert.equal(view.content().summaryJob.error, 'Automatic summaries are off.');
+  assert.equal(view.calls.some(call => /generate|start_recording_summary|get_model_config/.test(call.command)), false);
   view.unmount();
 });

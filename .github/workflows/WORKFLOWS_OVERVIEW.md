@@ -9,7 +9,8 @@ in repository settings, never in committed files.
 
 | Workflow | Trigger | Execution and output |
 | --- | --- | --- |
-| `clawscribe-windows-release.yml` | Manual or reusable call | Local Windows runner; checks or installers; explicit draft/publish options |
+| `clawscribe-windows-release.yml` | Manual or reusable call | Local Windows runner; checks or installers (with packaged-binary acceptance of the unpacked installer); explicit draft/publish options. The Vulkan SDK comes from the local `.github/actions/vulkan-sdk` action: a matching SDK is reused, otherwise it is staged in its own per-version folder and never over the runner's own SDK |
+| `native-library-tests.yml` | Trusted pull request or `main` push on native paths, or manual with a commit SHA (optionally `provision-toolchain`) | Local Windows runner; verifies the pinned toolchain (installs only on a manual provisioning run), rebuilds the embedded frontend assets, runs the locked native check and the required release-profile Rust library test groups; size-bounded local build cache |
 | `windows-candidate.yml` | `release/**` push or manual | Local Windows frontend checks, then the Windows GPU build and a draft release |
 | `windows-native-loader-diagnostics.yml` | Selected trusted branch pushes or manual | Local Windows runner; native Vulkan loader fixture |
 | `pr-main-check.yml` | Trusted pull request, `main` push, or manual | Local Windows safety, version, frontend typecheck and helper tests |

@@ -1,9 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { appDataDir } from '@tauri-apps/api/path';
-import { listen } from '@tauri-apps/api/event';
 import { motion } from 'framer-motion';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -18,18 +15,20 @@ import { LiveAssistancePanel } from '@/components/LiveAssistancePanel';
 import { HomeDashboard } from '@/components/HomeDashboard';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useModalState } from '@/hooks/useModalState';
-import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
-import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
+import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecordings';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
+import { errorText } from '@/lib/errorText';
+import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
+import { LIVE_MODEL_FAILURE_MESSAGE, transcriptionSettingsPath } from '@/lib/start-error';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 export default function Home() {
   // Local page state (not moved to contexts)
-  const [isRecording, setIsRecordingState] = useState(false);
-  const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
   // Use contexts for state management
@@ -38,20 +37,19 @@ export default function Home() {
   const recordingState = useRecordingState();
 
   // Extract status from global state
-  const { status, isStarting, isStopping, isProcessing, isSaving } = recordingState;
+  const { status, isRecording, isStarting, isStopping, isProcessing, isSaving } = recordingState;
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
-  const { setIsMeetingActive, sidebarOffset, isSidebarResizing, refetchMeetings } = useSidebar();
-  const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
-  const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
-  const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState);
-
-  // Get handleRecordingStop function and setIsStopping (state comes from global context)
-  const { handleRecordingStop, setIsStopping } = useRecordingStop(
-    setIsRecordingState,
-    setIsRecordingDisabled
+  const { sidebarOffset, isSidebarResizing, refetchMeetings } = useSidebar();
+  const { modals, messages, showModal, hideModal, modelStartFailure, dismissModelStartFailure } = useModalState(transcriptModelConfig);
+  const liveReadiness = useLiveTranscriptionReadiness(
+    recordingState.recordingMode === 'live',
+    transcriptModelConfig.provider,
+    transcriptModelConfig.model,
   );
+  const isRecordingDisabled = isStarting || isStopping || isProcessing || isSaving;
+  const { handleRecordingStart } = useRecordingStart();
 
   // Recovery hook
   const {
@@ -59,6 +57,7 @@ export default function Home() {
     isLoading: isLoadingRecovery,
     isRecovering,
     checkForRecoverableTranscripts,
+    keepRecoverableMeeting,
     recoverMeeting,
     loadMeetingTranscripts,
     deleteRecoverableMeeting
@@ -96,6 +95,23 @@ export default function Home() {
     performStartupChecks();
   }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
 
+  // Settings > General can ask for the dialog again ("Interrupted recordings").
+  // It opens only when there is something to recover and nothing is running.
+  useEffect(() => {
+    let requested: string | null = null;
+    try {
+      requested = sessionStorage.getItem(RECOVERY_OPEN_REQUEST);
+      sessionStorage.removeItem(RECOVERY_OPEN_REQUEST);
+    } catch {
+      return;
+    }
+    if (!requested) return;
+    // "Show kept" also lists the recordings the user asked not to be asked about.
+    void checkForRecoverableTranscripts({ includeKept: requested === RECOVERY_OPEN_ALL }).then(found => {
+      if (found.length > 0) setShowRecoveryDialog(true);
+    });
+  }, [checkForRecoverableTranscripts]);
+
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {
     // Only show dialog if we have meetings and haven't shown it yet this session
@@ -114,7 +130,7 @@ export default function Home() {
       const result = await recoverMeeting(meetingId);
 
       if (result.success) {
-        toast.success('Meeting recovered successfully!', {
+        toast.success('Meeting recovered', {
           description: result.audioRecoveryStatus?.status === 'partial'
             ? 'Available audio recovered with gaps. You can transcribe it from the saved meeting.'
             : result.audioRecoveryStatus?.status === 'success'
@@ -125,7 +141,7 @@ export default function Home() {
                 ? 'Transcripts saved. Audio recovery needs a retry; original recording files were kept.'
                 : 'Transcripts recovered (no audio available)',
           action: result.meetingId ? {
-            label: 'View Meeting',
+            label: 'View meeting',
             onClick: () => {
               router.push(`/meeting-details?id=${result.meetingId}`);
             }
@@ -150,7 +166,7 @@ export default function Home() {
       }
     } catch (error) {
       toast.error('Failed to recover meeting', {
-        description: error instanceof Error ? error.message : 'Unknown error occurred',
+        description: errorText(error),
       });
       throw error;
     }
@@ -165,44 +181,6 @@ export default function Home() {
       sessionStorage.removeItem('recovery_dialog_shown');
     }
   };
-
-  useEffect(() => {
-    if (recordingState.isRecording) {
-      const interval = setInterval(() => {
-        setBarHeights(prev => {
-          const newHeights = [...prev];
-          newHeights[0] = Math.random() * 20 + 10 + 'px';
-          newHeights[1] = Math.random() * 20 + 10 + 'px';
-          newHeights[2] = Math.random() * 20 + 10 + 'px';
-          return newHeights;
-        });
-      }, 300);
-
-      return () => clearInterval(interval);
-    }
-  }, [recordingState.isRecording]);
-
-  // Stop the recording when the sidebar "Recording…" indicator is clicked.
-  // Mirrors RecordingControls.stopRecordingAction so the stop flow is identical
-  // regardless of which control triggered it.
-  useEffect(() => {
-    const onStopFromSidebar = async () => {
-      if (!recordingState.isRecording || isStopping) return;
-      setIsStopping(true);
-      try {
-        const dataDir = await appDataDir();
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const savePath = `${dataDir}/recording-${timestamp}.wav`;
-        await invoke('stop_recording', { args: { save_path: savePath } });
-        await handleRecordingStop(true);
-      } catch (error) {
-        console.error('Failed to stop recording from sidebar:', error);
-        await handleRecordingStop(false);
-      }
-    };
-    window.addEventListener('stop-recording-from-sidebar', onStopFromSidebar);
-    return () => window.removeEventListener('stop-recording-from-sidebar', onStopFromSidebar);
-  }, [recordingState.isRecording, isStopping, handleRecordingStop, setIsStopping]);
 
   // Computed values using global status
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
@@ -221,6 +199,24 @@ export default function Home() {
         messages={messages}
         onClose={hideModal}
       />
+      <Dialog open={modelStartFailure !== null} onOpenChange={open => { if (!open) dismissModelStartFailure(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Live transcription couldn’t start</DialogTitle>
+            <DialogDescription>{modelStartFailure && LIVE_MODEL_FAILURE_MESSAGE[modelStartFailure]}</DialogDescription>
+          </DialogHeader>
+          {recordingState.modeError && <p role="alert" className="text-sm text-destructive">{recordingState.modeError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => {
+              dismissModelStartFailure();
+              router.push(transcriptionSettingsPath(liveReadiness.data?.provider));
+            }}>Transcription settings</Button>
+            <Button disabled={recordingState.isSavingMode} onClick={async () => {
+              if (await recordingState.setRecordingMode('audio_only')) dismissModelStartFailure();
+            }}>Use audio-only mode</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Recovery Dialog */}
       <TranscriptRecovery
@@ -229,6 +225,7 @@ export default function Home() {
         recoverableMeetings={recoverableMeetings}
         onRecover={handleRecovery}
         onDelete={deleteRecoverableMeeting}
+        onKeep={keepRecoverableMeeting}
         onLoadPreview={loadMeetingTranscripts}
       />
       <div className="flex flex-1 overflow-hidden">
@@ -237,7 +234,6 @@ export default function Home() {
             <TranscriptPanel
               isProcessingStop={isProcessingStop}
               isStopping={isStopping}
-              showModal={showModal}
               assistance={<LiveAssistancePanel />}
             />
 
@@ -255,11 +251,9 @@ export default function Home() {
                       <RecordingControls
                         variant="floating"
                         isRecording={recordingState.isRecording}
-                        onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
                         onRecordingStart={handleRecordingStart}
                         onTranscriptReceived={() => {}}
-                        onStopInitiated={() => setIsStopping(true)}
-                        barHeights={barHeights}
+                        onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
                         onTranscriptionError={(message) => showModal('errorAlert', message)}
                         isRecordingDisabled={isRecordingDisabled}
                         isParentProcessing={isProcessingStop}
@@ -278,15 +272,13 @@ export default function Home() {
           </>
         ) : (
           <HomeDashboard
-            canRecord={hasMicrophone || isRecording}
+            liveReadiness={liveReadiness}
             isRecording={recordingState.isRecording}
             isProcessingStop={isProcessingStop}
             isRecordingDisabled={isRecordingDisabled}
-            barHeights={barHeights}
             meetingName={meetingTitle}
             onRecordingStart={handleRecordingStart}
-            onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
-            onStopInitiated={() => setIsStopping(true)}
+            onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
             onTranscriptionError={(message) => {
               showModal('errorAlert', message);
             }}

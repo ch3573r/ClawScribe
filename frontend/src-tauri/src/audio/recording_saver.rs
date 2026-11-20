@@ -1,16 +1,18 @@
 use crate::api::TranscriptWord;
 use anyhow::Result;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
+use super::outcome::RecordingOutcome;
+use super::transcription::TranscriptUpdate;
 
 /// Structured transcript segment for JSON export
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,10 +39,14 @@ pub struct MeetingMetadata {
     pub recording_mode: super::recording_mode::RecordingMode,
     pub version: String,
     pub meeting_id: Option<String>,
+    #[serde(default)]
+    pub recording_id: Option<String>,
     pub meeting_name: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
     pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub duration_measured: bool,
     pub devices: DeviceInfo,
     pub audio_file: String,
     pub transcript_file: String,
@@ -53,6 +59,8 @@ pub struct MeetingMetadata {
     pub transcription_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcription_source_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +71,91 @@ pub struct DeviceInfo {
 
 #[derive(Default)]
 pub struct RecordingSaveReport {
-    pub outcome: super::outcome::RecordingOutcome,
+    pub outcome: RecordingOutcome,
     pub audio_path: Option<String>,
     raw_fully_encoded: bool,
     warnings: Vec<&'static str>,
+}
+
+#[derive(Default)]
+struct TranscriptState {
+    session_id: Option<String>,
+    segments: Vec<Arc<TranscriptSegment>>,
+}
+
+/// Shared with the transcription producer. Disk writers take a shallow copy
+/// of the rows and do their work after releasing the state lock.
+#[derive(Default)]
+pub(super) struct RecordingTranscripts {
+    state: Mutex<TranscriptState>,
+    snapshot_notify: tokio::sync::Notify,
+    updates_since_flush: AtomicUsize,
+    snapshot_written: AtomicBool,
+}
+
+impl RecordingTranscripts {
+    fn lock(&self) -> MutexGuard<'_, TranscriptState> {
+        // Retain the poison flag so failed-start cleanup cannot infer emptiness.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn snapshot(&self) -> Vec<Arc<TranscriptSegment>> {
+        self.lock().segments.clone()
+    }
+
+    pub(super) fn record_update(&self, session_id: &str, update: &TranscriptUpdate) -> bool {
+        if update.session_id.as_deref() != Some(session_id) || update.text.trim().is_empty() {
+            return false;
+        }
+        let segment = TranscriptSegment {
+            id: format!("seg_{}", update.sequence_id),
+            text: update.text.clone(),
+            speaker: match update.source.as_str() {
+                "Me" | "Participants" => Some(update.source.clone()),
+                _ => None,
+            },
+            audio_start_time: update.audio_start_time,
+            audio_end_time: update.audio_end_time,
+            duration: update.duration,
+            display_time: update.timestamp.clone(),
+            confidence: update.confidence,
+            sequence_id: update.sequence_id,
+            word_timestamps: update.word_timestamps.clone(),
+        };
+        let mut state = self.lock();
+        if state.session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        Self::upsert(&mut state.segments, segment);
+        drop(state);
+        self.notify_snapshot_worker();
+        true
+    }
+
+    fn add_segment(&self, segment: TranscriptSegment) {
+        Self::upsert(&mut self.lock().segments, segment);
+        self.notify_snapshot_worker();
+    }
+
+    fn upsert(segments: &mut Vec<Arc<TranscriptSegment>>, segment: TranscriptSegment) {
+        if let Some(existing) = segments
+            .iter_mut()
+            .find(|s| s.sequence_id == segment.sequence_id)
+        {
+            *existing = Arc::new(segment);
+        } else {
+            segments.push(Arc::new(segment));
+        }
+    }
+
+    fn notify_snapshot_worker(&self) {
+        let pending = self.updates_since_flush.fetch_add(1, Ordering::AcqRel) + 1;
+        if (pending == 1 && !self.snapshot_written.load(Ordering::Acquire))
+            || pending == TRANSCRIPT_SNAPSHOT_MAX_UPDATES
+        {
+            self.snapshot_notify.notify_one();
+        }
+    }
 }
 
 /// New recording saver using incremental saving strategy
@@ -77,16 +166,13 @@ pub struct RecordingSaver {
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
     metadata: Option<MeetingMetadata>,
-    transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
-    snapshot_dirty: Arc<AtomicBool>,
+    transcripts: Arc<RecordingTranscripts>,
     snapshot_write_lock: Arc<Mutex<()>>,
     snapshot_task: Option<tokio::task::JoinHandle<()>>,
-    transcript_updates_since_flush: AtomicUsize,
-    transcript_snapshot_written: AtomicBool,
-    last_transcript_flush: Mutex<Instant>,
     transcription_provider: Option<String>,
     transcription_model: Option<String>,
     transcription_source_language: Option<String>,
+    summary_language: Option<String>,
 }
 
 impl RecordingSaver {
@@ -98,22 +184,36 @@ impl RecordingSaver {
             meeting_folder: None,
             meeting_name: None,
             metadata: None,
-            transcript_segments: Arc::new(Mutex::new(Vec::new())),
-            snapshot_dirty: Arc::new(AtomicBool::new(false)),
+            transcripts: Arc::default(),
             snapshot_write_lock: Arc::new(Mutex::new(())),
             snapshot_task: None,
-            transcript_updates_since_flush: AtomicUsize::new(0),
-            transcript_snapshot_written: AtomicBool::new(false),
-            last_transcript_flush: Mutex::new(Instant::now()),
             transcription_provider: None,
             transcription_model: None,
             transcription_source_language: None,
+            summary_language: None,
         }
     }
 
     /// Snapshot the selected capture mode before initializing meeting metadata.
     pub fn set_mode(&mut self, mode: super::recording_mode::RecordingMode) {
         self.mode = mode;
+    }
+
+    pub(crate) fn set_summary_language(&mut self, language: Option<&str>) {
+        self.summary_language = language.and_then(|value| {
+            crate::summary::metadata::normalise_supported_summary_language(value).ok()
+        });
+    }
+
+    pub(crate) fn continue_audio_only(&mut self) {
+        self.mode = super::recording_mode::RecordingMode::AudioOnly;
+        self.set_transcription_info(None, None, None);
+        if let Some(metadata) = &mut self.metadata {
+            metadata.recording_mode = self.mode;
+            metadata.transcription_provider = None;
+            metadata.transcription_model = None;
+            metadata.transcription_source_language = None;
+        }
     }
 
     /// Provider captured for this recording, without loading saved credentials.
@@ -153,69 +253,25 @@ impl RecordingSaver {
             // Write updated metadata to disk if folder exists
             if let Some(folder) = &self.meeting_folder {
                 let metadata_clone = metadata.clone();
-                if let Err(_e) = self.write_metadata(folder, &metadata_clone) {
+                if let Err(_e) = write_metadata(folder, &metadata_clone) {
                     warn!("Failed to update metadata with device info");
                 }
             }
         }
     }
 
-    /// Add or update a structured transcript segment (upserts based on sequence_id)
-    /// Also saves incrementally to disk
+    pub(super) fn bind_transcript_session(&self, session_id: &str) -> Arc<RecordingTranscripts> {
+        self.transcripts.lock().session_id = Some(session_id.to_owned());
+        self.transcripts.clone()
+    }
+
+    pub(super) fn close_transcript_input(&self) {
+        self.transcripts.lock().session_id = None;
+    }
+
+    /// Add or update a transcript segment and schedule a recovery snapshot.
     pub fn add_transcript_segment(&self, segment: TranscriptSegment) {
-        if let Ok(mut segments) = self.transcript_segments.lock() {
-            // Check if segment with same sequence_id exists (update it)
-            if let Some(existing) = segments
-                .iter_mut()
-                .find(|s| s.sequence_id == segment.sequence_id)
-            {
-                *existing = segment.clone();
-                debug!("Updated existing transcript segment");
-            } else {
-                // New segment, add it
-                segments.push(segment.clone());
-                debug!("Added transcript segment");
-            }
-        } else {
-            error!("Failed to lock transcript segments for adding segment");
-        }
-
-        self.snapshot_dirty.store(true, Ordering::Release);
-
-        let pending_updates = self
-            .transcript_updates_since_flush
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-        let elapsed = self
-            .last_transcript_flush
-            .lock()
-            .map(|last_flush| last_flush.elapsed())
-            .unwrap_or(Duration::MAX);
-        let snapshot_due = transcript_snapshot_due(
-            self.transcript_snapshot_written.load(Ordering::Acquire),
-            pending_updates,
-            elapsed,
-        );
-
-        // Keep a crash-recovery snapshot, but coalesce updates. Rewriting the
-        // entire growing JSON document for every segment is cumulative O(n²)
-        // work over a long meeting.
-        if snapshot_due {
-            if let Some(folder) = &self.meeting_folder {
-                match self.write_transcripts_json(folder) {
-                    Ok(()) => {
-                        self.transcript_updates_since_flush
-                            .store(0, Ordering::Release);
-                        self.transcript_snapshot_written
-                            .store(true, Ordering::Release);
-                        if let Ok(mut last_flush) = self.last_transcript_flush.lock() {
-                            *last_flush = Instant::now();
-                        }
-                    }
-                    Err(_e) => warn!("Failed to write incremental transcript update"),
-                }
-            }
-        }
+        self.transcripts.add_segment(segment);
     }
 
     /// Legacy method for backward compatibility - converts text to basic segment
@@ -242,14 +298,15 @@ impl RecordingSaver {
     pub fn start_accumulation(
         &mut self,
         auto_save: bool,
-        _state: Arc<super::recording_state::RecordingState>,
+        state: Arc<super::recording_state::RecordingState>,
     ) -> Result<Option<super::transcription::queue::TranscriptionQueueSender>> {
         let name = self
             .meeting_name
             .clone()
             .unwrap_or_else(|| "Meeting".into());
         self.initialize_meeting_folder(&name, auto_save)?;
-        self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL);
+        // Only a recording that writes audio can run out of space for it.
+        self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL, Some((state, auto_save)));
         if !auto_save {
             return Ok(None);
         }
@@ -264,74 +321,127 @@ impl RecordingSaver {
         Ok(Some(sender))
     }
 
-    fn start_snapshot_timer(&mut self, interval_duration: Duration) {
+    /// Handle periodic snapshots and recovery requests. The free-space check
+    /// also runs once a minute for a recording that saves audio.
+    fn start_snapshot_timer(
+        &mut self,
+        interval_duration: Duration,
+        state: Option<(Arc<super::recording_state::RecordingState>, bool)>,
+    ) {
         let Some(folder) = self.meeting_folder.clone() else {
             return;
         };
-        let segments = self.transcript_segments.clone();
-        let dirty = self.snapshot_dirty.clone();
+        let transcripts = self.transcripts.clone();
         let write_lock = self.snapshot_write_lock.clone();
         self.snapshot_task = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
+            let mut disk_watch = super::disk_space::DiskWatch::new(Instant::now());
+            let mut gap_saved = false;
             loop {
-                interval.tick().await;
-                if !dirty.load(Ordering::Acquire) {
+                tokio::select! {
+                    _ = interval.tick() => {},
+                    _ = transcripts.snapshot_notify.notified() => {},
+                    _ = async {
+                        match &state {
+                            Some((state, _)) => state.wait_for_recovery_work().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {},
+                }
+                if let Some((state, true)) = &state {
+                    if !gap_saved && state.capture_incomplete() {
+                        let gap = folder.join(".audio-spool/.incomplete");
+                        gap_saved = tokio::task::spawn_blocking(move || {
+                            crate::library::atomic_write(&gap, b"capture incomplete")
+                        })
+                        .await
+                        .is_ok_and(|result| result.is_ok());
+                    }
+                    if disk_watch.due(Instant::now()) {
+                        let free = super::disk_space::free_space_bounded(&folder).await;
+                        if let Some(free) = disk_watch.evaluate(free) {
+                            state.report_disk_space_low(free, &folder);
+                        }
+                    }
+                }
+                let count = transcripts.updates_since_flush.swap(0, Ordering::AcqRel);
+                if count == 0 {
                     continue;
                 }
-                let (folder, segments, dirty, write_lock) = (
-                    folder.clone(),
-                    segments.clone(),
-                    dirty.clone(),
-                    write_lock.clone(),
-                );
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _writer = write_lock.lock().unwrap();
-                    // Take the dirty flag before cloning. Updates arriving during
-                    // I/O remain dirty for the next tick.
-                    if !dirty.swap(false, Ordering::AcqRel) {
-                        return;
-                    }
-                    let snapshot = segments.lock().unwrap().clone();
-                    if write_transcript_snapshot(&folder, &snapshot).is_err() {
-                        dirty.store(true, Ordering::Release);
-                        warn!("Transcript recovery snapshot could not be saved; retrying");
-                    }
-                })
-                .await;
+                if save_snapshot(folder.clone(), transcripts.clone(), write_lock.clone())
+                    .await
+                    .is_ok()
+                {
+                    transcripts.snapshot_written.store(true, Ordering::Release);
+                } else {
+                    // Keep the snapshot dirty even if speech stops before the next tick.
+                    transcripts
+                        .updates_since_flush
+                        .fetch_add(1, Ordering::AcqRel);
+                    warn!("Transcript recovery snapshot could not be saved; retrying");
+                }
             }
         }));
     }
 
-    pub async fn failed_start(&mut self) {
+    pub async fn failed_start(&mut self, capture_drained: bool) {
+        self.close_transcript_input();
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
             let _ = task.await;
         }
-        // The recording manager has already stopped and drained the pipeline.
-        if self.transcript_segments.lock().unwrap().is_empty() {
-            if let Some(folder) = &self.meeting_folder {
-                // Only remove a newly owned folder containing metadata and empty
-                // capture directories. Unknown or possibly recoverable files stay.
-                let empty = std::fs::read_dir(folder).is_ok_and(|mut entries| {
-                    entries.all(|entry| {
-                        let Ok(entry) = entry else {
-                            return false;
-                        };
-                        entry.file_name() == "metadata.json"
-                            || ([".audio-spool", ".checkpoints"]
-                                .iter()
-                                .any(|name| entry.file_name() == *name)
-                                && std::fs::read_dir(entry.path())
-                                    .is_ok_and(|mut files| files.next().is_none()))
+        let Some(folder) = &self.meeting_folder else {
+            return;
+        };
+        let owned = std::fs::symlink_metadata(folder)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && crate::database::meeting_files::read_marker(folder).is_some_and(|marker| {
+                self.recording_id().is_some_and(|id| {
+                    crate::database::meeting_files::recording_id(&marker) == Some(id)
+                        && marker
+                            .get("meeting_id")
+                            .is_none_or(serde_json::Value::is_null)
+                })
+            });
+        if !owned {
+            return;
+        }
+
+        let definitely_empty = self
+            .transcripts
+            .state
+            .lock()
+            .is_ok_and(|state| state.segments.is_empty());
+        if capture_drained && definitely_empty {
+            const CAPTURE_DIRS: [&str; 2] = [".audio-spool", ".checkpoints"];
+            let only_start_files = std::fs::read_dir(folder).is_ok_and(|mut entries| {
+                entries.all(|entry| {
+                    let Ok(entry) = entry else {
+                        return false;
+                    };
+                    entry.file_name() == "metadata.json"
+                        || (CAPTURE_DIRS.iter().any(|name| entry.file_name() == *name)
+                            && entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                })
+            });
+            // Non-recursive removal also protects a late capture write that
+            // lands after enumeration.
+            if only_start_files
+                && CAPTURE_DIRS
+                    .iter()
+                    .all(|name| match std::fs::remove_dir(folder.join(name)) {
+                        Ok(()) => true,
+                        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
                     })
-                });
-                if empty && std::fs::remove_dir_all(folder).is_ok() {
-                    self.meeting_folder = None;
-                    self.metadata = None;
-                    self.incremental_saver = None;
-                    return;
-                }
+                && std::fs::remove_file(folder.join("metadata.json")).is_ok()
+                && std::fs::remove_dir(folder).is_ok()
+            {
+                self.meeting_folder = None;
+                self.metadata = None;
+                self.incremental_saver = None;
+                return;
             }
         }
         // Never delete possible capture from a partially opened device. Mark
@@ -340,8 +450,8 @@ impl RecordingSaver {
             metadata.status = "error".into();
             let metadata = metadata.clone();
             let folder = folder.clone();
-            let _ = self.write_metadata(&folder, &metadata);
-            let _ = self.write_transcripts_json(&folder);
+            let _ = save_metadata(folder.clone(), metadata, false).await;
+            let _ = self.write_transcripts_json(&folder).await;
         }
     }
 
@@ -374,10 +484,12 @@ impl RecordingSaver {
             recording_mode: self.mode,
             version: "1.0".to_string(),
             meeting_id: None, // Will be set by backend
+            recording_id: Some(format!("meeting-{}", uuid::Uuid::new_v4())),
             meeting_name: Some(meeting_name.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
             duration_seconds: None,
+            duration_measured: false,
             devices: DeviceInfo {
                 microphone: None, // Could be enhanced to store actual device names
                 system_audio: None,
@@ -393,11 +505,12 @@ impl RecordingSaver {
             transcription_provider: self.transcription_provider.clone(),
             transcription_model: self.transcription_model.clone(),
             transcription_source_language: self.transcription_source_language.clone(),
+            summary_language: self.summary_language.clone(),
         };
 
         // Write initial metadata.json
         self.metadata = Some(metadata.clone());
-        self.write_metadata(&meeting_folder, &metadata)?;
+        write_metadata(&meeting_folder, &metadata)?;
 
         self.meeting_folder = Some(meeting_folder);
         self.metadata = Some(metadata);
@@ -405,35 +518,14 @@ impl RecordingSaver {
         Ok(())
     }
 
-    /// Write metadata.json to disk (atomic write with temp file)
-    fn write_metadata(&self, folder: &PathBuf, metadata: &MeetingMetadata) -> Result<()> {
-        let metadata_path = folder.join("metadata.json");
-        let temp_path = folder.join(".metadata.json.tmp");
-
-        let json_string = serde_json::to_string_pretty(metadata)?;
-        std::fs::write(&temp_path, json_string)?;
-        std::fs::rename(&temp_path, &metadata_path)?; // Atomic
-
-        Ok(())
-    }
-
     /// Write transcripts.json to disk (atomic write with temp file and validation)
-    fn write_transcripts_json(&self, folder: &PathBuf) -> Result<()> {
-        let _writer = self.snapshot_write_lock.lock().unwrap();
-        self.snapshot_dirty.store(false, Ordering::Release);
-        // Clone segments to avoid holding lock during I/O
-        let segments_clone = if let Ok(segments) = self.transcript_segments.lock() {
-            segments.clone()
-        } else {
-            error!("Failed to lock transcript segments for writing");
-            return Err(anyhow::anyhow!("Failed to lock transcript segments"));
-        };
-
-        let result = write_transcript_snapshot(folder, &segments_clone);
-        if result.is_err() {
-            self.snapshot_dirty.store(true, Ordering::Release);
-        }
-        result
+    async fn write_transcripts_json(&self, folder: &Path) -> Result<()> {
+        save_snapshot(
+            folder.to_path_buf(),
+            self.transcripts.clone(),
+            self.snapshot_write_lock.clone(),
+        )
+        .await
     }
 
     /// Stop and save using incremental saving approach
@@ -445,11 +537,9 @@ impl RecordingSaver {
         &mut self,
         app: &AppHandle<R>,
         recording_duration: Option<f64>,
-        capture_incomplete: bool,
+        outcome: RecordingOutcome,
     ) -> Result<RecordingSaveReport, String> {
-        let report = self
-            .finalize_files(recording_duration, capture_incomplete)
-            .await?;
+        let report = self.finalize_files(recording_duration, outcome).await?;
         if report.audio_path.is_some() {
             let _ = app.emit("recording-saved", serde_json::json!({
                 "audio_file": report.audio_path,
@@ -467,47 +557,52 @@ impl RecordingSaver {
     async fn finalize_files(
         &mut self,
         recording_duration: Option<f64>,
-        capture_incomplete: bool,
+        outcome: RecordingOutcome,
     ) -> Result<RecordingSaveReport, String> {
         info!("Stopping recording saver");
+        self.close_transcript_input();
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
             let _ = task.await;
         }
-        let mut report = RecordingSaveReport::default();
-        report.outcome.capture_incomplete = capture_incomplete;
+        let mut report = RecordingSaveReport {
+            outcome,
+            ..Default::default()
+        };
         // Attempt every artifact independently, then report all failures.
         if let Some(folder) = &self.meeting_folder {
-            if self.write_transcripts_json(folder).is_err() {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(5), self.write_transcripts_json(folder))
+                    .await,
+                Ok(Ok(()))
+            ) {
                 report.outcome.recording_files_incomplete = true;
                 report
                     .warnings
                     .push("The final transcript snapshot could not be saved.");
             }
             if let Some(metadata) = &mut self.metadata {
-                metadata.duration_seconds = recording_duration.or_else(|| {
-                    self.transcript_segments
-                        .lock()
-                        .ok()
-                        .and_then(|segments| segments.last().map(|segment| segment.audio_end_time))
-                });
+                metadata.duration_seconds =
+                    super::provenance::measured_duration(recording_duration);
+                metadata.duration_measured = metadata.duration_seconds.is_some();
                 metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
                 metadata.status = "error".into();
             }
             // Persist the stopped duration before potentially lengthy encoding.
             // Reuse the existing error status until final audio is published.
             if let Some(metadata) = &self.metadata {
-                if self.write_metadata(folder, metadata).is_err() {
+                if save_metadata(
+                    folder.clone(),
+                    metadata.clone(),
+                    report.outcome.capture_incomplete,
+                )
+                .await
+                .is_err()
+                {
                     // The final write below may repair this transient failure.
                     // Only its result determines the persistent file warning.
                     debug!("Stopped metadata write failed; final metadata will retry");
                 }
-            }
-            if capture_incomplete {
-                let _ = std::fs::write(
-                    folder.join(".audio-spool/.incomplete"),
-                    b"capture incomplete",
-                );
             }
         }
 
@@ -545,7 +640,10 @@ impl RecordingSaver {
                 "completed"
             }
             .into();
-            if self.write_metadata(folder, &metadata).is_err() {
+            if save_metadata(folder.clone(), metadata.clone(), false)
+                .await
+                .is_err()
+            {
                 report.outcome.recording_files_incomplete = true;
                 report
                     .warnings
@@ -556,17 +654,23 @@ impl RecordingSaver {
         // Persist gaps before discarding redundant originals. Missing samples
         // cannot be reconstructed by retaining an otherwise encoded raw spool.
         if let Some(folder) = &self.meeting_folder {
-            let outcome_saved = report.outcome.write(folder).is_ok();
+            let outcome = report.outcome.clone();
+            let folder = folder.clone();
+            let clean_spool = report.raw_fully_encoded && report.audio_path.is_some();
+            let outcome_saved = tokio::task::spawn_blocking(move || {
+                outcome.write(&folder)?;
+                if clean_spool {
+                    let _ = std::fs::remove_dir_all(folder.join(".audio-spool"));
+                }
+                Ok::<_, String>(())
+            })
+            .await
+            .is_ok_and(|result| result.is_ok());
             if !outcome_saved {
                 report.outcome.recording_files_incomplete = true;
                 report
                     .warnings
                     .push("The recording warning status could not be saved.");
-            }
-            // Raw audio cannot repair transcript or metadata files. Retain it
-            // only while audio publication or durable gap reporting is incomplete.
-            if report.raw_fully_encoded && report.audio_path.is_some() && outcome_saved {
-                let _ = std::fs::remove_dir_all(folder.join(".audio-spool"));
             }
         }
         Ok(report)
@@ -577,13 +681,17 @@ impl RecordingSaver {
         self.meeting_folder.as_ref()
     }
 
+    pub(crate) fn recording_id(&self) -> Option<&str> {
+        self.metadata.as_ref()?.recording_id.as_deref()
+    }
+
     /// Get accumulated transcript segments (for reload sync)
     pub fn get_transcript_segments(&self) -> Vec<TranscriptSegment> {
-        if let Ok(segments) = self.transcript_segments.lock() {
-            segments.clone()
-        } else {
-            Vec::new()
-        }
+        self.transcripts
+            .snapshot()
+            .iter()
+            .map(|segment| (**segment).clone())
+            .collect()
     }
 
     /// Get meeting name (for reload sync)
@@ -609,20 +717,27 @@ fn final_audio_failure_message(error: &str) -> &'static str {
     }
 }
 
-fn write_transcript_snapshot(
-    folder: &std::path::Path,
-    segments: &[TranscriptSegment],
-) -> Result<()> {
-    use std::io::Write;
+fn write_transcript_snapshot(folder: &Path, segments: &[Arc<TranscriptSegment>]) -> Result<()> {
+    use std::io::{BufWriter, Write};
+    #[derive(Serialize)]
+    struct Snapshot<'a> {
+        version: &'static str,
+        segments: Vec<&'a TranscriptSegment>,
+        total_segments: usize,
+        last_updated: String,
+    }
     let mut staged = tempfile::NamedTempFile::new_in(folder)?;
-    serde_json::to_writer(
-        staged.as_file_mut(),
-        &serde_json::json!({
-            "version": "1.0", "segments": segments, "total_segments": segments.len(),
-            "last_updated": chrono::Utc::now().to_rfc3339()
-        }),
-    )?;
-    staged.flush()?;
+    let snapshot = Snapshot {
+        version: "1.0",
+        segments: segments.iter().map(Arc::as_ref).collect(),
+        total_segments: segments.len(),
+        last_updated: chrono::Utc::now().to_rfc3339(),
+    };
+    {
+        let mut writer = BufWriter::new(staged.as_file_mut());
+        serde_json::to_writer(&mut writer, &snapshot)?;
+        writer.flush()?;
+    }
     staged.as_file().sync_all()?;
     staged.persist(folder.join("transcripts.json"))?;
     Ok(())
@@ -630,25 +745,145 @@ fn write_transcript_snapshot(
 
 impl Drop for RecordingSaver {
     fn drop(&mut self) {
+        self.close_transcript_input();
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
         }
     }
 }
 
-fn transcript_snapshot_due(
-    snapshot_written: bool,
-    pending_updates: usize,
-    elapsed: Duration,
-) -> bool {
-    !snapshot_written
-        || pending_updates >= TRANSCRIPT_SNAPSHOT_MAX_UPDATES
-        || elapsed >= TRANSCRIPT_SNAPSHOT_INTERVAL
+fn write_metadata(folder: &Path, metadata: &MeetingMetadata) -> Result<()> {
+    let json = serde_json::to_vec_pretty(metadata)?;
+    crate::library::atomic_write(&folder.join("metadata.json"), &json).map_err(anyhow::Error::msg)
+}
+
+async fn save_metadata(
+    folder: PathBuf,
+    metadata: MeetingMetadata,
+    capture_gap: bool,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let result = write_metadata(&folder, &metadata);
+        if capture_gap {
+            let _ = crate::library::atomic_write(
+                &folder.join(".audio-spool/.incomplete"),
+                b"capture incomplete",
+            );
+        }
+        result
+    })
+    .await?
+}
+
+async fn save_snapshot(
+    folder: PathBuf,
+    transcripts: Arc<RecordingTranscripts>,
+    write_lock: Arc<Mutex<()>>,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        // A failed writer only owned an unpublished temporary file.
+        let _writer = write_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let snapshot = transcripts.snapshot();
+        write_transcript_snapshot(&folder, &snapshot)
+    })
+    .await?
 }
 
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    fn poison<T>(lock: &Mutex<T>) {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("Synthetic lock poison");
+        }));
+        assert!(panic.is_err());
+        assert!(lock.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn poisoned_transcript_locks_preserve_rows_for_history_and_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        saver.add_transcript_chunk("Before poison".into());
+        poison(&saver.transcripts.state);
+        poison(&saver.snapshot_write_lock);
+        saver.add_transcript_segment(TranscriptSegment {
+            id: "seg_1".into(),
+            text: "After poison".into(),
+            sequence_id: 1,
+            ..saver.get_transcript_segments()[0].clone()
+        });
+        let rows = saver.get_transcript_segments();
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["Before poison", "After poison"]
+        );
+        saver.write_transcripts_json(&folder).await.unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(folder.join("transcripts.json")).unwrap())
+                .unwrap();
+        assert_eq!(snapshot["total_segments"], 2);
+        assert_eq!(snapshot["segments"][0]["text"], "Before poison");
+        assert_eq!(snapshot["segments"][1]["text"], "After poison");
+    }
+
+    #[tokio::test]
+    async fn failed_start_keeps_its_folder_when_transcript_emptiness_is_uncertain() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        poison(&saver.transcripts.state);
+        saver.failed_start(true).await;
+        assert_eq!(saver.get_meeting_folder(), Some(&folder));
+        let marker = crate::database::meeting_files::read_marker(&folder).unwrap();
+        assert_eq!(marker["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn startup_fallback_keeps_the_original_capture_and_audio_only_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver.set_transcription_info(Some("whisper".into()), Some("synthetic-model".into()), None);
+        let state = super::super::recording_state::RecordingState::new();
+        let sender = saver.start_accumulation(true, state.clone()).unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        drop(sender);
+        let spool = folder.join(".audio-spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        let capture = spool.join("synthetic-capture");
+        std::fs::write(&capture, b"captured prefix").unwrap();
+
+        saver.continue_audio_only();
+        state.mark_capture_incomplete();
+        let gap = spool.join(".incomplete");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !gap.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        saver.failed_start(true).await;
+
+        let marker = crate::database::meeting_files::read_marker(&folder).unwrap();
+        assert_eq!(marker["recording_mode"], "audio_only");
+        assert_eq!(marker["recording_id"], id);
+        assert!(marker["transcription_provider"].is_null());
+        assert_eq!(std::fs::read(capture).unwrap(), b"captured prefix");
+    }
 
     #[tokio::test]
     async fn snapshot_and_metadata_failures_do_not_block_available_audio() {
@@ -676,7 +911,16 @@ mod snapshot_tests {
         std::fs::remove_file(folder.join("metadata.json")).unwrap();
         std::fs::create_dir(folder.join("metadata.json")).unwrap();
         assert!(!folder.join(".checkpoints").exists());
-        let report = saver.finalize_files(Some(0.1), true).await.unwrap();
+        let report = saver
+            .finalize_files(
+                Some(0.1),
+                RecordingOutcome {
+                    capture_incomplete: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         assert!(report.audio_path.is_some());
         assert!(!report.outcome.audio_save_failed);
         assert!(report.outcome.capture_incomplete);
@@ -717,7 +961,17 @@ mod snapshot_tests {
         std::fs::create_dir(folder.join("metadata.json")).unwrap();
         let encoder = saver.incremental_saver.as_ref().unwrap().clone();
         let guard = encoder.lock().await;
-        let task = tokio::spawn(async move { saver.finalize_files(Some(0.1), true).await });
+        let task = tokio::spawn(async move {
+            saver
+                .finalize_files(
+                    Some(0.1),
+                    RecordingOutcome {
+                        capture_incomplete: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
         // The gap marker is written after the stopped metadata attempt. Block
         // encoding until that failed attempt has happened, then repair the path.
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -771,7 +1025,10 @@ mod snapshot_tests {
                 std::fs::remove_file(&failed_path).unwrap();
             }
             std::fs::create_dir(failed_path).unwrap();
-            let report = saver.finalize_files(Some(0.1), false).await.unwrap();
+            let report = saver
+                .finalize_files(Some(0.1), RecordingOutcome::default())
+                .await
+                .unwrap();
             assert!(report.audio_path.is_some() && report.raw_fully_encoded);
             assert!(!report.outcome.audio_save_failed);
             assert!(report.outcome.recording_files_incomplete);
@@ -818,7 +1075,16 @@ mod snapshot_tests {
             .await
             .unwrap();
         drop(sender);
-        let report = saver.finalize_files(Some(1.1), true).await.unwrap();
+        let report = saver
+            .finalize_files(
+                Some(1.1),
+                RecordingOutcome {
+                    capture_incomplete: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let folder = saver.meeting_folder.as_ref().unwrap();
         assert!(report.audio_path.is_some() && !report.outcome.audio_save_failed);
         assert!(!folder.join(".audio-spool").exists());
@@ -843,7 +1109,11 @@ mod snapshot_tests {
         // Hold the encoder lock so we can inspect metadata while finalization waits.
         let encoder = saver.incremental_saver.as_ref().unwrap().clone();
         let guard = encoder.lock().await;
-        let task = tokio::spawn(async move { saver.finalize_files(Some(1.25), false).await });
+        let task = tokio::spawn(async move {
+            saver
+                .finalize_files(Some(1.25), RecordingOutcome::default())
+                .await
+        });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let metadata: serde_json::Value =
@@ -907,7 +1177,10 @@ mod snapshot_tests {
                 )
                 .unwrap();
             }
-            let report = saver.finalize_files(Some(0.3), false).await.unwrap();
+            let report = saver
+                .finalize_files(Some(0.3), RecordingOutcome::default())
+                .await
+                .unwrap();
             assert!(!report.outcome.audio_save_failed);
             assert!(!report.outcome.recording_files_incomplete);
             assert_eq!(
@@ -961,7 +1234,10 @@ mod snapshot_tests {
         std::fs::create_dir(folder.join("transcripts.json")).unwrap();
         std::fs::remove_file(folder.join("metadata.json")).unwrap();
         std::fs::create_dir(folder.join("metadata.json")).unwrap();
-        let report = saver.finalize_files(Some(1.0), false).await.unwrap();
+        let report = saver
+            .finalize_files(Some(1.0), RecordingOutcome::default())
+            .await
+            .unwrap();
         assert!(report.outcome.audio_save_failed && report.outcome.recording_files_incomplete);
         assert_eq!(report.warnings.len(), 3);
         assert!(folder.join(".audio-spool").exists());
@@ -975,7 +1251,7 @@ mod snapshot_tests {
         saver
             .initialize_meeting_folder("Synthetic meeting", false)
             .unwrap();
-        saver.start_snapshot_timer(Duration::from_millis(20));
+        saver.start_snapshot_timer(Duration::from_millis(20), None);
         saver.add_transcript_chunk("First synthetic sentence".into());
         saver.add_transcript_segment(TranscriptSegment {
             id: "second".into(),
@@ -996,9 +1272,10 @@ mod snapshot_tests {
             .join("transcripts.json");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let json: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-                if json["total_segments"] == 2 {
+                let json: Option<serde_json::Value> = std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                if json.is_some_and(|json| json["total_segments"] == 2) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1006,7 +1283,7 @@ mod snapshot_tests {
         })
         .await
         .unwrap();
-        saver.failed_start().await;
+        saver.failed_start(true).await;
     }
 
     #[tokio::test]
@@ -1018,26 +1295,125 @@ mod snapshot_tests {
             .start_accumulation(true, super::super::recording_state::RecordingState::new())
             .unwrap();
         let folder = saver.meeting_folder.clone().unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        let pool = stage_synthetic_calendar(&id).await;
         drop(sender);
-        saver.failed_start().await;
+        saver.failed_start(true).await;
+        crate::library::recording_calendar::discard_failed_start_draft(
+            &pool,
+            Some(&id),
+            saver.get_meeting_folder().is_none(),
+        )
+        .await
+        .unwrap();
         assert!(!folder.exists());
         assert!(saver.snapshot_task.is_none());
+        assert_eq!(draft_ids(&pool).await, ["another-start"]);
     }
 
-    #[test]
-    fn transcript_snapshots_are_coalesced_but_first_update_is_durable() {
-        assert!(transcript_snapshot_due(false, 1, Duration::ZERO));
-        assert!(!transcript_snapshot_due(true, 1, Duration::from_secs(1)));
-        assert!(transcript_snapshot_due(
-            true,
-            TRANSCRIPT_SNAPSHOT_MAX_UPDATES,
-            Duration::from_secs(1)
-        ));
-        assert!(transcript_snapshot_due(
-            true,
-            1,
-            TRANSCRIPT_SNAPSHOT_INTERVAL
-        ));
+    #[tokio::test]
+    async fn failed_start_keeps_its_calendar_with_the_audio_captured_so_far() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let sender = saver
+            .start_accumulation(true, super::super::recording_state::RecordingState::new())
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        let pool = stage_synthetic_calendar(&id).await;
+        drop(sender);
+        let spool = folder.join(".audio-spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        let prefix = spool.join("captured");
+        std::fs::write(&prefix, b"first seconds").unwrap();
+        saver.failed_start(true).await;
+        crate::library::recording_calendar::discard_failed_start_draft(
+            &pool,
+            Some(&id),
+            saver.get_meeting_folder().is_none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(prefix).unwrap(), b"first seconds");
+        assert_eq!(saver.get_meeting_folder(), Some(&folder));
+        assert!(saver.snapshot_task.is_none());
+        assert_eq!(draft_ids(&pool).await, ["another-start", id.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn uncertain_capture_shutdown_keeps_the_empty_folder_and_its_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        let pool = stage_synthetic_calendar(&id).await;
+
+        saver.failed_start(false).await;
+        crate::library::recording_calendar::discard_failed_start_draft(
+            &pool,
+            Some(&id),
+            saver.get_meeting_folder().is_none(),
+        )
+        .await
+        .unwrap();
+        assert!(saver.get_meeting_folder().unwrap().is_dir());
+        assert_eq!(draft_ids(&pool).await, ["another-start", id.as_str()]);
+    }
+
+    async fn stage_synthetic_calendar(recording_id: &str) -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for id in [recording_id, "another-start"] {
+            sqlx::query("INSERT INTO recording_calendar_drafts VALUES (?, ?, 1)")
+                .bind(id)
+                .bind(r#"{"source":"microsoft","eventId":"fixture","subject":"Synthetic invitation"}"#)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool
+    }
+
+    async fn draft_ids(pool: &sqlx::SqlitePool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT recording_id FROM recording_calendar_drafts ORDER BY recording_id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_pending_disk_writer_does_not_block_transcript_ingestion() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        saver.start_snapshot_timer(Duration::from_secs(60), None);
+        let writer_lock = saver.snapshot_write_lock.clone();
+        {
+            let _writer = writer_lock.lock().unwrap();
+            saver.add_transcript_chunk("First synthetic sentence".into());
+            assert_eq!(saver.get_transcript_segments().len(), 1);
+        }
+        let path = saver
+            .meeting_folder
+            .as_ref()
+            .unwrap()
+            .join("transcripts.json");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !path.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }
 

@@ -15,8 +15,8 @@ the last transcript segment beyond the source.
 
 Select the microphone and the output device actually used by the meeting app.
 Verify both sources in a short saved recording before relying on a long session.
-Teams detection is optional and distinct from audio capture; Webex and other
-applications can be recorded through system audio without a dedicated meeting bot.
+Call detection is optional. With the correct output device selected, manual
+recordings can capture audio from any meeting app.
 
 The Settings microphone test is independent of recording capture. On Windows,
 an unavailable preferred microphone falls back to the current default, with the
@@ -35,7 +35,37 @@ language/model selection. Playback is the reference when a name, number, short
 answer, or overlapping utterance needs review. A confidence value is not proof
 that a segment is correct or incorrect.
 
+## Testing local transcription speed
+
+In **Settings → Transcription**, select an installed Whisper, Parakeet or Nemotron model
+and choose **Test this PC**. When a hosted transcription provider is selected,
+the test uses the local Parakeet model used for live recording. The benchmark
+shares the recording and transcription job gate. Run it while those jobs are
+idle. It uses two synthetic, local speech samples (German and English) and
+reports inference time separately from model loading.
+
+Compare processing time with the sample duration. Taking longer than the
+audio means a stream of similar speech would accumulate a backlog. The result
+also identifies samples that produced no text. For slow results, try a
+smaller installed model or select **Record now, transcribe later**. Short
+sample timing measures model speed. Meeting duration, other apps, audio
+capture, language and overlapping speakers affect live performance.
+
 ## Live Transcript Behavior
+
+With **Auto** selected, ClawScribe compares each speech segment with the
+microphone and system-audio levels captured over the same interval. Only
+segments clearly attributable to one source can establish its language.
+Overlapping speakers are still transcribed from the mix.
+
+Whisper checks the language acoustically on longer turns. Two credible
+observations on the same source establish a language or confirm a switch.
+Short replies can then use the recent language for that source. For example,
+the microphone can remain German while remote participants switch to English.
+The live transcript displays the confirmed languages. Multilingual Parakeet
+v3 and Ultra estimate them from finalized text and keep using their normal
+decoder. Fixed-language and translation modes retain the user's choice.
+Starting a new recording clears both language histories.
 
 The transcript view preserves recognized words, including words that resemble
 English fillers in other languages. It does not silently remove German `er` or
@@ -61,8 +91,10 @@ Live transcription failures produce one user-facing failure notice per recording
 later failures do not repeat it. Live wall-clock timestamps use local time.
 
 The **Live assistance** preview panel uses finalized backend speech from the
-latest ten-minute context window. **Summarize so far** summarizes that bounded
-context, which may omit earlier discussion and recent untranscribed speech.
+context window, a fixed span of up to ten minutes ending at the finalized-through
+time. It is shorter early in a recording or when the segment or size limit
+applies. **Summarize the last 10 minutes** summarizes that bounded context, which
+may omit earlier discussion and recent untranscribed speech.
 Current finalized-through time remains visible while collapsed, and each answer
 shows its own timestamp and incomplete status. Assistance/provider errors are
 separate from the recording health banner; they do not certify or change capture
@@ -110,8 +142,8 @@ audio and recovery. A torn temporary tail records a gap without retaining the
 spool; unreadable published chunks and originals needed after a failed save
 are retained.
 
-Stopped duration and completion time are saved before the final encode; a crash
-during encoding leaves a stopped, unfinished meeting rather than an active recording.
+Stopped duration and completion time are saved before the final encode. A crash
+during encoding leaves a stopped, unfinished meeting available to recovery.
 Final audio is encoded once from available raw chunks, avoiding repeated AAC
 priming at checkpoint joins. Missing or unreadable chunks do not prevent saving
 the rest. The encode deadline scales with recording duration (one fifth of the
@@ -141,14 +173,15 @@ access rather than decoding the whole recording into webview memory.
 
 Stop has one shared owner across the app, tray and shortcut. Recording duration
 is frozen before transcription drain, and device-error limits apply to a recent
-30-second window. Transcript snapshots flush every 15 seconds even during silence
-and once more before audio finalization. Library saving uses that backend snapshot
-and continues if the optional transcription status refresh fails. An unavailable
-or invalid snapshot falls back to the UI transcript with a visible review warning.
+30-second window. A background worker writes transcript snapshots during silence
+and once more before audio finalization. The core saves the finalized transcript
+and outcome directly to the library. If the library write fails after the files
+are saved, open **Interrupted recordings** to finish saving the meeting.
 Transcript, audio and metadata writes each get an independent attempt; failures
-are reported together. The app-wide post-processing guard and transactional folder
-lookup prevent concurrent or delayed stop callbacks from creating duplicate
-library entries. Failed starts
+are reported together. Each recording has a stable library ID. Retries reuse it,
+and library deletion leaves retained recording files out of recovery. A failed
+microphone or system-audio stream can be retried while the other source keeps
+recording. The capture-gap warning stays with the saved meeting. Failed starts
 stop their background workers; empty owned folders are removed, while possible
 recovery data is retained with an error status.
 
@@ -165,12 +198,51 @@ transcription are saved with the meeting and
 in its recording folder. Automatic notes wait only for failed audio saves or an
 incomplete transcript. Capture gaps and recording-file warnings remain visible
 without blocking notes. Successful retranscription clears audio-save and
-transcript failure flags; recording-file warnings clear only after both transcript
-and metadata files are rewritten successfully. Permanent capture gaps remain.
-Empty
-retranscription is rejected before replacement, and a successful replacement
-retains the prior transcript as a database revision. Capture-loss warnings remain
-conservative: retranscribing available audio cannot restore missing samples.
+transcript failure flags. Recording-file warnings clear after the transcript,
+metadata, and recording status are written. If a folder write fails, the new
+transcript is available in the library and **Retry file update** stays available
+after restarting. Empty retranscription is rejected before replacement. A
+successful replacement retains the prior transcript as a database revision.
+Permanent capture gaps remain visible after retranscribing the available audio.
+
+## Reviewing a saved meeting
+
+Select a transcript timestamp to hear that passage. Dragging the playback bar
+changes the position and keeps the current play or pause state.
+
+- **Speed** (0.5× to 2×, pitch preserved). The chosen speed is remembered in this
+  app's browser storage and applies to the next recording you open.
+- **Follow playback** keeps the passage being played in view. It scrolls only when
+  the spoken passage changes and turns itself off when you scroll the transcript by
+  hand, so it never fights the reader. It is on by default and applies while audio plays.
+- Bookmarks are drawn on the timeline and seek when chosen.
+
+Keyboard shortcuts work while the meeting page is open and stand down whenever you
+type (text fields and the summary editor), inside dialogs and menus, and on controls
+that already use the key (a focused button keeps Space; a focused slider keeps the
+arrows). Key combinations with Ctrl, Alt or Meta are never taken, except Ctrl+F.
+
+| Key | Action |
+| --- | --- |
+| Space | Play or pause |
+| Left, Right | Back or forward 5 seconds (hold Shift for 15) |
+| `<`, `>` | Slower or faster |
+| F | Follow playback |
+| B | Add a bookmark at the playback position |
+| Ctrl+F | Find in the transcript |
+
+**Find in transcript** searches the complete saved transcript, not only the loaded
+pages, ignores case, and treats the text literally. Matches are marked in the text;
+Enter and Shift+Enter move to the next and previous passage (wrapping at the ends)
+and Escape closes the bar. The count is of passages, not occurrences.
+
+**Copy** for the summary and the transcript puts plain, readable text and an HTML
+version on the clipboard. Neither contains Markdown markup, source-link anchors,
+the internal meeting id or the time of copying; the summary starts with the title
+and date, the transcript with the title, date and one line per passage with its
+time and speaker. The HTML uses a fixed set of formatting tags, escapes all text
+and links only to http and https addresses. Where the platform refuses rich copy,
+the plain text is still copied. The Confluence export keeps its own format.
 
 ## Notebook Resource Policy
 
@@ -187,10 +259,23 @@ real-time performance from this setting alone.
 
 Native speech-model loading runs outside the async executor. Import and
 retranscription pass each bounded speech buffer into inference without making
-another full copy. Cloud upload requests can be cancelled while waiting for a
-response. MAI conversion from other formats remains a separate limitation: it
-decodes the whole file in memory, and that background conversion can continue
-after cancellation. Its memory use is not covered by the local ASR segment bound.
+another full copy. MAI uses a 64 KiB file-read buffer for multipart audio.
+Conversion uses bounded copies into a temporary WAV, which is limited to
+300 MB before upload. For two hours at 16 kHz mono PCM16, allow about 230 MB
+of temporary disk space. These are buffer and file-size bounds. FFmpeg, HTTP
+transport, and transcript responses have their own memory needs. Cancellation
+stops conversion and can drop an in-flight upload or retry delay.
+
+The temporary WAV is an unnamed file the operating system deletes when the
+process closes it or dies. A manual, ignored test on the designated runner
+measures the conversion and upload stream with synthetic audio only
+(`CLAWSCRIBE_MAI_PERF_SECONDS`, 10 to 3600, default 600): it prints elapsed time,
+peak memory delta of the app process (FFmpeg is separate), source seconds,
+output bytes and cancellation latency for the current path, the earlier
+named-file path and the in-memory decode baseline.
+Select `measure-mai` when manually dispatching Windows validation to run the
+ten-minute synthetic comparison with the release-profile test binary and staged
+encoder. The fixture makes no provider requests.
 
 For an i5-1235U / 8 GB notebook, choose models based on a measured session with
 Teams/Webex and the normal concurrent workload. Compare sustained backlog,

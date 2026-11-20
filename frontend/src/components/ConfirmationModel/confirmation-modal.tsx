@@ -6,11 +6,17 @@ interface ConfirmationModalProps {
   onConfirm: () => void;
   onCancel: () => void;
   text: string;
+  title?: string;
+  confirmLabel?: string;
   isOpen: boolean;
+  /** Disables the confirm action while the surface cannot act on it yet. */
+  confirmDisabled?: boolean;
+  /** Control that opened this dialog. Needed when it was opened from a menu item that closes with the menu. */
+  returnFocus?: React.RefObject<HTMLElement | null>;
   children?: React.ReactNode;
 }
 
-export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children }: ConfirmationModalProps) {
+export function ConfirmationModal({ onConfirm, onCancel, text, title = 'Confirm delete', confirmLabel = 'Delete', isOpen, confirmDisabled = false, returnFocus, children }: ConfirmationModalProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
 
@@ -22,10 +28,14 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children 
           if (typeof document !== 'undefined') returnFocusRef.current = document.activeElement as HTMLElement | null;
           cancelRef.current?.focus();
         }}
-        onCloseAutoFocus={event => { event.preventDefault(); if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus(); }}
+        onCloseAutoFocus={event => {
+          event.preventDefault();
+          const target = returnFocus?.current?.isConnected ? returnFocus.current : returnFocusRef.current;
+          if (target?.isConnected) target.focus();
+        }}
       >
         <DialogHeader>
-          <DialogTitle>Confirm delete</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{text}</DialogDescription>
         </DialogHeader>
         {children}
@@ -35,10 +45,10 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children 
           >
             Cancel
           </Button>
-          <Button variant="destructive"
+          <Button variant="destructive" disabled={confirmDisabled}
             onClick={onConfirm}
           >
-            Delete
+            {confirmLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

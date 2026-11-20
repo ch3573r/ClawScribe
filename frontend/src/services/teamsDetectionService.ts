@@ -6,6 +6,11 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import type { CallProvider, CallScan } from '@/lib/autoRecord';
+
+export function getCallDetectionStatus(providers: CallProvider[], watched: string[] = []): Promise<CallScan> {
+  return invoke('get_call_detection_status', { providers, watched });
+}
 
 export type TeamsDetectionState =
   | 'unsupported'

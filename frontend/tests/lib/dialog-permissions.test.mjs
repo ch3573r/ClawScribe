@@ -7,13 +7,17 @@ import test from 'node:test';
 const config = JSON.parse(readFileSync(new URL('../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
 const main = config.app.security.capabilities.find(capability => capability.identifier === 'main');
 
-test('the local main window can save Word documents and backups and open restore archives', () => {
+test('the window opens no file or folder dialog itself and has no direct store access: the core opens the dialogs', () => {
   assert.ok(main, 'the desktop main window needs a capability');
   assert.deepEqual(main.windows, ['main']);
   assert.notEqual(main.local, false);
-  assert.equal(main.remote, undefined, 'file dialogs must not be granted to remote pages');
+  assert.equal(main.remote, undefined, 'no permission may be granted to remote pages');
+  // A dialog the webview opens adds what the user picks to the asset scope and
+  // can be shown by a compromised page; the core opens every picker instead.
   for (const command of ['save', 'open']) {
-    assert.ok(main.permissions.includes(`dialog:allow-${command}`), `missing permission for the ${command} file picker`);
-    assert.ok(!main.permissions.includes(`dialog:deny-${command}`), `the ${command} file picker must not be denied`);
+    assert.ok(!main.permissions.includes(`dialog:allow-${command}`), `the window must not open the ${command} picker itself`);
   }
+  assert.ok(!main.permissions.some(permission => permission.startsWith('store:')), 'core-owned settings must not be writable from the window');
+  // Plain message and confirm boxes are all the window keeps.
+  assert.ok(main.permissions.includes('dialog:allow-message'));
 });

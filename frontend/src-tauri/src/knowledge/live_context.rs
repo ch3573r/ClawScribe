@@ -42,6 +42,7 @@ pub(crate) fn passage(
         },
         meeting_id: String::new(),
         title: "Current recording".into(),
+        provider_title: Some("Current recording".into()),
         date: String::new(),
         speaker: None,
         metadata_truncated: false,

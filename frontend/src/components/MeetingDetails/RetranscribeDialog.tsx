@@ -57,6 +57,7 @@ interface RetranscriptionResult {
   segments_count: number;
   duration_seconds: number;
   language: string | null;
+  file_warning?: boolean;
 }
 
 interface RetranscriptionError {
@@ -109,6 +110,7 @@ export function RetranscribeDialog({
     processingSeconds: number;
     modelLabel: string;
     language: string;
+    fileWarning: boolean;
   } | null>(null);
 
   // Use centralized model fetching hook
@@ -209,14 +211,16 @@ export function RetranscribeDialog({
             setIsProcessing(false);
             setIsCancelling(false);
             setProgress(null);
+            setError(null);
             const startedAt = retranscriptionStartedAtRef.current;
-            const processingSeconds = startedAt ? (performance.now() - startedAt) / 1000 : 0;
+            const processingSeconds = startedAt ? (globalThis.performance.now() - startedAt) / 1000 : 0;
             setStats({
               segments: event.payload.segments_count,
               audioSeconds: event.payload.duration_seconds,
               processingSeconds,
               modelLabel: retranscribedModelLabelRef.current,
               language: event.payload.language || 'Auto',
+              fileWarning: event.payload.file_warning === true,
             });
             toast.success(
               `${isRetranscription ? 'Retranscription' : 'Transcription'} complete! ${event.payload.segments_count} segments created.`
@@ -287,7 +291,7 @@ export function RetranscribeDialog({
 
     try {
       const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
-      retranscriptionStartedAtRef.current = performance.now();
+      retranscriptionStartedAtRef.current = globalThis.performance.now();
       retranscribedModelLabelRef.current = selectedModelDetails
         ? `${selectedModelDetails.displayName} (${selectedModelDetails.provider})`
         : 'Default model';
@@ -315,16 +319,11 @@ export function RetranscribeDialog({
   };
 
   const handleCancel = async () => {
-    if (isProcessing && !isCancelling) {
+    if (isProcessing && !isCancelling && progress?.stage !== 'saving') {
       setIsCancelling(true);
-      setProgress((current) => ({
-        meeting_id: meetingId,
-        stage: 'cancelling',
-        progress_percentage: current?.progress_percentage ?? 0,
-        message: isRetranscription ? 'Cancelling retranscription...' : 'Cancelling transcription...'
-      }));
       try {
-        await invoke('cancel_retranscription_command');
+        const accepted = await invoke<boolean>('cancel_retranscription_command');
+        if (accepted === false) setIsCancelling(false);
       } catch (err) {
         setIsCancelling(false);
         setError(err instanceof Error ? err.message : String(err));
@@ -403,6 +402,11 @@ export function RetranscribeDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-4">
+          {stats?.fileWarning && (
+            <p role="alert" className="text-sm text-warning-foreground">
+              The recording-folder copy needs updating. Use Retry file update below the transcript.
+            </p>
+          )}
           {isRetranscription && !isProcessing && !isCancelling && !error && !stats && (
             <div
               className="rounded-lg border p-3 text-sm"
@@ -602,7 +606,7 @@ export function RetranscribeDialog({
             </>
           )}
           {(isProcessing || isCancelling) && (
-            <Button variant="outline" onClick={handleCancel} disabled={isCancelling}>
+            <Button variant="outline" onClick={handleCancel} disabled={isCancelling || progress?.stage === 'saving'}>
               {isCancelling ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               ) : (

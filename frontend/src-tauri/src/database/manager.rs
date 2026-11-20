@@ -12,6 +12,22 @@ pub struct DatabaseManager {
 
 impl DatabaseManager {
     pub async fn new(tauri_db_path: &str, backend_db_path: &str) -> Result<Self> {
+        Self::open(tauri_db_path, backend_db_path, true).await
+    }
+
+    /// The same backup, repair and migration path as [`Self::new`], without the
+    /// step that reads or seals provider credentials through the platform
+    /// credential store. The packaged self-test opens its disposable profile this
+    /// way so it can never read or write the real credential store.
+    pub(crate) async fn new_isolated(tauri_db_path: &str, backend_db_path: &str) -> Result<Self> {
+        Self::open(tauri_db_path, backend_db_path, false).await
+    }
+
+    async fn open(
+        tauri_db_path: &str,
+        backend_db_path: &str,
+        migrate_credentials: bool,
+    ) -> Result<Self> {
         if let Some(parent_dir) = Path::new(tauri_db_path).parent() {
             if !parent_dir.exists() {
                 fs::create_dir_all(parent_dir).map_err(|e| sqlx::Error::Io(e))?;
@@ -56,7 +72,9 @@ impl DatabaseManager {
             log::warn!("Could not remove expired pre-migration database backups");
         }
         crate::database::repositories::summary::SummaryProcessesRepository::fail_interrupted_processes(&pool).await?;
-        crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
+        if migrate_credentials {
+            crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
+        }
         // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&pool)
@@ -352,20 +370,21 @@ fn prune_expired_snapshots(database: &Path) -> std::io::Result<()> {
 }
 
 /// A SQLite snapshot includes committed WAL pages even when another reader
-/// prevents a complete checkpoint. Never copy only the main database file.
+/// prevents a complete checkpoint. Never copy only the main database file. The
+/// source is opened read-only and is never created, checkpointed or modified:
+/// it may be a database the app does not own.
 async fn snapshot_database(source: &Path, target: &Path) -> Result<()> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(source)
+                .read_only(true)
+                .create_if_missing(false)
                 .busy_timeout(Duration::from_secs(5)),
         )
         .await?;
     let result = async {
-        sqlx::query("PRAGMA wal_checkpoint(FULL)")
-            .execute(&pool)
-            .await?;
         let staged = tempfile::NamedTempFile::new_in(target.parent().unwrap_or(Path::new(".")))
             .map_err(sqlx::Error::Io)?
             .into_temp_path();

@@ -17,10 +17,15 @@ pub enum ShortcutAction {
     StartStop,
     PauseResume,
     ToggleWindow,
+    BookmarkRecording,
 }
 
 fn default_toggle_window() -> String {
     "Ctrl+Shift+F11".to_string()
+}
+
+fn default_bookmark_recording() -> String {
+    "Ctrl+Shift+F8".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +37,8 @@ pub struct ShortcutBindings {
     // loads (with the default binding) instead of resetting every shortcut.
     #[serde(default = "default_toggle_window")]
     pub toggle_window: String,
+    #[serde(default = "default_bookmark_recording")]
+    pub bookmark_recording: String,
 }
 
 impl Default for ShortcutBindings {
@@ -42,6 +49,7 @@ impl Default for ShortcutBindings {
             start_stop: "Ctrl+Shift+F9".to_string(),
             pause_resume: "Ctrl+Shift+F10".to_string(),
             toggle_window: default_toggle_window(),
+            bookmark_recording: default_bookmark_recording(),
         }
     }
 }
@@ -51,7 +59,7 @@ impl Default for ShortcutBindings {
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutApplyResult {
     pub bindings: ShortcutBindings,
-    /// Action keys ("startStop"/"pauseResume") whose binding could not be
+    /// Action keys whose binding could not be
     /// registered (already in use by another app, or invalid).
     pub conflicts: Vec<String>,
 }
@@ -83,7 +91,7 @@ fn save_bindings(bindings: &ShortcutBindings) {
 
 /// The handler invoked by the plugin when any registered shortcut fires.
 pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: ShortcutState) {
-    if state != ShortcutState::Pressed {
+    if state != ShortcutState::Pressed || crate::database::setup::startup_failed() {
         return;
     }
     let action = {
@@ -96,7 +104,10 @@ pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: S
     let Some(action) = action else { return };
 
     match action {
-        ShortcutAction::StartStop => crate::tray::toggle_recording_handler(app),
+        ShortcutAction::BookmarkRecording => crate::library::bookmark_active_recording(app),
+        ShortcutAction::StartStop => {
+            crate::tray::toggle_recording_handler(app, crate::start_request::StartSource::Shortcut)
+        }
         ShortcutAction::PauseResume => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -158,6 +169,11 @@ pub fn apply_bindings<R: Runtime>(
             "toggleWindow",
             bindings.toggle_window.as_str(),
             ShortcutAction::ToggleWindow,
+        ),
+        (
+            "bookmarkRecording",
+            bindings.bookmark_recording.as_str(),
+            ShortcutAction::BookmarkRecording,
         ),
     ] {
         match Shortcut::from_str(accel) {

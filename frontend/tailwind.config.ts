@@ -19,6 +19,12 @@ export default {
           'system-ui',
           'sans-serif'
         ],
+        reading: [
+          'var(--font-reading)',
+          'ui-sans-serif',
+          'system-ui',
+          'sans-serif'
+        ],
         mono: [
           'var(--font-plex-mono)',
           'ui-monospace',

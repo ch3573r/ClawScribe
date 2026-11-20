@@ -1,113 +1,113 @@
-import { openExternal } from '@/lib/openExternal';
-import React, { useEffect, useState } from 'react';
-import { Info } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
-import { useOnboarding } from '@/contexts/OnboardingContext';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { getSummaryModelSizeLabel } from '@/lib/onboarding-summary-model';
+import type { RecordingMode } from '@/contexts/RecordingStateContext';
 
-export function SetupOverviewStep() {
-  const { goNext } = useOnboarding();
-  const [isMac, setIsMac] = useState(false);
+const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+type SetupState = 'idle' | 'preparing' | 'ready' | 'failed';
 
-  useEffect(() => {
-    const checkPlatform = async () => {
-      try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        setIsMac(platform() === 'macos');
-      } catch (e) {
-        setIsMac(navigator.userAgent.includes('Mac'));
+interface SetupOverviewStepProps {
+  onChoose: (mode: RecordingMode, localNotesModel: string | null) => void;
+  finishing: boolean;
+  error: string | null;
+}
+
+export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewStepProps) {
+  const [speech, setSpeech] = useState<SetupState>('idle');
+  const [notes, setNotes] = useState<SetupState>('idle');
+  const [notesModel, setNotesModel] = useState<string | null>(null);
+  const [notesOptIn, setNotesOptIn] = useState(false);
+  const speechPending = useRef(false);
+  const notesPending = useRef(false);
+
+  const prepareSpeech = async () => {
+    if (speechPending.current) return;
+    speechPending.current = true;
+    setSpeech('preparing');
+    try {
+      await invoke('parakeet_init');
+      if (!await invoke<boolean>('parakeet_has_available_models')) {
+        await invoke('parakeet_download_model', { modelName: PARAKEET_MODEL });
+        if (!await invoke<boolean>('parakeet_has_available_models')) throw new Error('Model unavailable');
       }
-    };
-    checkPlatform();
-  }, []);
-
-  const steps = [
-    {
-      number: 1,
-      type: 'transcription',
-      title: 'Download Transcription Engine',
-    },
-    {
-      number: 2,
-      type: 'summarization',
-      title: 'Download Summarization Engine',
-    },
-  ];
-
-  const handleContinue = () => {
-    goNext();
+      setSpeech('ready');
+    } catch {
+      setSpeech('failed');
+    } finally {
+      speechPending.current = false;
+    }
   };
 
+  const prepareNotes = async () => {
+    if (notesPending.current) return;
+    notesPending.current = true;
+    setNotes('preparing');
+    setNotesOptIn(true);
+    try {
+      const model = await invoke<string>('builtin_ai_get_recommended_model');
+      setNotesModel(model);
+      const args = { modelName: model, refresh: true };
+      if (!await invoke<boolean>('builtin_ai_is_model_ready', args)) {
+        await invoke('builtin_ai_download_model', { modelName: model });
+        if (!await invoke<boolean>('builtin_ai_is_model_ready', args)) throw new Error('Model unavailable');
+      }
+      setNotes('ready');
+    } catch {
+      setNotes('failed');
+    } finally {
+      notesPending.current = false;
+    }
+  };
+
+  const choose = (mode: RecordingMode) => onChoose(mode, notesOptIn && notes === 'ready' ? notesModel : null);
+
   return (
-    <OnboardingContainer
-      title="Setup Overview"
-      description="Download a transcription model to record locally. For meeting notes, use a local summary model or choose an external provider in Settings."
-      step={2}
-      totalSteps={isMac ? 4 : 3}
-    >
-      <div className="flex flex-col items-center space-y-10">
-        {/* Steps Card */}
-        <div className="w-full max-w-md bg-card rounded-lg border border-border p-4">
-          <div className="space-y-4">
-            {steps.map((step, idx) => {
-              return (
-                <div
-                  key={step.number}
-                  className={`flex items-start gap-4 p-1`}
-                >
-                  <div className="flex-1 ml-1">
-                    <h3 className="font-medium text-foreground flex items-center gap-2">
-                        Step {step.number} :  {step.title}
-
-                        {step.type === "summarization" && (
-                            <TooltipProvider>
-                            <Tooltip>
-                                <TooltipTrigger asChild>
-                                <button type="button" aria-label="About summary provider choices" className="text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                                    <Info className="w-4 h-4" />
-                                </button>
-                                </TooltipTrigger>
-                                <TooltipContent className="max-w-xs text-sm">
-                                You can also select external AI providers like OpenAI, Claude, or
-                                Ollama for summary generation in settings.
-                                </TooltipContent>
-                            </Tooltip>
-                            </TooltipProvider>
-                        )}
-                        </h3>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-
-        {/* CTA Section */}
-        <div className="w-full max-w-xs space-y-4">
-          <Button
-            onClick={handleContinue}
-            className="w-full h-11 bg-accent-gradient hover:brightness-110 text-primary-foreground"
-          >
-            Let's Go
+    <OnboardingContainer title="Choose how to record" hideProgress>
+      <div className="mx-auto max-w-lg space-y-3">
+        <section className="space-y-3 rounded-lg border border-border bg-card p-5">
+          <p className="text-sm text-muted-foreground">
+            Save audio on this device and transcribe it from the meeting later. No model download is required.
+          </p>
+          <Button onClick={() => choose('audio_only')} disabled={finishing}>
+            {finishing ? 'Finishing setup…' : 'Record audio now'}
           </Button>
-          <div className="text-center">
-            <a
-              href="https://github.com/ch3573r/ClawScribe"
-              onClick={event => { event.preventDefault(); void openExternal(event.currentTarget.href); }}
-              rel="noopener noreferrer"
-              className="text-xs text-muted-foreground hover:underline"
-            >
-              View ClawScribe on GitHub
-            </a>
-          </div>
-        </div>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        </section>
+
+        <section className="space-y-3 rounded-lg border border-border bg-card p-5">
+          <h2 className="font-medium">Live transcription</h2>
+          <p className="text-sm text-muted-foreground">
+            Show speech as text while recording. Setting up Parakeet can download about 670 MB.
+          </p>
+          {speech === 'preparing' && <p role="status" className="text-sm text-muted-foreground">Preparing the speech model…</p>}
+          {speech === 'failed' && <p role="alert" className="text-sm text-destructive">Could not prepare the speech model. Try again or record audio now.</p>}
+          {speech === 'ready'
+            ? <Button variant="outline" onClick={() => choose('live')} disabled={finishing}>Continue with live transcription</Button>
+            : <Button variant="outline" onClick={() => void prepareSpeech()} disabled={finishing || speech === 'preparing'}>
+                {speech === 'failed' ? 'Retry speech model setup' : 'Set up live transcription'}
+              </Button>}
+        </section>
+
+        <section className="space-y-3 rounded-lg border border-border bg-card p-5">
+          <h2 className="font-medium">Local meeting notes</h2>
+          <p className="text-sm text-muted-foreground">
+            Generate notes on this device after transcription. This may download several gigabytes. You can set it up later in Summary settings.
+          </p>
+          {notes === 'preparing' && <p role="status" className="text-sm text-muted-foreground">
+            {notesModel ? `Preparing the notes model (${getSummaryModelSizeLabel(notesModel) || 'download size varies'})…` : 'Finding a notes model…'}
+          </p>}
+          {notes === 'failed' && <p role="alert" className="text-sm text-destructive">Could not prepare the notes model. Try again or continue with recording.</p>}
+          {notes === 'ready' && notesOptIn && <p role="status" className="text-sm text-muted-foreground">The notes model is ready.</p>}
+          {notesOptIn && notes !== 'failed' ? (
+            <Button variant="ghost" onClick={() => setNotesOptIn(false)} disabled={finishing || notes === 'preparing'}>Skip local notes</Button>
+          ) : (
+            <Button variant="outline" onClick={() => void prepareNotes()} disabled={finishing || notes === 'preparing'}>
+              {notes === 'failed' ? 'Retry local notes setup' : 'Download local notes model'}
+            </Button>
+          )}
+        </section>
       </div>
     </OnboardingContainer>
   );

@@ -8,7 +8,8 @@ summaries can misread ownership, due dates, or action boundaries.
 
 1. User signs in to Microsoft.
 2. User opens Planner export from a meeting.
-3. ClawScribe parses candidate action items from the current notes.
+3. ClawScribe uses open reviewed meeting actions when available. Before an action
+   list has been saved, it can suggest actions from summary lists or tables.
 4. User reviews, edits, and deselects tasks.
 5. User selects a plan and bucket, or creates a bucket when available.
 6. ClawScribe creates only the selected tasks.
@@ -60,8 +61,10 @@ re-export skips confirmed tasks, including successful items from a partial batch
 Exports stop when this history cannot be read or saved.
 
 An interrupted submission can have an unknown outcome and is not automatically
-retried. Check Planner before creating another task; changing its reviewed title
-or destination creates a different export identity. See
+retried. Check Planner before creating another task. A saved action retains its
+identity when edited and is scoped to the Microsoft account, plan, and bucket.
+Adding a task to the selection preserves the history for tasks already submitted.
+Ambiguous matches with older suggestions are held for review. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).
 
 The ledger stores:

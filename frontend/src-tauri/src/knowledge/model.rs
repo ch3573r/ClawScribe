@@ -2,8 +2,12 @@
 use super::types::{EmbeddingSpace, KnowledgeError};
 use crate::model_download::{self, Downloads};
 use once_cell::sync::Lazy;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Conservatively distinguish vectors computed by a different loading policy.
@@ -59,13 +63,53 @@ impl VerifiedModel {
     pub fn root(&self) -> &Path {
         &self.root
     }
-    pub async fn verify(root: &Path) -> Result<Self, KnowledgeError> {
-        for file in &PINS.files {
-            model_download::verify_file(&root.join(&file.path), file.size, &file.sha256)
-                .await
-                .map_err(|_| KnowledgeError::ModelUnavailable)?;
+    pub(super) fn verify_blocking(
+        root: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Self, KnowledgeError> {
+        Self::verify_pinned(root, &PINS, cancelled, |_| {})
+    }
+    pub(super) fn verify_pinned(
+        root: &Path,
+        pins: &ModelPins,
+        cancelled: &AtomicBool,
+        mut bytes_read: impl FnMut(usize),
+    ) -> Result<Self, KnowledgeError> {
+        for file in &pins.files {
+            model_download::verify_file_blocking(
+                &root.join(&file.path),
+                file.size,
+                &file.sha256,
+                |count| {
+                    bytes_read(count);
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(model_download::Cancelled.into());
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| {
+                if error.is::<model_download::Cancelled>() {
+                    KnowledgeError::Cancelled
+                } else {
+                    KnowledgeError::ModelUnavailable
+                }
+            })?;
         }
         Ok(Self { root: root.into() })
+    }
+    #[cfg(test)]
+    pub async fn verify(root: &Path) -> Result<Self, KnowledgeError> {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::verify_blocking(&root, &AtomicBool::new(false)))
+            .await
+            .map_err(|_| KnowledgeError::ModelUnavailable)?
+    }
+    #[cfg(test)]
+    pub(super) fn synthetic() -> Self {
+        Self {
+            root: PathBuf::new(),
+        }
     }
 }
 #[derive(Default)]
@@ -125,13 +169,24 @@ impl ModelDownloads {
     pub fn snapshot(&self) -> DownloadStatus {
         self.status.lock().unwrap().clone()
     }
+    #[cfg(test)]
     pub async fn download(
         &self,
         root: &Path,
         cancelled: CancellationToken,
     ) -> Result<VerifiedModel, KnowledgeError> {
+        self.download_after(root, cancelled, std::future::ready(()))
+            .await
+    }
+    pub(super) async fn download_after(
+        &self,
+        root: &Path,
+        cancelled: CancellationToken,
+        before_file_access: impl Future<Output = ()> + Send,
+    ) -> Result<VerifiedModel, KnowledgeError> {
         let urls: Vec<_> = PINS.files.iter().map(|file| PINS.url(file)).collect();
-        self.download_files(root, &PINS, &urls, cancelled).await
+        self.download_files(root, &PINS, &urls, cancelled, before_file_access)
+            .await
     }
     async fn download_files(
         &self,
@@ -139,6 +194,7 @@ impl ModelDownloads {
         pins: &ModelPins,
         urls: &[String],
         cancelled: CancellationToken,
+        before_file_access: impl Future<Output = ()> + Send,
     ) -> Result<VerifiedModel, KnowledgeError> {
         if pins.files.len() != urls.len() {
             return Err(KnowledgeError::ModelUnavailable);
@@ -154,6 +210,9 @@ impl ModelDownloads {
             ..DownloadStatus::default()
         };
         let operation = async {
+            // Publish the cancellable reservation before waiting for the
+            // scheduler to release any open model files.
+            before_file_access.await;
             let client = model_download::client().map_err(|_| KnowledgeError::ModelUnavailable)?;
             let mut completed = 0;
             for (file, url) in pins.files.iter().zip(urls) {
@@ -341,6 +400,7 @@ mod tests {
                     &pins(),
                     &[url.clone(), url],
                     CancellationToken::new(),
+                    std::future::ready(()),
                 )
                 .await
         });
@@ -391,7 +451,13 @@ mod tests {
         let downloads = ModelDownloads::default();
         let urls = vec!["http://127.0.0.1:1/model".into(); 2];
         downloads
-            .download_files(dir.path(), &pins(), &urls, CancellationToken::new())
+            .download_files(
+                dir.path(),
+                &pins(),
+                &urls,
+                CancellationToken::new(),
+                std::future::ready(()),
+            )
             .await
             .unwrap();
         let status = downloads.snapshot();
@@ -411,7 +477,13 @@ mod tests {
             .await
             .unwrap();
         assert!(downloads
-            .download_files(dir.path(), &pins(), &urls, CancellationToken::new())
+            .download_files(
+                dir.path(),
+                &pins(),
+                &urls,
+                CancellationToken::new(),
+                std::future::ready(())
+            )
             .await
             .is_err());
         assert_eq!(downloads.snapshot().stage, DownloadStage::Error);

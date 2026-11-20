@@ -232,75 +232,38 @@ pub async fn parakeet_validate_model_ready() -> Result<String, String> {
     }
 }
 
-/// Internal version of parakeet_validate_model_ready that respects user's transcript config
-/// This matches whisper_validate_model_ready_with_config for consistency
-pub async fn parakeet_validate_model_ready_with_config<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Result<String, String> {
+/// Load the chosen model, or another available model from the same engine.
+pub(crate) async fn parakeet_validate_model_ready_for(
+    configured_model: Option<String>,
+) -> Result<String, crate::audio::transcription::engine::LiveModelFailure> {
+    use crate::audio::transcription::engine::{
+        check_model_files, LiveModelFailure, ModelFileState,
+    };
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
     };
 
     if let Some(engine) = engine {
-        // No model loaded - try to load user's configured model from transcript config
-        let model_to_load = match crate::api::api::api_get_transcript_config(
-            app.clone(),
-            app.state(),
-            None,
-        )
-        .await
-        {
-            Ok(Some(config)) => {
-                log::info!(
-                    "Got transcript config from API - provider: {}, model: {}",
-                    config.provider,
-                    config.model
-                );
-                if config.provider == "parakeet" && !config.model.is_empty() {
-                    log::info!("Using user's configured Parakeet model: {}", config.model);
-                    Some(config.model)
-                } else {
-                    log::info!(
-                        "API config uses non-Parakeet provider ({}) or empty model, will auto-select",
-                        config.provider
-                    );
-                    None
-                }
-            }
-            Ok(None) => {
-                log::info!("No transcript config found in API, will auto-select Parakeet model");
-                None
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to get transcript config from API: {}, will auto-select Parakeet model",
-                    e
-                );
-                None
-            }
-        };
-
         // Check available models
         let models = engine
             .discover_models()
             .await
-            .map_err(|e| format!("Failed to discover Parakeet models: {}", e))?;
+            .map_err(|_| LiveModelFailure::LoadFailed)?;
 
         let available_models: Vec<_> = models
             .iter()
             .filter(|model| matches!(model.status, crate::parakeet_engine::ModelStatus::Available))
             .collect();
 
-        if available_models.is_empty() {
-            return Err(
-                "No Parakeet models are available. Please download a model to enable fast transcription."
-                    .to_string(),
-            );
-        }
+        check_model_files(
+            models
+                .iter()
+                .map(|model| ModelFileState::from(&model.status)),
+        )?;
 
         // Try to load user's configured model if specified
-        let model_name = if let Some(configured_model) = model_to_load {
+        let model_name = if let Some(configured_model) = configured_model {
             // Check if configured model is available
             if available_models.iter().any(|m| m.name == configured_model) {
                 log::info!(
@@ -334,14 +297,14 @@ pub async fn parakeet_validate_model_ready_with_config<R: tauri::Runtime>(
                 .clone()
         };
 
-        engine
-            .load_model(&model_name)
-            .await
-            .map_err(|e| format!("Failed to load Parakeet model {}: {}", model_name, e))?;
+        engine.load_model(&model_name).await.map_err(|error| {
+            log::warn!("Live model load failed: {error}");
+            LiveModelFailure::LoadFailed
+        })?;
 
         Ok(model_name)
     } else {
-        Err("Parakeet engine not initialized".to_string())
+        Err(LiveModelFailure::LoadFailed)
     }
 }
 
@@ -567,10 +530,7 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+        crate::local_path::open_in_explorer(std::path::Path::new(&folder_path))?;
     }
 
     #[cfg(target_os = "macos")]
@@ -597,8 +557,30 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
 /// execution provider. Unloads any loaded model so the change applies on the
 /// next load. No effect unless the build includes the `directml` feature.
 #[command]
-pub async fn set_parakeet_use_directml(enabled: bool) -> Result<(), String> {
+pub async fn set_parakeet_use_directml<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _change = crate::behavior_settings::CHANGE_LOCK.lock().await;
+    apply_parakeet_directml(&app, enabled).await
+}
+
+/// The change itself, shared by the command and the one-time hand-over of the
+/// webview's old values: it refuses while another job holds the slot, stores the
+/// value first, and unloads the model so it reloads with the change. The caller
+/// holds `behavior_settings::CHANGE_LOCK`.
+pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let app = app.clone();
     let _job = crate::audio::inference::claim_job()?;
+    // Stored first: when the save fails the running value is unchanged.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::behavior_settings::save_parakeet_directml(&app, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())??;
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 
@@ -611,6 +593,22 @@ pub async fn set_parakeet_use_directml(enabled: bool) -> Result<(), String> {
     }
     log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
     Ok(())
+}
+
+/// Unloads a loaded Parakeet model so the next load uses changed settings, when
+/// no other job holds the slot. Otherwise the change applies at the next load.
+pub(crate) async fn unload_for_new_settings() {
+    let Ok(_job) = crate::audio::inference::claim_job() else {
+        log::warn!("Parakeet settings changed while a job was running; they apply at the next model load");
+        return;
+    };
+    let engine = {
+        let guard = PARAKEET_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    if let Some(engine) = engine {
+        engine.unload_model().await;
+    }
 }
 
 #[command]
@@ -628,9 +626,28 @@ pub async fn get_parakeet_directml_session_disabled() -> Result<bool, String> {
 
 /// Beta opt-in: isolate Parakeet in a supervised process on the next load.
 #[command]
-pub async fn set_parakeet_use_worker(enabled: bool) -> Result<(), String> {
+pub async fn set_parakeet_use_worker<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _change = crate::behavior_settings::CHANGE_LOCK.lock().await;
+    apply_parakeet_worker(&app, enabled).await
+}
+
+/// See `apply_parakeet_directml`.
+pub(crate) async fn apply_parakeet_worker<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let app = app.clone();
     let _job = crate::audio::inference::claim_job()
         .map_err(|error| format!("PARAKEET_WORKER_BUSY: {error}"))?;
+    // Stored first: when the save fails the running value is unchanged.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::behavior_settings::save_parakeet_worker(&app, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())??;
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_WORKER
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 

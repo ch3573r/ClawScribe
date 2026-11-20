@@ -21,7 +21,7 @@ const DEFAULT_ENDPOINT: &str = "";
 const DEFAULT_MODEL_ENDPOINT: &str = "";
 const DEFAULT_SOURCE: &str = "ClawScribe";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenClawConfig {
     #[serde(skip)]
@@ -34,6 +34,11 @@ pub struct OpenClawConfig {
     pub source: String,
     pub include_audio_path: bool,
 }
+
+crate::credentials::debug_without_secrets!(OpenClawConfig {
+    destination_problem, allow_unencrypted, enabled, endpoint, model_endpoint, source, include_audio_path;
+    secret bearer_token
+});
 
 impl Default for OpenClawConfig {
     fn default() -> Self {
@@ -136,46 +141,178 @@ pub async fn save_openclaw_config<R: Runtime>(
     app: AppHandle<R>,
     config: OpenClawConfig,
 ) -> Result<(), String> {
+    use crate::summary::{automatic, llm_client::LLMProvider};
+    let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
+    let selected = match app.try_state::<crate::state::AppState>() {
+        Some(state) => {
+            crate::database::repositories::setting::SettingsRepository::get_model_config(
+                state.db_manager.pool(),
+            )
+            .await
+            .map_err(|_| "Could not read the saved summary model settings")?
+        }
+        None => None,
+    };
     let _guard = CONFIG_LOCK
         .lock()
         .map_err(|_| "Provider settings are unavailable")?;
     let path = config_path(&app)?;
+    if selected.is_some_and(|setting| {
+        LLMProvider::from_str(&setting.provider) == Ok(LLMProvider::OpenClaw)
+    }) {
+        let old = load_config_from_path(&path).ok();
+        if old.is_none_or(|old| {
+            old.enabled != config.enabled
+                || old.allow_unencrypted != config.allow_unencrypted
+                || !automatic::same_endpoint(&old.model_endpoint, &config.model_endpoint)
+        }) {
+            automatic::invalidate_external_review(&app)?;
+        }
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    save_config_at(&path, config, |value| {
-        crate::credentials::seal("openclaw/bearer-token", value)
-    })
+    save_config_at(
+        &path,
+        config,
+        |value| crate::credentials::seal("openclaw/bearer-token", value),
+        forget_bearer_reference,
+    )
+}
+
+/// Removes the credential-store entry behind a replaced or cleared token.
+fn forget_bearer_reference(reference: &str) {
+    if crate::credentials::forget("openclaw/bearer-token", reference).is_err() {
+        warn!("A replaced OpenClaw credential could not be removed from the credential store");
+    }
+}
+
+/// The protected reference of the stored bearer token, exactly as it is in the
+/// file: never the token itself. A token an old version stored in plaintext is
+/// sealed first.
+fn stored_bearer_reference(path: &Path) -> Result<Option<String>, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) if !content.trim().is_empty() => content,
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(
+                "Provider settings could not be read. Existing settings were preserved.".into(),
+            )
+        }
+    };
+    let value: Value =
+        serde_json::from_str(&content).map_err(|_| "Invalid OpenClaw configuration")?;
+    let token = value
+        .get("bearer_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if token.is_empty() {
+        Ok(None)
+    } else if crate::credentials::is_protected(token) {
+        Ok(Some(token.to_string()))
+    } else {
+        crate::credentials::seal("openclaw/bearer-token", token).map(Some)
+    }
 }
 
 fn save_config_at(
     path: &Path,
     config: OpenClawConfig,
     protect: impl FnOnce(&str) -> Result<String, String>,
+    forget_old: impl FnOnce(&str),
 ) -> Result<(), String> {
     let mut config = normalize_config(config);
     validate_endpoints(&config)?;
+    let old_reference = stored_bearer_reference(path)?;
+    let mut new_reference: Option<String> = None;
     if config.bearer_token.is_empty() {
-        config.bearer_token = load_config_from_path(path)?.bearer_token;
+        // Untouched: the stored token stays exactly as it is, and only for the
+        // addresses it was saved with. A changed address needs the token again.
+        if old_reference.is_some() && destination_changed(path, &config)? {
+            return Err(crate::credentials::KEY_REQUIRED_FOR_NEW_ADDRESS.into());
+        }
+        config.bearer_token = old_reference.clone().unwrap_or_default();
+    } else {
+        if let Some(problem) = crate::credentials::new_secret_problem(&config.bearer_token) {
+            return Err(problem.into());
+        }
+        // Replaced: the new token is written first, the old entry removed after.
+        config.bearer_token = protect(&config.bearer_token)?;
+        new_reference = Some(config.bearer_token.clone());
     }
-    config.bearer_token = protect(&config.bearer_token)?;
-    write_config_atomically(&path, &config)
+    if let Err(error) = write_config_atomically(&path, &config) {
+        // The file still names the old token: the entry just written is not
+        // referenced by anything and is removed again.
+        if let Some(new_reference) = &new_reference {
+            forget_old(new_reference);
+        }
+        return Err(error);
+    }
+    if let Some(old) = old_reference {
+        if old != config.bearer_token && crate::credentials::is_protected(&old) {
+            forget_old(&old);
+        }
+    }
+    Ok(())
 }
 
-#[tauri::command]
-pub async fn submit_meeting_folder_to_openclaw<R: Runtime>(
-    app: AppHandle<R>,
-    folder_path: String,
-) -> Result<OpenClawSubmissionResult, String> {
-    submit_folder(&app, PathBuf::from(folder_path), None).await
+/// True when the saved configuration names a different destination for the
+/// token than the stored one (either endpoint), compared by scheme, host, port
+/// and path. An endpoint that was empty and now is set counts as changed; one
+/// that is cleared is not a destination.
+fn destination_changed(path: &Path, requested: &OpenClawConfig) -> Result<bool, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) if !content.trim().is_empty() => content,
+        _ => return Ok(false),
+    };
+    let stored: Value =
+        serde_json::from_str(&content).map_err(|_| "Invalid OpenClaw configuration")?;
+    let field = |name: &str| {
+        stored
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    Ok([
+        (field("endpoint"), &requested.endpoint),
+        (field("model_endpoint"), &requested.model_endpoint),
+    ]
+    .iter()
+    .any(|(stored, requested)| {
+        !requested.is_empty()
+            && !crate::openai::secret_destination::keeps_destination(stored, requested)
+    }))
 }
 
+/// Removes the stored bearer token and its credential-store entry; the rest of
+/// the configuration stays.
 #[tauri::command]
-pub async fn get_openclaw_submission_status(
-    folder_path: String,
-) -> Result<Option<OpenClawSubmissionStatus>, String> {
-    read_submission_status_from_folder(&PathBuf::from(folder_path))
+pub async fn clear_openclaw_bearer_token<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let _guard = CONFIG_LOCK
+        .lock()
+        .map_err(|_| "Provider settings are unavailable")?;
+    clear_bearer_at(&config_path(&app)?, forget_bearer_reference)
+}
+
+fn clear_bearer_at(path: &Path, forget_old: impl FnOnce(&str)) -> Result<(), String> {
+    let Some(old) = stored_bearer_reference(path)? else {
+        return Ok(());
+    };
+    // The file as it is (no environment overrides, no opened token).
+    let content = fs::read_to_string(path)
+        .map_err(|_| "Provider settings could not be read. Existing settings were preserved.")?;
+    let mut config: OpenClawConfig =
+        serde_json::from_str(&content).map_err(|_| "Invalid OpenClaw configuration")?;
+    config.bearer_token = String::new();
+    write_config_atomically(path, &config)?;
+    if crate::credentials::is_protected(&old) {
+        forget_old(&old);
+    }
+    Ok(())
 }
 
 pub fn submit_completed_recording<R: Runtime>(
@@ -263,16 +400,6 @@ pub fn submit_completed_recording<R: Runtime>(
             Err(_e) => error!("OpenClaw handoff failed"),
         }
     });
-}
-
-async fn submit_folder<R: Runtime>(
-    app: &AppHandle<R>,
-    folder: PathBuf,
-    meeting_name: Option<String>,
-) -> Result<OpenClawSubmissionResult, String> {
-    let config = load_config(app)?;
-    let last_status_path = last_status_path(app).ok();
-    submit_folder_with_config(folder, meeting_name, config, last_status_path).await
 }
 
 async fn submit_folder_with_config(
@@ -1154,7 +1281,7 @@ mod tests {
             bearer_token: String::new(),
             ..loaded
         };
-        save_config_at(&path, repaired, protect).unwrap();
+        save_config_at(&path, repaired, protect, |_| {}).unwrap();
         let loaded = load_config_from_path(&path).unwrap();
         assert!(loaded.destination_problem.is_none());
         assert_eq!(loaded.bearer_token, "test-token");
@@ -1200,5 +1327,205 @@ mod tests {
         let stored = marker["response"].as_str().unwrap();
         assert!(stored.len() <= MAX_RESPONSE_BYTES);
         assert!(response.starts_with(stored));
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const OLD_REFERENCE: &str = "clawscribe:secret:v1:keyring:00000000-0000-4000-8000-000000000001";
+    const NEW_REFERENCE: &str = "clawscribe:secret:v1:keyring:00000000-0000-4000-8000-000000000002";
+
+    fn write_stored(dir: &Path) -> PathBuf {
+        let path = dir.join("openclaw.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "endpoint": "https://openclaw.example.com", "enabled": true,
+                "source": "ClawScribe", "bearer_token": OLD_REFERENCE
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    fn untouched() -> OpenClawConfig {
+        OpenClawConfig {
+            endpoint: "https://openclaw.example.com".into(),
+            enabled: true,
+            bearer_token: String::new(),
+            ..OpenClawConfig::default()
+        }
+    }
+
+    fn stored_token(path: &Path) -> String {
+        let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        value["bearer_token"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn saving_without_a_token_keeps_the_stored_one_and_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_stored(dir.path());
+        let forgotten = RefCell::new(Vec::new());
+        save_config_at(
+            &path,
+            untouched(),
+            |_| panic!("an untouched token is not sealed again"),
+            |old| forgotten.borrow_mut().push(old.to_string()),
+        )
+        .unwrap();
+        assert_eq!(stored_token(&path), OLD_REFERENCE);
+        assert!(forgotten.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_file_write_removes_the_token_entry_that_was_just_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-folder").join("openclaw.json");
+        let forgotten = RefCell::new(Vec::new());
+        let config = OpenClawConfig { bearer_token: "fake-new-token-0000".into(), ..untouched() };
+        let error = save_config_at(
+            &path,
+            config,
+            |_| Ok(NEW_REFERENCE.to_string()),
+            |reference| forgotten.borrow_mut().push(reference.to_string()),
+        )
+        .unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(*forgotten.borrow(), vec![NEW_REFERENCE.to_string()], "the new entry is removed, nothing else");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_stored_token_does_not_follow_a_changed_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_stored(dir.path());
+        let before = fs::read(&path).unwrap();
+        for changed in [
+            OpenClawConfig { endpoint: "https://other.example.com".into(), ..untouched() },
+            OpenClawConfig { model_endpoint: "https://models.example.com".into(), ..untouched() },
+            OpenClawConfig { endpoint: "https://openclaw.example.com:8443".into(), ..untouched() },
+        ] {
+            let error = save_config_at(
+                &path,
+                changed,
+                |_| panic!("nothing is sealed"),
+                |_| panic!("nothing is removed"),
+            )
+            .unwrap_err();
+            assert!(error.contains("Enter the key again"));
+            assert_eq!(fs::read(&path).unwrap(), before, "the file is unchanged");
+        }
+    }
+
+    #[test]
+    fn the_same_endpoint_in_another_spelling_keeps_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_stored(dir.path());
+        let spelled = OpenClawConfig { endpoint: " HTTPS://OpenClaw.Example.com/ ".into(), ..untouched() };
+        save_config_at(&path, spelled, |_| panic!("not sealed"), |_| panic!("not removed")).unwrap();
+        assert_eq!(stored_token(&path), OLD_REFERENCE);
+    }
+
+    #[test]
+    fn a_new_token_may_come_with_a_new_endpoint_and_a_short_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_stored(dir.path());
+        let forgotten = RefCell::new(Vec::new());
+        let moved = OpenClawConfig {
+            endpoint: "https://other.example.com".into(),
+            bearer_token: "fake-new-token-0000".into(),
+            ..untouched()
+        };
+        save_config_at(&path, moved, |_| Ok(NEW_REFERENCE.to_string()), |old| forgotten.borrow_mut().push(old.to_string())).unwrap();
+        assert_eq!(stored_token(&path), NEW_REFERENCE);
+        let short = OpenClawConfig { bearer_token: "abcd".into(), ..untouched() };
+        let error = save_config_at(&path, short, |_| panic!("not sealed"), |_| panic!("not removed")).unwrap_err();
+        assert!(error.contains("too short"));
+        assert_eq!(stored_token(&path), NEW_REFERENCE);
+    }
+
+    #[test]
+    fn without_a_stored_token_the_endpoint_changes_freely() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openclaw.json");
+        let config = OpenClawConfig { endpoint: "https://one.example.com".into(), ..OpenClawConfig::default() };
+        save_config_at(&path, config, |_| panic!("no token"), |_| panic!("nothing stored")).unwrap();
+        let config = OpenClawConfig { endpoint: "https://two.example.com".into(), ..OpenClawConfig::default() };
+        save_config_at(&path, config, |_| panic!("no token"), |_| panic!("nothing stored")).unwrap();
+    }
+
+    #[test]
+    fn replacing_the_token_stores_the_new_one_and_removes_the_old_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_stored(dir.path());
+        let forgotten = RefCell::new(Vec::new());
+        let config = OpenClawConfig {
+            bearer_token: "fake-new-token-0000".into(),
+            ..untouched()
+        };
+        save_config_at(
+            &path,
+            config,
+            |value| {
+                assert_eq!(value, "fake-new-token-0000");
+                Ok(NEW_REFERENCE.to_string())
+            },
+            |old| forgotten.borrow_mut().push(old.to_string()),
+        )
+        .unwrap();
+        assert_eq!(stored_token(&path), NEW_REFERENCE);
+        assert_eq!(*forgotten.borrow(), vec![OLD_REFERENCE.to_string()]);
+    }
+
+    #[test]
+    fn clearing_removes_the_token_and_its_entry_and_keeps_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_stored(dir.path());
+        let forgotten = RefCell::new(Vec::new());
+        clear_bearer_at(&path, |old| forgotten.borrow_mut().push(old.to_string())).unwrap();
+        assert_eq!(stored_token(&path), "");
+        assert_eq!(*forgotten.borrow(), vec![OLD_REFERENCE.to_string()]);
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["endpoint"], "https://openclaw.example.com");
+        // Clearing again, or with nothing stored, is harmless.
+        clear_bearer_at(&path, |_| panic!("nothing left to remove")).unwrap();
+        clear_bearer_at(&dir.path().join("missing.json"), |_| panic!("no file")).unwrap();
+    }
+
+    #[test]
+    fn the_status_shown_to_the_webview_has_no_token() {
+        let status = OpenClawConfigStatus {
+            destination_problem: None,
+            allow_unencrypted: false,
+            enabled: true,
+            configured: true,
+            ready: true,
+            bearer_token_configured: true,
+            endpoint: "https://openclaw.example.com".into(),
+            model_endpoint: String::new(),
+            source: "ClawScribe".into(),
+            status_message: String::new(),
+            config_path: String::new(),
+            last_status_path: String::new(),
+            include_audio_path: false,
+            last_submission: None,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"bearer_token_configured\":true"));
+        assert!(!json.contains("\"bearer_token\""));
+    }
+
+    #[test]
+    fn debug_output_of_the_configuration_never_contains_the_token() {
+        let config = OpenClawConfig {
+            bearer_token: "fake-debug-token-1111".into(),
+            ..OpenClawConfig::default()
+        };
+        assert!(!format!("{config:?}").contains("fake-debug-token-1111"));
     }
 }

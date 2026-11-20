@@ -1,8 +1,8 @@
 # Microsoft Graph Integration
 
 ClawScribe uses Microsoft Graph as an optional delegated integration for
-calendar context, OneNote export, Planner task export, and Microsoft To Do task
-export. Microsoft auth is separate from OpenAI, OpenClaw, Codex, Ollama, and
+calendar context, OneNote, Planner, Microsoft To Do, and OneDrive or SharePoint
+file export. Microsoft auth is separate from OpenAI, OpenClaw, Codex, Ollama, and
 other summary providers.
 
 ## Current Capabilities
@@ -16,6 +16,7 @@ other summary providers.
   selected task export.
 - Microsoft To Do list discovery, task preview, and selected personal task
   export.
+- OneDrive or SharePoint destination selection and export of reviewed notes as Word or PDF.
 - Connection status surfaced in the integrations/settings UI.
 
 ## Delegated Scopes
@@ -30,6 +31,7 @@ Current scope set:
 - `Notes.ReadWrite.All`
 - `Tasks.ReadWrite`
 - `Calendars.Read`
+- `Files.ReadWrite`
 - `offline_access`
 
 Scope rules:
@@ -37,8 +39,7 @@ Scope rules:
 - Do not add Graph scopes unless code calls the matching endpoint.
 - Teams meeting detection is local process/window detection and does not require
   `OnlineMeetings.*` or `Presence.*`.
-- File access scopes should stay out unless a OneDrive/SharePoint file export
-  feature actually lands.
+- File export uses `Files.ReadWrite` to write documents to the selected destination.
 - Mail scopes should stay out unless an Outlook recap sender actually lands.
 - `Notes.ReadWrite.All` is intentionally broader than basic page creation so
   shared-notebook workflows can work, but it should remain visible in reviews.
@@ -86,10 +87,29 @@ the next event list, including:
 - start/end
 - organizer
 - invited attendees
+- event type and the series master ID for recurring occurrences and exceptions
 
-The app uses the selected event to seed the next recording title and to prepend
-invited attendees to the generated summary as a checklist. The event body is not
-read for summary context. Invited attendees are not proof of actual attendance.
+The app uses a selected event for the next recording or links a single timed
+event in progress across enabled sources. The event body is excluded. The
+meeting's attendance checklist starts unchecked and summaries receive only
+calendar names confirmed in that checklist. Recording works without a link if
+calendar data is unavailable. Calendar lookup uses the existing read permission.
+
+Microsoft sign-out ends the connection and clears what came from the account
+and was never confirmed: current event choices, an unreviewed selection and
+automatically matched links on saved meetings. A link you reviewed is part of the
+local meeting record and stays, with its attendance, until you unlink it.
+iCalendar sources and their associations are unaffected.
+
+For a saved recurring meeting, **Attendance → Template for this series** sets
+the default summary template for linked occurrences and exceptions from the
+same account. The preference stays on this device and is available when you
+reconnect that account. The existing calendar read supplies the series master
+ID. ClawScribe hashes it together with the sign-in authority and the account's
+tenant-specific Graph user ID, and stores only that series key alongside the
+existing meeting link. Single events, legacy links, and events without a usable
+account or series ID use the regular summary template settings.
+See [Calendar sources and attendance](icalendar.md).
 
 ## OneNote
 
@@ -130,7 +150,7 @@ To Do export is also review-first:
 1. extract action items from the meeting notes
 2. preview candidate personal tasks
 3. let the user edit/deselect tasks and notes
-4. choose the destination To Do list in Settings → Add-ons
+4. choose the destination To Do list in Settings → Microsoft 365
 5. export selected tasks
 6. record local duplicate-protection metadata
 
@@ -152,6 +172,10 @@ Graph failures should not delete local meeting artifacts.
 
 ## Export History And Recovery
 
+Choose **Export history** from a meeting’s export menu to see results and their
+dates. **Open** is available when Microsoft supplied a usable link. The history
+is stored in app data and included in portable library backups.
+
 OneNote page and Planner/To Do task creation save a pending attempt locally before
 contacting Graph, then save each result. Completed items survive an interrupted
 batch and are skipped on a matching re-export. Exports run one at a time so
@@ -166,12 +190,18 @@ saved locally, an item can have an **unknown outcome** (`unknown_after_submit`).
 ClawScribe cannot determine from that state whether Microsoft created it and
 will not automatically submit that item again. Inspect the selected destination
 for the page or task before taking further action. There is no automatic remote
-reconciliation or reset control for these entries. Changing a title or destination
-can create a different export identity and must not be used as a blind retry.
+reconciliation or reset control for these entries. A saved task keeps its identity
+across edits, and choosing a different destination starts a separate export.
 
-OneNote retains a newly created section if a page is confirmed or may have been
-created. Duplicate protection applies to matching content and destinations; it
-does not make Graph's create operations intrinsically idempotent.
+Older Planner and To Do exports identified summary suggestions by title and
+position. When a title matches several past tasks, or several suggestions match
+one past task, ClawScribe marks the affected tasks for review. Check the selected
+destination for existing tasks. Open **Meeting actions**, use **Add action** for
+each task you confirm is new, and save those actions before exporting them.
+
+OneNote records the created section before submitting pages. Resume reuses that
+section with the same content and skips pages whose history protects them from a
+duplicate submission.
 
 ## Test And Review Checklist
 

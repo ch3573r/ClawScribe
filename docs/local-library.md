@@ -1,20 +1,107 @@
 # Local meeting library
 
+## Archive review and storage
+
+Open **Meetings → Archive** to see transcript and summary status alongside
+titles, dates, and project tags. The archive shows whether audio was recorded or
+imported and its measured duration when available, including audio-only recordings.
+Older meetings may have no duration or source. **Meetings that need attention** puts saved
+meetings with recording warnings, missing transcripts, or failed or cancelled
+summary jobs before the rest of the archive. Select **Needs attention** to show
+only those meetings. The title and project filters
+apply to both groups. Use the row action to open transcription, review the
+recording, retry a recording-folder copy, or return to the summary. Starting transcription or generation
+still requires a choice in the existing meeting tools. A missing summary
+alone is optional. Recovery files from another computer must be recovered there.
+
+Use **Storage** for measured file sizes of audio and recovery files in
+registered saved meeting folders, the library database and indexes, reference
+originals, and local database snapshots. Sizes use filesystem metadata and
+count each shared recording folder once. Unavailable recording folders and
+skipped files are reported. Unattached interrupted recordings, user-created
+backup ZIPs, and model downloads are outside these totals.
+
+To free space, choose **Review saved audio** in a meeting row's menu, or use
+**Select meetings → Review selected audio**. Selection applies to the currently
+visible rows, up to 100 at a time. The confirmation lists the eligible copies
+with their sizes and explains which meetings must keep their audio. Only the
+exact reviewed copy can be removed. The app checks again before each removal
+and keeps audio when a recording or transcription job is active, the folder
+is shared or linked, no transcript is saved, recovery data is present, or
+changes to the recording-folder copy are pending. Older recordings, including
+older retranscriptions, may lack the information needed to verify ownership.
+
+Removal is permanent and turns off playback and retranscription from that
+copy. The meeting, its measured duration and source, transcript, summaries, notes, reference originals,
+recording-folder support files, and existing backups remain available.
+Imported originals outside the meeting folder remain where they were.
+ClawScribe only removes audio after confirmation.
+
+## Local assistant access
+
+Open **Settings → Assistant access** and enable **Allow
+read-only access**. Choose your client format. For Claude Desktop, add the
+`clawscribe` entry to `mcpServers` in its JSON configuration. For Codex,
+add the displayed table to `config.toml`. Keep other server entries and
+reconnect your client. For clients with separate fields, use the
+ClawScribe executable as the command and `--mcp-stdio` as the sole argument.
+The client starts its own local process, including when the desktop window
+is closed. See the [Claude Desktop setup guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
+and [Codex MCP configuration](https://developers.openai.com/codex/mcp).
+
+| Tool | Result |
+| --- | --- |
+| `list_meetings` | Saved meeting IDs, titles and dates, newest first. |
+| `search_meetings` | Meetings matching literal text in their title or current transcript. |
+| `search_passages` | Up to 25 literal matches in current transcripts, with meeting and segment IDs, speaker and available recording time. Accepts inclusive `from` and `to` dates, `tags`, `tag_mode` (`any` or `all`), and `untagged`. |
+| `get_meeting` | Saved meeting details, summary and notes. |
+| `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
+| `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
+
+Use the meeting ID from a list or search result. For passage matches, use
+the segment ID when reading the transcript. If passage search reports
+`limited`, narrow the query or date and project filters. Follow the returned
+offsets for long transcripts and notes. Calendar invitations stored in the desktop
+calendar picker and attached reference documents are outside this interface.
+
+Enabling this setting grants access to local clients running under your user
+account. A client may send retrieved content to its own provider. Turning the
+switch off blocks new reads, including from clients already connected. Copies
+already read are under the client's control.
+
+## Archive search
+
+Open **Meetings → Archive** to browse saved meetings or search titles and
+transcripts together. Search ignores letter case and treats punctuation like
+`%` and `_` literally. Choose a Project filter or inclusive date range to
+narrow both kinds of results. Select **Show in transcript** to open the
+verified segment, including segments on later transcript pages. **Back to
+archive** restores the search text, project filters, dates, and sort order
+for the current app session. The sidebar offers the same search with one
+passage preview per matching meeting.
+
+Queries accept up to 256 characters. The desktop shows up to 50 title matches
+and 50 passage matches. Searches stop at a scan or time limit and tell you
+when results are limited. Browse or narrow the query and filters to search
+a smaller set. Literal search needs no index download or answer provider.
+
 ## Meeting memory
 
-The **Meetings** tab opens the saved archive. Switch to **Meeting memory** for
-transcript search and cited questions. Its searchable picker lets you select
-meetings and remove selected chips, or check **Search
-all saved meetings**. The shared Project filter applies Any/All/Untagged
-semantics to title browsing and retrieval; **From** and **To** dates are
-inclusive. All-meetings mode searches every meeting eligible under those filters;
+Switch to **Meeting memory** for ranked source search and cited questions. Its
+searchable picker lets you select meetings and remove selected chips, or check
+**Search all saved meetings**. Project filters and inclusive dates constrain
+that conversation's sources. All-meetings mode searches every meeting eligible under those filters;
 turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
 search. Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
 
 The first question creates a saved library conversation automatically. You can
-also create a new conversation or choose an existing one.
+also create a new conversation or choose an existing one. Opening an existing
+conversation restores its last submitted meeting scope, including the project
+and date filters. Changes made since the last question are remembered while the
+app is open. Select reference files for the current conversation before asking
+with them. Use **Copy answer** to copy an assistant response as Markdown.
 Questions use the summary provider configured in Settings. That provider may
 be local or cloud; retrieval and embedding inference remain local. Answers
 show the executed provider/model and retrieval mode. Cancel and scope changes
@@ -58,8 +145,6 @@ English and German retrieval; its fixed tokenizer, pooling and 384-dimensional
 vectors must stay compatible with the saved index. ONNX Runtime runs this model
 locally on CPU. The configured summary provider answers questions using the
 retrieved passages; the embedding model itself does not write answers.
-Document and live-assistance controls are outside
-this preview.
 
 Automated helper and native resolver checks cover request ownership and
 canonical navigation. Installed offline retrieval, provider-failure recovery,
@@ -152,30 +237,56 @@ of the selected tags, or show only untagged meetings. The filter also applies to
 transcript search results. Tags are stored in SQLite and refreshed
 across views after changes.
 
-## Bookmarks
+## Bookmarks and notes
 
 Select the bookmark button (**Bookmark this moment**) in the recording bar to mark
-the current position as “Review this.” The timestamp excludes pauses. Markers are stored immediately and linked
-to the saved meeting by its recording folder. In the saved transcript panel,
-expand **Bookmarks** to rename or remove markers, add a labeled time in seconds,
-or use the current playback time. Select a marker to seek in the recording.
-Playback requires available saved audio. An interrupted recording's markers remain
-local and become visible when that recording is recovered into the same folder.
-Startup removes abandoned, unattached recording bookmarks only when their folder
-is gone and no saved meeting uses it. Existing or inaccessible recovery folders
-are preserved, and cleanup skips active recording.
+the current position as “Review this.” The tray has the same action. The default
+keyboard shortcut is **Ctrl+Shift+F8**, which you can change in Shortcuts settings.
+Open **My notes** from the pencil button to write and review timestamped notes
+while recording. The timestamp uses the recording time at save and excludes
+pauses. In the saved transcript panel, expand **Bookmarks** to rename or remove
+markers. While reviewing a saved meeting,
+press **B** or choose **Add bookmark** in the transcript menu to add a timestamped
+note at the playback position. The dialog opens with the cursor in the note field
+(up to 160 characters; an empty note is saved as “Review this”), and Enter saves
+it. The time can be changed in seconds. Select a marker to seek in the recording.
+Bookmarks also appear as small markers on the playback timeline; each one can be
+reached with the keyboard and seeks when chosen.
+Playback requires available saved audio. Stop and Interrupted recordings attach
+saved markers using the recording's original ID. The ID follows the recording
+folder if it moves within the recovery locations. Discarding an interrupted
+recording removes its pending markers. Legacy folder-based bookmarks are cleaned
+up at startup when their folder is gone and no saved meeting owns it.
+If a recording’s folder becomes unavailable, its notes and summary preference
+stay available for recovery. In **Settings → General → Storage**, select
+**Manage pending notes** to review them. Delete an entry only if you no longer
+need those notes, even if you recover the recording later. This action removes
+only the selected pending notes and preference.
+
+Bookmarks and their notes are included in backups. The **Use as summary
+priorities** switch in **My notes** while recording or under **Bookmarks** in a
+saved meeting is off by default. The local library saves the choice for that
+meeting and includes it in backups. Enabling it lets
+manual and automatic summaries send the first 40 notes in timestamp order to
+the summary provider for that run. The switch applies to the whole meeting.
 
 ## Backup and restore
 
 Open **Meetings → Backup and restore** to save or restore a ZIP archive. Finish
-active recording, import, and retranscription work first. The native job permit
-prevents these operations from overlapping an archive operation. Keep the app open
-until it completes.
+active recording, import, retranscription, and Microsoft export work first. The
+app prevents these operations from overlapping an archive operation. Keep the
+app open until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
-summaries, per-meeting summary context, meeting chat, project tags, bookmarks,
-attached reference originals and extracted blocks, and supported recording files.
-Microsoft export history (`exports.json`) is retained with the recording folder.
+summaries, per-meeting summary context, linked calendar events and attendance,
+meeting chat, project tags, bookmarks, reviewed actions, attached reference
+originals and extracted blocks, and supported recording files. The archive
+includes Microsoft export history from app data, including for meetings without
+a recording folder. Restore preserves task and page duplicate protection and
+saved OneNote sections in the new profile. Existing meetings keep their own
+history. Older archives restore the export history they contain.
+If an archived calendar link cannot be read, restore keeps the meeting and
+reports how many links it left unset.
 Provider settings, credentials, model downloads, UI preferences, and unfinished
 recording recovery spools are excluded. Missing
 recording folders are reported by meeting title without blocking the backup;
@@ -203,8 +314,10 @@ its audio can be extracted. Invalid archives leave existing meetings alone.
 Restore displays saved audio-omission warnings for imported meetings.
 Meetings whose recovery files were excluded retain a message directing recovery
 to the original computer.
-Folder references are rewritten for the destination computer. Interrupted summary
-jobs are marked cancelled; their saved output is retained.
+Folder references are rewritten for the destination computer. Restore retains
+saved summaries and partial notes that still match their transcripts. Summary jobs
+that were still in progress are marked cancelled. Restored jobs do not retry at
+startup, even when the same summary destination is approved.
 
 Archives also retain saved knowledge conversations, including independent
 library threads and the original citation labels. Existing conversation-owner

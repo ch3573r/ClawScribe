@@ -4,7 +4,7 @@ import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummary
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
-import { formatTranscriptLine } from '@/lib/transcriptFormatting';
+import { summaryClipboard, transcriptClipboard, writeClipboard } from '@/lib/clipboard-format';
 import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 
 interface UseCopyOperationsProps {
@@ -51,13 +51,18 @@ export function useCopyOperations({
 
     console.log(`✅ Copying ${allTranscripts.length} transcripts to clipboard`);
 
-    const header = `# Transcript of the Meeting: ${meeting.id} - ${meetingTitle ?? meeting.title}\n\n`;
-    const date = `## Date: ${new Date(meeting.created_at).toLocaleDateString()}\n\n`;
-    const fullTranscript = allTranscripts
-      .map(t => `${formatTranscriptLine(t, { includeSpeaker: includeSpeakerLabels })}  `)
-      .join('\n');
-
-    await navigator.clipboard.writeText(header + date + fullTranscript);
+    // Readable text plus escaped HTML; no Markdown markup and no internal meeting id.
+    try {
+      await writeClipboard(transcriptClipboard({
+        title: meetingTitle ?? meeting.title ?? '',
+        createdAt: meeting.created_at,
+        transcripts: allTranscripts,
+        includeSpeaker: includeSpeakerLabels,
+      }));
+    } catch {
+      toast.error('Could not copy the transcript');
+      return;
+    }
     toast.success("Transcript copied to clipboard");
 
     // Track copy analytics
@@ -124,24 +129,8 @@ export function useCopyOperations({
         return;
       }
 
-      // Build metadata header
-      const header = `# Meeting Summary: ${meetingTitle}\n\n`;
-      const metadata = `**Meeting ID:** ${meeting.id}\n**Date:** ${new Date(meeting.created_at).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      })}\n**Copied on:** ${new Date().toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      })}\n\n---\n\n`;
-
-      const fullMarkdown = header + metadata + summaryMarkdown;
-      await navigator.clipboard.writeText(fullMarkdown);
+      // Readable text plus escaped HTML; no Markdown markup, source anchors or internal meeting id.
+      await writeClipboard(summaryClipboard({ title: meetingTitle, createdAt: meeting.created_at, markdown: summaryMarkdown }));
 
       console.log('✅ Successfully copied to clipboard!');
       toast.success("Summary copied to clipboard");

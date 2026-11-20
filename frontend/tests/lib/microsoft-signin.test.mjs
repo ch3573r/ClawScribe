@@ -16,7 +16,7 @@ test('explicit consent failure retains the connected account and shows the admin
       requestMissingPermissions: async () => { requests++; },
       connectionStatus: async () => partial,
     }, isOneNoteLargeLibraryError: () => false },
-    '@/lib/meetingCalendar': { clearAllCalendarLinks: () => {} },
+    '@/lib/meetingCalendar': { clearMicrosoftCalendarLinks: () => {} },
   });
   const render = () => hooks.render(useMicrosoftExport);
   render();
@@ -43,7 +43,7 @@ test('Microsoft cancellation calls the backend and refreshes disconnected state'
       cancelSignIn: async () => { calls.push('cancel'); },
       connectionStatus: async () => ({ state: 'not_connected', userDisplayName: null, userEmail: null }),
     }, isOneNoteLargeLibraryError: () => false },
-    '@/lib/meetingCalendar': { clearAllCalendarLinks: () => {} },
+    '@/lib/meetingCalendar': { clearMicrosoftCalendarLinks: () => {} },
   });
   const render = () => hooks.render(useMicrosoftExport);
   await render().signIn();

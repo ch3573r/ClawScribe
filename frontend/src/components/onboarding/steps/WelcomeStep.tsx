@@ -4,7 +4,11 @@ import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 
-export function WelcomeStep() {
+export function WelcomeStep({ onRecordAudio, finishing, error }: {
+  onRecordAudio: () => void;
+  finishing: boolean;
+  error: string | null;
+}) {
   const { goNext } = useOnboarding();
 
   const features = [
@@ -25,7 +29,7 @@ export function WelcomeStep() {
   return (
     <OnboardingContainer
       title="Welcome to ClawScribe"
-      description="Record. Transcribe. Summarize. All on your device."
+      description="Save your meetings on this device."
       step={1}
       hideProgress={true}
     >
@@ -53,12 +57,17 @@ export function WelcomeStep() {
         {/* CTA Section */}
         <div className="w-full max-w-xs space-y-3">
           <Button
-            onClick={goNext}
-            className="w-full h-11 bg-accent-gradient hover:brightness-110 text-primary-foreground"
+            onClick={onRecordAudio}
+            disabled={finishing}
+            className="w-full h-11"
           >
-            Get Started
+            {finishing ? 'Finishing setup…' : 'Record audio now'}
           </Button>
-          <p className="text-xs text-center text-muted-foreground">Setup time depends on model downloads and your connection.</p>
+          <Button variant="outline" onClick={goNext} disabled={finishing} className="w-full h-11">
+            Set up transcription and notes
+          </Button>
+          <p className="text-xs text-center text-muted-foreground">You can start with audio and set up transcription and notes later.</p>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         </div>
       </div>
     </OnboardingContainer>

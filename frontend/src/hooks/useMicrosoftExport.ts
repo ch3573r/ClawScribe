@@ -12,7 +12,7 @@ import {
   type ToDoListInfo,
   type CalendarEvent,
 } from "@/services/microsoftExportService";
-import { clearAllCalendarLinks } from "@/lib/meetingCalendar";
+import { clearMicrosoftCalendarLinks, microsoftCalendarRevision } from "@/lib/meetingCalendar";
 
 export function useMicrosoftExport() {
   const [connection, setConnection] = useState<MicrosoftConnectionInfo>({
@@ -134,8 +134,8 @@ export function useMicrosoftExport() {
       setOneNoteNotebookListingLimited(false);
       setCalendarEvents([]);
       setCurrentMeeting(null);
-      // Drop any stored calendar associations (attendee PII) on sign-out.
-      clearAllCalendarLinks();
+      // Drop Microsoft calendar associations and their attendee data on sign-out.
+      clearMicrosoftCalendarLinks();
       // Broadcast so the OTHER hook instances (OneNote / Planner panels, which
       // each call this hook separately) also reset and don't show stale data.
       // Sign-in already broadcasts this event from the backend.
@@ -199,9 +199,11 @@ export function useMicrosoftExport() {
 
   // Current/next meeting + the next 24h of events (with invited attendees).
   const loadCalendar = useCallback(async () => {
+    const revision = microsoftCalendarRevision;
     setLoadingCalendar(true);
     try {
       const status = await microsoftExportService.connectionStatus();
+      if (revision !== microsoftCalendarRevision) return;
       if (status.state !== "connected" || status.unavailableExports?.includes("Calendar lookup")) {
         setCalendarEvents([]);
         setCurrentMeeting(null);
@@ -216,6 +218,7 @@ export function useMicrosoftExport() {
         ),
         microsoftExportService.currentOrNextMeeting(),
       ]);
+      if (revision !== microsoftCalendarRevision) return;
       setCalendarEvents(events);
       setCurrentMeeting(current);
     } catch (e) {

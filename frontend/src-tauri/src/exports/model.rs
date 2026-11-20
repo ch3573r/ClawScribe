@@ -57,7 +57,10 @@ impl ExportStatus {
     /// Whether a retry may be attempted automatically without user review.
     /// `UnknownAfterSubmit` and `DestinationNotFound` always need review first.
     pub fn allows_automatic_retry(self) -> bool {
-        matches!(self, ExportStatus::Failed | ExportStatus::PartialFailure)
+        matches!(
+            self,
+            ExportStatus::Failed | ExportStatus::PartialFailure | ExportStatus::FailedAuth
+        )
     }
 }
 
@@ -77,6 +80,8 @@ pub struct ExportActionItem {
     /// Planner task description instead of the templated default.
     #[serde(default)]
     pub details: Option<String>,
+    #[serde(skip)]
+    pub legacy_action: Option<crate::exports::actions::LegacyAction>,
 }
 
 /// A decision captured in the meeting.
@@ -158,6 +163,7 @@ mod tests {
                 owner: None,
                 due_date: None,
                 details: None,
+                legacy_action: None,
             }],
             transcript_excerpt: None,
             summary_html: None,

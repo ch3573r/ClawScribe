@@ -101,7 +101,7 @@ export function NemotronModelManager({
       unlisteners.push(
         await listen<{ modelName: string }>('nemotron-model-download-complete', (e) => {
           patchModel(e.payload.modelName, { status: 'Available' });
-          toast.success('🌊 Nemotron ready!', { description: 'Model downloaded and ready to use' });
+          toast.success('Nemotron ready', { description: 'Model downloaded and ready to use' });
           if (onSelectRef.current) {
             onSelectRef.current(e.payload.modelName);
             if (autoSaveRef.current) saveSelection(e.payload.modelName);

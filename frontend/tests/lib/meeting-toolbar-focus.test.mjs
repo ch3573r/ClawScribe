@@ -24,6 +24,7 @@ const primitives = {
   './MeetingDetails/ActionIcon': { ActionIcon: 'action-icon' },
   './ProjectTags': { ProjectTags: 'project-tags' },
   './MeetingExportButtons': { MeetingExportButtons: 'export-buttons' },
+  './ReviewedActions': { ReviewedActions: 'reviewed-actions' },
   './MeetingChat': { MeetingChat: 'meeting-chat' },
   './SummarySources': { SummarySources: 'summary-sources' },
   './TextReplaceDialog': { TextReplaceDialog: 'replace-dialog' },
@@ -74,6 +75,29 @@ test('Rename retains title focus after overflow closes and normal dismissal stil
   closeMenu(content, () => { active = 'overflow'; });
   assert.equal(active, 'overflow', 'suppression applies only to the Rename close');
   headerHooks.unmount(); titleHooks.unmount();
+});
+
+test('the saved header preserves attendance and returns focus after reviewing meeting actions', () => {
+  const hooks = createHookHarness();
+  const { MeetingHeader } = loadTsModule('src/components/MeetingDetails/MeetingHeader.tsx', { ...primitives, react: hooks.react });
+  const attendance = jsx('attendance', {});
+  const props = {
+    meeting: { id: 'example', created_at: '2026-01-01T12:00:00Z' }, title: 'Review', segmentCount: 2, disabled: false,
+    onStartEditing() {}, onFinishEditing() {}, onChange() {}, getMarkdown: async () => '', onOpenFolder: async () => {}, attendance,
+  };
+  const render = () => nodes(hooks.render(() => MeetingHeader(props)));
+  let tree = render();
+  assert.ok(tree.includes(attendance));
+  let focused = false;
+  tree.find(node => node.type === 'action-icon').props.ref.current = { focus() { focused = true; } };
+  tree.find(node => node.type === 'menu-item' && text(node) === 'Meeting actions').props.onSelect();
+  tree = render();
+  closeMenu(tree.find(node => node.type === 'menu-content'), () => assert.fail('menu steals dialog focus'));
+  const dialog = tree.find(node => node.type === 'reviewed-actions');
+  assert.equal(dialog.props.open, true);
+  dialog.props.onReturnFocus();
+  assert.equal(focused, true);
+  hooks.unmount();
 });
 
 const summaryProps = {
@@ -151,5 +175,34 @@ test('meeting title strips pasted line breaks without trimming ordinary spaces',
   const input = hooks.render(() => EditableTitle({ title: 'Review', meetingTitle: true, isEditing: true, onStartEditing() {}, onFinishEditing() {}, onChange: value => values.push(value) }));
   input.props.onChange({ target: { value: '  First\r\nsecond\nthird\rfourth\u2028fifth\u2029sixth  ' } });
   assert.deepEqual(values, ['  First second third fourth fifth sixth  ']);
+  hooks.unmount();
+});
+
+test('the empty summary view offers the one primary Generate action, and the toolbar steps back', () => {
+  const hooks = createHookHarness();
+  const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } }, react: hooks.react });
+  const render = props => hooks.render(() => SummaryPanel({ ...summaryProps, ...props }));
+  const group = tree => nodes(tree).find(node => node.props && 'secondaryGenerate' in node.props);
+  const generate = tree => nodes(tree).find(node => node.type === 'button' && text(node) === 'Generate summary');
+
+  const empty = render({ aiSummary: null, summaryStatus: 'idle' });
+  assert.ok(generate(empty), 'the empty view has the action');
+  assert.equal(group(empty).props.secondaryGenerate, true, 'so the toolbar one is secondary');
+  let started = 0;
+  group(empty).props.generateRef.current = () => { started++; };
+  generate(empty).props.onClick();
+  assert.equal(started, 1, 'it runs the same action as the toolbar');
+  assert.doesNotMatch(text(empty), /toolbar above/);
+
+  const noTranscript = render({ aiSummary: null, summaryStatus: 'idle', transcripts: [] });
+  assert.equal(generate(noTranscript), undefined, 'nothing to generate from');
+  assert.equal(group(noTranscript).props.secondaryGenerate, false);
+
+  const generating = render({ aiSummary: null, summaryStatus: 'processing' });
+  assert.equal(generate(generating), undefined, 'no Generate while one is running');
+  assert.equal(group(generating).props.secondaryGenerate, false);
+
+  const populated = render({});
+  assert.equal(group(populated).props.secondaryGenerate, false, 'with a summary the toolbar action is the only one');
   hooks.unmount();
 });

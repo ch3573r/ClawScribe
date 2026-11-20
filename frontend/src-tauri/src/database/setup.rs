@@ -75,3 +75,110 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
 
     Ok(())
 }
+
+static STARTUP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once the meeting database could not be opened at startup. The app is
+/// then only waiting for the error dialog to be closed: nothing may show the
+/// window, start a recording or run a command line request.
+pub fn startup_failed() -> bool {
+    STARTUP_FAILED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// How long the app stays alive for a startup-failure dialog nobody closes (or
+/// that never appeared). Ten minutes is long enough to read the message and
+/// find the log; after that the process ends with code 1 rather than staying
+/// alive invisibly without a window or a tray.
+pub(crate) const STARTUP_FAILURE_EXIT_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
+#[cfg(test)]
+pub(crate) fn set_startup_failed_for_tests(failed: bool) {
+    STARTUP_FAILED.store(failed, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Text of the dialog shown when the meeting database cannot be opened.
+/// The underlying error goes to the log only: it can contain paths and
+/// internals that mean nothing to the user.
+pub(crate) fn startup_failure_message(
+    data_dir: Option<&std::path::Path>,
+    log_dir: Option<&std::path::Path>,
+) -> String {
+    let show = |dir: Option<&std::path::Path>| {
+        dir.map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| "not available".to_string())
+    };
+    format!(
+        "ClawScribe could not open its meeting database, so it cannot start.\n\n\
+         App data folder: {}\n\
+         Log folder: {}\n\n\
+         The newest log file in the log folder says what went wrong. Close any other \
+         copy of ClawScribe, make sure the disk is not full, and start the app again.",
+        show(data_dir),
+        show(log_dir)
+    )
+}
+
+/// Reports a database that could not be opened at startup: logs the error,
+/// shows a native error dialog, and exits with a non-zero code once the user
+/// closes it. The dialog is not blocking, because setup runs on the main
+/// thread before the event loop starts.
+pub fn report_startup_failure(app: &AppHandle, error: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    STARTUP_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+    log::error!("The meeting database could not be opened: {error}");
+    let message = startup_failure_message(
+        app.path().app_data_dir().ok().as_deref(),
+        app.path().app_log_dir().ok().as_deref(),
+    );
+    // Nothing useful can be shown without the database.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    let exit_app = app.clone();
+    app.dialog()
+        .message(message)
+        .title("ClawScribe cannot start")
+        .kind(MessageDialogKind::Error)
+        .show(move |_| exit_app.exit(1));
+    // Fallback: the dialog normally ends the process (above). If it never
+    // appears or is never closed, do not stay alive without a window.
+    tauri::async_runtime::spawn(async {
+        tokio::time::sleep(STARTUP_FAILURE_EXIT_AFTER).await;
+        log::error!("The startup error dialog was not closed in time; exiting");
+        std::process::exit(1);
+    });
+}
+
+#[cfg(test)]
+mod startup_failure_tests {
+    use super::startup_failure_message;
+    use std::path::Path;
+
+    #[test]
+    fn the_message_names_the_data_and_log_folders_in_plain_words() {
+        let message = startup_failure_message(
+            Some(Path::new("D:/data/app")),
+            Some(Path::new("D:/data/app/logs")),
+        );
+        assert!(message.contains("could not open its meeting database"));
+        assert!(message.contains("App data folder: D:/data/app"));
+        assert!(message.contains("Log folder: D:/data/app/logs"));
+        assert!(!message.contains("panicked"));
+    }
+
+    #[test]
+    fn the_fallback_waits_long_enough_to_read_the_dialog_but_is_bounded() {
+        use super::STARTUP_FAILURE_EXIT_AFTER as limit;
+        assert!(limit >= std::time::Duration::from_secs(5 * 60));
+        assert!(limit <= std::time::Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn missing_folders_are_reported_not_hidden() {
+        let message = startup_failure_message(None, None);
+        assert!(message.contains("App data folder: not available"));
+        assert!(message.contains("Log folder: not available"));
+    }
+}

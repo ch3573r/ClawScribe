@@ -3,16 +3,21 @@
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { memo, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
-import { Pause, Play } from "lucide-react";
+import { Bookmark, Pause, Play } from "lucide-react";
 import { buildSpeakerCatalog, getSpeakerColor, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
 import { RenameSpeakerPopover, type RenameSpeaker } from "./SpeakerLabelPopover";
 import { TranscriptSegmentData } from "@/types";
+import { PlaybackOptions } from "./PlaybackOptions";
+import { bookmarkTime, type MeetingBookmark } from "@/lib/library";
 
 interface SpeakerLaneTimelineProps {
   onApplySpeakerToMatching?: RenameSpeaker;
   segments: TranscriptSegmentData[]; totalCount?: number; showSpeakerAttribution?: boolean;
   currentTime?: number; durationSeconds?: number; isPlaying?: boolean; isAudioReady?: boolean;
   onPlayPause?: () => void; onSeek?: (seconds: number) => void;
+  rate?: number; onRateChange?: (rate: number) => void;
+  followPlayback?: boolean; onFollowChange?: (follow: boolean) => void;
+  bookmarks?: readonly MeetingBookmark[];
 }
 
 type TimedSegment = TranscriptSegmentData & { endTime: number };
@@ -76,7 +81,7 @@ const LaneBars = memo(function LaneBars({ lane, duration }: { lane: TimelineLane
   })}</>;
 });
 
-export function SpeakerLaneTimeline({ segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek }: SpeakerLaneTimelineProps) {
+export function SpeakerLaneTimeline({ segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek, rate, onRateChange, followPlayback, onFollowChange, bookmarks = [] }: SpeakerLaneTimelineProps) {
   // Keep the rename anchor and draft mounted through optimistic label updates.
   const [renameSnapshot, setRenameSnapshot] = useState<TranscriptSegmentData[] | null>(null);
   const laneSegments = renameSnapshot ?? segments;
@@ -110,15 +115,24 @@ export function SpeakerLaneTimeline({ segments, onApplySpeakerToMatching, showSp
       {isPlaying ? <Pause /> : <Play />}
     </Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>
     <span className="shrink-0 font-mono text-xs tabular-nums text-primary">{formatDuration(currentTime)}</span>
+    <div className="relative h-10 min-w-0 flex-1">
     <Button variant="ghost" {...seekProps} aria-label="Seek recording"
-      className="relative h-10 min-w-0 flex-1 overflow-hidden rounded-sm p-0 hover:bg-muted/40 disabled:opacity-100">
+      className="relative h-10 w-full overflow-hidden rounded-sm p-0 hover:bg-muted/40 disabled:opacity-100">
       <span aria-hidden className="pointer-events-none absolute inset-0">
         {timed ? <SegmentBars segments={timedSegments} duration={duration} /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-muted" />}
         <span className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - played}% 0 0)` }}>{timed ? <SegmentBars segments={timedSegments} duration={duration} played /> : <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary to-primary/70" />}</span>
         <span className="absolute inset-y-1 w-px bg-foreground" style={{ left: played + '%' }} />
       </span>
     </Button>
+    {duration > 0 && bookmarks.filter(mark => Number.isFinite(mark.seconds) && mark.seconds >= 0 && mark.seconds <= duration).map(mark =>
+      <Tooltip key={mark.id}><TooltipTrigger asChild>
+        <Button variant="ghost" type="button" disabled={!canSeek} aria-label={`Go to bookmark at ${bookmarkTime(mark.seconds)}: ${mark.label}`}
+          className="absolute bottom-0 h-4 w-4 -translate-x-1/2 rounded-sm p-0 text-primary hover:bg-transparent hover:text-foreground disabled:opacity-100 [&_svg]:size-3"
+          style={{ left: Math.min(100, mark.seconds / duration * 100) + '%' }} onClick={() => onSeek?.(mark.seconds)}><Bookmark className="fill-current" /></Button>
+      </TooltipTrigger><TooltipContent>{bookmarkTime(mark.seconds)} · {mark.label}</TooltipContent></Tooltip>)}
+    </div>
     <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{formatDuration(duration)}</span>
+    <PlaybackOptions rate={rate} onRateChange={onRateChange} followPlayback={followPlayback} onFollowChange={onFollowChange} />
     </div>
     {showSpeakerAttribution && lanes.length > 0 && <div className="space-y-1.5 px-5 pb-4">
       {lanes.map(lane => <div key={lane.segments[0].id} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">

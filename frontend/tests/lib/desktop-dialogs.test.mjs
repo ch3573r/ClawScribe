@@ -26,6 +26,44 @@ test('shared delete dialog focuses Cancel and routes dismissal without confirmin
   confirm.props.onClick();assert.deepEqual(calls,['focus cancel','cancel','delete']);hooks.unmount();
 });
 
+test('shared confirmation returns focus to the explicit trigger, not the closed menu item',()=>{
+  const hooks=createHookHarness(),focused=[];
+  const {ConfirmationModal}=loadTsModule('src/components/ConfirmationModel/confirmation-modal.tsx',{...primitives,react:hooks.react});
+  const trigger={isConnected:true,focus:()=>focused.push('trigger')};
+  const menuItem={isConnected:false,focus:()=>focused.push('closed menu item')};
+  const previous=globalThis.document;
+  globalThis.document={activeElement:menuItem};
+  try {
+    for (const closeBy of ['escape','cancel','confirm']) {
+      focused.length=0;
+      const calls=[];
+      const props={isOpen:true,title:'Clear conversation?',confirmLabel:'Clear conversation',text:'Remove everything?',returnFocus:{current:trigger},onConfirm:()=>calls.push('confirm'),onCancel:()=>calls.push('cancel')};
+      const tree=hooks.render(()=>ConfirmationModal(props));
+      const content=nodes(tree).find(node=>node.type==='content');
+      nodes(tree).find(node=>node.type==='button'&&text(node)==='Cancel').props.ref.current={focus:()=>focused.push('cancel')};
+      content.props.onOpenAutoFocus({preventDefault:()=>{}});
+      assert.deepEqual(focused,['cancel']);
+      if (closeBy==='escape') nodes(tree).find(node=>node.type==='dialog').props.onOpenChange(false);
+      if (closeBy==='cancel') nodes(tree).find(node=>node.type==='button'&&text(node)==='Cancel').props.onClick();
+      if (closeBy==='confirm') nodes(tree).find(node=>text(node)==='Clear conversation'&&node.type==='button').props.onClick();
+      assert.deepEqual(calls,[closeBy==='confirm'?'confirm':'cancel']);
+      let prevented=false;
+      content.props.onCloseAutoFocus({preventDefault:()=>{prevented=true;}});
+      assert.equal(prevented,true);
+      assert.deepEqual(focused,['cancel','trigger']);
+    }
+  } finally { globalThis.document=previous; hooks.unmount(); }
+});
+
+test('shared confirmation disables the destructive action while the surface is busy',()=>{
+  const hooks=createHookHarness();
+  const {ConfirmationModal}=loadTsModule('src/components/ConfirmationModel/confirmation-modal.tsx',{...primitives,react:hooks.react});
+  const tree=hooks.render(()=>ConfirmationModal({isOpen:true,text:'Remove?',confirmDisabled:true,onConfirm:()=>{},onCancel:()=>{}}));
+  assert.equal(nodes(tree).find(node=>node.type==='button'&&node.props.variant==='destructive').props.disabled,true);
+  assert.notEqual(nodes(tree).find(node=>node.type==='button'&&text(node)==='Cancel').props.disabled,true);
+  hooks.unmount();
+});
+
 test('recovery deletion waits for explicit confirmation and keeps failures actionable',async context=>{
   const hooks=createHookHarness(),calls=[],errors=[],request=deferred();
   const diagnostic=context.mock.method(console,'error',()=>{});
@@ -80,7 +118,7 @@ test('permission settings errors give platform-neutral recovery instructions',as
     '../OnboardingContainer':{OnboardingContainer:'onboarding'},'../shared':{PermissionRow:'permission'},
     '@/contexts/OnboardingContext':{useOnboarding:()=>({permissions:{microphone:'denied',systemAudio:'denied'}})},
   });
-  const tree=hooks.render(PermissionsStep);
+  const tree=hooks.render(() => PermissionsStep({ onFinish: async () => {}, finishing: false, error: null }));
   for(const row of nodes(tree).filter(node=>node.type==='permission')) await row.props.onAction();
   assert.equal(errors.length,2);assert.ok(errors.every(message=>/settings/i.test(message)&&/try again/i.test(message)));
   assert.ok(errors.every(message=>!/System Preferences|Audio Capture|console/.test(message)));hooks.unmount();

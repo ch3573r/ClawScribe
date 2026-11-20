@@ -29,6 +29,70 @@ static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Global flag to signal cancellation
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// Where the import is, as far as a cancel from a starting recording is
+/// concerned. The lock makes "cancel accepted" and "save begins" mutually
+/// exclusive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Before the meeting is saved: a cancel takes effect.
+    Open,
+    /// The meeting is being created and the import runs to completion.
+    Saving,
+    /// The import is over, successfully or not.
+    Finished,
+}
+
+static IMPORT_PHASE: std::sync::Mutex<Phase> = std::sync::Mutex::new(Phase::Finished);
+
+fn set_import_phase(phase: Phase) {
+    *IMPORT_PHASE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = phase;
+}
+
+/// Opens the cancel window for one import and closes it when dropped. Declared
+/// after the job registration, so it is dropped (and cancel starts reporting
+/// false) before the registration is cleared.
+struct PhaseGuard;
+
+impl PhaseGuard {
+    fn open() -> Self {
+        set_import_phase(Phase::Open);
+        PhaseGuard
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        set_import_phase(Phase::Finished);
+    }
+}
+
+/// Cancels for a starting recording. Returns false when the import is already
+/// saving, or over, and a cancel cannot take effect.
+fn cancel_import_if_possible() -> bool {
+    let phase = IMPORT_PHASE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if *phase != Phase::Open {
+        return false;
+    }
+    IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+    true
+}
+
+/// The last cancel check: after this the meeting is created.
+fn begin_import_save() -> Result<()> {
+    let mut phase = IMPORT_PHASE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Import cancelled"));
+    }
+    *phase = Phase::Saving;
+    Ok(())
+}
+
 /// RAII guard for IMPORT_IN_PROGRESS flag
 /// Ensures flag is cleared even if import panics or returns early
 struct ImportGuard;
@@ -104,6 +168,7 @@ pub struct AudioFileInfo {
     pub duration_seconds: f64,
     pub size_bytes: u64,
     pub format: String,
+    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Progress update emitted during import
@@ -148,6 +213,7 @@ pub fn is_import_in_progress() -> bool {
 }
 
 /// Cancel ongoing import
+#[cfg(test)]
 pub fn cancel_import() {
     IMPORT_CANCELLED.store(true, Ordering::SeqCst);
 }
@@ -178,6 +244,10 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
     // Get file size
     let metadata = std::fs::metadata(path).map_err(|e| anyhow!("Cannot read file: {}", e))?;
     let size_bytes = metadata.len();
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
 
     // Check file size limit
     if size_bytes > MAX_FILE_SIZE_BYTES {
@@ -213,12 +283,45 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
         duration_seconds,
         size_bytes,
         format: extension.to_uppercase(),
+        modified_at,
     })
+}
+
+/// Compute duration from track codec parameters.
+///
+/// MP4 and Matroska/WebM containers store `n_frames` as timestamp ticks in
+/// `time_base` units, not as PCM sample counts. When `time_base` is available
+/// it is converted via `TimeBase::calc_time`, which uses integer arithmetic to
+/// avoid f64 precision loss at high tick counts. `sample_rate` is the fallback
+/// for containers such as WAV that express `n_frames` as PCM sample counts.
+fn duration_from_params(
+    time_base: Option<symphonia::core::units::TimeBase>,
+    sample_rate: Option<u32>,
+    n_frames: u64,
+) -> Option<f64> {
+    if let Some(tb) = time_base {
+        if tb.denom > 0 {
+            let t = tb.calc_time(n_frames);
+            let secs = t.seconds as f64 + t.frac;
+            if secs.is_finite() && secs > 0.0 {
+                return Some(secs);
+            }
+        }
+    }
+    if let Some(rate) = sample_rate {
+        if rate > 0 {
+            let secs = n_frames as f64 / rate as f64;
+            if secs.is_finite() && secs > 0.0 {
+                return Some(secs);
+            }
+        }
+    }
+    None
 }
 
 /// Extract duration from audio file metadata without full decode
 /// Returns an error when the container does not expose duration metadata.
-fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
+pub(super) fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
@@ -250,87 +353,138 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
 
     // Find the first audio track
     use symphonia::core::codecs::CODEC_TYPE_NULL;
-    let track = format
+    let duration_seconds = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| anyhow!("No audio track found in file"))?;
+        .filter(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .find_map(|track| {
+            let n_frames = track.codec_params.n_frames?;
+            duration_from_params(
+                track.codec_params.time_base,
+                track.codec_params.sample_rate,
+                n_frames,
+            )
+        })
+        .ok_or_else(|| anyhow!("Audio duration not available in metadata"))?;
 
-    // Extract duration from metadata
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| anyhow!("Unknown sample rate"))?;
+    debug!("Extracted metadata duration: {:.2}s", duration_seconds);
 
-    let n_frames = track
-        .codec_params
-        .n_frames
-        .ok_or_else(|| anyhow!("Frame count not available in metadata"))?;
+    super::provenance::measured_duration(Some(duration_seconds))
+        .ok_or_else(|| anyhow!("Invalid audio duration"))
+}
 
-    let duration_seconds = n_frames as f64 / sample_rate as f64;
+#[derive(Clone, Copy)]
+pub(crate) struct ImportDate {
+    meeting_at: Option<chrono::DateTime<chrono::Utc>>,
+    imported_at: chrono::DateTime<chrono::Utc>,
+    from_file: bool,
+}
 
-    debug!(
-        "Extracted metadata: {}Hz, {} frames, {:.2}s",
-        sample_rate, n_frames, duration_seconds
-    );
+impl ImportDate {
+    fn meeting_date(self) -> chrono::DateTime<chrono::Utc> {
+        self.meeting_at.unwrap_or(self.imported_at)
+    }
 
-    Ok(duration_seconds)
+    fn provenance(self) -> &'static str {
+        if self.from_file {
+            "file_modified_time"
+        } else if self.meeting_at.is_some() {
+            "user_selected"
+        } else {
+            "import_time"
+        }
+    }
+}
+
+impl Default for ImportDate {
+    fn default() -> Self {
+        Self {
+            meeting_at: None,
+            imported_at: chrono::Utc::now(),
+            from_file: false,
+        }
+    }
+}
+
+struct ImportOptions {
+    date: ImportDate,
+    summary_request: Option<crate::summary::automatic::AuthorizedRequest>,
+    summary_language: Option<String>,
 }
 
 /// Start import of an audio file
-pub async fn start_import<R: Runtime>(
+async fn start_import<R: Runtime>(
     app: AppHandle<R>,
     source_path: String,
     title: String,
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    options: ImportOptions,
+    guard: ImportGuard,
 ) -> Result<ImportResult> {
-    let _job = super::inference::claim_job_preempting_local_summary(
+    // Registered so a starting recording can cancel this job. A cancel before
+    // the database commit removes the half-built meeting folder (see
+    // `ImportFolderGuard`); the source file is never touched.
+    let cancel: super::inference::CancelBatchJob = std::sync::Arc::new(cancel_import_if_possible);
+    let _job = super::inference::claim_batch_job(
+        super::inference::BatchJob::Import,
+        cancel,
         "Local summary stopped because import started. Generate it again afterwards.",
     )
     .await
     .map_err(anyhow::Error::msg)?;
+    // Dropped before `_job`, so a cancel is refused once the import is over.
+    let _phase = PhaseGuard::open();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
-    // Acquire guard - ensures flag is cleared even on panic/early return
-    let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
-
-    // Reset cancellation flag
-    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
     let use_parakeet = provider.as_deref() == Some("parakeet")
         || super::transcription::cloud::is_cloud_provider(provider.as_deref());
     let use_nemotron = provider.as_deref() == Some("nemotron");
-    let result = run_import(app.clone(), source_path, title, language, model, provider)
-        .await
-        .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
+    let result = run_import(
+        app.clone(),
+        source_path,
+        title,
+        language,
+        model,
+        provider,
+        &options,
+    )
+    .await
+    .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
 
-    // Guard will automatically clear flag on drop
-    // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-    match &result {
-        Ok(res) => {
-            let _ = app.emit(
-                "import-complete",
-                serde_json::json!({
-                    "meeting_id": res.meeting_id,
-                    "title": res.title,
-                    "segments_count": res.segments_count,
-                    "duration_seconds": res.duration_seconds
-                }),
-            );
+    // Release the transcription slot before starting a local summary or
+    // telling the UI that another import can begin.
+    drop(_phase);
+    drop(_job);
+    if let Ok(res) = &result {
+        if let Some(request) = options.summary_request {
+            if let Some(state) = app.try_state::<AppState>() {
+                if crate::summary::automatic::start_import(
+                    app.clone(),
+                    state.db_manager.pool().clone(),
+                    res.meeting_id.clone(),
+                    request,
+                )
+                .await
+                .is_err()
+                {
+                    warn!("Could not start notes for imported meeting");
+                    let _ = app.emit(
+                        "import-warning",
+                        ImportWarning {
+                            warning: "Could not start notes for this import.".into(),
+                            details: Some("Open the saved meeting to generate a summary.".into()),
+                        },
+                    );
+                }
+            }
         }
-        Err(e) => {
-            let _ = app.emit(
-                "import-error",
-                ImportError {
-                    error: e.to_string(),
-                },
-            );
-        }
+        drop(guard);
+        let _ = app.emit("import-complete", res);
     }
 
     result
@@ -344,6 +498,7 @@ async fn run_import<R: Runtime>(
     language: Option<String>,
     mut model: Option<String>,
     mut provider: Option<String>,
+    options: &ImportOptions,
 ) -> Result<ImportResult> {
     let source = PathBuf::from(&source_path);
 
@@ -408,39 +563,34 @@ async fn run_import<R: Runtime>(
                 15,
                 "Uploading audio for cloud transcription...",
             );
-            match super::batch_audio::cancel_aware(
-                async {
-                    Ok(super::transcription::cloud::transcribe_whole_file(
-                        &app,
-                        &provider_id,
-                        model.as_deref(),
-                        &dest_path,
-                        language.as_deref(),
-                    )
-                    .await)
-                },
+            let outcome = super::transcription::cloud::transcribe_whole_file(
+                &app,
+                &provider_id,
+                model.as_deref(),
+                &dest_path,
+                language.as_deref(),
                 &IMPORT_CANCELLED,
             )
-            .await?
-            {
+            .await;
+            if IMPORT_CANCELLED.load(Ordering::Acquire) {
+                return Err(anyhow!("Import cancelled"));
+            }
+            match outcome {
                 Ok(outcome) => {
-                    let mut duration_seconds = extract_duration_from_metadata(&dest_path)
-                        .unwrap_or_else(|_| {
-                            outcome
-                                .segments
-                                .iter()
-                                .map(|segment| segment.end_ms)
-                                .fold(0.0_f64, f64::max)
-                                / 1000.0
-                        });
-                    let cloud_segments = if outcome.requires_local_timing_grid {
-                        let (decoded_duration_seconds, timed_segments) =
+                    let (duration_seconds, cloud_segments) = if outcome.requires_local_timing_grid {
+                        let (decoded_duration, timed_segments) =
                             prepare_cloud_import_timing_grid(&app, &dest_path, &outcome.segments)
                                 .await?;
-                        duration_seconds = decoded_duration_seconds;
-                        timed_segments
+                        (Some(decoded_duration), timed_segments)
                     } else {
-                        outcome.segments
+                        let duration = tokio::task::spawn_blocking({
+                            let path = dest_path.clone();
+                            move || extract_duration_from_metadata(&path).ok()
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        (duration, outcome.segments)
                     };
                     let source_language =
                         super::common::transcription_source_language_hint(language.as_deref());
@@ -455,6 +605,7 @@ async fn run_import<R: Runtime>(
                         &outcome.model,
                         source_language.as_deref(),
                         0,
+                        options,
                     )
                     .await;
                 }
@@ -783,12 +934,13 @@ async fn run_import<R: Runtime>(
         &mut folder_guard,
         &title,
         &dest_filename,
-        duration_seconds,
+        Some(duration_seconds),
         &all_transcripts,
         used_provider,
         &used_model,
         source_language.as_deref(),
         failed_segments,
+        options,
     )
     .await
 }
@@ -834,16 +986,15 @@ async fn save_import_transcripts<R: Runtime>(
     folder_guard: &mut ImportFolderGuard,
     title: &str,
     dest_filename: &str,
-    duration_seconds: f64,
+    duration_seconds: Option<f64>,
     all_transcripts: &[TranscribedSegment],
     used_provider: &str,
     used_model: &str,
     transcription_source_language: Option<&str>,
     failed_segments: usize,
+    options: &ImportOptions,
 ) -> Result<ImportResult> {
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        return Err(anyhow!("Import cancelled"));
-    }
+    begin_import_save()?;
     let meeting_folder = folder_guard.path.as_path();
     emit_progress(app, "saving", 85, "Creating meeting...");
 
@@ -864,6 +1015,8 @@ async fn save_import_transcripts<R: Runtime>(
         &segments,
         meeting_folder.to_string_lossy().to_string(),
         failed_segments > 0,
+        options.date,
+        duration_seconds,
     )
     .await?;
     folder_guard.committed = true;
@@ -898,8 +1051,17 @@ async fn save_import_transcripts<R: Runtime>(
         used_provider,
         used_model,
         transcription_source_language,
+        options.date,
+        options.summary_language.as_deref(),
     ) {
         warn!("Failed to write metadata.json");
+        let _ = app.emit(
+            "import-warning",
+            ImportWarning {
+                warning: "The meeting was saved but its metadata file could not be written.".into(),
+                details: None,
+            },
+        );
     }
 
     emit_progress(app, "complete", 100, "Import complete");
@@ -908,7 +1070,7 @@ async fn save_import_transcripts<R: Runtime>(
         meeting_id,
         title: title.to_string(),
         segments_count: segments.len(),
-        duration_seconds,
+        duration_seconds: duration_seconds.unwrap_or_default(),
     })
 }
 
@@ -925,15 +1087,17 @@ fn emit_progress<R: Runtime>(app: &AppHandle<R>, stage: &str, progress: u32, mes
 }
 
 /// Create a new meeting with transcripts in the database
-async fn create_meeting_with_transcripts(
+pub(crate) async fn create_meeting_with_transcripts(
     pool: &sqlx::SqlitePool,
     title: &str,
     segments: &[TranscriptSegment],
     folder_path: String,
     transcription_incomplete: bool,
+    date: ImportDate,
+    duration_seconds: Option<f64>,
 ) -> Result<String> {
     let meeting_id = format!("meeting-{}", Uuid::new_v4());
-    let now = chrono::Utc::now();
+    let provenance = super::provenance::RecordingProvenance::import(duration_seconds);
 
     // Start transaction
     let mut conn = pool
@@ -946,14 +1110,17 @@ async fn create_meeting_with_transcripts(
 
     // Insert meeting
     sqlx::query(
-        "INSERT INTO meetings (id, title, created_at, updated_at, folder_path)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO meetings (id, title, created_at, updated_at, folder_path,
+                               recording_source, recording_duration_s)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&meeting_id)
     .bind(title)
-    .bind(now)
-    .bind(now)
+    .bind(date.meeting_date())
+    .bind(date.imported_at)
     .bind(&folder_path)
+    .bind(provenance.source)
+    .bind(provenance.duration_seconds)
     .execute(&mut *tx)
     .await
     .map_err(|e| anyhow!("Failed to create meeting: {}", e))?;
@@ -1173,24 +1340,27 @@ fn write_import_metadata(
     folder: &Path,
     meeting_id: &str,
     title: &str,
-    duration_seconds: f64,
+    duration_seconds: Option<f64>,
     audio_filename: &str,
     source: &str,
     transcription_provider: &str,
     transcription_model: &str,
     transcription_source_language: Option<&str>,
+    date: ImportDate,
+    summary_language: Option<&str>,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
-    let now = chrono::Utc::now().to_rfc3339();
-
     let mut json = serde_json::json!({
         "version": "1.0",
         "meeting_id": meeting_id,
         "meeting_name": title,
-        "created_at": now,
-        "completed_at": now,
+        "created_at": date.meeting_date().to_rfc3339(),
+        "completed_at": chrono::Utc::now().to_rfc3339(),
+        "imported_at": date.imported_at.to_rfc3339(),
+        "meeting_date_source": date.provenance(),
         "duration_seconds": duration_seconds,
+        "duration_measured": duration_seconds.is_some(),
         "audio_file": audio_filename,
         "transcript_file": "transcripts.json",
         "status": "completed",
@@ -1203,6 +1373,9 @@ fn write_import_metadata(
         json["transcription_source_language"] = serde_json::json!(language);
     }
 
+    if let Some(language) = summary_language {
+        json["summary_language"] = serde_json::json!(language);
+    }
     let json_string = serde_json::to_string_pretty(&json)?;
     std::fs::write(&temp_path, &json_string)?;
     std::fs::rename(&temp_path, &metadata_path)?;
@@ -1241,6 +1414,9 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
         Some(path) => {
             let path_str = path.to_string();
             info!("Audio file selected");
+            // The user chose it in a dialog the core opened: the import accepts
+            // this file once, and no other path.
+            crate::file_grants::grant(crate::file_grants::Purpose::AudioImport, Path::new(&path_str))?;
 
             match validate_audio_file(Path::new(&path_str)) {
                 Ok(info) => Ok(Some(info)),
@@ -1257,11 +1433,50 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
     }
 }
 
+/// Choose and validate a small set in the core. Each selected file retains
+/// its own one-use grant and is reviewed and imported separately.
+#[tauri::command]
+pub async fn select_audio_files_command<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<AudioFileInfo>, String> {
+    tokio::task::spawn_blocking(move || {
+        const MAX_SELECTION: usize = 12;
+        let paths = app
+            .dialog()
+            .file()
+            .add_filter("Audio Files", AUDIO_EXTENSIONS)
+            .blocking_pick_files()
+            .unwrap_or_default();
+        if paths.len() > MAX_SELECTION {
+            return Err(format!(
+                "Choose up to {MAX_SELECTION} audio files at a time."
+            ));
+        }
+        let files: Vec<AudioFileInfo> = paths
+            .iter()
+            .map(|path| {
+                validate_audio_file(Path::new(&path.to_string())).map_err(|error| error.to_string())
+            })
+            .collect::<Result<_, String>>()?;
+        for file in &files {
+            crate::file_grants::grant(
+                crate::file_grants::Purpose::AudioImport,
+                Path::new(&file.path),
+            )?;
+        }
+        Ok(files)
+    })
+    .await
+    .map_err(|_| "Could not select audio files".to_string())?
+}
+
 /// Validate an audio file from a given path (for drag-drop)
 #[tauri::command]
 pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
     info!("Validating selected audio file");
-    validate_audio_file(Path::new(&path)).map_err(|e| e.to_string())
+    // Only a file the user chose (or dropped on the window) and the core saw.
+    let granted = crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, &path)?;
+    validate_audio_file(&granted).map_err(|e| e.to_string())
 }
 
 /// Start importing an audio file.
@@ -1273,18 +1488,82 @@ pub async fn start_import_audio_command<R: Runtime>(
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    meeting_at: Option<chrono::DateTime<chrono::Utc>>,
+    use_file_date: Option<bool>,
+    summarize: Option<bool>,
+    summary_destination_fingerprint: Option<String>,
+    summary_use_automatic_preference: Option<bool>,
+    summary_language: Option<String>,
 ) -> Result<ImportStarted, String> {
-    // Check if import is already in progress (guard will be acquired in start_import)
-    if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
-        return Err("Import already in progress".to_string());
-    }
+    let guard = ImportGuard::acquire()?;
+    let summary_language = summary_language
+        .map(|value| crate::summary::metadata::normalise_supported_summary_language(&value))
+        .transpose()
+        .map_err(|_| "Unsupported summary language")?;
+    let from_file = use_file_date.unwrap_or(false);
+    let meeting_at = if from_file {
+        let source =
+            crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, &source_path)?;
+        Some(
+            tauri::async_runtime::spawn_blocking(move || std::fs::metadata(source)?.modified())
+                .await
+                .map_err(|_| "Could not read the file's modified time")?
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .map_err(|_| "Could not read the file's modified time")?,
+        )
+    } else {
+        meeting_at
+    };
+    let summary_request = if summarize.unwrap_or(false) {
+        let state = app
+            .try_state::<AppState>()
+            .ok_or("Meeting storage is unavailable")?;
+        Some(
+            crate::summary::automatic::prepare_import(
+                &app,
+                state.db_manager.pool(),
+                summary_destination_fingerprint.as_deref(),
+                summary_use_automatic_preference.unwrap_or(false),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let options = ImportOptions {
+        date: ImportDate {
+            meeting_at,
+            from_file,
+            ..ImportDate::default()
+        },
+        summary_request,
+        summary_language,
+    };
+    let taken = crate::file_grants::take(crate::file_grants::Purpose::AudioImport, &source_path)?;
+    let source_path = taken.path.to_string_lossy().into_owned();
+    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    // Spawn import in background
     tauri::async_runtime::spawn(async move {
-        let result = start_import(app, source_path, title, language, model, provider).await;
-
-        if let Err(_e) = result {
-            error!("Import failed");
+        let result = start_import(
+            app.clone(),
+            source_path,
+            title,
+            language,
+            model,
+            provider,
+            options,
+            guard,
+        )
+        .await;
+        if let Err(e) = result {
+            // Return the original grant before notifying the UI that retry is available.
+            crate::file_grants::give_back(crate::file_grants::Purpose::AudioImport, &taken);
+            let _ = app.emit(
+                "import-error",
+                ImportError {
+                    error: e.to_string(),
+                },
+            );
         }
     });
 
@@ -1299,14 +1578,12 @@ pub async fn cancel_import_command() -> Result<(), String> {
     if !is_import_in_progress() {
         return Err("No import in progress".to_string());
     }
-    cancel_import();
+    if !cancel_import_if_possible() {
+        return Err(
+            "The import cannot be stopped during setup or save. Wait for it to finish.".into(),
+        );
+    }
     Ok(())
-}
-
-/// Check if import is in progress
-#[tauri::command]
-pub async fn is_import_in_progress_command() -> bool {
-    is_import_in_progress()
 }
 
 fn accept_import_segment<T>(
@@ -1449,6 +1726,8 @@ mod tests {
             &create_transcript_segments(&kept),
             folder.path().to_string_lossy().into(),
             failed > 0,
+            ImportDate::default(),
+            Some(120.5),
         )
         .await
         .unwrap();
@@ -1461,11 +1740,19 @@ mod tests {
         .unwrap();
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
-                .bind(id)
+                .bind(&id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert!(incomplete);
+        let facts: (String, f64) = sqlx::query_as(
+            "SELECT recording_source, recording_duration_s FROM meetings WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(facts, ("import".into(), 120.5));
         assert_eq!(count, 2);
         assert_eq!(failed, 1);
     }
@@ -1495,6 +1782,23 @@ mod tests {
         }
 
         std::fs::write(path, bytes).expect("write test wav");
+    }
+
+    #[test]
+    fn recovery_measures_the_selected_audio_and_ignores_legacy_transcript_duration() {
+        let folder = tempfile::tempdir().unwrap();
+        let marker = serde_json::json!({
+            "recording_mode": "audio_only", "duration_seconds": 12.0,
+        });
+        let measure = |marker: &serde_json::Value| {
+            super::super::interrupted::recovered_provenance(folder.path(), marker, None)
+        };
+        assert_eq!(measure(&marker).source, Some("recording"));
+        assert_eq!(measure(&marker).duration_seconds, None);
+        write_test_wav(&folder.path().join("unrelated.wav"));
+        assert_eq!(measure(&marker).duration_seconds, None);
+        write_test_wav(&folder.path().join("audio-recovered.wav"));
+        assert_eq!(measure(&marker).duration_seconds, Some(0.1));
     }
 
     #[test]
@@ -1554,6 +1858,25 @@ mod tests {
         );
     }
 
+    // End-to-end demux probe of a real M4A container. This exercises the
+    // time_base branch of duration_from_params: Symphonia's ISOBMFF reader sets
+    // time_base from the mdhd time-scale box, so n_frames are ticks — not PCM
+    // sample counts.  Using sample_rate alone would give the wrong answer for
+    // HE-AAC whose SBR doubling makes the codec rate differ from the container
+    // time-scale.
+    #[test]
+    fn extract_duration_from_m4a_fixture_uses_time_base_path() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/he_aac_48k_5s.m4a");
+        let duration = extract_duration_from_metadata(&path)
+            .expect("should probe m4a duration without full decode");
+        assert!(
+            (duration - 5.16).abs() < 0.5,
+            "M4A duration {:.2}s outside expected ~5.16s",
+            duration
+        );
+    }
+
     #[test]
     fn test_validate_audio_file_with_metadata() {
         let test_path = std::env::temp_dir().join("clawscribe-test-validation.wav");
@@ -1571,9 +1894,14 @@ mod tests {
 
     #[test]
     fn test_validate_audio_file_nonexistent() {
-        let result = validate_audio_file(Path::new("/nonexistent/file.mp4"));
+        let missing = std::env::temp_dir().join("clawscribe-missing-folder").join("file.mp4");
+        let result = validate_audio_file(&missing);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
+        // A network or relative path is refused before the filesystem is asked.
+        // Only a granted path is accepted by the commands.
+        assert!(crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, "//host/share/never-granted.mp4").is_err());
+        assert!(crate::file_grants::take(crate::file_grants::Purpose::AudioImport, "relative/file.mp4").is_err());
     }
 
     #[test]
@@ -1718,37 +2046,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_meeting_with_transcripts_persists_speaker() {
-        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-
-        sqlx::query(
-            "CREATE TABLE meetings (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                folder_path TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE transcripts (
-                id TEXT PRIMARY KEY,
-                meeting_id TEXT NOT NULL,
-                transcript TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                audio_start_time REAL,
-                audio_end_time REAL,
-                duration REAL,
-                speaker TEXT,
-                word_timestamps_json TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(":memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
         let segments = vec![TranscriptSegment {
             id: "t-speaker".to_string(),
@@ -1767,6 +2070,8 @@ mod tests {
             &segments,
             "C:\\recordings\\speaker-persistence".to_string(),
             false,
+            ImportDate::default(),
+            Some(1.5),
         )
         .await
         .unwrap();
@@ -1780,6 +2085,14 @@ mod tests {
                 .unwrap();
 
         assert_eq!(speaker.as_deref(), Some("Participants"));
+        let provenance: (String, f64) = sqlx::query_as(
+            "SELECT recording_source, recording_duration_s FROM meetings WHERE id = ?",
+        )
+        .bind(&meeting_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(provenance, ("import".into(), 1.5));
     }
 
     #[test]
@@ -1790,12 +2103,18 @@ mod tests {
             dir.path(),
             "meeting-123",
             "Test Meeting",
-            1800.0,
+            Some(1800.0),
             "audio.mp4",
             "import",
             "parakeet",
             "parakeet-tdt-0.6b-v3-int8",
             Some("en"),
+            ImportDate {
+                meeting_at: Some("2025-09-15T13:05:00Z".parse().unwrap()),
+                imported_at: "2025-11-22T10:00:00Z".parse().unwrap(),
+                from_file: true,
+            },
+            None,
         );
         assert!(result.is_ok(), "write_import_metadata failed: {:?}", result);
 
@@ -1811,6 +2130,9 @@ mod tests {
         assert_eq!(parsed["audio_file"], "audio.mp4");
         assert_eq!(parsed["status"], "completed");
         assert_eq!(parsed["source"], "import");
+        assert_eq!(parsed["created_at"], "2025-09-15T13:05:00+00:00");
+        assert_eq!(parsed["imported_at"], "2025-11-22T10:00:00+00:00");
+        assert_eq!(parsed["meeting_date_source"], "file_modified_time");
         assert_eq!(parsed["transcription_provider"], "parakeet");
         assert_eq!(parsed["transcription_model"], "parakeet-tdt-0.6b-v3-int8");
         assert_eq!(parsed["transcription_source_language"], "en");
@@ -1901,5 +2223,79 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    /// A cancel from a starting recording is accepted only while the import
+    /// can still stop, and reports false once it is saving or over, so no
+    /// "being stopped" notice is sent for a job that has already succeeded.
+    #[test]
+    fn cancel_is_accepted_only_before_the_save_and_never_after_the_job_ends() {
+        set_import_phase(Phase::Finished);
+        assert!(!cancel_import_if_possible(), "no job is running");
+        {
+            let _phase = PhaseGuard::open();
+            assert!(cancel_import_if_possible(), "before the save a cancel takes effect");
+            assert!(cancel_import_if_possible(), "repeats stay accepted");
+            set_import_phase(Phase::Saving);
+            assert!(!cancel_import_if_possible(), "a save in progress cannot be cancelled");
+        }
+        // Dropping the guard (declared after the job registration) ends the
+        // window before the registration is cleared.
+        assert!(!cancel_import_if_possible(), "the finished job refuses a cancel");
+    }
+
+    // ── duration_from_params via TimeBase::calc_time ───────────────────────
+
+    fn tb(numer: u32, denom: u32) -> symphonia::core::units::TimeBase {
+        symphonia::core::units::TimeBase { numer, denom }
+    }
+
+    // Matroska/WebM: n_frames are nanosecond ticks (time_base = 1/1_000_000_000).
+    // sample_rate = 48_000 would give 5_000_000_000 / 48_000 ≈ 104_167 s — wrong.
+    // calc_time must yield exactly 5 s.
+    #[test]
+    fn duration_matroska_nanosecond_time_base_ignores_sample_rate() {
+        let secs = duration_from_params(Some(tb(1, 1_000_000_000)), Some(48_000), 5_000_000_000);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // Matroska/WebM millisecond time_base (common in WebM containers).
+    // sample_rate = 44_100 would give 5_000 / 44_100 ≈ 0.113 s — wrong.
+    #[test]
+    fn duration_matroska_millisecond_time_base() {
+        let secs = duration_from_params(Some(tb(1, 1_000)), Some(44_100), 5_000);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // MP4: 90 kHz tick clock — common for ISOBMFF video and some audio tracks.
+    // sample_rate = 44_100 would give 450_000 / 44_100 ≈ 10.2 s — wrong.
+    #[test]
+    fn duration_mp4_90khz_time_base_ignores_sample_rate() {
+        let secs = duration_from_params(Some(tb(1, 90_000)), Some(44_100), 450_000);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // WAV has no time_base; sample_rate is the correct fallback.
+    #[test]
+    fn duration_wav_no_time_base_uses_sample_rate() {
+        let secs = duration_from_params(None, Some(44_100), 220_500);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // No time_base and no sample_rate → None.
+    #[test]
+    fn duration_no_params_returns_none() {
+        assert!(duration_from_params(None, None, 44_100).is_none());
+    }
+
+    // Zero n_frames → None (not a valid duration).
+    #[test]
+    fn duration_zero_frames_returns_none() {
+        assert!(duration_from_params(Some(tb(1, 1_000)), Some(44_100), 0).is_none());
     }
 }

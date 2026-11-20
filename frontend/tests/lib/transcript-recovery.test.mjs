@@ -13,6 +13,7 @@ function recoveryHarness({ status = 'success', transcripts = [], failSave = fals
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push(command);
       if (command === 'has_audio_checkpoints') return true;
+      if (command === 'find_interrupted_recordings') return { recordings: [], truncated: false, recordingActive: false };
       if (command === 'recover_audio_from_checkpoints') {
         assert.equal(args.meetingFolder, metadata.folderPath);
         if (status === 'throw') throw new Error('Synthetic audio failure');

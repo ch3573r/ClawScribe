@@ -138,12 +138,74 @@ pub(crate) fn chunks_by_bytes(text: &str, budget: usize) -> Vec<String> {
     chunks
 }
 
-/// Every source window must succeed. Reduce recursively, with bounded depth and
-/// an explicit progress requirement, before sending a final combined prompt.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReductionProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub level: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct Reduction {
+    progress: std::sync::Mutex<ReductionProgress>,
+    partial_notes: std::sync::Mutex<String>,
+    retry_provider_errors: bool,
+}
+
+impl Reduction {
+    pub fn with_local_retry() -> Self {
+        Self {
+            retry_provider_errors: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn progress(&self) -> ReductionProgress {
+        self.progress
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn partial_notes(&self) -> String {
+        self.partial_notes
+            .lock()
+            .map(|notes| notes.clone())
+            .unwrap_or_default()
+    }
+
+    fn report(&self, completed: usize, total: usize, level: usize) {
+        if let Ok(mut progress) = self.progress.lock() {
+            *progress = ReductionProgress {
+                completed,
+                total,
+                level,
+            };
+        }
+    }
+
+    fn retain_excerpt(&self, notes: &str) {
+        const MAX_PARTIAL_BYTES: usize = 256 * 1024;
+        if let Ok(mut partial) = self.partial_notes.lock() {
+            let remaining = MAX_PARTIAL_BYTES.saturating_sub(partial.len() + 2);
+            if remaining > 0 {
+                if !partial.is_empty() {
+                    partial.push_str("\n\n");
+                }
+                partial.push_str(prefix_bytes(notes, remaining));
+            }
+        }
+    }
+}
+
+/// Reduce recursively with bounded depth. Incomplete inputs never reach the
+/// final report, but successful excerpts are available for local recovery.
 pub(crate) async fn reduce<F, Fut>(
     text: &str,
     budget: usize,
     piece_budget: usize,
+    reduction: &Reduction,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
     mut summarize: F,
 ) -> Result<(String, i64), String>
 where
@@ -156,6 +218,9 @@ where
     let mut content = text.to_string();
     let mut source_chunks = 1;
     for level in 0..8 {
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err("Summary generation was cancelled".into());
+        }
         if content.len() <= budget {
             return Ok((content, source_chunks));
         }
@@ -163,13 +228,62 @@ where
         if level == 0 {
             source_chunks = chunks.len() as i64;
         }
-        let mut reduced = Vec::with_capacity(chunks.len());
+        let total = chunks.len();
+        let mut reduced = Vec::with_capacity(total);
+        let mut failed = 0;
+        reduction.report(0, total, level + 1);
         for (index, chunk) in chunks.into_iter().enumerate() {
-            let output = summarize(chunk).await.map_err(|error| format!("Summary stopped at reduction level {}, chunk {}. No complete notes were produced. {error}", level + 1, index + 1))?;
-            if output.trim().is_empty() {
-                return Err("A meeting excerpt returned no notes. Retry generation; no complete notes were produced.".into());
+            let mut output = None;
+            for _ in 0..2 {
+                if cancellation.is_some_and(|token| token.is_cancelled()) {
+                    return Err("Summary generation was cancelled".into());
+                }
+                // Let the provider finish cancellation cleanup, especially when
+                // it must terminate an in-flight local sidecar request.
+                let result = summarize(chunk.clone()).await;
+                if cancellation.is_some_and(|token| token.is_cancelled()) {
+                    return Err("Summary generation was cancelled".into());
+                }
+                match result {
+                    Ok(notes) if !notes.trim().is_empty() => {
+                        output = Some(notes);
+                        break;
+                    }
+                    Err(reason)
+                        if [
+                            super::automatic::DISABLED,
+                            super::automatic::REVIEW_REQUIRED,
+                            super::automatic::DESTINATION_CHANGED,
+                        ]
+                        .contains(&reason.as_str()) =>
+                    {
+                        reduction.report(index, total, level + 1);
+                        return Err(reason);
+                    }
+                    // Remote providers already retry transient transport failures. Keep their
+                    // error bodies out of the meeting, including when they contain user input.
+                    _ if !reduction.retry_provider_errors => {
+                        reduction.report(index, total, level + 1);
+                        return Err(format!(
+                            "The summary provider failed on excerpt {} of {total}. Check provider settings before retrying.",
+                            index + 1
+                        ));
+                    }
+                    _ => {}
+                }
             }
-            reduced.push(output);
+            if let Some(notes) = output {
+                if level == 0 {
+                    reduction.retain_excerpt(&notes);
+                }
+                reduced.push(notes);
+            } else {
+                failed += 1;
+            }
+            reduction.report(index + 1, total, level + 1);
+        }
+        if failed > 0 {
+            return Err(format!("{failed} of {total} excerpts failed in pass {}. Generate the summary again to retry.", level + 1));
         }
         let next = reduced.join("\n---\n");
         if next.len() >= content.len() {
@@ -183,6 +297,126 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn consent_revoke_surfaces_through_excerpt_reduction_and_keeps_partials() {
+        use super::super::automatic::{DESTINATION_CHANGED, DISABLED, REVIEW_REQUIRED};
+        // Partials from the successful first excerpt are retained even when
+        // a consent/revoke error stops reduction mid-pass.
+        for consent_error in [DISABLED, REVIEW_REQUIRED, DESTINATION_CHANGED] {
+            let reduction = Reduction::default();
+            let mut calls = 0usize;
+            // "AAAABBBB" → two excerpts; first succeeds, second returns a consent error.
+            let result = reduce("AAAABBBB", 4, 4, &reduction, None, |chunk| {
+                calls += 1;
+                let result = if chunk == "AAAA" {
+                    Ok("First excerpt notes.".to_string())
+                } else {
+                    Err(consent_error.to_string())
+                };
+                std::future::ready(result)
+            })
+            .await;
+            assert_eq!(
+                result.unwrap_err(),
+                consent_error,
+                "consent error must pass through, not be wrapped"
+            );
+            assert_eq!(calls, 2, "no retry on consent error");
+            assert!(
+                reduction.partial_notes().contains("First excerpt notes."),
+                "successful excerpt must be retained as partial notes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_consent_errors_produce_bounded_excerpt_diagnostic() {
+        let reduction = Reduction::default();
+        let result = reduce("AAAABBBB", 4, 4, &reduction, None, |_| {
+            std::future::ready(Err("arbitrary provider output".to_string()))
+        })
+        .await;
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("excerpt 1 of 2"),
+            "must report excerpt position"
+        );
+        assert!(
+            !error.contains("arbitrary provider"),
+            "must not leak provider output"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_failure_stops_submissions_and_retains_unicode_notes() {
+        let reduction = Reduction::default();
+        let mut submitted = Vec::new();
+        let notes = "ä".repeat(128 * 1024) + "📝";
+        let result = reduce("AAAABBBBCCCC", 8, 4, &reduction, None, |chunk| {
+            let result = if chunk == "AAAA" {
+                Ok(notes.clone())
+            } else {
+                Err("Provider response must stay out of diagnostics".into())
+            };
+            submitted.push(chunk);
+            std::future::ready(result)
+        })
+        .await;
+        let error = result.unwrap_err();
+        assert!(error.contains("excerpt 2 of 3"));
+        assert!(!error.contains("Provider response"));
+        assert_eq!(submitted, ["AAAA", "BBBB"]);
+        assert_eq!(reduction.partial_notes(), "ä".repeat(128 * 1024 - 1));
+        assert_eq!(reduction.progress().completed, 1);
+    }
+
+    #[tokio::test]
+    async fn keeps_successful_excerpts_and_retries_each_failed_excerpt_once() {
+        let reduction = Reduction::with_local_retry();
+        let mut attempts = std::collections::HashMap::new();
+        let result = reduce("AAAABBBBCCCC", 8, 4, &reduction, None, |chunk| {
+            let attempt = attempts.entry(chunk.clone()).or_insert(0);
+            *attempt += 1;
+            let result = match (chunk.as_str(), *attempt) {
+                ("AAAA", 2) => Ok("First excerpt kept".into()),
+                ("CCCC", 1) => Ok("Last excerpt kept".into()),
+                _ => Err("Synthetic local model failure".into()),
+            };
+            std::future::ready(result)
+        })
+        .await;
+        assert!(result.unwrap_err().contains("1 of 3 excerpts failed"));
+        assert_eq!(attempts["AAAA"], 2);
+        assert_eq!(attempts["BBBB"], 2);
+        assert_eq!(attempts["CCCC"], 1);
+        assert_eq!(
+            reduction.partial_notes(),
+            "First excerpt kept\n\nLast excerpt kept"
+        );
+        assert_eq!(reduction.progress().completed, 3);
+        assert_eq!(reduction.progress().total, 3);
+    }
+
+    #[tokio::test]
+    async fn cancelled_reduction_stops_before_retry_or_next_excerpt() {
+        let reduction = Reduction::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut calls = 0;
+        let result = reduce("AAAABBBB", 4, 4, &reduction, Some(&token), |_| {
+            calls += 1;
+            token.cancel();
+            let token = &token;
+            async move {
+                token.cancelled().await;
+                Err("Synthetic local request cancelled".into())
+            }
+        })
+        .await;
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert_eq!(calls, 1);
+        assert_eq!(reduction.progress().completed, 0);
+    }
     #[test]
     fn claude_code_aliases_reuse_api_budgets_for_long_meetings() {
         for alias in ["sonnet", "opus", "haiku"] {
@@ -314,10 +548,17 @@ mod tests {
     #[tokio::test]
     async fn reduction_never_sends_an_oversized_combine() {
         let source = "synthetic fact. ".repeat(1000);
-        let (result, count) = reduce(&source, 512, 512, |chunk| async move {
-            assert!(chunk.len() <= 512);
-            Ok(prefix_bytes(&chunk, 100).to_string())
-        })
+        let (result, count) = reduce(
+            &source,
+            512,
+            512,
+            &Reduction::default(),
+            None,
+            |chunk| async move {
+                assert!(chunk.len() <= 512);
+                Ok(prefix_bytes(&chunk, 100).to_string())
+            },
+        )
         .await
         .unwrap();
         assert!(result.len() <= 512);
@@ -325,14 +566,24 @@ mod tests {
     }
     #[tokio::test]
     async fn failed_or_nonconverging_excerpts_never_produce_complete_notes() {
-        assert!(
-            reduce(&"x".repeat(1024), 512, 512, |chunk| async { Ok(chunk) })
-                .await
-                .is_err()
-        );
-        assert!(reduce(&"x".repeat(1024), 512, 512, |_| async {
-            Err("cancelled".into())
-        })
+        assert!(reduce(
+            &"x".repeat(1024),
+            512,
+            512,
+            &Reduction::default(),
+            None,
+            |chunk| async { Ok(chunk) }
+        )
+        .await
+        .is_err());
+        assert!(reduce(
+            &"x".repeat(1024),
+            512,
+            512,
+            &Reduction::default(),
+            None,
+            |_| async { Err("cancelled".into()) }
+        )
         .await
         .is_err());
     }

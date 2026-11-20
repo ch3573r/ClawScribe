@@ -5,20 +5,25 @@ import './globals.css'
 import {
   Atkinson_Hyperlegible,
   Fira_Sans,
+  Geist,
   IBM_Plex_Mono,
   IBM_Plex_Sans,
+  Inter,
   Lexend,
   Source_Sans_3,
+  Source_Serif_4,
 } from 'next/font/google'
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
 import { cleanupTranscriptRecoveryOnce } from '@/services/indexedDBService'
 import { migrateLegacyMeetingContexts } from '@/lib/meetingContext'
+import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore'
 import { flushMeetingDrafts, flushSummaryEditsBeforeExit } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
-import { Toaster, toast } from 'sonner'
+import { toast } from 'sonner'
+import { AppToaster } from '@/components/AppToaster'
 import { useState, useEffect, useCallback } from 'react'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
@@ -40,8 +45,9 @@ import { installTeamsDetectionDebugBridge } from '@/services/teamsDetectionServi
 import { useRouter } from 'next/navigation'
 import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
-import { TeamsAutoRecord } from '@/components/TeamsAutoRecord'
+import { RecordingRequests } from '@/components/RecordingRequests'
 import { AudioDeviceHotSwapMonitor } from '@/components/AudioDeviceHotSwapMonitor'
+import { ArchiveStorageDialog } from '@/components/Archive/ArchiveStorageDialog'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -74,6 +80,21 @@ const ibmPlexSans = IBM_Plex_Sans({
   variable: '--font-ibm-plex-sans',
 })
 
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+})
+
+const geist = Geist({
+  subsets: ['latin'],
+  variable: '--font-geist',
+})
+
+const sourceSerif4 = Source_Serif_4({
+  subsets: ['latin'],
+  variable: '--font-source-serif-4',
+})
+
 // Utility/data face: timestamps, durations, speaker labels, model ids, paths,
 // shortcuts. Transcription is data, so its values read as data.
 const plexMono = IBM_Plex_Mono({
@@ -81,6 +102,11 @@ const plexMono = IBM_Plex_Mono({
   weight: ['400', '500', '600'],
   variable: '--font-plex-mono',
 })
+
+// On <html>, so the font tokens set on the root element can resolve them.
+const fontVariables = [sourceSans3, atkinson, lexend, firaSans, ibmPlexSans, inter, geist, sourceSerif4, plexMono]
+  .map((font) => font.variable)
+  .join(' ')
 
 function AppImportDialog({
   showImportDialog,
@@ -100,16 +126,13 @@ function AppImportDialog({
   );
 }
 
-// export { metadata } from './metadata'
-
 export default function RootLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
   const router = useRouter()
-  const [showOnboarding, setShowOnboarding] = useState(false)
-  const [onboardingCompleted, setOnboardingCompleted] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
 
   useEffect(() => {
     const close = listen('summary-flush-on-close', () => { void flushMeetingDrafts().catch(() => {}); });
@@ -123,6 +146,8 @@ export default function RootLayout({
 
   useEffect(() => {
     void migrateLegacyMeetingContexts().catch(() => toast.error('Could not migrate meeting context. Existing context is retained for retry.'));
+    // Never rejects: an entry that cannot be saved stays isolated and is retried or set aside.
+    void migrateLegacyMeetingCalendars();
   }, []);
 
   useEffect(() => {
@@ -139,22 +164,13 @@ export default function RootLayout({
   }, [])
 
   useEffect(() => {
-    // Push stored Parakeet preferences to the backend on startup so
-    // they apply even if Beta settings isn't opened. Busy worker changes retry
-    // briefly without blocking startup or interrupting a running task.
-    void import('@/lib/parakeetAccel').then((m) => m.applyParakeetPreferences())
-  }, [])
-
-  useEffect(() => {
-    // Push the stored source-attribution (Me/Participants) preference to the
-    // backend on startup. Default off until the heuristic is production-quality.
-    void import('@/lib/sourceAttribution').then((m) => m.applySourceAttribution())
-  }, [])
-
-  useEffect(() => {
-    // Push the stored cloud-transcription Beta preference to the backend on
-    // startup. Default off until the user has consented to uploading audio.
-    void import('@/lib/cloudTranscription').then((m) => m.applyCloudTranscription())
+    // The core owns the behaviour settings (engine options, cloud opt-in,
+    // source attribution, language) and has applied them before this window
+    // existed. Read them here; the first time, the old webview values are
+    // handed to the core, which keeps its own wherever it already has one.
+    void import('@/lib/behaviorSettings')
+      .then((m) => m.loadBehaviorSettings())
+      .catch((error) => console.error('[Layout] Could not read the behaviour settings:', error))
   }, [])
 
   useEffect(() => {
@@ -162,20 +178,12 @@ export default function RootLayout({
     invoke<{ completed: boolean } | null>('get_onboarding_status')
       .then((status) => {
         const isComplete = status?.completed ?? false
-        setOnboardingCompleted(isComplete)
-
-        if (!isComplete) {
-          console.log('[Layout] Onboarding not completed, showing onboarding flow')
-          setShowOnboarding(true)
-        } else {
-          console.log('[Layout] Onboarding completed, showing main app')
-        }
+        setShowOnboarding(!isComplete)
       })
       .catch((error) => {
         console.error('[Layout] Failed to check onboarding status:', error)
         // Default to showing onboarding if we can't check
         setShowOnboarding(true)
-        setOnboardingCompleted(false)
       })
   }, [])
 
@@ -187,27 +195,6 @@ export default function RootLayout({
       return () => document.removeEventListener('contextmenu', handleContextMenu);
     }
   }, []);
-  useEffect(() => {
-    // Listen for tray recording toggle request
-    const unlisten = listen('request-recording-toggle', () => {
-      console.log('[Layout] Received request-recording-toggle from tray');
-
-      if (showOnboarding) {
-        toast.error("Please complete setup first", {
-          description: "You need to finish onboarding before you can start recording."
-        });
-      } else {
-        // If in main app, forward to useRecordingStart via window event
-        console.log('[Layout] Forwarding to start-recording-from-sidebar');
-        window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'));
-      }
-    });
-
-    return () => {
-      unlisten.then(fn => fn());
-    };
-  }, [showOnboarding]);
-
   // Surface non-fatal warnings raised by the recording pipeline.
   useEffect(() => {
     const unlisten = listen<string>('recording-warning', (event) => {
@@ -280,18 +267,18 @@ export default function RootLayout({
   }, [router]);
 
   // Handle file drop for audio import
-  const handleFileDrop = useCallback((paths: string[]) => {
-    // Find the first audio file
-    const audioFile = paths.find(p => {
+  const handleFileDrop = useCallback((audioPaths: string[], otherCount: number) => {
+    // The first audio file the core granted
+    const audioFile = audioPaths.find(p => {
       const ext = p.split('.').pop()?.toLowerCase();
       return !!ext && isAudioExtension(ext);
     });
 
     if (audioFile) {
-      console.log('[Layout] Audio file dropped:', audioFile);
+      console.log('[Layout] Audio file dropped');
       setImportFilePath(audioFile);
       setShowImportDialog(true);
-    } else if (paths.length > 0) {
+    } else if (audioPaths.length + otherCount > 0) {
       toast.error('Please drop an audio file', {
         description: `Supported formats: ${getAudioFormatsDisplayList()}`
       });
@@ -300,7 +287,7 @@ export default function RootLayout({
 
   // Listen for drag-drop events
   useEffect(() => {
-    if (showOnboarding) return; // Don't handle drops during onboarding
+    if (showOnboarding !== false) return;
 
     const unlisteners: UnlistenFn[] = [];
     const cleanedUpRef = { current: false };
@@ -327,10 +314,11 @@ export default function RootLayout({
       }
       unlisteners.push(unlistenDragLeave);
 
-      // Drop - process files
-      const unlistenDrop = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
+      // Drop - the core saw the drop and granted the audio files for import
+      // before telling the window; the paths come from the core's event.
+      const unlistenDrop = await listen<{ audio: string[]; other: number }>('files-dropped', (event) => {
         setShowDropOverlay(false);
-        handleFileDrop(event.payload.paths);
+        handleFileDrop(event.payload.audio ?? [], event.payload.other ?? 0);
       });
       if (cleanedUpRef.current) {
         unlistenDrop();
@@ -364,15 +352,13 @@ export default function RootLayout({
 
   const handleOnboardingComplete = () => {
     console.log('[Layout] Onboarding completed, reloading app')
-    setShowOnboarding(false)
-    setOnboardingCompleted(true)
     // Optionally reload the window to ensure all state is fresh
     window.location.reload()
   }
 
   return (
-    <html lang="en">
-      <body className={`${sourceSans3.variable} ${atkinson.variable} ${lexend.variable} ${firaSans.variable} ${ibmPlexSans.variable} ${plexMono.variable} font-sans antialiased`}>
+    <html lang="en" className={fontVariables}>
+      <body className="font-sans antialiased">
         <ThemeInitializer />
         <AppShortcuts />
         <AppTitlebar />
@@ -391,21 +377,21 @@ export default function RootLayout({
                             <ImportDialogProvider onOpen={handleOpenImportDialog}>
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
+                              <ArchiveStorageDialog />
 
-                              {/* Auto-start recording when a Teams meeting is detected (opt-in) */}
-                              <TeamsAutoRecord />
+                              <RecordingRequests ready={showOnboarding === false} />
 
                               {/* Show onboarding or main app */}
                               {showOnboarding ? (
                                 <div className="pt-[var(--titlebar-height)]">
                                   <OnboardingFlow onComplete={handleOnboardingComplete} />
                                 </div>
-                              ) : (
+                              ) : showOnboarding === false ? (
                                 <div className="flex pt-[var(--titlebar-height)]">
                                   <Sidebar />
                                   <MainContent>{children}</MainContent>
                                 </div>
-                              )}
+                              ) : null}
                               {/* Import audio overlay and dialog */}
                               <ImportDropOverlay visible={showDropOverlay} />
                               <AppImportDialog
@@ -427,7 +413,7 @@ export default function RootLayout({
           </RecordingStateProvider>
         </AnalyticsProvider>
 
-        <Toaster position="bottom-center" richColors closeButton />
+        <AppToaster />
       </body>
     </html>
   )

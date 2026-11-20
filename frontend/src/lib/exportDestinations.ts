@@ -1,7 +1,7 @@
 // Persisted Microsoft export destinations.
 //
 // The OneNote notebook and Planner plan/bucket chosen in
-// Settings → Add-ons are saved here so the per-meeting export buttons in the
+// Export destinations chosen in Settings (Microsoft 365, Confluence) are saved here so the per-meeting export buttons in the
 // summary view know where to send. These are non-sensitive Graph IDs, stored
 // in localStorage.
 

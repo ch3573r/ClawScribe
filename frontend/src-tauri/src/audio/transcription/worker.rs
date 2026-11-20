@@ -8,7 +8,11 @@ use super::queue::{
     QueuedAudioChunk, TranscriptionMetrics, TranscriptionMetricsSnapshot,
     TranscriptionQueueReceiver,
 };
+use super::source_language::{
+    parakeet_multilingual, LanguageEvidence, SourceLanguageSnapshot, SourceLanguages,
+};
 use crate::api::TranscriptWord;
+use crate::audio::recording_manager::LiveTranscriptSink;
 use crate::audio::AudioChunk;
 use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
@@ -74,6 +78,31 @@ pub fn current_transcription_metrics() -> Option<TranscriptionMetricsSnapshot> {
         .lock()
         .ok()
         .and_then(|metrics| metrics.as_ref().map(|metrics| metrics.snapshot()))
+}
+
+#[tauri::command]
+pub(crate) fn get_live_source_languages() -> Option<SourceLanguageSnapshot> {
+    let active = ACTIVE_TRANSCRIPTION_METRICS.lock().ok()?.clone()?;
+    let state = active.source_languages.lock().ok()?;
+    state.as_ref().map(SourceLanguages::snapshot)
+}
+
+pub(crate) fn reset_live_source_languages<R: Runtime>(app: &AppHandle<R>) {
+    let active = ACTIVE_TRANSCRIPTION_METRICS
+        .lock()
+        .ok()
+        .and_then(|metrics| metrics.clone());
+    let snapshot = active.and_then(|metrics| {
+        metrics
+            .source_languages
+            .lock()
+            .ok()?
+            .as_mut()
+            .map(SourceLanguages::reset)
+    });
+    if let Some(snapshot) = snapshot {
+        let _ = app.emit("live-source-languages", snapshot);
+    }
 }
 
 struct ProcessingMetricsGuard {
@@ -143,14 +172,21 @@ pub struct TranscriptUpdate {
     pub word_timestamps: Option<Vec<TranscriptWord>>,
 }
 
-// NOTE: get_transcript_history and get_recording_meeting_name functions
-// have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
+fn publish_transcript_update(
+    sink: &LiveTranscriptSink,
+    update: &TranscriptUpdate,
+    notify_frontend: impl FnOnce(&TranscriptUpdate),
+) {
+    if sink.ingest(update) {
+        notify_frontend(update);
+    }
+}
 
 /// Start the serial, memory-bounded transcription task.
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: TranscriptionQueueReceiver,
-    live_sink: crate::audio::recording_manager::LiveTranscriptSink,
+    live_sink: LiveTranscriptSink,
 ) -> TranscriptionTask {
     let metrics = transcription_receiver.metrics();
     metrics.set_worker_active(true);
@@ -210,6 +246,22 @@ pub fn start_transcription_task<R: Runtime>(
         );
 
         let failure_notice = Arc::new(SegmentFailureNotice::default());
+        let current_model = transcription_engine
+            .get_current_model()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let evidence = match &transcription_engine {
+            TranscriptionEngine::Whisper(_) => Some(LanguageEvidence::WhisperAudio),
+            TranscriptionEngine::Parakeet(_) if parakeet_multilingual(&current_model) => {
+                Some(LanguageEvidence::TranscriptText)
+            }
+            _ => None,
+        };
+        if let Some(evidence) = evidence {
+            if let Ok(mut languages) = task_metrics.source_languages.lock() {
+                *languages = Some(SourceLanguages::new(live_sink.session_id.clone(), evidence));
+            }
+        }
 
         // Spawn worker tasks
         let mut worker_handles = tokio::task::JoinSet::new();
@@ -228,17 +280,13 @@ pub fn start_transcription_task<R: Runtime>(
             let failure_notice = failure_notice.clone();
             let live_sink = live_sink.clone();
             let vocabulary = vocabulary.clone();
+            let current_model = current_model.clone();
 
             worker_handles.spawn(async move {
                 info!("👷 Worker {} started", worker_id);
 
                 // PRE-VALIDATE model state to avoid repeated async calls per chunk
                 let initial_model_loaded = engine_clone.is_model_loaded().await;
-                let current_model = engine_clone
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-
                 let engine_name = engine_clone.provider_name();
 
                 if initial_model_loaded {
@@ -286,6 +334,18 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+                            let source = chunk.device_type.clone();
+                            let mut language = crate::get_language_preference_internal();
+                            let auto = matches!(language.as_deref(), None | Some("auto"));
+                            let input = if auto && queued_chunk.clear_source {
+                                metrics_clone.source_languages.lock().ok().and_then(|state|
+                                    state.as_ref().map(|s| s.input(&source, chunk_timestamp, chunk_duration)))
+                            } else {
+                                None
+                            };
+                            if let Some((_, Some(hint))) = input {
+                                language = Some(hint.to_owned());
+                            }
 
                             // Speaker label from the segment's dominant source (set
                             // by the pipeline): mic = "Me", system audio = "Participants".
@@ -305,7 +365,7 @@ pub fn start_transcription_task<R: Runtime>(
                             };
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(&engine_clone, chunk)
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, language)
                                 .await
                             {
                                 Ok((
@@ -313,6 +373,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     confidence_opt,
                                     is_partial,
                                     provider_word_timestamps,
+                                    detected_language,
                                 )) => {
                                     debug!("Transcription result: chars={}, confidence={:?}, partial={}", transcript.chars().count(), confidence_opt, is_partial);
                                     if is_partial {
@@ -326,6 +387,14 @@ pub fn start_transcription_task<R: Runtime>(
                                     // which silently dropped short valid utterances ("Ja",
                                     // "Nein", names, numbers). Confidence is display-only.
                                     if !transcript.trim().is_empty() {
+                                        if let Some((generation, _)) = input.filter(|_| !is_partial) {
+                                            let snapshot = metrics_clone.source_languages.lock().ok().and_then(|mut state| {
+                                                state.as_mut()?.observe(generation, &source, detected_language, chunk_timestamp, chunk_duration, confidence_opt, &transcript)
+                                            });
+                                            if let Some(snapshot) = snapshot {
+                                                let _ = app_clone.emit("live-source-languages", snapshot);
+                                            }
+                                        }
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         debug!("Recognized speech retained");
 
@@ -372,15 +441,6 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time, audio_end_time,
                                         );
 
-                                        // Save structured transcript segment to recording manager (only final results)
-                                        // Save ALL segments (partial and final) to ensure complete JSON
-                                        // Create structured segment with full timestamp data
-                                        // NOTE: This is now handled via the transcript-update event emission below
-                                        // The recording_commands module listens to these events and saves them
-                                        // This decouples the transcription worker from direct RECORDING_MANAGER access
-
-                                        // Emit transcript update with NEW recording-relative timestamps
-
                                         let update = TranscriptUpdate {
                                             session_id: Some(live_sink.session_id.clone()),
                                             text: transcript,
@@ -397,12 +457,11 @@ pub fn start_transcription_task<R: Runtime>(
                                             word_timestamps,
                                         };
 
-                                        // Ingest before UI emission, retaining the producer's session identity and partial flag.
-                                        live_sink.ingest(&update);
-                                        if let Err(_e) = app_clone.emit("transcript-update", &update)
-                                        {
-                                            error!("Failed to emit transcript update");
-                                        }
+                                        publish_transcript_update(&live_sink, &update, |update| {
+                                            if app_clone.emit("transcript-update", update).is_err() {
+                                                error!("Failed to emit transcript update");
+                                            }
+                                        });
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     } else if !transcript.trim().is_empty() && should_log_this_chunk
                                     {
@@ -663,12 +722,20 @@ impl SegmentFailureNotice {
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
-/// Returns: (text, confidence Option, is_partial)
 async fn transcribe_chunk_with_provider(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
-) -> std::result::Result<(String, Option<f32>, bool, Option<Vec<TranscriptWord>>), TranscriptionError>
-{
+    language: Option<String>,
+) -> std::result::Result<
+    (
+        String,
+        Option<f32>,
+        bool,
+        Option<Vec<TranscriptWord>>,
+        Option<&'static str>,
+    ),
+    TranscriptionError,
+> {
     let chunk_start_time = chunk.timestamp;
     let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
     let chunk_end_time = chunk_start_time + chunk_duration;
@@ -705,17 +772,14 @@ async fn transcribe_chunk_with_provider(
     // Transcribe using the appropriate engine (with improved error handling)
     match engine {
         TranscriptionEngine::Whisper(whisper_engine) => {
-            // Get language preference from global state
-            let language = crate::get_language_preference_internal();
-
             match whisper_engine
-                .transcribe_audio_with_confidence(speech_samples, language)
+                .transcribe_live(speech_samples, language)
                 .await
             {
-                Ok((text, confidence, is_partial)) => {
+                Ok(((text, confidence, is_partial), detected)) => {
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), confidence, is_partial, None));
+                        return Ok((String::new(), confidence, is_partial, None, None));
                     }
 
                     debug!(
@@ -723,7 +787,7 @@ async fn transcribe_chunk_with_provider(
                         confidence, is_partial
                     );
 
-                    Ok((cleaned_text, confidence, is_partial, None))
+                    Ok((cleaned_text, confidence, is_partial, None, detected))
                 }
                 Err(e) => {
                     error!("Whisper transcription failed for chunk");
@@ -742,7 +806,7 @@ async fn transcribe_chunk_with_provider(
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), None, false, None));
+                        return Ok((String::new(), None, false, None, None));
                     }
 
                     debug!("Parakeet transcription completed");
@@ -758,7 +822,7 @@ async fn transcribe_chunk_with_provider(
                             None,
                         );
 
-                    Ok((cleaned_text, None, false, word_timestamps))
+                    Ok((cleaned_text, None, false, word_timestamps, None))
                 }
                 Err(e) => {
                     error!("Parakeet transcription failed for chunk");
@@ -771,13 +835,17 @@ async fn transcribe_chunk_with_provider(
         }
         TranscriptionEngine::Provider(provider) => {
             // NEW: Trait-based provider (clean, unified interface)
-            let language = crate::get_language_preference_internal();
-
             match provider.transcribe(speech_samples, language).await {
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), result.confidence, result.is_partial, None));
+                        return Ok((
+                            String::new(),
+                            result.confidence,
+                            result.is_partial,
+                            None,
+                            None,
+                        ));
                     }
 
                     debug!(
@@ -792,6 +860,7 @@ async fn transcribe_chunk_with_provider(
                         result.confidence,
                         result.is_partial,
                         result.word_timestamps,
+                        None,
                     ))
                 }
                 Err(e) => {
@@ -837,6 +906,69 @@ fn format_recording_time(seconds: f64) -> String {
     let secs = total_seconds % 60;
 
     format!("[{:02}:{:02}]", minutes, secs)
+}
+
+#[cfg(test)]
+mod transcript_delivery_tests {
+    use super::*;
+    use crate::audio::RecordingManager;
+    use crate::knowledge::live::LiveState;
+
+    #[test]
+    fn complete_update_is_saved_before_frontend_notification() {
+        let live = Arc::new(LiveState::default());
+        let startup = live.prepare(true).unwrap();
+        let mut manager = RecordingManager::new();
+        let sink = manager.bind_live_session(
+            live,
+            startup.session_id.clone(),
+            startup.recording_generation,
+        );
+        let update = TranscriptUpdate {
+            session_id: Some(startup.commit()),
+            text: "Ja".into(),
+            timestamp: "12:02:03".into(),
+            source: "Participants".into(),
+            sequence_id: 0,
+            chunk_start_time: 3.0,
+            is_partial: false,
+            confidence: Some(0.1),
+            audio_start_time: 3.0,
+            audio_end_time: 4.0,
+            duration: 1.0,
+            word_timestamps: Some(vec![TranscriptWord {
+                text: "Ja".into(),
+                start: 3.1,
+                end: 3.4,
+                confidence: Some(0.1),
+                speaker: Some("Participants".into()),
+                timestamp_source: Some(crate::api::TranscriptWordTimestampSource::Estimated),
+            }]),
+        };
+
+        let mut notifications = 0;
+        publish_transcript_update(&sink, &update, |event| {
+            notifications += 1;
+            assert_eq!(event.session_id, update.session_id);
+            let rows = manager.get_transcript_segments();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].confidence, Some(0.1));
+            assert_eq!(rows[0].display_time, "12:02:03");
+        });
+        assert_eq!(notifications, 1);
+        let rows = manager.library_transcripts();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "seg_0");
+        assert_eq!(rows[0].text, "Ja");
+        assert_eq!(rows[0].speaker.as_deref(), Some("Participants"));
+        assert_eq!(rows[0].audio_start_time, Some(3.0));
+        assert_eq!(rows[0].audio_end_time, Some(4.0));
+        assert_eq!(rows[0].duration, Some(1.0));
+        assert_eq!(rows[0].word_timestamps, update.word_timestamps);
+
+        publish_transcript_update(&sink, &update, |_| {});
+        assert_eq!(manager.library_transcripts().len(), 1);
+    }
 }
 
 #[cfg(test)]

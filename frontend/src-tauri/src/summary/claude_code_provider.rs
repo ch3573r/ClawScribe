@@ -20,7 +20,8 @@ const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const STDERR_LIMIT: usize = 256 * 1024;
 const LOGIN: &str = "Claude Code is not signed in. Open a terminal and run: claude auth login";
 const NOT_INSTALLED: &str = "Claude Code was not found. Install it yourself or update Program path";
-const INVALID_PROGRAM: &str = "Choose the full path to the Claude Code program";
+const INVALID_PROGRAM: &str =
+    "Choose the Claude Code program: a local file named claude, claude.exe, claude.cmd or claude.bat";
 const GENERIC_ERROR: &str = "Claude Code returned an error";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -94,6 +95,14 @@ pub async fn claude_code_save_config<R: Runtime>(
             .map(|path| path.trim().to_string())
             .filter(|path| !path.is_empty()),
     };
+    // Only a path that passes validation is ever saved, so nothing that was not
+    // validated can be run later.
+    if config.program_path.is_some() {
+        let checked = config.clone();
+        tokio::task::spawn_blocking(move || resolve_program(&checked))
+            .await
+            .map_err(|_| "Could not save Claude Code settings")??;
+    }
     let data = app_data(&app)?;
     std::fs::create_dir_all(&data).map_err(|_| "Could not save Claude Code settings")?;
     let mut file = tempfile::NamedTempFile::new_in(&data)
@@ -110,15 +119,16 @@ pub async fn claude_code_save_config<R: Runtime>(
         .map_err(|_| "Could not save Claude Code settings")?;
     Ok(config)
 }
+/// Checks the saved configuration. A `config` argument from the webview is
+/// ignored: running a program is only ever done for a path that was saved after
+/// it passed validation, never for a draft.
 #[tauri::command]
 pub async fn claude_code_check_status<R: Runtime>(
     app: AppHandle<R>,
     config: Option<ClaudeCodeConfig>,
 ) -> Result<ClaudeCodeStatus, String> {
-    let provider = match config {
-        Some(config) => Ok(ClaudeCodeProvider { config }),
-        None => app_data(&app).and_then(|data| provider_from_data(&data)),
-    };
+    let _ignored_draft = config;
+    let provider = app_data(&app).and_then(|data| provider_from_data(&data));
     Ok(match provider {
         Ok(provider) => provider.status().await,
         Err(message) => ClaudeCodeStatus::Error { message },
@@ -316,6 +326,62 @@ fn scrub_environment(command: &mut Command) {
     }
 }
 
+/// The names the program may have. Case does not matter on Windows.
+fn is_program_name(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        ["claude.exe", "claude.cmd", "claude.bat", "claude"]
+            .iter()
+            .any(|allowed| name.eq_ignore_ascii_case(allowed))
+    }
+    #[cfg(not(windows))]
+    {
+        name == "claude"
+    }
+}
+
+/// A `.cmd` or `.bat` shim that sits inside a `node_modules` folder: a
+/// project-local shim (`<project>/node_modules/.bin/claude.cmd`) that whoever
+/// controls the project controls. A global npm install puts its shim in the npm
+/// prefix folder itself (for example `%APPDATA%/npm/claude.cmd`), which has no
+/// `node_modules` component, so it is told apart by that component alone.
+fn is_project_local_shim(path: &Path) -> bool {
+    let is_script = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    is_script
+        && path.components().any(|component| {
+            matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.eq_ignore_ascii_case("node_modules")))
+        })
+}
+
+/// A configured program path: local text (checked before any filesystem call),
+/// a file called claude (claude.exe, claude.cmd, claude.bat), existing, a
+/// regular file, and still on a local disk once resolved.
+fn validate_program_path(configured: &str) -> Result<PathBuf, String> {
+    if !crate::local_path::is_local_path_text(configured) {
+        return Err(INVALID_PROGRAM.into());
+    }
+    let path = Path::new(configured);
+    if !is_program_name(path) || !is_program_file(path) || is_project_local_shim(path) {
+        return Err(INVALID_PROGRAM.into());
+    }
+    let resolved = std::fs::canonicalize(path).map_err(|_| INVALID_PROGRAM.to_string())?;
+    // A link may not turn it into a different program or a remote one.
+    if !crate::local_path::is_local_canonical(&resolved)
+        || !is_program_name(&resolved)
+        || !is_program_file(&resolved)
+        || is_project_local_shim(&resolved)
+    {
+        return Err(INVALID_PROGRAM.into());
+    }
+    Ok(resolved)
+}
+
 fn resolve_program(config: &ClaudeCodeConfig) -> Result<Option<PathBuf>, String> {
     if let Some(configured) = config
         .program_path
@@ -323,20 +389,14 @@ fn resolve_program(config: &ClaudeCodeConfig) -> Result<Option<PathBuf>, String>
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        let path = Path::new(configured);
-        if !path.is_absolute() || !is_program_file(path) {
-            return Err(INVALID_PROGRAM.into());
-        }
-        return std::fs::canonicalize(path)
-            .map(Some)
-            .map_err(|_| INVALID_PROGRAM.into());
+        return validate_program_path(configured).map(Some);
     }
     if let Some(found) = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .filter(|dir| dir.is_absolute())
         .flat_map(|dir| program_candidates(&dir.join("claude")))
-        .find(|path| is_program_file(path))
+        .find(|path| is_program_file(path) && !is_project_local_shim(path))
     {
         return Ok(std::fs::canonicalize(found).ok());
     }

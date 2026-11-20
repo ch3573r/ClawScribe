@@ -1,6 +1,6 @@
 import { openExternal } from '@/lib/openExternal';
 import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
@@ -21,7 +21,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
-import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, Wrench } from 'lucide-react';
+import { Lock, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, Wrench } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   Command,
@@ -34,17 +34,36 @@ import {
 import { cn, isOllamaNotInstalledError } from '@/lib/utils';
 import { toast } from 'sonner';
 import { ClaudeCodeProviderCard, CLAUDE_CODE_MODELS, useClaudeCodeSettings } from './ClaudeCodeProviderCard';
+import { platform as osPlatform } from '@tauri-apps/plugin-os';
+import { Progress } from '@/components/ui/progress';
+import { Meta, SettingsFooter, SettingsRow, StatusText, type StatusTone } from '@/components/ui/settings-layout';
+import { NoteRow, ROW_SELECT } from '@/components/settings/settings-parts';
+import { SaveError, safeMessage, useSaveFeedback, type CommitResult } from '@/components/settings/commit-field';
+import { CommitInputRow, CopyCommandRow, SaveMark, withError } from '@/components/settings/summary-provider-parts';
+import { providerLabel as summaryProviderLabel } from '@/components/settings/provider-data';
+import { SecretKeyControl, SecretKeyRow } from '@/components/settings/SecretKeyControl';
+import { configService } from '@/services/configService';
+import {
+  KEY_REQUIRED_FOR_NEW_ADDRESS, NO_SECRET, hasUsableKey, keyProblem, keyRequiredForAddress, newKeyPayload, readSecretStatus,
+  removalNeedsConfirmation, withoutSecrets, type SecretStatus,
+} from '@/lib/secret-key';
+import type { KeyProvider } from '@/contexts/ConfigContext';
 
 export interface ModelConfig {
   provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
   model: string;
   whisperModel: string;
+  /** A key the user has just typed, held only until it is saved. Never loaded from the core. */
   apiKey?: string | null;
+  /** Whether the provider has a stored key, with a short hint. */
+  apiKeyStatus?: SecretStatus;
   ollamaEndpoint?: string | null;
   // Custom OpenAI fields
   customOpenAIEndpoint?: string | null;
   customOpenAIModel?: string | null;
+  /** A key just typed for the custom provider, held only until it is saved. */
   customOpenAIApiKey?: string | null;
+  customOpenAIKeyStatus?: SecretStatus;
   maxTokens?: number | null;
   contextWindow?: number | null;
   temperature?: number | null;
@@ -210,12 +229,60 @@ const GROQ_FALLBACK_MODELS = [
   'openai/gpt-oss-20b',
 ];
 
+const KEY_PROVIDERS = ['claude', 'groq', 'openai', 'openrouter'];
+const needsKey = (provider: string) => KEY_PROVIDERS.includes(provider);
+/** Providers that cannot summarize until a model is chosen from their list. */
+const MODEL_LIST_PROVIDERS = ['builtin-ai', 'ollama', 'openrouter', 'claude', 'groq', 'openai'];
+
+const PROVIDER_SUMMARY: Record<ModelConfig['provider'], string> = {
+  'builtin-ai': 'Runs on this PC, offline, no key',
+  ollama: 'Uses your local Ollama server',
+  'custom-openai': 'OpenAI or any OpenAI-compatible gateway',
+  claude: 'Anthropic API with your own key',
+  openai: 'OpenAI API with your own key',
+  groq: 'Groq API with your own key',
+  openrouter: 'OpenRouter API with your own key',
+  openclaw: 'Routes summaries through your OpenClaw gateway',
+  codex: 'Bundled Codex runtime signed in with ChatGPT',
+  'claude-code': 'Uses the Claude Code you installed and signed in to',
+};
+
+const urlProblem = (value: string): string | null => {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return null;
+  } catch { /* falls through */ }
+  return 'Enter a URL that starts with http:// or https://';
+};
+const requiredProblem = (label: string) => (value: string) => (value.trim() ? null : `${label} is required`);
+const numberProblem = (min: number, max: number, integer: boolean, required = false) => (value: string): string | null => {
+  if (!value.trim()) return required ? 'This value is required' : null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || (integer && !Number.isInteger(parsed)) || parsed < min || parsed > max) {
+    return `Enter ${integer ? 'a whole number' : 'a number'} from ${min} to ${max}`;
+  }
+  return null;
+};
+const readModelMap = (): Record<string, string> => {
+  try { return JSON.parse(localStorage.getItem('providerModelMap') || '{}'); } catch { return {}; }
+};
+const rememberModel = (provider: string, model: string) => {
+  try { const map = readModelMap(); map[provider] = model; localStorage.setItem('providerModelMap', JSON.stringify(map)); } catch { /* optional cache */ }
+};
+
 interface ModelSettingsModalProps {
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
-  onSave: (config: ModelConfig) => void;
+  onSave: (config: ModelConfig) => void | Promise<void>;
   skipInitialFetch?: boolean; // Optional: skip fetching config from backend if parent manages it
   layout?: 'inline' | 'dialog';
+  /**
+   * Settings page mode. Renders rows for a settings card (no Save button) and
+   * saves each change as it is made: selects and switches at once, text fields
+   * on blur or Enter. `onSave` must throw when the save fails. Other callers
+   * keep the explicit Save button.
+   */
+  autosave?: boolean;
 }
 
 export function ModelSettingsModal({
@@ -224,21 +291,38 @@ export function ModelSettingsModal({
   onSave,
   skipInitialFetch = false,
   layout = 'inline',
+  autosave = false,
 }: ModelSettingsModalProps) {
   // Use ConfigContext if available, fallback to props for backward compatibility
   const configContext = useConfig();
-  const modelConfig = configContext?.modelConfig || propsModelConfig;
-  const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+  const sharedModelConfig = configContext?.modelConfig || propsModelConfig;
+  const setSharedModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+  // Settings page only: a provider the user is looking at but has not switched
+  // to. It is kept here and never written to the shared configuration, because
+  // summaries are generated with whatever the shared configuration holds.
+  const [previewConfig, setPreviewConfig] = useState<ModelConfig | null>(null);
+  const previewRef = useRef<ModelConfig | null>(null);
+  const setPreview = useCallback((next: ModelConfig | null) => {
+    previewRef.current = next;
+    setPreviewConfig(next);
+  }, []);
+  const modelConfig = (autosave && previewConfig) || sharedModelConfig;
+  const setModelConfig = useCallback((next: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => {
+    const preview = previewRef.current;
+    if (preview) setPreview(typeof next === 'function' ? next(preview) : next);
+    else setSharedModelConfig(next);
+  }, [setPreview, setSharedModelConfig]);
   const claudeCode = useClaudeCodeSettings(modelConfig.provider === 'claude-code');
-  const providerApiKeys = configContext?.providerApiKeys;
-  const updateProviderApiKey = configContext?.updateProviderApiKey;
+  const providerKeyStatus = configContext?.providerKeyStatus;
+  const refreshProviderKeyStatus = configContext?.refreshProviderKeyStatus;
 
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [error, setError] = useState<string>('');
+  // The key typed for the provider being looked at. A stored key is never loaded
+  // here: the core reports only whether one is stored (`keyStatus`).
   const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
-  const [showApiKey, setShowApiKey] = useState<boolean>(false);
-  const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(!!modelConfig.apiKey?.trim());
-  const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
+  const keyStatus: SecretStatus =
+    providerKeyStatus?.[modelConfig.provider as KeyProvider] ?? modelConfig.apiKeyStatus ?? NO_SECRET;
   const { serverAddress } = useSidebar();
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
   const [openRouterError, setOpenRouterError] = useState<string>('');
@@ -250,7 +334,6 @@ export function ModelSettingsModal({
   const [hasAutoFetched, setHasAutoFetched] = useState<boolean>(false);
   const hasSyncedFromParent = useRef<boolean>(false);
   const hasLoadedInitialConfig = useRef<boolean>(false);
-  const [autoGenerateEnabled, setAutoGenerateEnabled] = useState<boolean>(true); // Default to true
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isEndpointSectionCollapsed, setIsEndpointSectionCollapsed] = useState<boolean>(true); // Collapsed by default
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
@@ -261,7 +344,11 @@ export function ModelSettingsModal({
   const [openClawAllowUnencrypted, setOpenClawAllowUnencrypted] = useState(false);
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+  // A key typed for the custom provider; the stored one is only reported as a status.
   const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
+  const [customKeyStatus, setCustomKeyStatus] = useState<SecretStatus>(modelConfig.customOpenAIKeyStatus ?? NO_SECRET);
+  // The address the stored custom key was saved for. Changing the address needs the key again.
+  const [savedCustomEndpoint, setSavedCustomEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || '');
   const [customContextWindow, setCustomContextWindow] = useState<string>(modelConfig.contextWindow?.toString() || '8192');
   const [customMaxTokens, setCustomMaxTokens] = useState<string>(modelConfig.maxTokens?.toString() || '');
   const [customTemperature, setCustomTemperature] = useState<string>(modelConfig.temperature?.toString() || '');
@@ -315,6 +402,14 @@ export function ModelSettingsModal({
   // Built-in AI models state
   const [builtinAiModels, setBuiltinAiModels] = useState<any[]>([]);
 
+  // Settings page (autosave) state
+  const feedback = useSaveFeedback();
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+  const [modelListFailed, setModelListFailed] = useState<boolean>(false);
+  const [customCheck, setCustomCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; message: string }>({ state: 'idle', message: '' });
+  const [claudeRecheck, setClaudeRecheck] = useState<number>(0);
+  const [claudeGuideError, setClaudeGuideError] = useState<string>('');
+
   // Cache models by endpoint to avoid refetching when reverting endpoint changes
   const modelsCache = useRef<Map<string, OllamaModel[]>>(new Map());
 
@@ -345,26 +440,6 @@ export function ModelSettingsModal({
 
     return () => clearTimeout(timer);
   }, [ollamaEndpoint]);
-
-  const fetchApiKey = async (provider: string) => {
-    try {
-      const data = (await invoke('api_get_api_key', {
-        provider,
-      })) as string;
-      setApiKey(data || '');
-    } catch (err) {
-      console.error('Error fetching API key:', err);
-      setApiKey(null);
-    }
-  };
-
-  // Auto-unlock when API key becomes empty, 
-  useEffect(() => {
-    const hasContent = !!apiKey?.trim();
-    if (!hasContent) {
-      setIsApiKeyLocked(false);
-    }
-  }, [apiKey]);
 
   const configuredCodexModel = codexConfig.model || modelConfig.model || CODEX_DEFAULT_MODEL;
   const codexPickerModels = codexModels.some((model) => model.id === configuredCodexModel)
@@ -412,7 +487,16 @@ export function ModelSettingsModal({
     !customTimeoutSeconds.trim()
   );
 
+  // A stored key goes only to the address it was saved for: changing the
+  // address asks for the key again, and nothing is saved until it is entered.
+  const customKeyRequired = keyRequiredForAddress(savedCustomEndpoint, customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, customOpenAIApiKey);
+  const openClawTokenRequired = !!openClawStatus?.bearer_token_configured && !openClawBearerToken.trim()
+    && (keyRequiredForAddress(openClawStatus.endpoint, openClawEndpoint, { stored: true, hint: null }, '')
+      || keyRequiredForAddress(openClawStatus.model_endpoint, openClawModelEndpoint, { stored: true, hint: null }, ''));
+  const typedKeyProblem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
+
   const isOpenClawInvalid = modelConfig.provider === 'openclaw' && (
+    openClawTokenRequired ||
     !openClawEndpoint.trim() ||
     !openClawModelEndpoint.trim() ||
     !openClawSource.trim() ||
@@ -421,9 +505,11 @@ export function ModelSettingsModal({
 
   const isDoneDisabled =
     (modelConfig.provider === 'claude-code' && claudeCode.busy) ||
-    (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
+    (requiresApiKey && !hasUsableKey(apiKey, keyStatus)) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
     isCustomOpenAIInvalid ||
+    (modelConfig.provider === 'custom-openai' && customKeyRequired) ||
+    typedKeyProblem !== null ||
     isOpenClawInvalid;
 
   useEffect(() => {
@@ -437,20 +523,7 @@ export function ModelSettingsModal({
       try {
         const data = (await invoke('api_get_model_config')) as any;
         if (data && data.provider !== null) {
-          setModelConfig(data);
-
-          // Fetch API key if not included in response and provider requires it
-          if (['claude', 'groq', 'openai', 'openrouter'].includes(data.provider) && !data.apiKey) {
-            try {
-              const apiKeyData = await invoke('api_get_api_key', {
-                provider: data.provider
-              }) as string;
-              data.apiKey = apiKeyData;
-              setApiKey(apiKeyData);
-            } catch (err) {
-              console.error('Failed to fetch API key:', err);
-            }
-          }
+          setModelConfig({ ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) });
 
           // Sync ollamaEndpoint state with fetched config
           if (data.ollamaEndpoint) {
@@ -468,7 +541,8 @@ export function ModelSettingsModal({
                 setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                 setCustomAllowUnencrypted(customConfig.allow_unencrypted ?? false);
                 setCustomDestinationProblem(customConfig.destination_problem ?? null);
-                setCustomOpenAIApiKey(customConfig.apiKey || '');
+                setCustomKeyStatus(readSecretStatus(customConfig.apiKeyStatus));
+                setSavedCustomEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                 setCustomMaxTokens(customConfig.maxTokens?.toString() || '');
                 setCustomContextWindow(customConfig.contextWindow?.toString() || '8192');
                 setCustomTemperature(customConfig.temperature?.toString() || '');
@@ -491,22 +565,6 @@ export function ModelSettingsModal({
     fetchModelConfig();
   }, [skipInitialFetch]);
 
-  // Fetch auto-generate setting on mount
-  useEffect(() => {
-    const fetchAutoGenerateSetting = async () => {
-      try {
-        const enabled = (await invoke('api_get_auto_generate_setting')) as boolean;
-        setAutoGenerateEnabled(enabled);
-        console.log('Auto-generate setting loaded:', enabled);
-      } catch (err) {
-        console.error('Failed to fetch auto-generate setting:', err);
-        // Keep default value (true) on error
-      }
-    };
-
-    fetchAutoGenerateSetting();
-  }, []);
-
   // Sync ollamaEndpoint state when modelConfig.ollamaEndpoint changes from parent
   useEffect(() => {
     const endpoint = modelConfig.ollamaEndpoint || '';
@@ -526,13 +584,13 @@ export function ModelSettingsModal({
       console.log('Syncing custom OpenAI fields from ConfigContext:', {
         endpoint: modelConfig.customOpenAIEndpoint,
         model: modelConfig.customOpenAIModel,
-        hasApiKey: !!modelConfig.customOpenAIApiKey,
+        hasStoredKey: !!modelConfig.customOpenAIKeyStatus?.stored,
       });
 
       // Always sync from modelConfig (which comes from context if available)
       setCustomOpenAIEndpoint(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
       setCustomOpenAIModel(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-      setCustomOpenAIApiKey(modelConfig.customOpenAIApiKey || '');
+      if (modelConfig.customOpenAIKeyStatus) setCustomKeyStatus(modelConfig.customOpenAIKeyStatus);
       setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
       setCustomContextWindow(modelConfig.contextWindow?.toString() || '8192');
       setCustomTemperature(modelConfig.temperature?.toString() || '');
@@ -545,7 +603,7 @@ export function ModelSettingsModal({
     modelConfig.provider,
     modelConfig.customOpenAIEndpoint,
     modelConfig.customOpenAIModel,
-    modelConfig.customOpenAIApiKey,
+    modelConfig.customOpenAIKeyStatus,
     modelConfig.maxTokens,
     modelConfig.contextWindow,
     modelConfig.temperature,
@@ -587,20 +645,26 @@ export function ModelSettingsModal({
     }
   }, [ollamaEndpoint, lastFetchedEndpoint, modelConfig.provider]);
 
-  // Sync local apiKey state when provider changes
+  // A key typed for one provider is never carried to another.
   useEffect(() => {
-    if (providerApiKeys && requiresApiKey && modelConfig.provider !== 'custom-openai') {
-      const correctKey = providerApiKeys[modelConfig.provider as keyof typeof providerApiKeys];
-      if (correctKey !== apiKey) {
-        setApiKey(correctKey || '');
-        setIsApiKeyLocked(!!correctKey?.trim());
-      }
-    }
-  }, [modelConfig.provider, providerApiKeys, requiresApiKey]);
+    setApiKey(modelConfig.apiKey || null);
+  }, [modelConfig.provider]);
+
+  useEffect(() => {
+    setAdvancedOpen(false);
+    setModelListFailed(false);
+    setCustomCheck({ state: 'idle', message: '' });
+    setClaudeGuideError('');
+  }, [modelConfig.provider]);
+
+  // Re-check Claude Code after the program path was saved, once the new path is in state.
+  useEffect(() => {
+    if (claudeRecheck > 0) void claudeCode.check();
+  }, [claudeRecheck]);
 
   // Manual fetch function for Ollama models
-  const fetchOllamaModels = async (silent = false) => {
-    const trimmedEndpoint = ollamaEndpoint.trim();
+  const fetchOllamaModels = async (silent = false, endpointOverride?: string) => {
+    const trimmedEndpoint = (endpointOverride ?? ollamaEndpoint).trim();
 
     // Validate URL if provided
     if (trimmedEndpoint && !validateOllamaEndpoint(trimmedEndpoint)) {
@@ -700,7 +764,8 @@ export function ModelSettingsModal({
       if (data.length > 0 && !modelConfig.model) {
         const firstAvailable = data.find((m: any) => m.status?.type === 'available');
         if (firstAvailable) {
-          setModelConfig((prev: ModelConfig) => ({ ...prev, model: firstAvailable.name }));
+          // The answer can arrive after the user moved to another provider.
+          setModelConfig((prev: ModelConfig) => (prev.provider === 'builtin-ai' && !prev.model ? { ...prev, model: firstAvailable.name } : prev));
         }
       }
     } catch (err) {
@@ -710,54 +775,60 @@ export function ModelSettingsModal({
   };
 
   // Fetch OpenAI models from API
-  const loadOpenAIModels = async (key: string | null) => {
-    if (!key?.trim()) {
+  const loadOpenAIModels = async (key: string | null, useStoredKey = false) => {
+    if (!key?.trim() && !useStoredKey) {
       setOpenaiModels([]); // Will use fallback via modelOptions
       return;
     }
     setIsLoadingOpenAI(true);
     try {
-      const data = (await invoke('get_openai_models', { apiKey: key })) as OpenAIModel[];
+      const data = (await invoke('get_openai_models', { apiKey: newKeyPayload(key) })) as OpenAIModel[];
       setOpenaiModels(data.map((m) => m.id));
+      setModelListFailed(false);
     } catch (err) {
       console.error('Error loading OpenAI models:', err);
       setOpenaiModels([]); // Will use fallback via modelOptions
+      setModelListFailed(true);
     } finally {
       setIsLoadingOpenAI(false);
     }
   };
 
   // Fetch Anthropic (Claude) models from API
-  const loadClaudeModels = async (key: string | null) => {
-    if (!key?.trim()) {
+  const loadClaudeModels = async (key: string | null, useStoredKey = false) => {
+    if (!key?.trim() && !useStoredKey) {
       setClaudeModels([]); // Will use fallback via modelOptions
       return;
     }
     setIsLoadingClaude(true);
     try {
-      const data = (await invoke('get_anthropic_models', { apiKey: key })) as AnthropicModel[];
+      const data = (await invoke('get_anthropic_models', { apiKey: newKeyPayload(key) })) as AnthropicModel[];
       setClaudeModels(data.map((m) => m.id));
+      setModelListFailed(false);
     } catch (err) {
       console.error('Error loading Claude models:', err);
       setClaudeModels([]); // Will use fallback via modelOptions
+      setModelListFailed(true);
     } finally {
       setIsLoadingClaude(false);
     }
   };
 
   // Fetch Groq models from API
-  const loadGroqModels = async (key: string | null) => {
-    if (!key?.trim()) {
+  const loadGroqModels = async (key: string | null, useStoredKey = false) => {
+    if (!key?.trim() && !useStoredKey) {
       setGroqModels([]); // Will use fallback via modelOptions
       return;
     }
     setIsLoadingGroq(true);
     try {
-      const data = (await invoke('get_groq_models', { apiKey: key })) as GroqModel[];
+      const data = (await invoke('get_groq_models', { apiKey: newKeyPayload(key) })) as GroqModel[];
       setGroqModels(data.map((m) => m.id));
+      setModelListFailed(false);
     } catch (err) {
       console.error('Error loading Groq models:', err);
       setGroqModels([]); // Will use fallback via modelOptions
+      setModelListFailed(true);
     } finally {
       setIsLoadingGroq(false);
     }
@@ -806,7 +877,8 @@ export function ModelSettingsModal({
       if (codex) {
         setCodexConfig(codex);
         if (codex.model && modelConfig.provider === 'codex') {
-          setModelConfig((prev: ModelConfig) => ({ ...prev, model: codex.model }));
+          // The answer can arrive after the user moved to another provider.
+          setModelConfig((prev: ModelConfig) => (prev.provider === 'codex' ? { ...prev, model: codex.model } : prev));
         }
         return codex;
       }
@@ -951,10 +1023,10 @@ export function ModelSettingsModal({
 
   // Auto-fetch OpenAI models when provider is openai and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'openai' && apiKey?.trim()) {
-      loadOpenAIModels(apiKey);
+    if (modelConfig.provider === 'openai' && hasUsableKey(apiKey, keyStatus)) {
+      loadOpenAIModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored]);
 
   useEffect(() => {
     if (modelConfig.provider === 'openai') {
@@ -970,17 +1042,17 @@ export function ModelSettingsModal({
 
   // Auto-fetch Claude models when provider is claude and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'claude' && apiKey?.trim()) {
-      loadClaudeModels(apiKey);
+    if (modelConfig.provider === 'claude' && hasUsableKey(apiKey, keyStatus)) {
+      loadClaudeModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored]);
 
   // Auto-fetch Groq models when provider is groq and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'groq' && apiKey?.trim()) {
-      loadGroqModels(apiKey);
+    if (modelConfig.provider === 'groq' && hasUsableKey(apiKey, keyStatus)) {
+      loadGroqModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored]);
 
   // Restore cached model when async model lists become available
   useEffect(() => {
@@ -999,6 +1071,10 @@ export function ModelSettingsModal({
   }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, codexModels, modelConfig.provider]);
 
   const handleSave = async () => {
+    const problem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
+    if (problem) { toast.error(problem); return; }
+    if (modelConfig.provider === 'custom-openai' && customKeyRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
+    if (modelConfig.provider === 'openclaw' && openClawTokenRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
     if (modelConfig.provider === 'claude-code') {
       try { await claudeCode.save(); }
       catch { toast.error('Could not save Claude Code settings'); return; }
@@ -1009,7 +1085,7 @@ export function ModelSettingsModal({
         await invoke('api_save_custom_openai_config', {
         allowUnencrypted: customAllowUnencrypted,
           endpoint: customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
-          apiKey: customOpenAIApiKey.trim() || null,
+          apiKey: newKeyPayload(customOpenAIApiKey),
           model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
           maxTokens: customMaxTokens ? parseInt(customMaxTokens, 10) : null,
           contextWindow: Number(customContextWindow) || 8192,
@@ -1029,14 +1105,15 @@ export function ModelSettingsModal({
 
     let updatedConfig = {
       ...modelConfig,
-      apiKey: requiresApiKey && typeof apiKey === 'string' ? apiKey.trim() || null : null,
+      // Only a key typed now is sent; without one the stored key is kept.
+      apiKey: requiresApiKey ? newKeyPayload(apiKey) : null,
       ollamaEndpoint: modelConfig.provider === 'ollama'
         ? (ollamaEndpoint.trim() || null)
         : (modelConfig.ollamaEndpoint || null),
       // Include custom OpenAI fields
       customOpenAIEndpoint: modelConfig.provider === 'custom-openai' ? (customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT) : null,
       customOpenAIModel: modelConfig.provider === 'custom-openai' ? (customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL) : null,
-      customOpenAIApiKey: modelConfig.provider === 'custom-openai' && customOpenAIApiKey.trim() ? customOpenAIApiKey.trim() : null,
+      customOpenAIApiKey: modelConfig.provider === 'custom-openai' ? newKeyPayload(customOpenAIApiKey) : null,
       contextWindow: modelConfig.provider === 'custom-openai' ? Number(customContextWindow) || 8192 : null,
       maxTokens: modelConfig.provider === 'custom-openai' && customMaxTokens ? parseInt(customMaxTokens, 10) : null,
       temperature: modelConfig.provider === 'custom-openai' && customTemperature ? parseFloat(customTemperature) : null,
@@ -1048,18 +1125,12 @@ export function ModelSettingsModal({
       model: modelConfig.provider === 'custom-openai' ? (customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL) : modelConfig.model,
     };
     setModelConfig(updatedConfig);
-    console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', updatedConfig);
 
     // Persist confirmed model choice to per-provider cache
     if (updatedConfig.model) {
       const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
       map[updatedConfig.provider] = updatedConfig.model;
       localStorage.setItem('providerModelMap', JSON.stringify(map));
-    }
-
-    // Update provider-specific key in context
-    if (updateProviderApiKey && updatedConfig.apiKey && updatedConfig.provider !== 'custom-openai') {
-      updateProviderApiKey(updatedConfig.provider, updatedConfig.apiKey);
     }
 
     if (updatedConfig.provider === 'openai') {
@@ -1116,14 +1187,57 @@ export function ModelSettingsModal({
 
     await Promise.resolve(onSave(updatedConfig));
 
+    // The typed key is stored now: drop it and ask the core what is stored.
+    await afterKeySaved(updatedConfig.provider);
+
     if (updatedConfig.provider === 'openai') {
       await loadOpenAIAuthStatus();
     }
   };
 
+  /** Forget a typed key once it is stored, and show what the core reports instead. */
+  const afterKeySaved = async (provider: string) => {
+    setApiKey(null);
+    setCustomOpenAIApiKey('');
+    setModelConfig((prev: ModelConfig) => ({ ...prev, apiKey: null, customOpenAIApiKey: null }));
+    await refreshProviderKeyStatus?.(provider);
+    if (provider === 'custom-openai') await refreshCustomKeyStatus();
+  };
+
+  const refreshCustomKeyStatus = async () => {
+    try {
+      const config = await configService.getCustomOpenAIConfig();
+      setCustomKeyStatus(config?.apiKeyStatus ?? NO_SECRET);
+      if (config?.endpoint) setSavedCustomEndpoint(config.endpoint);
+    } catch {
+      console.error('Failed to read the custom provider key status');
+    }
+  };
+
+  /** What removing a provider's key breaks, when that provider is the one in use. */
+  const removeWarning = (provider: string) =>
+    removalNeedsConfirmation(provider, sharedModelConfig.provider)
+      ? 'Summaries with this provider will not work until you add a key again.'
+      : null;
+
+  const removeStoredKey = async () => {
+    const provider = modelConfig.provider;
+    await configService.clearApiKey(provider);
+    setApiKey(null);
+    setModelConfig((prev: ModelConfig) => ({ ...prev, apiKey: null }));
+    await refreshProviderKeyStatus?.(provider);
+  };
+
+  const removeCustomKey = async () => {
+    await configService.clearCustomOpenAIApiKey();
+    setCustomOpenAIApiKey('');
+    await refreshCustomKeyStatus();
+    await refreshProviderKeyStatus?.('custom-openai');
+  };
+
   const customOpenAIInvokeConfig = () => ({
     endpoint: customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
-    apiKey: customOpenAIApiKey.trim() || null,
+    apiKey: newKeyPayload(customOpenAIApiKey),
     model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
     maxTokens: customMaxTokens ? parseInt(customMaxTokens, 10) : null,
           contextWindow: Number(customContextWindow) || 8192,
@@ -1147,7 +1261,7 @@ export function ModelSettingsModal({
         allowUnencrypted: customAllowUnencrypted,
         ...customOpenAIInvokeConfig(),
       });
-      toast.success(result.message || 'Connection successful!');
+      toast.success(result.message || 'Connection successful');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       toast.error(errorMsg);
@@ -1177,17 +1291,14 @@ export function ModelSettingsModal({
     }
   };
 
-  const clearCustomOpenAICredentials = () => {
-    setCustomOpenAIApiKey('');
-    setCustomOrganization('');
-    setCustomProject('');
-    toast.success('Credentials cleared from this form. Click Save to persist.');
-  };
-
-  const handleInputClick = () => {
-    if (isApiKeyLocked) {
-      setIsLockButtonVibrating(true);
-      setTimeout(() => setIsLockButtonVibrating(false), 500);
+  const clearCustomOpenAICredentials = async () => {
+    try {
+      await removeCustomKey();
+      setCustomOrganization('');
+      setCustomProject('');
+      toast.success('The saved key was removed. Click Save to clear the organization and project.');
+    } catch {
+      toast.error('Could not remove the saved key');
     }
   };
 
@@ -1294,6 +1405,753 @@ export function ModelSettingsModal({
     );
   });
 
+  // ---------------------------------------------------------------------------
+  // Settings page mode: rows for a settings card, every change saved as made.
+  // ---------------------------------------------------------------------------
+  // While another provider is only being looked at, changes stay with the
+  // preview and resolve as "held". Only `switching` (the "Use" button) saves.
+  const saveConfig = async (next: ModelConfig, failure: string, switching = false): Promise<CommitResult> => {
+    if (previewRef.current && !switching) {
+      setPreview(next);
+      return 'held';
+    }
+    try { await Promise.resolve(onSave(next)); } catch { throw new SaveError(failure); }
+    setPreview(null);
+  };
+
+  // Looking at another provider must not replace a working setup. The select
+  // only changes what is shown; the saved provider stays in use until the user
+  // switches with "Use ..." or saves a setting of the new provider.
+  const changeProviderAutosave = (value: string) => {
+    const provider = value as ModelConfig['provider'];
+    setError('');
+    if (provider === sharedModelConfig.provider) {
+      setPreview(null);
+      return;
+    }
+    if (provider === modelConfig.provider) return;
+    {
+      if (!previewRef.current && sharedModelConfig.model) rememberModel(sharedModelConfig.provider, sharedModelConfig.model);
+      const saved = readModelMap()[provider];
+      const options = modelOptions[provider];
+      const model = saved && options?.includes(saved) ? saved : (options?.[0] ?? '');
+      const next: ModelConfig = {
+        ...sharedModelConfig,
+        provider,
+        model,
+        apiKey: null,
+        apiKeyStatus: needsKey(provider) ? providerKeyStatus?.[provider as KeyProvider] : undefined,
+      };
+      setPreview(next);
+      if (provider === 'openrouter') void loadOpenRouterModels();
+      if (provider === 'builtin-ai') void loadBuiltinAiModels();
+      if (provider === 'custom-openai') {
+        invoke<any>('api_get_custom_openai_config').then((config) => {
+          if (!config) return;
+          setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
+          setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+          setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
+          setCustomDestinationProblem(config.destination_problem ?? null);
+          setCustomKeyStatus(readSecretStatus(config.apiKeyStatus));
+          setSavedCustomEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
+          setCustomMaxTokens(config.maxTokens?.toString() || '');
+          setCustomContextWindow(config.contextWindow?.toString() || '8192');
+          setCustomTemperature(config.temperature?.toString() || '');
+          setCustomTopP(config.topP?.toString() || '');
+          setCustomTimeoutSeconds(config.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
+          setCustomOrganization(config.organization || '');
+          setCustomProject(config.project || '');
+        }).catch(() => { /* the fields keep their last values */ });
+      }
+      if (provider === 'openclaw') void loadOpenClawStatus();
+      if (provider === 'codex') void loadCodexConfig().then((loaded) => checkCodexInstallation(loaded || undefined));
+    }
+  };
+
+  /** What still has to be chosen before the provider being looked at can be used. */
+  const draftProviderMissing = (): string | null => {
+    if (needsKey(modelConfig.provider) && !hasUsableKey(modelConfig.apiKey, keyStatus)) return 'Enter an API key first';
+    if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
+    if (modelConfig.provider === 'openclaw' && openClawMissing(openClawValues()).length > 0) return 'Fill in the OpenClaw settings first';
+    if (modelConfig.provider === 'codex' && codexStatus && !codexStatus.found) return 'Install the Codex runtime first';
+    if (modelConfig.provider === 'claude-code' && claudeCode.status && claudeCode.status.state !== 'ready') return 'Claude Code is not ready yet';
+    return null;
+  };
+
+  const useDraftProvider = () => {
+    void feedback.run('provider', async () => {
+      // Only the key stored for this provider is used, never one typed for another provider.
+      const next: ModelConfig = {
+        ...modelConfig,
+        whisperModel: sharedModelConfig.whisperModel,
+        ollamaEndpoint: modelConfig.provider === 'ollama' ? modelConfig.ollamaEndpoint : sharedModelConfig.ollamaEndpoint,
+        apiKey: needsKey(modelConfig.provider) ? newKeyPayload(modelConfig.apiKey) : null,
+      };
+      await saveConfig(next, 'Could not save the provider', true);
+      setError('');
+      setModelConfig({ ...next, apiKey: null });
+      setApiKey(null);
+      await refreshProviderKeyStatus?.(next.provider);
+    });
+  };
+
+  const chooseModelAutosave = (model: string) => {
+    void feedback.run('model', async () => {
+      const next: ModelConfig = { ...modelConfig, model, apiKey: needsKey(modelConfig.provider) ? newKeyPayload(modelConfig.apiKey) : null };
+      const held = await saveConfig(next, 'Could not save the model');
+      rememberModel(modelConfig.provider, model);
+      setModelConfig(next);
+      return held;
+    });
+  };
+
+  // The core opens the folder dialog and only accepts the folder it chose here
+  // (new or empty, or already ClawScribe's own Codex profile).
+  const chooseCodexHome = async () => {
+    try {
+      const folder = await invoke<string | null>('pick_codex_home_folder');
+      if (!folder) return;
+      await saveCodexSafe({ ...codexConfig, codexHomePath: folder, codexHomeMode: 'clawscribe-isolated', useExistingUserCodexSession: false, codexBinaryPath: null });
+    } catch (err) {
+      toast.error(typeof err === 'string' ? err : 'Could not use that folder');
+    }
+  };
+
+  const saveCodexSafe = async (config: CodexProviderConfig) => {
+    try { return await saveCodexConfig(config); } catch { throw new SaveError('Could not save the Codex settings'); }
+  };
+
+  const chooseCodexModel = (model: string) => {
+    void feedback.run('model', async () => {
+      const saved = await saveCodexSafe({ ...codexConfig, model });
+      const next: ModelConfig = { ...modelConfig, model: saved.model, apiKey: null };
+      const held = await saveConfig(next, 'Could not save the model');
+      setModelConfig(next);
+      return held;
+    });
+  };
+
+  const commitApiKey = async (value: string): Promise<CommitResult> => {
+    const next: ModelConfig = { ...modelConfig, apiKey: newKeyPayload(value) };
+    const held = await saveConfig(next, 'Could not save the API key');
+    // Kept with the preview. It is stored when the user switches to this provider.
+    if (held) { setApiKey(value); setModelConfig(next); return held; }
+    // Stored now: forget what was typed and show what the core reports.
+    await afterKeySaved(modelConfig.provider);
+    if (modelConfig.provider === 'openai') {
+      try {
+        const status = (await invoke('api_save_openai_auth_config', { config: { mode: 'api_key' } })) as OpenAIAuthStatus;
+        setOpenAIAuthStatus(status);
+      } catch {
+        throw new SaveError('The key is saved, but the OpenAI sign-in mode could not be updated');
+      }
+    }
+  };
+
+  const customValues = () => ({
+    endpoint: customOpenAIEndpoint, model: customOpenAIModel, apiKey: customOpenAIApiKey, contextWindow: customContextWindow,
+    maxTokens: customMaxTokens, temperature: customTemperature, topP: customTopP, timeoutSeconds: customTimeoutSeconds,
+    organization: customOrganization, project: customProject, allowUnencrypted: customAllowUnencrypted,
+  });
+
+  const commitCustom = async (over: Partial<ReturnType<typeof customValues>>): Promise<CommitResult> => {
+    const v = { ...customValues(), ...over };
+    if (keyRequiredForAddress(savedCustomEndpoint, v.endpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, v.apiKey)) {
+      // Keep the new address; it is saved together with the key.
+      setCustomOpenAIEndpoint(v.endpoint);
+      return 'held';
+    }
+    const payload = {
+      endpoint: v.endpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
+      apiKey: newKeyPayload(v.apiKey),
+      model: v.model.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
+      maxTokens: v.maxTokens ? parseInt(v.maxTokens, 10) : null,
+      contextWindow: Number(v.contextWindow) || 8192,
+      temperature: v.temperature ? parseFloat(v.temperature) : null,
+      topP: v.topP ? parseFloat(v.topP) : null,
+      timeoutSeconds: v.timeoutSeconds ? parseInt(v.timeoutSeconds, 10) : null,
+      organization: v.organization.trim() || null,
+      project: v.project.trim() || null,
+    };
+    try {
+      await invoke('api_save_custom_openai_config', { allowUnencrypted: v.allowUnencrypted, ...payload });
+    } catch (err) {
+      throw new SaveError(safeMessage(err, 'Could not save the connection settings', [v.apiKey, v.organization, v.project]));
+    }
+    const next: ModelConfig = {
+      ...modelConfig, provider: 'custom-openai', apiKey: null, model: payload.model,
+      customOpenAIEndpoint: payload.endpoint, customOpenAIModel: payload.model, customOpenAIApiKey: null,
+      contextWindow: payload.contextWindow, maxTokens: payload.maxTokens, temperature: payload.temperature, topP: payload.topP,
+      timeoutSeconds: payload.timeoutSeconds, organization: payload.organization, project: payload.project,
+    };
+    const held = await saveConfig(next, 'Could not save the model settings');
+    rememberModel('custom-openai', payload.model);
+    setModelConfig(next);
+    setCustomAllowUnencrypted(v.allowUnencrypted);
+    setCustomDestinationProblem(null);
+    setCustomCheck({ state: 'idle', message: '' });
+    setSavedCustomEndpoint(payload.endpoint);
+    if (payload.apiKey) { setCustomOpenAIApiKey(''); await refreshCustomKeyStatus(); await refreshProviderKeyStatus?.('custom-openai'); }
+    return held;
+  };
+
+  const commitOllamaEndpoint = async (value: string): Promise<CommitResult> => {
+    const next: ModelConfig = { ...modelConfig, apiKey: null, ollamaEndpoint: value || null };
+    const held = await saveConfig(next, 'Could not save the endpoint');
+    setModelConfig(next);
+    setOllamaEndpoint(value);
+    void fetchOllamaModels(true, value);
+    return held;
+  };
+
+  // The core reports only that a token is saved, never the token.
+  const openClawTokenStatus: SecretStatus = { stored: !!openClawStatus?.bearer_token_configured, hint: null };
+  const removeOpenClawToken = async () => {
+    await invoke('clear_openclaw_bearer_token');
+    setOpenClawBearerToken('');
+    await loadOpenClawStatus();
+  };
+
+  const openClawValues = () => ({
+    enabled: openClawEnabled, endpoint: openClawEndpoint, modelEndpoint: openClawModelEndpoint, source: openClawSource,
+    token: openClawBearerToken, includeAudioPath: openClawIncludeAudioPath, allowUnencrypted: openClawAllowUnencrypted,
+  });
+  const openClawMissing = (v: ReturnType<typeof openClawValues>) => [
+    !v.endpoint.trim() && 'meeting handoff URL',
+    !v.modelEndpoint.trim() && 'summary gateway URL',
+    !v.source.trim() && 'source name',
+    !v.token.trim() && !openClawStatus?.bearer_token_configured && 'bearer token',
+    !v.token.trim() && !!openClawStatus?.bearer_token_configured
+      && (keyRequiredForAddress(openClawStatus.endpoint, v.endpoint, { stored: true, hint: null }, '')
+        || keyRequiredForAddress(openClawStatus.model_endpoint, v.modelEndpoint, { stored: true, hint: null }, ''))
+      && 'bearer token for the new address',
+  ].filter(Boolean) as string[];
+
+  // Keeps what was entered. Saves once every required value is present.
+  const commitOpenClaw = async (over: Partial<ReturnType<typeof openClawValues>>): Promise<CommitResult> => {
+    const v = { ...openClawValues(), ...over };
+    setOpenClawEnabled(v.enabled); setOpenClawEndpoint(v.endpoint); setOpenClawModelEndpoint(v.modelEndpoint);
+    setOpenClawSource(v.source); setOpenClawBearerToken(v.token); setOpenClawIncludeAudioPath(v.includeAudioPath);
+    setOpenClawAllowUnencrypted(v.allowUnencrypted);
+    if (openClawMissing(v).length > 0) return 'held';
+    try {
+      await invoke('save_openclaw_config', {
+        config: {
+          enabled: v.enabled, allow_unencrypted: v.allowUnencrypted, endpoint: v.endpoint.trim(), model_endpoint: v.modelEndpoint.trim(),
+          bearer_token: v.token.trim(), source: v.source.trim(), include_audio_path: v.includeAudioPath,
+        },
+      });
+    } catch (err) {
+      throw new SaveError(safeMessage(err, 'Could not save the OpenClaw settings', [v.token]));
+    }
+    setOpenClawBearerToken('');
+    await loadOpenClawStatus();
+  };
+
+  // A switch that fails to save goes back to its saved position.
+  const commitOpenClawSwitch = async (over: Partial<ReturnType<typeof openClawValues>>) => {
+    const before = openClawValues();
+    try { return await commitOpenClaw(over); }
+    catch (failure) {
+      setOpenClawEnabled(before.enabled); setOpenClawIncludeAudioPath(before.includeAudioPath); setOpenClawAllowUnencrypted(before.allowUnencrypted);
+      throw failure;
+    }
+  };
+
+  const modelListLoading =
+    (modelConfig.provider === 'openrouter' && isLoadingOpenRouter) || (modelConfig.provider === 'openai' && isLoadingOpenAI) ||
+    (modelConfig.provider === 'claude' && isLoadingClaude) || (modelConfig.provider === 'groq' && isLoadingGroq) ||
+    (modelConfig.provider === 'ollama' && isLoadingOllama);
+
+  const runCustomCheck = async () => {
+    if (!customOpenAIEndpoint.trim() || !customOpenAIModel.trim()) {
+      setCustomCheck({ state: 'error', message: 'Enter an API base URL and a model name first' });
+      return;
+    }
+    setCustomCheck({ state: 'checking', message: '' });
+    try {
+      const result = await invoke<{ status: string; message: string }>('api_test_custom_openai_connection', {
+        allowUnencrypted: customAllowUnencrypted,
+        ...customOpenAIInvokeConfig(),
+      });
+      setCustomCheck({ state: 'ok', message: result.message || 'Connected' });
+    } catch (err) {
+      setCustomCheck({ state: 'error', message: safeMessage(err, 'Could not connect', [customOpenAIApiKey, customOrganization, customProject]) });
+    }
+  };
+
+  const claudeStatus = claudeCode.status;
+  const claudeBusy = claudeCode.busy;
+  let isWindows = false;
+  try { isWindows = osPlatform() === 'windows'; } catch { /* the guide also works when the platform is unknown */ }
+
+  type ProviderStatus = { tone: StatusTone; text: string; meta?: string };
+  const providerStatus = (): ProviderStatus => {
+    const provider = modelConfig.provider;
+    if (provider === 'builtin-ai') return { tone: 'ok', text: 'Runs on this PC', meta: 'Offline' };
+    if (provider === 'ollama') {
+      if (isLoadingOllama) return { tone: 'neutral', text: 'Checking Ollama…' };
+      if (ollamaNotInstalled) return { tone: 'error', text: 'Ollama is not installed or not running' };
+      if (error) return { tone: 'error', text: 'Could not reach Ollama' };
+      if (models.length > 0) return { tone: 'ok', text: 'Connected', meta: `${models.length} ${models.length === 1 ? 'model' : 'models'}` };
+      return { tone: 'warning', text: 'No models found' };
+    }
+    if (needsKey(provider)) {
+      if (!hasUsableKey(apiKey, keyStatus)) return { tone: 'warning', text: 'Needs an API key' };
+      if (modelListLoading) return { tone: 'neutral', text: 'Loading models…' };
+      if (provider === 'openrouter' && openRouterError) return { tone: 'warning', text: 'Key saved, model list unavailable' };
+      if (modelListFailed) return { tone: 'warning', text: 'Key saved, using the default model list' };
+      return { tone: 'ok', text: 'API key saved' };
+    }
+    if (provider === 'custom-openai') {
+      if (customCheck.state === 'checking') return { tone: 'neutral', text: 'Checking connection…' };
+      if (customCheck.state === 'ok') return { tone: 'ok', text: 'Connected' };
+      if (customCheck.state === 'error') return { tone: 'error', text: 'Could not connect' };
+      return { tone: 'neutral', text: 'Not checked yet' };
+    }
+    if (provider === 'openclaw') {
+      if (isLoadingOpenClawStatus) return { tone: 'neutral', text: 'Checking…' };
+      if (openClawStatusError) return { tone: 'error', text: 'Status unavailable' };
+      return openClawStatus?.ready ? { tone: 'ok', text: 'Ready' } : { tone: 'warning', text: 'Needs setup' };
+    }
+    if (provider === 'codex') {
+      if (isCodexBusy) return { tone: 'neutral', text: 'Checking…' };
+      if (!codexStatus) return { tone: 'neutral', text: 'Not checked yet' };
+      return codexStatus.found
+        ? { tone: 'ok', text: 'Runtime found', meta: [codexStatus.version, codexStatus.planType].filter(Boolean).join(' · ') || undefined }
+        : { tone: 'warning', text: 'Runtime missing or damaged' };
+    }
+    // claude-code
+    if (claudeBusy) return { tone: 'neutral', text: 'Checking Claude Code…' };
+    if (!claudeStatus) return { tone: 'neutral', text: 'Not checked yet' };
+    if (claudeStatus.state === 'ready') {
+      const version = claudeStatus.version.includes('Claude Code') ? claudeStatus.version : `Claude Code ${claudeStatus.version}`;
+      return { tone: 'ok', text: 'Ready', meta: [version, claudeStatus.plan ? `${claudeStatus.plan} plan` : null].filter(Boolean).join(' · ') };
+    }
+    if (claudeStatus.state === 'not_installed') return { tone: 'warning', text: 'Claude Code is not installed' };
+    if (claudeStatus.state === 'not_signed_in') return { tone: 'warning', text: 'Not signed in to Claude Code' };
+    return { tone: 'error', text: 'Could not check Claude Code' };
+  };
+
+  const checkingNow =
+    (modelConfig.provider === 'claude-code' && claudeBusy) || (modelConfig.provider === 'codex' && isCodexBusy) ||
+    (modelConfig.provider === 'openclaw' && isLoadingOpenClawStatus) || (modelConfig.provider === 'ollama' && isLoadingOllama) ||
+    (modelConfig.provider === 'custom-openai' && customCheck.state === 'checking') || (needsKey(modelConfig.provider) && modelListLoading);
+
+  const checkAgain = async () => {
+    const provider = modelConfig.provider;
+    if (provider === 'claude-code') return claudeCode.check();
+    if (provider === 'codex') return checkCodexInstallation();
+    if (provider === 'openclaw') return loadOpenClawStatus();
+    if (provider === 'ollama') return fetchOllamaModels(true);
+    if (provider === 'custom-openai') return runCustomCheck();
+    if (provider === 'openai') { await loadOpenAIAuthStatus(); return loadOpenAIModels(apiKey, keyStatus.stored); }
+    if (provider === 'claude') return loadClaudeModels(apiKey, keyStatus.stored);
+    if (provider === 'groq') return loadGroqModels(apiKey, keyStatus.stored);
+    if (provider === 'openrouter') { setOpenRouterModels([]); setOpenRouterError(''); return loadOpenRouterModels(); }
+  };
+
+  const modelError = feedback.states.model?.status === 'error' ? feedback.states.model.message : null;
+
+  const renderModelPicker = (key: string) => (
+    <SettingsRow key={key} title="Model" htmlFor="summary-model" description={withError(null, modelError)}>
+      <SaveMark status={feedback.states.model?.status} />
+      <Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen} modal={true}>
+        <PopoverTrigger asChild>
+          <Button id="summary-model" type="button" variant="outline" role="combobox" aria-expanded={modelComboboxOpen} disabled={feedback.busy}
+            className={cn(ROW_SELECT, 'justify-between font-normal')}>
+            <span className="truncate">{modelConfig.model || (modelListLoading ? 'Loading models…' : 'Select a model')}</span>
+            <ChevronsUpDown aria-hidden="true" className="h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[250px] p-0" align="end">
+          <Command>
+            <CommandInput placeholder="Search models" />
+            <CommandList className="max-h-[300px]">
+              {modelListLoading ? (
+                <div role="status" className="py-6 text-center text-sm text-muted-foreground">
+                  <RefreshCw aria-hidden="true" className="mx-auto mb-2 h-4 w-4 animate-spin" />
+                  Loading models
+                </div>
+              ) : (
+                <>
+                  <CommandEmpty>No models found</CommandEmpty>
+                  <CommandGroup>
+                    {modelOptions[modelConfig.provider]?.map((model) => (
+                      <CommandItem key={model} value={model} onSelect={(value) => { setModelComboboxOpen(false); chooseModelAutosave(value); }}>
+                        <Check aria-hidden="true" className={cn('mr-2 h-4 w-4', modelConfig.model === model ? 'opacity-100' : 'opacity-0')} />
+                        <span className="truncate">{model}</span>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                </>
+              )}
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </SettingsRow>
+  );
+
+  const renderSimpleModelSelect = (key: string, options: { value: string; label: string }[], onChange: (value: string) => void, loading?: boolean) => (
+    <SettingsRow key={key} title="Model" htmlFor="summary-model" description={withError(null, modelError)}>
+      <SaveMark status={feedback.states.model?.status} />
+      <Select value={modelConfig.model} onValueChange={onChange} disabled={feedback.busy || loading}>
+        <SelectTrigger id="summary-model" aria-label="Model" className={ROW_SELECT}>
+          <SelectValue placeholder={loading ? 'Loading models…' : 'Select a model'} />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </SettingsRow>
+  );
+
+  const renderProviderRows = () => {
+    const provider = modelConfig.provider;
+    const rows: ReactNode[] = [];
+    const advanced: ReactNode[] = [];
+
+    if (provider === 'builtin-ai') {
+      rows.push(
+        <div key="builtin" className="px-5 py-3">
+          <BuiltInModelManager
+            selectedModel={modelConfig.model}
+            layout={layout}
+            onModelSelect={(model) => chooseModelAutosave(model)}
+          />
+        </div>,
+      );
+    }
+
+    if (needsKey(provider)) {
+      rows.push(
+        // While another provider is only being looked at, a typed key stays in the
+        // preview; otherwise it is saved the moment it is entered.
+        previewConfig ? (
+          <SecretKeyRow
+            key="api-key" id="summary-api-key" title="API key" status={keyStatus}
+            draft={modelConfig.apiKey || ''} onDraftChange={(value) => setModelConfig((prev: ModelConfig) => ({ ...prev, apiKey: value || null }))}
+            description="Protected by your operating system. It is saved when you use this provider"
+          />
+        ) : (
+          <SecretKeyRow
+            key="api-key" id="summary-api-key" title="API key" status={keyStatus}
+            onCommit={commitApiKey} onRemove={removeStoredKey} removeWarning={removeWarning(provider)}
+            description={provider === 'openai' ? 'For Codex sign-in, choose Codex app-server instead' : 'Protected by your operating system'}
+          />
+        ),
+        renderModelPicker('model'),
+      );
+      if (provider === 'openai') {
+        advanced.push(
+          <SettingsRow key="openai-keys" title="Get an API key" description="Opens the OpenAI platform in your browser">
+            <Button type="button" variant="outline" onClick={() => openExternal('https://platform.openai.com/api-keys')}>
+              <ExternalLink aria-hidden="true" />Open API keys
+            </Button>
+          </SettingsRow>,
+        );
+      }
+    }
+
+    if (provider === 'ollama') {
+      rows.push(renderModelPicker('model'));
+      if (ollamaNotInstalled) {
+        rows.push(
+          <SettingsRow key="ollama-install" title="Ollama" description="Install Ollama, restart ClawScribe, then choose Check again">
+            <Button type="button" variant="outline" onClick={() => openExternal('https://ollama.com/download')}>
+              <ExternalLink aria-hidden="true" />Download Ollama
+            </Button>
+          </SettingsRow>,
+        );
+      } else if (!isLoadingOllama && models.length === 0) {
+        const downloading = isDownloading('gemma3:1b');
+        const progress = getProgress('gemma3:1b');
+        rows.push(
+          <SettingsRow key="ollama-recommended" title="Recommended model" description={`gemma3:1b, about 800 MB. ${ollamaEndpointChanged ? 'Check again to load models from the new endpoint' : 'No models are installed yet'}`}>
+            {downloading && progress !== undefined && <Meta>{Math.round(progress)}%</Meta>}
+            <Button type="button" variant="outline" onClick={downloadRecommendedModel} disabled={downloading || ollamaEndpointChanged}>
+              {downloading ? <RefreshCw aria-hidden="true" className="animate-spin" /> : <Download aria-hidden="true" />}
+              {downloading ? 'Downloading' : 'Download'}
+            </Button>
+          </SettingsRow>,
+        );
+        if (downloading && progress !== undefined) {
+          rows.push(<div key="ollama-progress" className="px-5 py-3"><Progress aria-label="Model download progress" value={progress} /></div>);
+        }
+      }
+      advanced.push(
+        <CommitInputRow
+          key="ollama-endpoint" id="summary-ollama-endpoint" title="Endpoint" type="url" placeholder="http://localhost:11434"
+          description="Leave empty to use the local Ollama server" value={ollamaEndpoint} validate={(value) => (value ? urlProblem(value) : null)}
+          onCommit={commitOllamaEndpoint}
+        />,
+      );
+    }
+
+    if (provider === 'custom-openai') {
+      rows.push(
+        <CommitInputRow
+          key="custom-endpoint" id="custom-endpoint" title="API base URL" type="url" placeholder={DEFAULT_OPENAI_COMPATIBLE_ENDPOINT}
+          description="Use another /v1 endpoint for OpenAI-compatible gateways" value={customOpenAIEndpoint}
+          validate={(value) => (value ? urlProblem(value) : 'The API base URL is required')} onCommit={(value) => commitCustom({ endpoint: value })}
+        />,
+        <div key="custom-http" className="px-5 py-3 empty:hidden">
+          <UnencryptedHttpOptIn destinationProblem={customDestinationProblem} urls={[customOpenAIEndpoint]} checked={customAllowUnencrypted}
+            onChange={(value) => { void feedback.run('custom-http', async () => { await commitCustom({ allowUnencrypted: value }); }); }} />
+        </div>,
+        <CommitInputRow
+          key="custom-model" id="custom-model" title="Model name" placeholder={DEFAULT_OPENAI_COMPATIBLE_MODEL}
+          description="The model identifier sent with each request" value={customOpenAIModel}
+          validate={requiredProblem('The model name')} onCommit={(value) => commitCustom({ model: value })}
+        />,
+        <SecretKeyRow
+          key="custom-key" id="custom-api-key" title="API key" status={customKeyStatus} placeholder="Leave empty if not required"
+          description="Protected by your operating system" onCommit={(value) => commitCustom({ apiKey: value })}
+          required={customKeyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+          onRemove={removeCustomKey} removeWarning={removeWarning('custom-openai')}
+        />,
+      );
+      if (customCheck.state === 'error') {
+        rows.push(<NoteRow key="custom-error" tone="error">{customCheck.message}</NoteRow>);
+      }
+      advanced.push(
+        <CommitInputRow key="custom-timeout" id="custom-timeout" title="Timeout" description="Seconds, 5 or more" value={customTimeoutSeconds}
+          inputMode="numeric" validate={numberProblem(5, 86400, true, true)} onCommit={(value) => commitCustom({ timeoutSeconds: value })} />,
+        <CommitInputRow key="custom-org" id="custom-organization" title="OpenAI organization" placeholder="org_..." description="Optional" value={customOrganization}
+          onCommit={(value) => commitCustom({ organization: value })} />,
+        <CommitInputRow key="custom-project" id="custom-project" title="OpenAI project" placeholder="proj_..." description="Optional" value={customProject}
+          onCommit={(value) => commitCustom({ project: value })} />,
+        <CommitInputRow key="custom-context" id="custom-context-window" title="Context window" description="Tokens. Longer meetings are summarized in sections to fit" value={customContextWindow}
+          inputMode="numeric" validate={numberProblem(4096, 2000000, true, true)} onCommit={(value) => commitCustom({ contextWindow: value })} />,
+        <CommitInputRow key="custom-max" id="custom-max-tokens" title="Maximum output tokens" placeholder="For example 4096" description="Optional" value={customMaxTokens}
+          inputMode="numeric" validate={numberProblem(1, 2000000, true)} onCommit={(value) => commitCustom({ maxTokens: value })} />,
+        <CommitInputRow key="custom-temp" id="custom-temperature" title="Temperature" placeholder="For example 0.7" description="0 to 2, optional" value={customTemperature}
+          validate={numberProblem(0, 2, false)} onCommit={(value) => commitCustom({ temperature: value })} />,
+        <CommitInputRow key="custom-top-p" id="custom-top-p" title="Top P" placeholder="For example 0.9" description="0 to 1, optional" value={customTopP}
+          validate={numberProblem(0, 1, false)} onCommit={(value) => commitCustom({ topP: value })} />,
+        <SettingsRow key="custom-actions" title="Tests and credentials"
+          description={withError('Test a full meeting summary, or remove the saved key, organization and project', feedback.states['custom-clear']?.status === 'error' ? feedback.states['custom-clear'].message : null)}>
+          <Button type="button" variant="outline" onClick={() => void testCustomOpenAIProcessing()} disabled={isTestingConnection || !customOpenAIEndpoint.trim() || !customOpenAIModel.trim()}>
+            {isTestingConnection && <RefreshCw aria-hidden="true" className="animate-spin" />}Test meeting processing
+          </Button>
+          <Button type="button" variant="outline" disabled={feedback.busy} onClick={() => {
+            void feedback.run('custom-clear', async () => {
+              try { await removeCustomKey(); } catch { throw new SaveError('Could not remove the saved key'); }
+              await commitCustom({ organization: '', project: '' });
+            });
+          }}>Clear credentials</Button>
+        </SettingsRow>,
+      );
+    }
+
+    if (provider === 'claude-code') {
+      if (claudeBusy) rows.push(<NoteRow key="cc-busy" role="status">Checking Claude Code…</NoteRow>);
+      if (!claudeBusy && claudeStatus?.state === 'not_installed') {
+        rows.push(
+          <SettingsRow key="cc-install" title="Install Claude Code" description={withError('Install Claude Code yourself, then choose Check again', claudeGuideError)}>
+            <Button type="button" variant="outline" onClick={async () => {
+              try { setClaudeGuideError(''); await openExternal('https://code.claude.com/docs/en/setup'); }
+              catch { setClaudeGuideError('Could not open the install guide. Try again'); }
+            }}>Open install guide</Button>
+          </SettingsRow>,
+        );
+        if (isWindows) rows.push(<CopyCommandRow key="cc-winget" id="claude-code-command" title="Install command" command="winget install Anthropic.ClaudeCode" />);
+      }
+      if (!claudeBusy && claudeStatus?.state === 'not_signed_in') {
+        rows.push(<CopyCommandRow key="cc-login" id="claude-code-command" title="Sign-in command" description="Run this in a terminal to sign in" command="claude auth login" />);
+      }
+      if (!claudeBusy && claudeStatus?.state === 'ready') {
+        rows.push(renderSimpleModelSelect('model', CLAUDE_CODE_MODELS.map((alias) => ({ value: alias, label: alias.charAt(0).toUpperCase() + alias.slice(1) })), chooseModelAutosave));
+      }
+      if (!claudeBusy && claudeStatus?.state === 'error') rows.push(<NoteRow key="cc-error" tone="error">{claudeStatus.message}</NoteRow>);
+      advanced.push(
+        <CommitInputRow
+          key="cc-path" id="claude-code-program" title="Program path" placeholder="Full path (optional)"
+          description="Leave empty to find Claude Code automatically, or use the full path to the program or Windows command shim"
+          value={claudeCode.programPath} disabled={claudeBusy}
+          onCommit={async (value) => {
+            try { await invoke('claude_code_save_config', { config: { programPath: value.trim() || null } }); }
+            catch { throw new SaveError('Could not save the program path'); }
+            claudeCode.setProgramPath(value);
+            setClaudeRecheck((count) => count + 1);
+          }}
+        />,
+      );
+    }
+
+    if (provider === 'codex') {
+      rows.push(
+        renderSimpleModelSelect(
+          'model',
+          codexPickerModels.map((model) => ({ value: model.id, label: `${model.displayName}${model.isDefault ? ' · recommended' : ''}` })),
+          chooseCodexModel, isLoadingCodexModels,
+        ),
+        <SettingsRow key="codex-account" title="Account"
+          description={codexModelError ? 'The model list is unavailable, so only the configured model is shown' : (codexStatus?.accountEmail || codexStatus?.authStatus || 'Not signed in')}>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_login_browser')} disabled={isCodexBusy}>
+            <ExternalLink aria-hidden="true" />Sign in with ChatGPT
+          </Button>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_logout')} disabled={isCodexBusy}>Sign out</Button>
+        </SettingsRow>,
+      );
+      advanced.push(
+        <SettingsRow key="codex-home" title="Isolated CODEX_HOME"
+          description={<>
+            A new or empty folder on a local drive that ClawScribe keeps its own Codex profile in. It never uses your normal ~/.codex profile or the standalone Codex CLI sign-in
+            <Meta className="mt-1 block break-all">{codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}</Meta>
+          </>}>
+          <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy}>Choose folder</Button>
+        </SettingsRow>,
+        <CommitInputRow key="codex-timeout" id="codex-timeout" title="Timeout" description="Seconds, 30 or more" inputMode="numeric" value={String(codexConfig.timeoutSeconds)}
+          validate={numberProblem(30, 86400, true, true)} onCommit={async (value) => { await saveCodexSafe({ ...codexConfig, timeoutSeconds: parseInt(value, 10) }); }} />,
+        <SettingsRow key="codex-runtime" title="Runtime"
+          description={codexStatus?.found ? `${codexStatus.version || 'Codex app-server runtime'} at ${codexStatus.path || 'bundled resources'}` : (codexStatus?.message || 'Bundled Codex runtime is missing or damaged. Repair or reinstall ClawScribe.')}>
+          <Button type="button" variant="outline" onClick={() => void findCodexAutomatically()} disabled={isCodexBusy}>Check bundled runtime</Button>
+          <Button type="button" variant="outline" onClick={() => void prepareCodexInstallRepair()} disabled={isCodexBusy}><Wrench aria-hidden="true" />Install or repair</Button>
+        </SettingsRow>,
+        <SettingsRow key="codex-tests" title="Tests" description="Check the app-server, or run a test meeting through it">
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_test_app_server')} disabled={isCodexBusy}>Test app-server</Button>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_test_processing')} disabled={isCodexBusy}>Test meeting processing</Button>
+        </SettingsRow>,
+        <SettingsRow key="codex-device" title="Other sign-in" description="Use a device code when the browser sign-in is not available">
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_login_device')} disabled={isCodexBusy}>Sign in with device code</Button>
+          <Button type="button" variant="ghost" onClick={() => openExternal('https://github.com/ch3573r/ClawScribe/blob/main/docs/auth/codex-auth.md')}>
+            <ExternalLink aria-hidden="true" />Auth docs
+          </Button>
+        </SettingsRow>,
+        <SettingsRow key="codex-details" title="Details"
+          description={<>
+            <span className="block break-all">CODEX_HOME: {codexStatus?.codexHome || codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}</span>
+            <span className="block">Runtime: {codexStatus?.runtimeKind || 'codex-app-server'} · Account: {codexStatus?.accountEmail || codexStatus?.authStatus || 'not signed in'}{codexStatus?.planType ? ` · Plan: ${codexStatus.planType}` : ''}{codexStatus?.rateLimitState ? ` · Rate limit: ${codexStatus.rateLimitState}` : ''}</span>
+            {codexStatus?.runtimeSha256 && <span className="block break-all">SHA256: {codexStatus.runtimeSha256}</span>}
+          </>} />,
+      );
+      if (codexLastResult) {
+        advanced.push(<div key="codex-result" className="px-5 py-3"><pre className="max-h-40 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">{codexLastResult}</pre></div>);
+      }
+    }
+
+    if (provider === 'openclaw') {
+      const missing = openClawMissing(openClawValues());
+      rows.push(
+        <SettingsRow key="oc-enabled" title="Enable OpenClaw handoff" htmlFor="openclaw-enabled" description={withError('Sends every finished recording to the gateway, whichever summary provider is in use. Also needed for OpenClaw summaries', feedback.states['oc-enabled']?.status === 'error' ? feedback.states['oc-enabled'].message : null)}>
+          <SaveMark status={feedback.states['oc-enabled']?.status} />
+          <Switch id="openclaw-enabled" checked={openClawEnabled} disabled={feedback.busy}
+            onCheckedChange={(value) => { void feedback.run('oc-enabled', () => commitOpenClawSwitch({ enabled: value })); }} />
+        </SettingsRow>,
+        <CommitInputRow key="oc-endpoint" id="openclaw-endpoint" title="Meeting handoff URL" type="url" placeholder="https://your-openclaw-host/meetings/completed"
+          value={openClawEndpoint} validate={(value) => (value ? urlProblem(value) : 'The meeting handoff URL is required')} onCommit={(value) => commitOpenClaw({ endpoint: value })} />,
+        <CommitInputRow key="oc-model-endpoint" id="openclaw-model-endpoint" title="Summary gateway URL" type="url" placeholder="https://your-openclaw-host/v1/chat/completions"
+          value={openClawModelEndpoint} validate={(value) => (value ? urlProblem(value) : 'The summary gateway URL is required')} onCommit={(value) => commitOpenClaw({ modelEndpoint: value })} />,
+        <div key="oc-http" className="px-5 py-3 empty:hidden">
+          <UnencryptedHttpOptIn
+            destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null}
+            urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted}
+            onChange={(value) => { void feedback.run('oc-http', () => commitOpenClawSwitch({ allowUnencrypted: value })); }} />
+        </div>,
+        <SecretKeyRow key="oc-token" id="openclaw-bearer-token" title="Bearer token" status={openClawTokenStatus}
+          placeholder="Paste the OpenClaw ingest token"
+          description="Must match the token on the OpenClaw ingest service"
+          onCommit={(value) => commitOpenClaw({ token: value })}
+          required={openClawTokenRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+          onRemove={removeOpenClawToken} removeWarning={removeWarning('openclaw')} />,
+      );
+      if (missing.length > 0) {
+        rows.push(<NoteRow key="oc-missing" role="status">Not saved yet. Still needed: {missing.join(', ')}</NoteRow>);
+      } else if (openClawStatus?.status_message || openClawStatusError) {
+        rows.push(<NoteRow key="oc-status" tone={openClawStatusError ? 'error' : 'muted'}>{openClawStatusError ? `OpenClaw status unavailable: ${openClawStatusError}` : openClawStatus?.status_message}</NoteRow>);
+      }
+      advanced.push(
+        <CommitInputRow key="oc-source" id="openclaw-source" title="Source name" placeholder="ClawScribe" value={openClawSource}
+          validate={requiredProblem('The source name')} onCommit={(value) => commitOpenClaw({ source: value })} />,
+        <SettingsRow key="oc-audio" title="Include local audio path" htmlFor="openclaw-include-audio-path" description="Adds this PC's audio file path to the submitted metadata">
+          <SaveMark status={feedback.states['oc-audio']?.status} />
+          <Switch id="openclaw-include-audio-path" checked={openClawIncludeAudioPath} disabled={feedback.busy}
+            onCheckedChange={(value) => { void feedback.run('oc-audio', () => commitOpenClawSwitch({ includeAudioPath: value })); }} />
+        </SettingsRow>,
+      );
+    }
+
+    return { rows, advanced };
+  };
+
+  if (autosave) {
+    const { rows, advanced } = renderProviderRows();
+    const status = providerStatus();
+    const providerState = feedback.states.provider;
+    return (
+      <>
+        <SettingsRow
+          title="Provider"
+          htmlFor="summary-provider"
+          description={withError(PROVIDER_SUMMARY[modelConfig.provider], providerState?.status === 'error' ? providerState.message : null)}
+        >
+          <SaveMark status={providerState?.status} />
+          <Select value={modelConfig.provider} onValueChange={changeProviderAutosave} disabled={feedback.busy}>
+            <SelectTrigger id="summary-provider" aria-label="Provider" className={ROW_SELECT}>
+              <SelectValue placeholder="Select a provider" />
+            </SelectTrigger>
+            <SelectContent className="max-h-72 overflow-y-auto">
+              <SelectGroup>
+                <SelectLabel className="normal-case">On your device</SelectLabel>
+                <SelectItem value="builtin-ai">Built-in</SelectItem>
+                <SelectItem value="ollama">Ollama</SelectItem>
+              </SelectGroup>
+              <SelectGroup>
+                <SelectLabel className="normal-case">Cloud APIs</SelectLabel>
+                <SelectItem value="custom-openai">OpenAI or compatible</SelectItem>
+                <SelectItem value="claude">Claude</SelectItem>
+                <SelectItem value="groq">Groq</SelectItem>
+                <SelectItem value="openrouter">OpenRouter</SelectItem>
+                <SelectItem value="openclaw">OpenClaw</SelectItem>
+              </SelectGroup>
+              <SelectGroup>
+                <SelectLabel className="normal-case">Advanced</SelectLabel>
+                <SelectItem value="codex">Codex app-server</SelectItem>
+                <SelectItem value="claude-code">Claude Code</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        {previewConfig && (
+          <SettingsRow
+            title="Not in use yet"
+            description={draftProviderMissing() ?? `${summaryProviderLabel(sharedModelConfig.provider)} stays your summary provider until you switch`}
+          >
+            <Button type="button" variant="ghost" size="sm" disabled={feedback.busy} onClick={() => changeProviderAutosave(sharedModelConfig.provider)}>
+              Keep {summaryProviderLabel(sharedModelConfig.provider)}
+            </Button>
+            <Button type="button" variant="outline" size="sm" disabled={feedback.busy || draftProviderMissing() !== null} onClick={useDraftProvider}>
+              Use {summaryProviderLabel(modelConfig.provider)}
+            </Button>
+          </SettingsRow>
+        )}
+        {rows}
+        {advancedOpen && advanced.length > 0 && <div id="summary-provider-advanced" className="divide-y divide-border/60">{advanced}</div>}
+        <SettingsFooter
+          actions={
+            <>
+              {advanced.length > 0 && (
+                <Button type="button" variant="ghost" size="sm" aria-expanded={advancedOpen} aria-controls="summary-provider-advanced" onClick={() => setAdvancedOpen(!advancedOpen)}>
+                  Advanced
+                </Button>
+              )}
+              {modelConfig.provider !== 'builtin-ai' && (
+                <Button type="button" variant="ghost" size="sm" disabled={checkingNow} onClick={() => void checkAgain()}>
+                  {checkingNow ? 'Checking…' : modelConfig.provider === 'custom-openai' && customCheck.state === 'idle' ? 'Check connection' : 'Check again'}
+                </Button>
+              )}
+            </>
+          }
+        >
+          <span role="status"><StatusText tone={status.tone}>{status.text}</StatusText></span>
+          {status.meta && <Meta>{status.meta}</Meta>}
+        </SettingsFooter>
+      </>
+    );
+  }
+
   return (
     <div>
       <div className="flex justify-between items-center mb-4">
@@ -1354,7 +2212,8 @@ export function ModelSettingsModal({
                       setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                       setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
                       setCustomDestinationProblem(config.destination_problem ?? null);
-                      setCustomOpenAIApiKey(config.apiKey || '');
+                      setCustomKeyStatus(readSecretStatus(config.apiKeyStatus));
+                      setSavedCustomEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                       setCustomMaxTokens(config.maxTokens?.toString() || '');
       setCustomContextWindow(config.contextWindow?.toString() || '8192');
                       setCustomTemperature(config.temperature?.toString() || '');
@@ -1496,14 +2355,15 @@ export function ModelSettingsModal({
 
             <div>
               <Label htmlFor="custom-api-key">API key</Label>
-              <Input
-                id="custom-api-key"
-                type="password"
-                value={customOpenAIApiKey}
-                onChange={(e) => setCustomOpenAIApiKey(e.target.value)}
-                placeholder="Leave empty if the endpoint does not require one"
-                className="mt-1"
-              />
+              <div className="mt-1">
+                <SecretKeyControl
+                  id="custom-api-key" status={customKeyStatus}
+                  draft={customOpenAIApiKey} onDraftChange={setCustomOpenAIApiKey}
+                  required={customKeyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+                  onRemove={removeCustomKey} removeWarning={removeWarning('custom-openai')}
+                  placeholder="Leave empty if the endpoint does not require one"
+                />
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
                 Protected by your operating system. Leave empty only for gateways that do not require a token.
               </p>
@@ -1710,19 +2570,10 @@ export function ModelSettingsModal({
 
             <div>
               <Label htmlFor="codex-home-path">Isolated CODEX_HOME</Label>
-              <Input
-                id="codex-home-path"
-                value={codexConfig.codexHomePath || ''}
-                onChange={(e) => setCodexConfig((prev) => ({
-                  ...prev,
-                  codexHomeMode: 'clawscribe-isolated',
-                  useExistingUserCodexSession: false,
-                  codexHomePath: e.target.value,
-                  codexBinaryPath: null,
-                }))}
-                placeholder="%APPDATA%\\ClawScribe\\codex"
-                className="mt-1"
-              />
+              <div className="mt-1 flex items-center gap-2">
+                <span id="codex-home-path" className="min-w-0 flex-1 break-all text-sm">{codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}</span>
+                <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy}>Choose folder</Button>
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
                 ClawScribe never uses the user's normal ~/.codex profile or the standalone Codex CLI auth state for this provider.
               </p>
@@ -1909,14 +2760,14 @@ export function ModelSettingsModal({
             <div>
               <UnencryptedHttpOptIn destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null} urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
               <Label htmlFor="openclaw-bearer-token">Bearer token *</Label>
-              <Input
-                id="openclaw-bearer-token"
-                type="password"
-                value={openClawBearerToken}
-                onChange={(e) => setOpenClawBearerToken(e.target.value)}
-                placeholder={openClawStatus?.bearer_token_configured ? 'Token already saved; enter a new one to replace it' : 'Paste the OpenClaw ingest bearer token'}
-                className="mt-1"
-              />
+              <div className="mt-1">
+                <SecretKeyControl
+                  id="openclaw-bearer-token" label="bearer token" status={openClawTokenStatus}
+                  draft={openClawBearerToken} onDraftChange={setOpenClawBearerToken}
+                  onRemove={removeOpenClawToken} removeWarning={removeWarning('openclaw')}
+                  placeholder="Paste the OpenClaw ingest bearer token"
+                />
+              </div>
               <p className="mt-1 text-xs text-muted-foreground">
                 {openClawStatus?.bearer_token_configured
                   ? 'A token is already configured. Leaving this blank keeps the saved token.'
@@ -1953,44 +2804,13 @@ export function ModelSettingsModal({
 
         {requiresApiKey && (
           <div>
-            <Label>API key</Label>
-            <div className="relative mt-1">
-              <Input
-                type={showApiKey ? 'text' : 'password'}
-                value={apiKey || ''}
-                onChange={(e) => setApiKey(e.target.value)}
-                disabled={isApiKeyLocked}
-                placeholder="Enter your API key"
-                className="pr-24"
+            <Label htmlFor="legacy-api-key">API key</Label>
+            <div className="mt-1">
+              <SecretKeyControl
+                id="legacy-api-key" status={keyStatus}
+                draft={apiKey || ''} onDraftChange={(value) => setApiKey(value || null)}
+                onRemove={removeStoredKey} removeWarning={removeWarning(modelConfig.provider)}
               />
-              {isApiKeyLocked && apiKey?.trim() && (
-                <div
-                  onClick={handleInputClick}
-                  className="absolute inset-0 flex items-center justify-center bg-muted/50 rounded-md cursor-not-allowed"
-                />
-              )}
-              <div className="absolute inset-y-0 right-0 pr-1 flex items-center space-x-1">
-                {apiKey?.trim() && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                    className={isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''}
-                    title={isApiKeyLocked ? 'Unlock to edit' : 'Lock to prevent editing'}
-                  >
-                    {isApiKeyLocked ? <Lock /> : <Unlock />}
-                  </Button>
-                )}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                >
-                  {showApiKey ? <EyeOff /> : <Eye />}
-                </Button>
-              </div>
             </div>
           </div>
         )}
@@ -2297,25 +3117,6 @@ export function ModelSettingsModal({
           </div>
         )}
       </div>
-
-      {/* Auto-generate summaries toggle */}
-      {/* <div className="mt-6 pt-6 border-t border-border">
-        <div className="flex items-center justify-between">
-          <div className="flex-1">
-            <Label htmlFor="auto-generate" className="text-base font-medium">
-              Auto-generate summaries
-            </Label>
-            <p className="text-sm text-muted-foreground mt-1">
-              Automatically generate summary when opening meetings without one
-            </p>
-          </div>
-          <Switch
-            id="auto-generate"
-            checked={autoGenerateEnabled}
-            onCheckedChange={setAutoGenerateEnabled}
-          />
-        </div>
-      </div> */}
 
       <div className="mt-6 flex justify-end">
         <Button

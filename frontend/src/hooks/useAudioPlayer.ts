@@ -1,5 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { DEFAULT_PLAYBACK_RATE, PLAYBACK_RATE_STORAGE_KEY, normalizePlaybackRate } from '@/lib/playback-controls';
+
+// The chosen speed is a per-viewer convenience; the player works without storage.
+function storedRate(): number {
+  try { return typeof window !== 'undefined' ? normalizePlaybackRate(window.localStorage?.getItem(PLAYBACK_RATE_STORAGE_KEY) ?? DEFAULT_PLAYBACK_RATE) : DEFAULT_PLAYBACK_RATE; }
+  catch { return DEFAULT_PLAYBACK_RATE; }
+}
 
 export const useAudioPlayer = (audioPath: string | null) => {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -8,6 +15,8 @@ export const useAudioPlayer = (audioPath: string | null) => {
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeek = useRef<number | null>(null);
+  const [rate, setRateState] = useState(storedRate);
+  const rateRef = useRef(rate);
 
   useEffect(() => {
     setIsPlaying(false); setCurrentTime(0); setDuration(0); setError(null);
@@ -19,6 +28,8 @@ export const useAudioPlayer = (audioPath: string | null) => {
     const audio = new window.Audio();
     audioRef.current = audio;
     audio.preload = 'metadata';
+    audio.playbackRate = rateRef.current;
+    audio.preservesPitch = true;
     const metadata = () => {
       if (Number.isFinite(audio.duration)) {
         setDuration(audio.duration);
@@ -71,6 +82,21 @@ export const useAudioPlayer = (audioPath: string | null) => {
     setCurrentTime(audio.currentTime);
   }, []);
 
-  return useMemo(() => ({ isPlaying, currentTime, duration, error, play, pause, seek }),
-    [isPlaying, currentTime, duration, error, play, pause, seek]);
+  // Relative to the element's own clock, so repeated key presses never use a stale time.
+  const seekBy = useCallback(async (delta: number) => {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(delta)) return;
+    await seek((pendingSeek.current ?? audio.currentTime) + delta);
+  }, [seek]);
+
+  const setRate = useCallback((value: number) => {
+    const next = normalizePlaybackRate(value);
+    rateRef.current = next;
+    setRateState(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+    try { window.localStorage?.setItem(PLAYBACK_RATE_STORAGE_KEY, String(next)); } catch { /* not remembered */ }
+  }, []);
+
+  return useMemo(() => ({ isPlaying, currentTime, duration, error, rate, play, pause, seek, seekBy, setRate }),
+    [isPlaying, currentTime, duration, error, rate, play, pause, seek, seekBy, setRate]);
 };

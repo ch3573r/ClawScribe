@@ -34,7 +34,7 @@ export function useClaudeCodeSettings(active: boolean) {
         const config = await invoke<ClaudeCodeConfig>('claude_code_get_config');
         if (current !== epoch.current) return;
         setProgramPath(config.programPath || '');
-        const next = await invoke<ClaudeCodeStatus>('claude_code_check_status', { config });
+        const next = await invoke<ClaudeCodeStatus>('claude_code_check_status');
         if (current === epoch.current) setStatus(next);
       } catch {
         if (current === epoch.current) setStatus({ state: 'error', message: 'Could not check Claude Code. Check Program path and try again' });
@@ -51,7 +51,15 @@ export function useClaudeCodeSettings(active: boolean) {
     inFlight.current = true;
     setBusy(true);
     try {
-      const next = await invoke<ClaudeCodeStatus>('claude_code_check_status', { config: { programPath: programPath.trim() || null } });
+      // The core runs only a saved path that passed its checks, so the path is
+      // saved first (and refused with a message if it is not acceptable).
+      try {
+        await invoke('claude_code_save_config', { config: { programPath: programPath.trim() || null } });
+      } catch (failure) {
+        if (current === epoch.current) setStatus({ state: 'error', message: typeof failure === 'string' && failure.length < 200 ? failure : 'Choose the Claude Code program: a local file named claude, claude.exe, claude.cmd or claude.bat' });
+        return;
+      }
+      const next = await invoke<ClaudeCodeStatus>('claude_code_check_status');
       if (current === epoch.current) setStatus(next);
     } catch {
       if (current === epoch.current) setStatus({ state: 'error', message: 'Could not check Claude Code. Check Program path and try again' });
@@ -134,8 +142,8 @@ export function ClaudeCodeProviderCard({ status, busy, programPath, model, onPro
           <AccordionTrigger>Advanced</AccordionTrigger>
           <AccordionContent>
             <Label htmlFor="claude-code-program">Program path</Label>
-            <Input id="claude-code-program" className="mt-2" value={programPath} placeholder="Full path (optional)" disabled={busy} onChange={event => onProgramPathChange(event.target.value)} />
-            <p className="mt-2 text-xs text-muted-foreground">Leave blank to find Claude Code automatically. Otherwise, use the full path to the program or Windows command shim. Save settings to keep this path.</p>
+            <Input id="claude-code-program" className="mt-2" value={programPath} placeholder="Path to claude.exe (optional)" disabled={busy} onChange={event => onProgramPathChange(event.target.value)} />
+            <p className="mt-2 text-xs text-muted-foreground">Leave blank to find Claude Code automatically. Otherwise, use the full path to claude.exe (or the claude.cmd command shim) on a local drive. Checking saves the path.</p>
           </AccordionContent>
         </AccordionItem>
       </Accordion>

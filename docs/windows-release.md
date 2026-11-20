@@ -37,6 +37,51 @@ Set `LIBCLANG_PATH` to the
 LLVM `bin` directory when needed. Use the versions declared by the checked-out
 workflow rather than silently changing the native toolchain during a release.
 
+The persistent runner keeps its toolchain. **Native library tests** therefore
+verifies it with `frontend/scripts/ensure-native-toolchain.ps1` (the Rust channel
+from `rust-toolchain.toml` with the MSVC target, LLVM 20.1.8, the Vulkan SDK 1.4.309.0
+and a loadable `vulkan-1.dll`) and fails with what is missing. The SDK is
+recognised by what it contains, never by its folder's name: the headers
+(`vulkan_core.h`) must be 1.4.309, `Lib/vulkan-1.lib` must exist and, when
+`Bin/vulkaninfoSDK.exe` is present, its file version must be 1.4.309.0. Matching
+content is accepted in any folder, and wrong content is rejected even in a folder
+named 1.4.309.0. The search covers per-version tool folders
+(`CLAWSCRIBE_TOOLCHAIN_ROOT`, the runner tool cache and ProgramData), `VULKAN_SDK`
+(process, machine and user) and the default SDK folder (`C:\VulkanSDK`, or
+`CLAWSCRIBE_VULKAN_SDK_ROOT`); every candidate and its verdict is printed. Pull
+requests and pushes never install, replace or downgrade anything. A runner whose
+inherited `VULKAN_SDK` names a different SDK is fine: that SDK is rejected by its
+content and the search continues.
+
+Every workflow that needs the SDK (release builds and, through them, the
+candidate workflow, plus the knowledge validation and loader diagnostics) uses the
+local `.github/actions/vulkan-sdk` action. It reuses a matching SDK, and otherwise
+stages the pinned SDK in its own per-version folder,
+`<toolchain root>/vulkan-sdk/<version>` (`CLAWSCRIBE_TOOLCHAIN_ROOT`, else the
+runner tool cache, else ProgramData), where later runs find it by content. The
+extraction action unpacks into whatever `VULKAN_SDK` names, so
+`stage-vulkan-sdk.ps1` first points `VULKAN_SDK` (and `VULKAN_SDK_VERSION`, which
+the action prefers over its input) at a fresh `.staging-*` folder, then requires
+that the action really used it, that the content is the pinned SDK and that the
+inherited SDK's identifying files are unchanged before renaming the folder into
+place. An existing per-version folder with other content stops the run and is
+never overwritten or deleted; remove it manually. Only the staging folder is ever
+deleted, after checking its name, its parent and that it holds no link. The
+runner's own SDK is never written.
+
+For the native tests, start the workflow manually with `provision-toolchain` to
+install only what is missing: Rust with rustup, LLVM with Chocolatey (replacing a
+different version), the SDK in its own folder as above, and the SDK's signed
+runtime only when the loader cannot be loaded. Node.js and pnpm come from the
+runner's tool cache through `actions/setup-node` and `pnpm/action-setup`.
+
+To check a runner's toolchain without changing it, start **Windows Vulkan runtime
+validation** manually with `verify-only` (any branch or commit; it needs no pull
+request). It runs on the designated runner with read-only repository access and
+only verifies: `ensure-native-toolchain.ps1`, the SDK search without installing
+(the verdict for every candidate is printed and added to the job summary) and the
+loader probe. It installs, extracts, stages, builds and tests nothing.
+
 ```powershell
 rustup target add x86_64-pc-windows-msvc
 cargo build -p llama-helper --release --locked --target x86_64-pc-windows-msvc
@@ -137,7 +182,116 @@ The unfiltered library suite can also run in the runner's service session.
 Tests that require a real audio output device are explicitly ignored; run those
 with `--ignored --exact` in an interactive session with the required hardware.
 
+Trusted pull requests and pushes to `main` that touch native code, scripts or
+the native workflow run these groups automatically in **Native library tests**
+(`native-library-tests.yml`). The job uses the release preflight's own staging
+and test entry point, `build-windows-release.ps1 -Feature windows-gpu -CheckOnly
+-NativeOnly`: locked cargo check, sidecar and runtime staging, then every
+required group above. `-NativeOnly` skips the frontend typecheck and tests,
+which **Validation Check** already covers. It still installs the frontend
+dependencies from the lockfile and rebuilds the exported frontend assets
+(`frontend/out`, which the native build embeds) from the checked-out commit,
+after deleting the old folder, so a stale build left on the runner is never
+compiled in. A reused Codex runtime is re-verified against its pinned hash
+instead of being downloaded again (`stage-codex-runtime.ps1 -SkipIfCurrent`).
+
+`self_test::tests` is part of the required groups. Besides unit tests of the
+command line, the profile isolation checks, the bundled-template list and the
+package-layout checks, it runs the same code as the packaged self-test on a
+temporary profile, with no encoder and no packaged executable: it builds a
+database from the older migrations (once from the legacy schema and once from a
+recent schema seeded with non-secret rows), upgrades it through the production
+open path, imports a synthetic WAV and transcript, produces a summary through the
+provider path against a loopback stub, closes the database and reopens it. The
+package layout, packaged encoder and interrupted-recording recovery need the
+packaged executable and are covered only by the release-time acceptance below.
+
+The runner keeps Cargo output between runs, so the job also bounds it.
+`limit-native-test-cache.ps1` keeps the two newest `app_lib-*` test executables
+in the release dependency folder, deletes only older ones (and their `.pdb` and
+`.d` files) after checking that no link is involved, and fails early with a plain
+message when the volume that holds the Cargo target folder, or the checkout's
+volume, has less than 12 GiB free (network and removable volumes are refused).
+Libraries, models, sidecars, installers and source are not touched. Nothing is uploaded to Actions
+storage or cache. Manual dispatch requires an immutable commit SHA, like the
+other manual validation.
+
+## Packaged-Binary Acceptance
+
+Unit tests run the library test executable, not the shipped program. Release
+builds therefore also run `frontend/scripts/test-packaged-acceptance.ps1` after
+the installers and native tests, before build metadata is written. It runs only
+on the designated runner (it checks `CLAWSCRIBE_BUILD_RUNNER` first) and:
+
+1. unpacks the NSIS installer just built into a new temporary folder with
+   7-Zip. Nothing is installed: no registry entry, shortcut or existing
+   installation is touched;
+2. runs the packaged executable twice, in two separate processes, as
+   `--self-test run <profile>` and `--self-test verify <profile>`. The profile is
+   a new folder inside the temporary folder. The run phase refuses a profile that
+   is not new or empty (so a stale marker or planted file is never reused), is a
+   link, is not absolute, or overlaps the application's own data folders, and
+   marks the folder with a random run id. The verify phase refuses a folder
+   without that exact marker, a folder that contains any link, and saved state
+   with another run id or a path outside the profile; it never creates a missing
+   database. Reports and state are written only as new files. The database is
+   opened through an isolated path that skips the credential-store step;
+3. runs the executable against unsafe input and requires the exact exit code and
+   an untouched folder: a command line without a phase or profile, an unknown
+   phase, an extra argument (all exit code 2), a relative path, a non-empty
+   folder, a folder with only a stale marker, an unmarked folder for verify, a
+   forged marker and a profile that contains a junction (all exit code 4, with
+   nothing written through the junction). Exit codes are 0 passed, 1 a check
+   failed, 2 unusable command line, 3 runtime or report setup failed, 4 profile
+   folder refused;
+4. deletes everything it created, only after checking the folder name and that it
+   holds no links. `-KeepWork` keeps it for inspection. A cleanup failure is
+   reported after, and never replaces, the first failure.
+
+The Actions log and summary hold only fixed check names, pass or fail, exit codes
+(a crash such as a missing runtime library shows its hexadecimal code, even with
+no report) and a few counts. Error text, paths and the application's own output
+are never printed. The work folder must be on a fixed local drive with 3 GiB free.
+
+The self-test is a headless mode of the shipped executable (`self_test.rs`). It
+starts before any window, plugin, single-instance guard or logger, so it never
+opens the interface, forwards to a running copy, or reads the user's own
+profile, credential store, settings, templates or providers. It needs no
+network. A failed check fails the release build; each check is printed and
+recorded in `self-test-report-<phase>.json` inside the profile.
+
+What it checks (all against synthetic data):
+
+| Check | What is exercised |
+| --- | --- |
+| `package_layout`, `packaged_encoder` | Sidecars, runtime libraries (DirectML in DirectML and Windows GPU builds), every bundled summary template (equal to this build's copy and parseable), the Codex runtime manifest and runtime folder sit where the installer puts them, and the packaged encoder runs. The check never falls back to a PATH or downloaded encoder. The resource locations follow `tauri.conf.json`; the first acceptance run on the runner confirms them against a real unpacked installer. |
+| `migration_upgrade` | A database built from the older migrations with synthetic meetings, one migration stamped with the other line-ending checksum, then opened through the production path without the credential-store step: pre-migration backup written, drift repaired, every embedded migration applied, the newest tables and columns present, legacy rows intact, integrity check passes. |
+| `recording_recovery` | A synthetic interrupted recording (capture chunks, marker, snapshot) is found by the recovery scan and recovered to compressed audio by the packaged encoder, then decoded and checked for length and level. |
+| `import_fixture` | A synthetic WAV and the recovered compressed audio are validated and decoded; an imported meeting with transcript lines is saved. |
+| `summary_stub` | The production summary path (provider call, prompt assembly, output checks) runs against an offline loopback stub, and the result is saved. |
+| `state_saved` | The state the second process reopens was written as a new file. |
+| `persistence_reopen`, `database_integrity`, `recovered_audio_persisted` | In a second process: the legacy meeting, imported transcript and summary survived, migrations are complete, the integrity check passes and the recovered audio (a path inside the profile) still decodes. |
+
+What it does not check, and what therefore remains manual (see the acceptance
+list below): microphone and system-audio capture, device changes and sleep/wake,
+speech models and transcription quality (no model is installed on the runner),
+import through a transcription engine, real summary providers and note quality,
+the graphical interface and keyboard behaviour, running the installer
+(interaction, upgrade over an existing installation, Windows security prompts),
+the updater, and long sessions on the target notebook. Passing it does not
+establish stable readiness.
+
+To rerun it against an existing installer on the runner (set
+`EXPECTED_BUILD_RUNNER` to the configured name first):
+
+```powershell
+.\frontend\scripts\test-packaged-acceptance.ps1 -Installer <path to ClawScribe_<version>_x64-setup.exe>
+```
+
 ## GitHub Actions
+
+**Native library tests** runs the real Rust library suite for trusted pull
+requests and `main` pushes (see Native Windows Unit Tests above).
 
 **ClawScribe Windows Release** is the manual/reusable build workflow. All CI
 validation, installer builds, and native Windows diagnostics run exclusively on
@@ -205,8 +359,8 @@ does not compress models, executables, installers, or source. Use another local
 volume for large evaluation model caches when available.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
-installers, and then runs the required native regression suites before staging
-release assets. A check-only run exercises those suites before packaging is
+installers, and then runs the required native regression suites and the
+packaged-binary acceptance before staging release assets. A check-only run exercises those suites before packaging is
 attempted, so compile or behavioral failures can be resolved first.
 
 **Stage Windows release candidate** runs on `release/**` pushes and can be run
@@ -263,11 +417,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.5.59, installer filenames are:
+For source version 0.63.0, installer filenames are:
 
 ```text
-ClawScribe_0.5.59_x64-setup.exe
-ClawScribe_0.5.59_x64_en-US.msi
+ClawScribe_0.63.0_x64-setup.exe
+ClawScribe_0.63.0_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).
@@ -349,8 +503,16 @@ and installer location, then returns a Tauri updater resource to the shared UI
 service. The dialog installs that exact checked release without a second stable
 check. Both channels use the existing pinned updater public key and Tauri's
 signature verification. Changing channels invalidates cached and in-flight
-results; leaving previews never downgrades an installed build. Finish recording
-and saving a meeting before installation. Device security policy still applies
+results; leaving previews never downgrades an installed build. The native
+application downloads and signature-checks the installer itself (at most 1 GiB,
+held in memory, never handed to the page) and keeps the verified bytes until the
+install step, so a page reload cannot change what is installed. An update can
+install once recording, transcription, speaker detection, indexing, summaries,
+saved answers and Microsoft 365 or Confluence exports finish. Work can start
+during the download. If it does, the install step stops without losing that work;
+try the update again after it finishes. The exclusion is held by the native
+application for the whole installer hand-off and released if the installer
+fails, so it cannot be stranded by a reload. Device security policy still applies
 to the installer; selecting a channel does not bypass Windows security blocks.
 
 To distribute a preview, stage a draft, verify its assets, then publish it as a
@@ -373,6 +535,11 @@ public prerelease may be distributed for manual evaluation after the native
 build/tests and artifact integrity checks pass, without advancing the stable
 updater. Its notes must state the missing real-device acceptance. Publishing a
 preview must not assert `capture-smoke-confirmed` or claim stable readiness.
+
+None of the items below is covered by the scripted packaged-binary acceptance or
+the native library tests; they need a person, real devices and the target
+notebook. Record each as passed, failed or not run for the exact build. Item 4
+and the two-hour comparison in item 6 are separate, long checks.
 
 Use a separate test profile or a backed-up installation; do not delete meeting
 data to test installation. Record the application commit, engine/model, Windows

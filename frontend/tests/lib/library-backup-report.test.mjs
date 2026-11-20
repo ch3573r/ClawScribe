@@ -29,8 +29,12 @@ for (const restore of [false, true]) {
       '@/components/ui/dialog': Object.fromEntries(['Dialog', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map(name => [name, name])),
       '@/contexts/RecordingStateContext': { useRecordingState: () => ({}) },
       '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ refetchMeetings: async () => { refreshes++; }, refreshProjectTags: async () => { refreshes++; } }) },
-      '@tauri-apps/plugin-dialog': { save: async () => pickerPath, open: async () => pickerPath },
       '@tauri-apps/api/core': { invoke: async command => {
+        // The core opens the dialogs; the picker commands return the chosen path.
+        if (command === 'pick_backup_save_path' || command === 'pick_backup_restore_path') {
+          assert.equal(command, expectedRestore ? 'pick_backup_restore_path' : 'pick_backup_save_path');
+          return pickerPath;
+        }
         invokes++;
         assert.equal(command, expectedRestore ? 'restore_library' : 'backup_library');
         if (invokeFails) throw new Error('Synthetic archive failure');

@@ -20,154 +20,78 @@ pub async fn check_first_launch(app: AppHandle) -> Result<bool, String> {
         .map_err(|e| format!("Failed to check first launch: {}", e))
 }
 
-/// Open a dialog to select a folder or file for legacy database import
-#[tauri::command]
-pub async fn select_legacy_database_path(app: AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-
-    info!("Opening dialog to select legacy database location");
-
-    let file_path = app
-        .dialog()
-        .file()
-        .add_filter("Database Files", &["db"])
-        .blocking_pick_file();
-
-    if let Some(path) = file_path {
-        let path_str = path.to_string();
-        info!("User selected path: {}", path_str);
-        Ok(Some(path_str))
-    } else {
-        info!("User cancelled file selection");
-        Ok(None)
-    }
+/// The legacy databases the core knows about: the one the earlier backend left
+/// in the app's own data folder and, on macOS, the Homebrew one. Chosen by the
+/// core; nothing here comes from the webview.
+fn legacy_database_candidates(app_data_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut candidates = vec![app_data_dir.join("meeting_minutes.db")];
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/usr/local/var/meetily/meeting_minutes.db"));
+    candidates
 }
 
-/// Detect legacy database from a selected path (root repo, backend folder, or db file)
-#[tauri::command]
-pub async fn detect_legacy_database(selected_path: String) -> Result<Option<String>, String> {
-    let path = PathBuf::from(&selected_path);
-
-    info!("Detecting legacy database from path: {}", selected_path);
-
-    // Case 1: User selected the .db file directly
-    if path.is_file() {
-        if let Some(extension) = path.extension() {
-            if extension == "db" {
-                info!("Direct .db file selected: {}", selected_path);
-                return Ok(Some(selected_path));
-            }
-        }
-    }
-
-    // Case 2: User selected directory containing meeting_minutes.db
-    if path.is_dir() {
-        let direct_db = path.join("meeting_minutes.db");
-        if direct_db.exists() && direct_db.is_file() {
-            let db_path = direct_db.to_string_lossy().to_string();
-            info!("Found database in selected directory: {}", db_path);
-            return Ok(Some(db_path));
-        }
-
-        // Case 3: User selected root repo (check backend subdirectory)
-        let backend_db = path.join("backend").join("meeting_minutes.db");
-        if backend_db.exists() && backend_db.is_file() {
-            let db_path = backend_db.to_string_lossy().to_string();
-            info!("Found database in backend subdirectory: {}", db_path);
-            return Ok(Some(db_path));
-        }
-    }
-
-    info!("No legacy database found at path: {}", selected_path);
-    Ok(None)
+/// The first of the candidates that is a non-empty regular file.
+fn find_legacy_database(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find_map(|path| {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        (metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0).then(|| path.clone())
+    })
 }
 
-/// Check for legacy database in the default app data directory
+/// First launch only: imports the legacy database the core finds, if there is
+/// one, and starts the app's database from it. Takes no path: the webview cannot
+/// point it at a file. Refused once a database exists. Returns whether a legacy
+/// database was imported; when it returns false the caller starts a fresh one.
+/// The legacy file is read through a read-only connection and never modified.
 #[tauri::command]
-pub async fn check_default_legacy_database(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn import_legacy_database_if_present(app: AppHandle) -> Result<bool, String> {
+    if app.try_state::<AppState>().is_some() {
+        return Err("The database already exists".into());
+    }
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let Some(legacy) = find_legacy_database(&legacy_database_candidates(&app_data_dir)) else {
+        info!("No legacy database found");
+        return Ok(false);
+    };
+    info!("Importing the legacy database");
 
-    let legacy_db = app_data_dir.join("meeting_minutes.db");
-    info!("Checking for default legacy database at: {:?}", legacy_db);
-
-    if legacy_db.exists() && legacy_db.is_file() {
-        let path_str = legacy_db.to_string_lossy().to_string();
-        info!("Found default legacy database: {}", path_str);
-        Ok(Some(path_str))
-    } else {
-        info!("No default legacy database found");
-        Ok(None)
-    }
-}
-
-/// Check if the Homebrew database exists and return its size
-/// This is specifically for detecting old Python backend installations
-#[tauri::command]
-pub async fn check_homebrew_database(path: String) -> Result<Option<DatabaseCheckResult>, String> {
-    let db_path = PathBuf::from(&path);
-
-    info!("Checking for Homebrew database at: {}", path);
-
-    // Check if file exists and is a regular file
-    if db_path.exists() && db_path.is_file() {
-        // Get file metadata to check size
-        match std::fs::metadata(&db_path) {
-            Ok(metadata) => {
-                let size = metadata.len();
-                info!("Found Homebrew database: {} ({} bytes)", path, size);
-
-                // Only consider it valid if it has content (not empty)
-                if size > 0 {
-                    Ok(Some(DatabaseCheckResult { exists: true, size }))
-                } else {
-                    info!("Database file exists but is empty");
-                    Ok(None)
-                }
-            }
-            Err(e) => {
-                error!("Failed to read database metadata: {}", e);
-                Ok(None)
-            }
-        }
-    } else {
-        info!("No database found at Homebrew location");
-        Ok(None)
-    }
-}
-
-/// Import legacy database and initialize the database manager
-#[tauri::command]
-pub async fn import_and_initialize_database(
-    app: AppHandle,
-    legacy_db_path: String,
-) -> Result<(), String> {
-    info!(
-        "Starting import of legacy database from: {}",
-        legacy_db_path
-    );
-
-    // Import and get initialized manager
-    let db_manager = DatabaseManager::import_legacy_database(&app, &legacy_db_path)
+    let db_manager = DatabaseManager::import_legacy_database(&app, &legacy.to_string_lossy())
         .await
         .map_err(|e| {
             error!("Failed to import legacy database: {}", e);
             format!("Failed to import database: {}", e)
         })?;
 
-    // Update app state with the new manager
     app.manage(AppState { db_manager });
     crate::knowledge::indexer::start_installed_pool(&app);
-
     info!("Legacy database imported and initialized successfully");
-
-    // Emit event to notify frontend that database is ready
     app.emit("database-initialized", ())
         .map_err(|e| format!("Failed to emit database-initialized event: {}", e))?;
+    Ok(true)
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_non_empty_regular_file_in_a_known_place_counts_as_a_legacy_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = dir.path().join("meeting_minutes.db");
+        assert_eq!(find_legacy_database(&[known.clone()]), None);
+        std::fs::write(&known, b"").unwrap();
+        assert_eq!(find_legacy_database(&[known.clone()]), None, "an empty file is not one");
+        std::fs::write(&known, b"SQLite format 3\0").unwrap();
+        assert_eq!(find_legacy_database(&[known.clone()]), Some(known.clone()));
+        std::fs::remove_file(&known).unwrap();
+        std::fs::create_dir(&known).unwrap();
+        assert_eq!(find_legacy_database(&[known]), None, "a folder is not one");
+        let app_data = std::path::Path::new("app-data");
+        assert!(legacy_database_candidates(app_data)[0].ends_with("meeting_minutes.db"));
+    }
 }
 
 /// Initialize a fresh database (for users who don't want to import)
@@ -188,40 +112,7 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
     });
     crate::knowledge::indexer::start_installed_pool(&app);
 
-    // Set default model configuration for fresh installs
-    let pool = db_manager.pool();
-
-    let default_summary_model =
-        crate::summary::summary_engine::commands::get_recommended_summary_model_for_current_system(
-        )
-        .unwrap_or("qwen3.5:2b");
-
-    // Default Summary Model: Built-in AI (Qwen recommendation for this system)
-    if let Err(e) = crate::database::repositories::setting::SettingsRepository::save_model_config(
-        pool,
-        "builtin-ai",
-        default_summary_model,
-        "large-v3", // Default whisper model (unused for builtin but required)
-        None,
-    )
-    .await
-    {
-        error!("Failed to set default summary model config: {}", e);
-    }
-
-    // Default Transcription Model: Parakeet
-    if let Err(e) =
-        crate::database::repositories::setting::SettingsRepository::save_transcript_config(
-            pool,
-            "parakeet",
-            crate::config::DEFAULT_PARAKEET_MODEL,
-        )
-        .await
-    {
-        error!("Failed to set default transcription model config: {}", e);
-    }
-
-    info!("Fresh database initialized successfully with default models");
+    info!("Fresh database initialized successfully");
 
     // Emit event to notify frontend that database is ready
     app.emit("database-initialized", ())
@@ -259,10 +150,7 @@ pub async fn open_database_folder(app: AppHandle) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+        crate::local_path::open_in_explorer(std::path::Path::new(&folder_path))?;
     }
 
     #[cfg(target_os = "macos")]

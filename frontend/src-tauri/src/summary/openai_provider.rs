@@ -20,7 +20,7 @@ const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 300;
 const TEST_PROMPT: &str = "What is 2 + 2? Reply with only the number.";
 const TEST_EXPECTED: &str = "4";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAICompatibleProviderConfig {
     #[serde(default)]
@@ -42,6 +42,12 @@ pub struct OpenAICompatibleProviderConfig {
     #[serde(default = "default_use_structured_outputs")]
     pub use_structured_outputs: bool,
 }
+
+crate::credentials::debug_without_secrets!(OpenAICompatibleProviderConfig {
+    allow_unencrypted, base_url, model, timeout_seconds, max_tokens, context_window, temperature, top_p,
+    organization, project, use_structured_outputs;
+    secret api_key
+});
 
 impl Default for OpenAICompatibleProviderConfig {
     fn default() -> Self {
@@ -104,10 +110,11 @@ pub struct OpenAICompatibleProcessingResult {
     pub markdown: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAICompatibleProcessingProvider {
     config: OpenAICompatibleProviderConfig,
     client: Client,
+    dispatch_check: Option<super::request_config::DispatchCheck>,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,13 +165,45 @@ pub struct OpenAICompatibleMeetingProcessRequest {
 
 impl OpenAICompatibleProcessingProvider {
     pub fn new(config: OpenAICompatibleProviderConfig) -> Result<Self, String> {
+        Self::with_client(config, Client::builder())
+    }
+
+    pub(super) fn new_direct(config: OpenAICompatibleProviderConfig) -> Result<Self, String> {
+        Self::with_client(config, super::request_config::direct_client())
+    }
+
+    fn with_client(
+        config: OpenAICompatibleProviderConfig,
+        client: reqwest::ClientBuilder,
+    ) -> Result<Self, String> {
         let config = normalize_config(config)?;
-        let client = Client::builder()
+        let client = client
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(config.timeout_seconds))
             .build()
             .map_err(|e| format!("Failed to create OpenAI-compatible HTTP client: {e}"))?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            dispatch_check: None,
+        })
+    }
+
+    pub(super) fn with_dispatch_check(
+        mut self,
+        check: super::request_config::DispatchCheck,
+    ) -> Self {
+        self.dispatch_check = Some(check);
+        self
+    }
+
+    pub(super) fn destination(&self) -> (String, bool, Option<&str>, Option<&str>) {
+        (
+            self.chat_completions_url(),
+            self.config.allow_unencrypted,
+            self.config.organization.as_deref(),
+            self.config.project.as_deref(),
+        )
     }
 
     pub async fn test_connection(&self) -> Result<CodexCommandStatus, String> {
@@ -211,16 +250,29 @@ impl OpenAICompatibleProcessingProvider {
         request: OpenAICompatibleMeetingProcessRequest,
         cancellation_token: Option<&CancellationToken>,
     ) -> Result<OpenAICompatibleProcessingResult, String> {
+        if request.output_dir.is_none() {
+            return Err("Meeting output storage was not resolved".into());
+        }
+        self.process_meeting_with_progress(
+            request,
+            cancellation_token,
+            &super::context_budget::Reduction::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn process_meeting_with_progress(
+        &self,
+        request: OpenAICompatibleMeetingProcessRequest,
+        cancellation_token: Option<&CancellationToken>,
+        reduction: &super::context_budget::Reduction,
+    ) -> Result<OpenAICompatibleProcessingResult, String> {
         if let Some(token) = cancellation_token {
             if token.is_cancelled() {
                 return Err("Summary generation was cancelled".to_string());
             }
         }
 
-        let output_dir = request
-            .output_dir
-            .as_ref()
-            .ok_or("Meeting output storage was not resolved")?;
         let started_at = Instant::now();
         let transcript = normalize_transcript_markdown(&request.transcript);
         let system_prompt = build_system_prompt(false);
@@ -252,8 +304,13 @@ impl OpenAICompatibleProcessingProvider {
         let mut extraction = self.clone();
         extraction.config.max_tokens = Some(limits.extraction().output_tokens as u32);
         let extraction = &extraction;
-        let (transcript, _) =
-            super::context_budget::reduce(&transcript, budget, piece_budget, |chunk| async move {
+        let (transcript, _) = super::context_budget::reduce(
+            &transcript,
+            budget,
+            piece_budget,
+            reduction,
+            cancellation_token,
+            |chunk| async move {
                 extraction
                     .send_chat(
                         super::context_budget::EXTRACT_FACTS,
@@ -262,6 +319,7 @@ impl OpenAICompatibleProcessingProvider {
                         cancellation_token,
                     )
                     .await
+                    .and_then(|text| super::processor::require_summary_markdown(&text, "Meeting excerpt"))
             })
             .await?;
         let user_prompt = build_user_prompt(
@@ -290,6 +348,20 @@ impl OpenAICompatibleProcessingProvider {
 
         let structured_output = super::sources::expand_output(structured_output, &request.sources)?;
         let markdown = render_meeting_notes_markdown(&request.meeting_title, &structured_output);
+
+        // Background automatic notes commit to SQLite only after checking the
+        // transcript revision. Do not publish independent side files first.
+        let Some(output_dir) = request.output_dir.as_ref() else {
+            return Ok(OpenAICompatibleProcessingResult {
+                meeting_id: request.meeting_id,
+                output_json_path: String::new(),
+                notes_markdown_path: String::new(),
+                follow_up_email_path: String::new(),
+                processing_log_path: String::new(),
+                structured_output,
+                markdown,
+            });
+        };
 
         fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create meeting output folder: {e}"))?;
@@ -481,6 +553,9 @@ impl OpenAICompatibleProcessingProvider {
         &self,
         body: &ChatCompletionRequest,
     ) -> Result<reqwest::RequestBuilder, String> {
+        if let Some(check) = &self.dispatch_check {
+            check()?;
+        }
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
@@ -526,6 +601,9 @@ impl OpenAICompatibleProcessingProvider {
             )?;
             self.client.clone()
         };
+        if let Some(check) = &self.dispatch_check {
+            check()?;
+        }
         Ok(client
             .post(self.chat_completions_url())
             .headers(headers)
@@ -882,6 +960,52 @@ mod tests {
                 .unwrap(),
             "The deadline was not agreed."
         );
+    }
+
+    #[tokio::test]
+    async fn automatic_compatible_requests_stay_on_the_frozen_route_and_stop_after_revocation() {
+        use std::sync::atomic::AtomicBool;
+        let approved = Arc::new(AtomicBool::new(true));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let received = requests.clone();
+        let original = fake_openai_server(move |request, _| {
+            assert!(request.starts_with("POST /approved/v1/chat/completions HTTP/1.1"));
+            received.fetch_add(1, Ordering::SeqCst);
+            (200, chat_response("Approved notes"))
+        })
+        .await;
+        let mut settings = OpenAICompatibleProviderConfig {
+            base_url: format!("{original}/approved/v1/chat/completions"),
+            ..OpenAICompatibleProviderConfig::default()
+        };
+        let check = approved.clone();
+        let provider = OpenAICompatibleProcessingProvider::new_direct(settings.clone())
+            .unwrap()
+            .with_dispatch_check(Arc::new(move || {
+                if check.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("Review required".into())
+                }
+            }));
+        settings.base_url = "https://different.example.com/v1".into();
+        assert_ne!(provider.destination().0, settings.base_url);
+        assert_eq!(
+            provider
+                .send_text_prompt("Use meeting facts", "A synthetic transcript")
+                .await
+                .unwrap(),
+            "Approved notes"
+        );
+        approved.store(false, Ordering::SeqCst);
+        assert_eq!(
+            provider
+                .send_text_prompt("Use meeting facts", "Another transcript")
+                .await
+                .unwrap_err(),
+            "Review required"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
