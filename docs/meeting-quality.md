@@ -195,12 +195,12 @@ transcription are saved with the meeting and
 in its recording folder. Automatic notes wait only for failed audio saves or an
 incomplete transcript. Capture gaps and recording-file warnings remain visible
 without blocking notes. Successful retranscription clears audio-save and
-transcript failure flags; recording-file warnings clear only after both transcript
-and metadata files are rewritten successfully. Permanent capture gaps remain.
-Empty
-retranscription is rejected before replacement, and a successful replacement
-retains the prior transcript as a database revision. Capture-loss warnings remain
-conservative: retranscribing available audio cannot restore missing samples.
+transcript failure flags. Recording-file warnings clear after the transcript,
+metadata, and recording status are written. If a folder write fails, the new
+transcript is available in the library and **Retry file update** stays available
+after restarting. Empty retranscription is rejected before replacement. A
+successful replacement retains the prior transcript as a database revision.
+Permanent capture gaps remain visible after retranscribing the available audio.
 
 ## Notebook Resource Policy
 

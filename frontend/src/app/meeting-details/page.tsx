@@ -58,8 +58,17 @@ function MeetingDetailsContent() {
       }
     };
     void refresh();
-    const subscription = listen('retranscription-complete', () => { void refresh(); });
-    return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+    const refreshMeeting = (event: { payload: { meeting_id: string } }) => {
+      if (event.payload.meeting_id === meetingId) void refresh();
+    };
+    const subscriptions = [
+      listen('retranscription-complete', refreshMeeting),
+      listen('transcript-files-synchronized', refreshMeeting),
+    ];
+    return () => {
+      active = false;
+      subscriptions.forEach(subscription => void subscription.then(unlisten => unlisten()).catch(() => {}));
+    };
   }, [meetingId]);
 
   // Use pagination hook for efficient transcript loading

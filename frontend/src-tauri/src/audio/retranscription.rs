@@ -2,9 +2,10 @@
 
 use super::common::{
     create_readable_transcript_segments_with_words, split_transcripts_to_timing_grid,
-    transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
+    transcript_words_from_token_timestamps, TranscribedSegment,
 };
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
+use crate::database::transcript_edits::RetranscriptionFileUpdate;
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
@@ -131,6 +132,7 @@ pub struct RetranscriptionResult {
     pub segments_count: usize,
     pub duration_seconds: f64,
     pub language: Option<String>,
+    pub file_warning: bool,
 }
 
 /// Error during retranscription
@@ -143,11 +145,6 @@ pub struct RetranscriptionError {
 /// Check if retranscription is currently in progress
 pub fn is_retranscription_in_progress() -> bool {
     RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst)
-}
-
-/// Cancel ongoing retranscription
-pub fn cancel_retranscription() {
-    RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
 }
 
 /// Start retranscription of a meeting's audio
@@ -170,14 +167,12 @@ pub async fn start_retranscription<R: Runtime>(
     )
     .await
     .map_err(anyhow::Error::msg)?;
-    // Dropped before `_job`, so a cancel is refused once the job is over.
-    let _phase = PhaseGuard::open();
-    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
-
-    // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
+    // Open the cancellation window after resetting its flag.
+    let _phase = PhaseGuard::open();
+    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
 
     let use_parakeet = provider.as_deref() == Some("parakeet")
         || super::transcription::cloud::is_cloud_provider(provider.as_deref());
@@ -200,15 +195,7 @@ pub async fn start_retranscription<R: Runtime>(
 
     match &result {
         Ok(res) => {
-            let _ = app.emit(
-                "retranscription-complete",
-                serde_json::json!({
-                    "meeting_id": res.meeting_id,
-                    "segments_count": res.segments_count,
-                    "duration_seconds": res.duration_seconds,
-                    "language": res.language
-                }),
-            );
+            let _ = app.emit("retranscription-complete", res);
         }
         Err(e) => {
             let _ = app.emit(
@@ -313,7 +300,6 @@ async fn run_retranscription<R: Runtime>(
                     return save_retranscription_transcripts(
                         &app,
                         &meeting_id,
-                        &folder_path,
                         &audio_path,
                         duration_seconds,
                         &cloud_segments,
@@ -631,7 +617,6 @@ async fn run_retranscription<R: Runtime>(
     save_retranscription_transcripts(
         &app,
         &meeting_id,
-        &folder_path,
         &audio_path,
         duration_seconds,
         &all_transcripts,
@@ -689,7 +674,6 @@ async fn prepare_cloud_retranscription_timing_grid<R: Runtime>(
 async fn save_retranscription_transcripts<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
-    folder_path: &Path,
     audio_path: &Path,
     duration_seconds: f64,
     all_transcripts: &[TranscribedSegment],
@@ -711,16 +695,48 @@ async fn save_retranscription_transcripts<R: Runtime>(
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
-
-    // Wrap delete+insert+update in a transaction to prevent data loss
     let pool = app_state.db_manager.pool();
-    let mut conn = pool
-        .acquire()
+    let publication = RetranscriptionFileUpdate {
+        retranscribed_at: chrono::Utc::now().to_rfc3339(),
+        duration_seconds,
+        audio_filename: audio_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audio.mp4")
+            .to_string(),
+        provider: used_provider.to_string(),
+        model: used_model.to_string(),
+        source_language: source_language.map(str::to_string),
+    };
+    commit_retranscription(pool, meeting_id, &segments, &publication, capture_gaps).await?;
+
+    emit_progress(app, meeting_id, "saving", 90, "Updating recording files...");
+    let roots = super::recording_preferences::recording_roots(app).await;
+    let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id, &roots)
         .await
-        .map_err(|e| anyhow!("DB error: {}", e))?;
-    let mut tx = sqlx::Connection::begin(&mut *conn)
-        .await
-        .map_err(|e| anyhow!("Failed to start transaction: {}", e))?;
+        .is_err();
+    if file_warning {
+        warn!("Retranscription saved; recording files need updating");
+    }
+
+    emit_progress(app, meeting_id, "complete", 100, "Retranscription complete");
+    Ok(RetranscriptionResult {
+        meeting_id: meeting_id.to_string(),
+        segments_count: segments.len(),
+        duration_seconds,
+        language: publication.source_language,
+        file_warning,
+    })
+}
+
+async fn commit_retranscription(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    segments: &[crate::api::TranscriptSegment],
+    publication: &RetranscriptionFileUpdate,
+    capture_gaps: bool,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
 
     let previous = sqlx::query_as::<_, crate::database::models::Transcript>(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, timestamp",
@@ -748,7 +764,7 @@ async fn save_retranscription_transcripts<R: Runtime>(
         .execute(&mut *tx)
         .await?;
 
-    for segment in &segments {
+    for segment in segments {
         let word_timestamps_json = segment
             .word_timestamps
             .as_ref()
@@ -773,119 +789,36 @@ async fn save_retranscription_transcripts<R: Runtime>(
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
     }
 
-    emit_progress(app, meeting_id, "saving", 90, "Writing transcript files...");
-    let folder = folder_path.to_path_buf();
-    let segments_count = segments.len();
-    let file_segments = segments;
-    let file_meeting_id = meeting_id.to_string();
-    let audio_filename = audio_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("audio.mp4")
-        .to_string();
-    let provider = used_provider.to_string();
-    let model = used_model.to_string();
-    let language = source_language.map(str::to_string);
-    let files_saved = tokio::task::spawn_blocking(move || {
-        rewrite_retranscription_files(
-            &folder,
-            &file_segments,
-            &file_meeting_id,
-            duration_seconds,
-            &audio_filename,
-            &provider,
-            &model,
-            language.as_deref(),
-        )
-    })
-    .await
-    .unwrap_or(false);
-    // Reaching this point means the input audio decoded and produced a valid
-    // transcript. Preserve permanent capture gaps while clearing repaired states.
-    update_retranscription_outcome(&mut tx, meeting_id, files_saved, capture_gaps).await?;
+    // Commit the revision, current text, and file retry together. A restart
+    // before publication can reconstruct the files from these committed rows.
+    update_retranscription_outcome(&mut tx, meeting_id, capture_gaps).await?;
+    sqlx::query("INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES (?, ?)
+                 ON CONFLICT(meeting_id) DO UPDATE SET retranscription_json = excluded.retranscription_json")
+        .bind(meeting_id)
+        .bind(serde_json::to_string(publication)?)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now())
+        .bind(meeting_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit()
         .await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
-
-    info!(
-        "Updated {} transcripts for meeting {} in transaction",
-        segments_count, meeting_id
-    );
-
-    let outcome: Option<super::outcome::RecordingOutcome> =
-        sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = ?")
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await?;
-    if let Some(outcome) = outcome {
-        let folder = folder_path.to_path_buf();
-        tokio::task::spawn_blocking(move || outcome.write(&folder))
-            .await
-            .map_err(|_| anyhow!("Transcript saved, but recording status could not be updated"))?
-            .map_err(anyhow::Error::msg)?;
-    }
-
-    if audio_path
-        .file_name()
-        .is_some_and(|name| name == "audio-recovered.mp4" || name == "audio-recovered.wav")
-    {
-        if super::audio_spool::release_recovered_capture(folder_path)
-            .await
-            .is_err()
-        {
-            warn!("Transcript saved; recovery originals retained because cleanup could not finish");
-        }
-    }
-
-    emit_progress(app, meeting_id, "complete", 100, "Retranscription complete");
-
-    Ok(RetranscriptionResult {
-        meeting_id: meeting_id.to_string(),
-        segments_count: segments_count,
-        duration_seconds,
-        language: source_language.map(str::to_string),
-    })
-}
-
-fn rewrite_retranscription_files(
-    folder: &Path,
-    segments: &[crate::api::TranscriptSegment],
-    meeting_id: &str,
-    duration: f64,
-    audio_filename: &str,
-    provider: &str,
-    model: &str,
-    language: Option<&str>,
-) -> bool {
-    let transcript_saved = write_transcripts_json(folder, segments).is_ok();
-    let metadata_saved = write_retranscription_metadata(
-        folder,
-        meeting_id,
-        duration,
-        audio_filename,
-        provider,
-        model,
-        language,
-    )
-    .is_ok();
-    if !transcript_saved || !metadata_saved {
-        warn!("Retranscription saved to library; recording files need repair");
-    }
-    transcript_saved && metadata_saved
+    Ok(())
 }
 
 async fn update_retranscription_outcome(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     meeting_id: &str,
-    files_saved: bool,
     capture_gaps: bool,
 ) -> Result<()> {
     sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, recording_files_incomplete, capture_incomplete)
-        VALUES (?, 0, 0, ?, ?) ON CONFLICT(meeting_id) DO UPDATE SET
-        audio_save_failed = 0, transcription_incomplete = 0,
-        recording_files_incomplete = excluded.recording_files_incomplete,
+        VALUES (?, 0, 0, 1, ?) ON CONFLICT(meeting_id) DO UPDATE SET
+        audio_save_failed = 0, transcription_incomplete = 0, recording_files_incomplete = 1,
         capture_incomplete = recording_outcomes.capture_incomplete OR excluded.capture_incomplete")
-        .bind(meeting_id).bind(!files_saved).bind(capture_gaps).execute(&mut **tx).await?;
+        .bind(meeting_id).bind(capture_gaps).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -1164,84 +1097,6 @@ async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result
     }
 }
 
-/// Write or update metadata.json for retranscription (preserves existing fields, adds retranscribed_at)
-fn write_retranscription_metadata(
-    folder: &Path,
-    meeting_id: &str,
-    duration_seconds: f64,
-    audio_filename: &str,
-    transcription_provider: &str,
-    transcription_model: &str,
-    transcription_source_language: Option<&str>,
-) -> Result<()> {
-    let metadata_path = folder.join("metadata.json");
-    let temp_path = folder.join(".metadata.json.tmp");
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // Try to read existing metadata and update it
-    let json = if metadata_path.exists() {
-        let existing = std::fs::read_to_string(&metadata_path)?;
-        let mut value: serde_json::Value = serde_json::from_str(&existing)?;
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("retranscribed_at".to_string(), serde_json::json!(now));
-            obj.insert("status".to_string(), serde_json::json!("completed"));
-            obj.insert("audio_file".into(), serde_json::json!(audio_filename));
-            obj.insert(
-                "duration_seconds".into(),
-                serde_json::json!(duration_seconds),
-            );
-            obj.insert(
-                "transcript_file".to_string(),
-                serde_json::json!("transcripts.json"),
-            );
-            obj.insert(
-                "transcription_provider".to_string(),
-                serde_json::json!(transcription_provider),
-            );
-            obj.insert(
-                "transcription_model".to_string(),
-                serde_json::json!(transcription_model),
-            );
-            match transcription_source_language {
-                Some(language) => {
-                    obj.insert(
-                        "transcription_source_language".to_string(),
-                        serde_json::json!(language),
-                    );
-                }
-                None => {
-                    obj.remove("transcription_source_language");
-                }
-            }
-            obj.remove("detected_summary_language");
-        }
-        value
-    } else {
-        serde_json::json!({
-            "version": "1.0",
-            "meeting_id": meeting_id,
-            "created_at": now,
-            "completed_at": now,
-            "retranscribed_at": now,
-            "duration_seconds": duration_seconds,
-            "audio_file": audio_filename,
-            "transcript_file": "transcripts.json",
-            "status": "completed",
-            "source": "retranscription",
-            "transcription_provider": transcription_provider,
-            "transcription_model": transcription_model,
-            "transcription_source_language": transcription_source_language
-        })
-    };
-
-    let json_string = serde_json::to_string_pretty(&json)?;
-    std::fs::write(&temp_path, &json_string)?;
-    std::fs::rename(&temp_path, &metadata_path)?;
-
-    info!("Meeting metadata saved");
-    Ok(())
-}
-
 // Tauri commands
 
 /// Response when retranscription is started
@@ -1262,7 +1117,7 @@ pub async fn start_retranscription_command<R: Runtime>(
     provider: Option<String>,
 ) -> Result<RetranscriptionStarted, String> {
     // Check if retranscription is already in progress (guard will be acquired in start_retranscription)
-    if RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst) {
+    if is_retranscription_in_progress() {
         return Err("Retranscription already in progress".to_string());
     }
 
@@ -1295,12 +1150,8 @@ pub async fn start_retranscription_command<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn cancel_retranscription_command() -> Result<(), String> {
-    if !is_retranscription_in_progress() {
-        return Err("No retranscription in progress".to_string());
-    }
-    cancel_retranscription();
-    Ok(())
+pub async fn cancel_retranscription_command() -> bool {
+    cancel_retranscription_if_possible()
 }
 
 #[cfg(test)]
@@ -1312,110 +1163,161 @@ mod tests {
     use std::path::Path;
 
     #[tokio::test]
-    async fn recovery_clears_repaired_flags_only_when_both_files_are_saved() {
-        for failed_file in [None, Some("transcripts.json"), Some("metadata.json")] {
-            let folder = tempfile::tempdir().unwrap();
-            if let Some(name) = failed_file {
-                std::fs::create_dir(folder.path().join(name)).unwrap();
-            }
-            let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
+    async fn failed_commit_keeps_the_previous_revision_and_recording_files() {
+        let (pool, folder) = publication_fixture().await;
+        let segment = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
+        // A deferred FK violation fails COMMIT after all replacement statements succeeded.
+        sqlx::raw_sql(
+            "CREATE TABLE commit_guard (id TEXT REFERENCES meetings(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_replacement AFTER INSERT ON transcripts
+             BEGIN INSERT INTO commit_guard VALUES ('missing'); END;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            commit_retranscription(&pool, "review-test", &segment, &publication(), false)
                 .await
-                .unwrap();
-            sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('synthetic', 'Synthetic meeting', '2026-01-01', '2026-01-01')").execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete) VALUES ('synthetic', 1, 1, 1, 1)").execute(&pool).await.unwrap();
-            std::fs::write(
-                folder.path().join("recording-outcome.json"),
-                b"damaged status",
-            )
+                .is_err()
+        );
+        let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'a'")
+            .fetch_one(&pool)
+            .await
             .unwrap();
-            std::fs::write(folder.path().join("audio-recovered.wav"), b"saved audio").unwrap();
-            let spool = folder.path().join(".audio-spool");
-            std::fs::create_dir(&spool).unwrap();
-            std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap();
-            let (_, capture_gaps) =
-                crate::audio::incremental_saver::find_or_recover_audio_file_with_status(
-                    folder.path(),
-                )
-                .await
+        assert_eq!(text, "Äpfel project");
+        let revisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_revisions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((revisions, pending), (0, 0));
+        assert_eq!(
+            std::fs::read(folder.path().join("transcripts.json")).unwrap(),
+            b"previous copy"
+        );
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(folder.path().join("metadata.json")).unwrap())
                 .unwrap();
-            assert!(capture_gaps);
-            let segments =
-                create_transcript_segments(&[("Synthetic recovered sentence".into(), 0.0, 2000.0)]);
-            let files_saved = rewrite_retranscription_files(
-                folder.path(),
-                &segments,
-                "synthetic",
-                2.0,
-                "audio-recovered.wav",
-                "localWhisper",
-                "tiny",
-                Some("en"),
-            );
-            assert_eq!(files_saved, failed_file.is_none());
-            let mut tx = pool.begin().await.unwrap();
-            update_retranscription_outcome(&mut tx, "synthetic", files_saved, capture_gaps)
-                .await
-                .unwrap();
-            tx.commit().await.unwrap();
-            let outcome: super::super::outcome::RecordingOutcome =
-                sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = 'synthetic'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert!(!outcome.audio_save_failed && !outcome.transcription_incomplete);
-            assert!(outcome.capture_incomplete);
-            assert_eq!(outcome.recording_files_incomplete, failed_file.is_some());
-            outcome.write(folder.path()).unwrap();
-            assert_eq!(
-                super::super::outcome::RecordingOutcome::read(folder.path())
-                    .unwrap()
-                    .unwrap()
-                    .recording_files_incomplete,
-                failed_file.is_some()
-            );
-        }
+        assert_eq!(original["transcription_model"], "old-model");
+        assert!(!folder.path().join("recording-outcome.json").exists());
+        pool.close().await;
     }
 
     #[tokio::test]
-    async fn partial_retranscription_sets_permanent_gap_and_repairs_other_flags() {
-        for existing in [false, true] {
-            for files_saved in [false, true] {
-                let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                    .max_connections(1)
-                    .connect("sqlite::memory:")
-                    .await
-                    .unwrap();
-                sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-                sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('synthetic', 'Synthetic meeting', '2026-01-01', '2026-01-01')").execute(&pool).await.unwrap();
-                if existing {
-                    sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('synthetic', 1, 1)").execute(&pool).await.unwrap();
-                }
-                let mut tx = pool.begin().await.unwrap();
-                update_retranscription_outcome(&mut tx, "synthetic", files_saved, true)
-                    .await
-                    .unwrap();
-                tx.commit().await.unwrap();
-                let outcome: super::super::outcome::RecordingOutcome = sqlx::query_as(
-                    "SELECT * FROM recording_outcomes WHERE meeting_id = 'synthetic'",
-                )
+    async fn committed_replacement_retries_each_folder_file_after_database_reopen() {
+        for blocked in [
+            "transcripts.json",
+            "metadata.json",
+            "recording-outcome.json",
+        ] {
+            let (pool, folder) = publication_fixture().await;
+            let segments = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
+            let blocked_path = folder.path().join(blocked);
+            if blocked_path.exists() {
+                std::fs::remove_file(&blocked_path).unwrap();
+            }
+            std::fs::create_dir(&blocked_path).unwrap();
+            commit_retranscription(&pool, "review-test", &segments, &publication(), true)
+                .await
+                .unwrap();
+            let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-                assert!(outcome.capture_incomplete);
-                assert!(!outcome.audio_save_failed && !outcome.transcription_incomplete);
-                assert_eq!(outcome.recording_files_incomplete, !files_saved);
-                let mut tx = pool.begin().await.unwrap();
-                update_retranscription_outcome(&mut tx, "synthetic", true, false)
+            assert_eq!(text, "new transcript");
+            let revision: String =
+                sqlx::query_scalar("SELECT transcripts_json FROM transcript_revisions")
+                    .fetch_one(&pool)
                     .await
                     .unwrap();
-                tx.commit().await.unwrap();
-                let gap: bool = sqlx::query_scalar("SELECT capture_incomplete FROM recording_outcomes WHERE meeting_id = 'synthetic'").fetch_one(&pool).await.unwrap();
-                assert!(gap, "Later repairs must never clear a capture gap");
+            assert!(revision.contains("Äpfel project"));
+            let sync = crate::database::transcript_edits::sync_file;
+            assert!(sync(&pool, "review-test", &[]).await.is_err(), "{blocked}");
+            let pending: bool =
+                sqlx::query_scalar("SELECT recording_files_incomplete FROM recording_outcomes")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(pending);
+
+            pool.close().await;
+            let pool = sqlx::SqlitePool::connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(folder.path().join("library.sqlite")),
+            )
+            .await
+            .unwrap();
+            std::fs::remove_dir(&blocked_path).unwrap();
+            sync(&pool, "review-test", &[]).await.unwrap();
+            sync(&pool, "review-test", &[]).await.unwrap();
+
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(folder.path().join("metadata.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(metadata["transcription_model"], "tiny");
+            assert_eq!(metadata["transcription_source_language"], "de");
+            if blocked != "metadata.json" {
+                assert_eq!(metadata["meeting_name"], "Synthetic review");
+                assert!(metadata.get("detected_summary_language").is_none());
             }
+            let outcome = super::super::outcome::RecordingOutcome::read(folder.path())
+                .unwrap()
+                .unwrap();
+            assert!(outcome.capture_incomplete);
+            assert!(!outcome.recording_files_incomplete);
+            let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(pending, 0);
+            pool.close().await;
         }
+    }
+
+    fn publication() -> RetranscriptionFileUpdate {
+        RetranscriptionFileUpdate {
+            retranscribed_at: "2026-01-01T00:00:00Z".into(),
+            duration_seconds: 2.0,
+            audio_filename: "audio.wav".into(),
+            provider: "localWhisper".into(),
+            model: "tiny".into(),
+            source_language: Some("de".into()),
+        }
+    }
+
+    async fn publication_fixture() -> (sqlx::SqlitePool, tempfile::TempDir) {
+        let folder = tempfile::tempdir().unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(folder.path().join("library.sqlite"))
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path)
+                     VALUES ('review-test', 'Synthetic review', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(folder.path().to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp)
+                     VALUES ('a', 'review-test', 'Äpfel project', '00:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        std::fs::write(folder.path().join("transcripts.json"), b"previous copy").unwrap();
+        std::fs::write(
+            folder.path().join("metadata.json"),
+            br#"{"meeting_name":"Synthetic review","transcription_model":"old-model","detected_summary_language":"en"}"#,
+        ).unwrap();
+        (pool, folder)
     }
 
     #[test]
@@ -1497,22 +1399,6 @@ mod tests {
         assert_ne!(segments[0].id, segments[1].id);
         assert!(segments[0].id.starts_with("transcript-"));
         assert!(segments[1].id.starts_with("transcript-"));
-    }
-
-    #[test]
-    fn test_cancellation_flag() {
-        // Reset flag to known state
-        RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
-        RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-        assert!(!is_retranscription_in_progress());
-
-        // Test cancellation
-        cancel_retranscription();
-        assert!(RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst));
-
-        // Reset for other tests
-        RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
     }
 
     #[test]
@@ -1603,99 +1489,6 @@ mod tests {
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));
     }
-
-    #[test]
-    fn test_write_retranscription_metadata_preserves_existing_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let metadata_path = dir.path().join("metadata.json");
-        std::fs::write(
-            &metadata_path,
-            serde_json::json!({
-                "version": "1.0",
-                "meeting_id": "meeting-123",
-                "meeting_name": "Planning Review",
-                "created_at": "2026-01-01T00:00:00Z",
-                "duration_seconds": 120.0,
-                "audio_file": "audio.mp4",
-                "detected_summary_language": "en",
-                "custom_field": "keep-me"
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let result = write_retranscription_metadata(
-            dir.path(),
-            "meeting-123",
-            240.0,
-            "audio.wav",
-            "nemotron",
-            "nemotron-streaming-0.6b-fp16",
-            Some("de"),
-        );
-        assert!(
-            result.is_ok(),
-            "write_retranscription_metadata failed: {:?}",
-            result
-        );
-
-        let content = std::fs::read_to_string(&metadata_path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(parsed["meeting_id"], "meeting-123");
-        assert_eq!(parsed["meeting_name"], "Planning Review");
-        assert_eq!(parsed["custom_field"], "keep-me");
-        assert_eq!(parsed["status"], "completed");
-        assert_eq!(parsed["transcript_file"], "transcripts.json");
-        assert_eq!(parsed["transcription_provider"], "nemotron");
-        assert_eq!(
-            parsed["transcription_model"],
-            "nemotron-streaming-0.6b-fp16"
-        );
-        assert_eq!(parsed["transcription_source_language"], "de");
-        assert!(parsed.get("retranscribed_at").is_some());
-        assert!(parsed.get("detected_summary_language").is_none());
-        assert!(!dir.path().join(".metadata.json.tmp").exists());
-    }
-
-    #[test]
-    fn test_write_retranscription_metadata_creates_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let result = write_retranscription_metadata(
-            dir.path(),
-            "meeting-456",
-            300.0,
-            "audio.flac",
-            "parakeet",
-            "parakeet-tdt-0.6b-v3-int8",
-            Some("en"),
-        );
-        assert!(
-            result.is_ok(),
-            "write_retranscription_metadata failed: {:?}",
-            result
-        );
-
-        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(parsed["version"], "1.0");
-        assert_eq!(parsed["meeting_id"], "meeting-456");
-        assert_eq!(parsed["duration_seconds"], 300.0);
-        assert_eq!(parsed["audio_file"], "audio.flac");
-        assert_eq!(parsed["transcript_file"], "transcripts.json");
-        assert_eq!(parsed["source"], "retranscription");
-        assert_eq!(parsed["transcription_provider"], "parakeet");
-        assert_eq!(parsed["transcription_model"], "parakeet-tdt-0.6b-v3-int8");
-        assert_eq!(parsed["transcription_source_language"], "en");
-        assert!(parsed.get("retranscribed_at").is_some());
-    }
-}
-
-#[cfg(test)]
-mod phase_tests {
-    use super::*;
 
     /// A cancel from a starting recording is accepted only while the retranscription
     /// can still stop, and reports false once it is saving or over, so no

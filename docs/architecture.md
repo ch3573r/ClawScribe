@@ -192,8 +192,12 @@ persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have
 separate persistent flags. File warnings reflect final write results. Spool cleanup
 requires published audio, complete raw encoding, and a saved outcome; independent
-transcript/metadata failures do not retain redundant audio. Retranscription updates repaired flags in the transcript
-transaction and mirrors the outcome afterwards; capture gaps remain informational.
+transcript/metadata failures do not retain redundant audio. Retranscription commits
+the previous revision, replacement text, and pending recording-file update in one
+SQLite transaction. It then publishes the transcript, metadata, and recording
+status from committed data. A failed folder write leaves the new transcript usable
+in the library. Retry file update on the meeting rebuilds the folder copy after a
+restart, using the recorded provider, model, and source language.
 Its audio resolver checks retained raw chunks and the saved outcome on a blocking
 worker, even when reusing recovered audio, so older partial recoveries also set
 the permanent capture-gap flag. Unreadable saved status is treated as unknown;

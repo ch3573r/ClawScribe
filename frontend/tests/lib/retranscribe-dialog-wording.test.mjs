@@ -11,7 +11,13 @@ function text(node) {
   return node ? text(node.props?.children) : '';
 }
 
-async function setup(hasTranscript, editStateFails = false) {
+function findButton(node, label) {
+  if (Array.isArray(node)) return node.map(child => findButton(child, label)).find(Boolean);
+  if (node?.type === 'button' && text(node).trim() === label) return node;
+  return node?.props && findButton(node.props.children, label);
+}
+
+async function setup(hasTranscript, editStateFails = false, cancelAccepted = true) {
   const hooks = createHookHarness();
   const calls = [];
   const listeners = new Map();
@@ -21,6 +27,7 @@ async function setup(hasTranscript, editStateFails = false) {
     '@tauri-apps/api/core': { invoke: async command => {
       calls.push(command);
       if (editStateFails) throw new Error('Synthetic edit state failure');
+      if (command === 'cancel_retranscription_command') return cancelAccepted;
       return { has_edits: true };
     } },
     '@tauri-apps/api/event': { listen: async (event, callback) => { listeners.set(event, callback); return () => listeners.delete(event); } },
@@ -73,6 +80,37 @@ test('edit-state warnings disappear when opening a meeting without a transcript'
   view.render();
   assert.doesNotMatch(text(view.render()), /replace|corrections/i);
   assert.equal(view.calls.length, 1);
+  view.hooks.unmount();
+});
+
+test('a saved transcript with pending folder files is shown as a successful transcription', async () => {
+  const view = await setup(true);
+  await view.listeners.get('retranscription-complete')({ payload: {
+    meeting_id: 'synthetic-meeting', segments_count: 3, duration_seconds: 10,
+    language: 'de', file_warning: true,
+  } });
+  const content = text(view.render());
+  assert.match(content, /Retranscription complete/);
+  assert.match(content, /recording-folder copy needs updating/);
+  assert.doesNotMatch(content, /Retranscription failed/);
+  view.hooks.unmount();
+});
+
+test('late cancellation keeps the save active until completion', async () => {
+  const view = await setup(true, false, false);
+  await findButton(view.render(), 'Replace transcript').props.onClick();
+  await findButton(view.render(), 'Cancel').props.onClick();
+  assert.doesNotMatch(text(view.render()), /Cancelling|Retranscription failed/);
+
+  view.listeners.get('retranscription-progress')({ payload: {
+    meeting_id: 'synthetic-meeting', stage: 'saving', progress_percentage: 90,
+    message: 'Updating recording files...',
+  } });
+  assert.equal(findButton(view.render(), 'Cancel').props.disabled, true);
+  await view.listeners.get('retranscription-complete')({ payload: {
+    meeting_id: 'synthetic-meeting', segments_count: 3, duration_seconds: 10, language: 'de',
+  } });
+  assert.match(text(view.render()), /Retranscription complete/);
   view.hooks.unmount();
 });
 

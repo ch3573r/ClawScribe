@@ -65,11 +65,13 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
       undo: () => void change('api_undo_transcript_edit', {}), restore: () => void change('api_restore_previous_transcript', {}) })}
     {(state.has_edits || state.pending_file_sync || (!editing && error)) && <div className="space-y-2 border-b border-border px-3 py-2 text-xs">
       {state.has_edits && <p className="text-muted-foreground">Transcript corrected. Regenerate notes to include the changes.</p>}
-      {state.pending_file_sync && <p role="alert">Corrections are saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
+      {state.pending_file_sync && <p role="alert">The transcript is saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
+        if (operation.current) return;
+        operation.current = true;
         setBusy(true); setError('');
         try { await invoke('api_sync_transcript_file', { meetingId }); await refresh(); }
-        catch { setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
-        finally { setBusy(false); }
+        catch { if (currentMeeting.current === meetingId) setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
+        finally { operation.current = false; setBusy(false); }
       }}>Retry file update</Button></p>}
       {!editing && error && <p role="alert" className="text-destructive">{error}</p>}
     </div>}
