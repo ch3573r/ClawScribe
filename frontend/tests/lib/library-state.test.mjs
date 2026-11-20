@@ -20,6 +20,7 @@ test('bookmark changes reload once through the event and preserve the list while
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
     '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/switch': { Switch: 'switch' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
       if (command === 'list_meeting_bookmarks') { const read = deferred(); reads.push(read); return read.promise; }
@@ -31,10 +32,12 @@ test('bookmark changes reload once through the event and preserve the list while
   });
   const render = () => hooks.render(() => MeetingBookmarks({ meetingId: 'meeting' }));
   const button = name => flatten(render()).find(node => node.type === 'button' && text(node) === name);
+  // The add dialog is a form, so Enter and the button both submit it.
+  const submit = () => flatten(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   render(); await flush();
   reads[0].resolve([{ id: 'mark', seconds: 10, label: 'Decision' }]); await flush();
   assert.match(text(render()), /Bookmarks \(1\)/);
-  await button('Add bookmark').props.onClick(); await flush();
+  await submit(); await flush();
   assert.equal(reads.length, 2); assert.match(text(render()), /Bookmarks \(1\)/);
   assert.equal(registrations, 1);
   reads[1].resolve([{ id: 'mark', seconds: 10, label: 'Decision' }, { id: 'new', seconds: 20, label: 'Follow-up' }]); await flush();
@@ -107,6 +110,7 @@ test('bookmarks load, retry, and refresh after writes when event registration fa
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
     '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/switch': { Switch: 'switch' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
       if (command === 'list_meeting_bookmarks') {
@@ -122,10 +126,12 @@ test('bookmarks load, retry, and refresh after writes when event registration fa
   });
   const render = () => hooks.render(() => MeetingBookmarks({ meetingId: 'meeting' }));
   const button = name => flatten(render()).find(node => node.type === 'button' && text(node) === name);
+  // The add dialog is a form, so Enter and the button both submit it.
+  const submit = () => flatten(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   render(); await flush();
   assert.equal(reads, 1); assert.match(text(render()), /Bookmarks \(1\)/);
   assert.match(text(render()), /Automatic bookmark refresh is unavailable/);
-  await button('Add bookmark').props.onClick(); await flush();
+  await submit(); await flush();
   assert.equal(reads, 2); assert.equal(registrations, 1);
   assert.match(text(render()), /Read 2/);
   button('Retry').props.onClick(); render(); await flush();
@@ -148,8 +154,14 @@ test('a subscription failure after navigation does not load the previous meeting
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
     '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/switch': { Switch: 'switch' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' }, sonner: { toast: { error() {} } },
-    '@tauri-apps/api/core': { invoke: async () => { reads++; return []; } },
+    '@tauri-apps/api/core': { invoke: async command => {
+      if (command === 'get_meeting_summary_bookmarks') return false;
+      assert.equal(command, 'list_meeting_bookmarks');
+      reads++;
+      return [];
+    } },
     '@tauri-apps/api/event': { listen: () => subscription.promise },
   });
   hooks.render(() => MeetingBookmarks({ meetingId: 'meeting' }));

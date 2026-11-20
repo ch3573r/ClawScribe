@@ -18,6 +18,7 @@ function setup(props = {}) {
     './ActionIcon': { ActionIcon: 'icon-button' },
     '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogHeader: 'dialog-header', DialogTitle: 'dialog-title', DialogDescription: 'dialog-description' },
     '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/switch': { Switch: 'switch' },
     '@/components/ui/accordion': { Accordion: 'accordion', AccordionContent: 'accordion-content', AccordionItem: 'accordion-item', AccordionTrigger: 'accordion-trigger' },
   });
   return { hooks, request, calls, render: () => hooks.render(() => LiveBookmarkButton(props)) };

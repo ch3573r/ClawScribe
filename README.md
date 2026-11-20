@@ -223,8 +223,9 @@ without these checks.
 - **Project tags:** choose existing labels from a searchable list or create new
   ones, then filter the archive and transcript search by one or more projects
   (matching any or all), or show untagged meetings.
-- **Meeting bookmarks:** mark a moment while recording, then label and revisit
-  it from the saved transcript panel. Add markers during playback too.
+- **Meeting bookmarks:** mark a moment while recording, then label and revisit it
+  from the saved transcript panel. Add timestamped notes during playback and
+  choose whether to include them in summaries for that meeting.
 
 Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Per-meeting summary

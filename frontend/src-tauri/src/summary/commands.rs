@@ -403,6 +403,8 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
         Some(link) => link.with_attendance(base_prompt),
         None => base_prompt,
     };
+    let final_prompt =
+        crate::library::summary_bookmarks::append_context(pool, meeting_id, final_prompt).await?;
     let final_template_id = match template_id.filter(|id| !id.is_empty()) {
         Some(id) => id,
         None => {

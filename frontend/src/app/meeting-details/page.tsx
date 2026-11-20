@@ -66,6 +66,7 @@ function MeetingDetailsContent() {
     metadata,
     segments,
     timelineSegments,
+    timelineComplete,
     transcripts,
     isLoadingMore,
     hasMore,
@@ -323,6 +324,7 @@ function MeetingDetailsContent() {
     // Pagination props for efficient transcript loading
     segments={segments}
     timelineSegments={timelineSegments}
+    timelineComplete={timelineComplete}
     hasMore={hasMore}
     isLoadingMore={isLoadingMore}
     totalCount={totalCount}

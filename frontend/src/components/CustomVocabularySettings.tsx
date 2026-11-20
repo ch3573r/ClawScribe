@@ -5,7 +5,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Meta, SettingsCard, SettingsFooter } from "@/components/ui/settings-layout";
+import { Switch } from "@/components/ui/switch";
+import { Meta, SettingsCard, SettingsFooter, SettingsRow } from "@/components/ui/settings-layout";
+import { readLearnVocabulary, writeLearnVocabulary } from "@/lib/vocabulary-learning";
 
 export function CustomVocabularySettings() {
   const [words, setWords] = useState<string[] | null>(null);
@@ -14,6 +16,7 @@ export function CustomVocabularySettings() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("");
+  const [learn, setLearn] = useState(false);
   const inFlight = useRef(false);
   const mounted = useRef(false);
   const input = useRef<HTMLInputElement>(null);
@@ -36,6 +39,7 @@ export function CustomVocabularySettings() {
 
   useEffect(() => {
     mounted.current = true;
+    setLearn(readLearnVocabulary());
     void load();
     return () => { mounted.current = false; };
   }, []);
@@ -88,6 +92,13 @@ export function CustomVocabularySettings() {
 
   return (
     <SettingsCard title="Custom vocabulary" description="Corrects similar words to your spelling" aria-busy={loading || saving}>
+      <SettingsRow title="Suggest words from my corrections" htmlFor="learn-vocabulary"
+        description="After you correct a name or term, offer to add its spelling here. Nothing is added until you confirm.">
+        <Switch id="learn-vocabulary" checked={learn} onCheckedChange={enabled => {
+          if (writeLearnVocabulary(enabled)) setLearn(enabled);
+          else setError("Could not save this choice. Browser storage is unavailable.");
+        }} />
+      </SettingsRow>
       {loading && <p role="status" className="px-5 py-3 text-sm text-muted-foreground">Loading custom vocabulary…</p>}
       {words !== null && <>
         <form onSubmit={add} className="flex items-center gap-2 px-5 py-4">

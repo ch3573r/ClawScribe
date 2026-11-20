@@ -231,18 +231,29 @@ of the selected tags, or show only untagged meetings. The filter also applies to
 transcript search results. Tags are stored in SQLite and refreshed
 across views after changes.
 
-## Bookmarks
+## Bookmarks and notes
 
 Select the bookmark button (**Bookmark this moment**) in the recording bar to mark
 the current position as “Review this.” The timestamp excludes pauses. Markers are stored immediately and linked
 to the saved meeting by its recording folder. In the saved transcript panel,
-expand **Bookmarks** to rename or remove markers, add a labeled time in seconds,
-or use the current playback time. Select a marker to seek in the recording.
+expand **Bookmarks** to rename or remove markers. While reviewing a saved meeting,
+press **B** or choose **Add bookmark** in the transcript menu to add a timestamped
+note at the playback position. The dialog opens with the cursor in the note field
+(up to 160 characters; an empty note is saved as “Review this”), and Enter saves
+it. The time can be changed in seconds. Select a marker to seek in the recording.
+Bookmarks also appear as small markers on the playback timeline; each one can be
+reached with the keyboard and seeks when chosen.
 Playback requires available saved audio. An interrupted recording's markers remain
 local and become visible when that recording is recovered into the same folder.
 Startup removes abandoned, unattached recording bookmarks only when their folder
 is gone and no saved meeting uses it. Existing or inaccessible recovery folders
 are preserved, and cleanup skips active recording.
+
+Bookmarks and their notes are included in backups. The **Use as summary
+priorities** switch under **Bookmarks** is off by default for each meeting. The
+local library saves this choice and includes it in backups. Enabling it lets
+manual and automatic summaries send up to 40 timestamped notes to the summary
+provider for that run. The switch applies to the whole meeting.
 
 ## Backup and restore
 

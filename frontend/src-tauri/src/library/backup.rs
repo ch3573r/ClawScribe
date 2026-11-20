@@ -27,6 +27,7 @@ const TABLES: &[&str] = &[
     "transcript_file_sync",
     "meeting_tags",
     "meeting_bookmarks",
+    "meeting_summary_bookmarks",
     "knowledge_owners",
     "knowledge_requests",
     "knowledge_messages",
@@ -2956,6 +2957,7 @@ mod tests {
         let (mut manifest, folders) = snapshot(&pool).await.unwrap();
         manifest.tables.remove("meeting_tags");
         manifest.tables.remove("meeting_bookmarks");
+        manifest.tables.remove("meeting_summary_bookmarks");
         write_archive(&archive, manifest, folders).unwrap();
         let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
         sqlx::query("DELETE FROM meetings")
@@ -2998,6 +3000,30 @@ mod tests {
             zip.finish().unwrap();
             assert!(unpack(&archive, root.path(), &HashSet::new()).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn restore_preserves_meeting_summary_bookmark_consent() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO meeting_summary_bookmarks (meeting_id) SELECT id FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        let (manifest, folders) = snapshot(&pool).await.unwrap();
+        write_archive(&archive, manifest, folders).unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        sqlx::query("DELETE FROM meetings").execute(&pool).await.unwrap();
+        assert_eq!(import_manifest(&pool, manifest, stage).await.unwrap().meetings, 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM meeting_summary_bookmarks")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

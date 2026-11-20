@@ -3,7 +3,11 @@
 import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo, useState, useEffect, type ComponentProps } from 'react';
+import { useMemo, useState, useEffect, useRef, useCallback, type ComponentProps } from 'react';
+import { toast } from 'sonner';
+import type { MeetingBookmark } from '@/lib/library';
+import { findTranscriptMatches, normalizeFindQuery, stepMatch } from '@/lib/transcript-find';
+import { TranscriptFind } from './TranscriptFind';
 import { TranscriptCorrections } from './TranscriptCorrections';
 import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
@@ -11,6 +15,7 @@ import { Button } from '@/components/ui/button';
 interface TranscriptPanelProps {
   openTranscription?: boolean;
   speakerSegments?: TranscriptSegmentData[];
+  timelineComplete?: boolean;
   sourceAttributionEnabled?: boolean;
   focusedSource?: { id: string; request: number };
   transcripts: Transcript[];
@@ -38,12 +43,22 @@ interface TranscriptPanelProps {
   onRefetchTranscripts?: () => Promise<void>;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
+
+  // Review tools
+  onRevealSegment?: (id: string, index: number) => Promise<void>;
+  followPlayback?: boolean;
+  onFollowStop?: () => void;
+  /** Counters raised by page shortcuts: open the find bar or the new-bookmark dialog. */
+  findOpenRequest?: number;
+  bookmarkRequest?: number;
+  onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void;
 }
 
 export function TranscriptPanel({
   openTranscription = false,
   focusedSource,
   speakerSegments,
+  timelineComplete,
   sourceAttributionEnabled,
   transcripts,
   onCopyTranscript,
@@ -66,8 +81,24 @@ export function TranscriptPanel({
   onRefetchTranscripts,
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
+  onRevealSegment,
+  followPlayback = false,
+  onFollowStop,
+  findOpenRequest = 0,
+  bookmarkRequest = 0,
+  onBookmarksChange,
 }: TranscriptPanelProps) {
   const [bookmarkOpen, setBookmarkOpen] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findIndex, setFindIndex] = useState(-1);
+  const [findFocus, setFindFocus] = useState(0);
+  const [findScroll, setFindScroll] = useState(0);
+  const findStep = useRef(0);
+  const openFind = useCallback(() => { setFindOpen(true); setFindFocus(value => value + 1); }, []);
+  useEffect(() => { if (findOpenRequest > 0 && meetingId) openFind(); }, [findOpenRequest]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (bookmarkRequest > 0 && meetingId) setBookmarkOpen(true); }, [bookmarkRequest]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setFindOpen(false); setFindQuery(''); setFindIndex(-1); }, [meetingId]);
   const [editing, setEditing] = useState<TranscriptSegmentData | null>(null);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [transcribeOpen, setTranscribeOpen] = useState(false);
@@ -91,6 +122,48 @@ export function TranscriptPanel({
       speaker: t.speaker,
     }));
   }, [transcripts, usePagination, segments]);
+
+  // Search the complete transcript, not only the pages loaded so far.
+  const searchable = timelineComplete ? (speakerSegments ?? convertedSegments) :
+    (speakerSegments?.length ? speakerSegments : convertedSegments);
+  const searchComplete = !usePagination || timelineComplete === true ||
+    (totalCount !== undefined && searchable.length === totalCount);
+  const findMatches = useMemo(() => findOpen ? findTranscriptMatches(searchable, findQuery) : [], [findOpen, searchable, findQuery]);
+  const matchesRef = useRef(findMatches);
+  matchesRef.current = findMatches;
+  // The page's reveal function changes whenever pages load; searching must not restart because of that.
+  const revealRef = useRef(onRevealSegment);
+  revealRef.current = onRevealSegment;
+  const currentMatchId = useRef<string | null>(null);
+  const goToMatch = useCallback(async (index: number) => {
+    const step = ++findStep.current;
+    const match = matchesRef.current[index];
+    if (!match) { currentMatchId.current = null; setFindIndex(-1); return; }
+    try { await revealRef.current?.(match.id, match.index); }
+    catch { if (step === findStep.current) toast.error('Could not load that part of the transcript. Try again.'); return; }
+    if (step !== findStep.current) return;
+    currentMatchId.current = match.id;
+    setFindIndex(index);
+    setFindScroll(value => value + 1);
+  }, []);
+  // A new search starts at its first match after a short pause in typing.
+  useEffect(() => {
+    if (!findOpen) return;
+    const timer = setTimeout(() => { void goToMatch(0); }, 150);
+    return () => clearTimeout(timer);
+  }, [findOpen, findQuery, goToMatch]);
+  // When the transcript changes under an open search (a correction, a speaker rename), stay on the same passage.
+  useEffect(() => {
+    if (!findOpen) return;
+    setFindIndex(findMatches.findIndex(match => match.id === currentMatchId.current));
+  }, [findOpen, findMatches]);
+  const closeFind = useCallback(() => {
+    findStep.current++;
+    currentMatchId.current = null;
+    setFindOpen(false); setFindIndex(-1);
+    document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+  }, []);
+  const activeFindId = findOpen && findIndex >= 0 ? findMatches[findIndex]?.id ?? null : null;
 
   const transcriptCount = usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0);
   const emptyState = transcriptCount === 0 ? (
@@ -120,6 +193,7 @@ export function TranscriptPanel({
         <TranscriptButtonGroup transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
           onCopyTranscript={onCopyTranscript} onOpenMeetingFolder={onOpenMeetingFolder} meetingId={meetingId} meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? () => setReplaceOpen(true) : undefined}
+          onFind={meetingId ? openFind : undefined}
           onAddBookmark={meetingId ? () => setBookmarkOpen(true) : undefined} correctionActions={actions} />
       </div>
   );
@@ -131,7 +205,9 @@ export function TranscriptPanel({
       {meetingId ? <TranscriptCorrections key={meetingId} meetingId={meetingId} editing={editing} onClose={() => setEditing(null)}
         onChanged={onRefetchTranscripts} replaceOpen={replaceOpen} onReplaceOpenChange={setReplaceOpen}
         renderActions={renderToolbar} /> : renderToolbar()}
-      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} />}
+      {findOpen && <TranscriptFind query={findQuery} onQueryChange={setFindQuery} current={findIndex} total={findMatches.length} complete={searchComplete} focusRequest={findFocus}
+        onStep={direction => void goToMatch(stepMatch(findIndex, findMatches.length, direction))} onClose={closeFind} />}
+      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange} />}
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView
@@ -156,6 +232,11 @@ export function TranscriptPanel({
           showSpeakerLabels={showSpeakerAttribution}
           activeTime={activeTime}
           onSeekToTime={onSeekToTime}
+          followPlayback={followPlayback}
+          onUserScroll={onFollowStop}
+          findQuery={findOpen ? normalizeFindQuery(findQuery) : undefined}
+          activeFindId={activeFindId}
+          findRequest={findScroll}
           onSpeakerChange={showSpeakerAttribution ? onUpdateTranscriptSpeaker : undefined}
           onApplySpeakerToMatching={showSpeakerAttribution ? onApplySpeakerToMatching : undefined}
         />

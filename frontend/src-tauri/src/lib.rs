@@ -782,6 +782,8 @@ pub fn run() {
             library::add_meeting_bookmark,
             library::delete_meeting_bookmark,
             library::rename_meeting_bookmark,
+            library::summary_bookmarks::get_meeting_summary_bookmarks,
+            library::summary_bookmarks::set_meeting_summary_bookmarks,
             library::export_local_word,
             library::backup::backup_library,
             library::backup::restore_library,

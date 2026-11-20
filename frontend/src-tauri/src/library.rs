@@ -3,6 +3,7 @@ pub(crate) mod archive;
 pub mod backup;
 pub mod calendar;
 pub mod context;
+pub mod summary_bookmarks;
 
 use crate::state::AppState;
 use serde::Serialize;

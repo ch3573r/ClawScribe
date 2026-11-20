@@ -86,6 +86,8 @@ function caller(kind, failOffset = -1) {
     '@/lib/openExternal': {},
     '@/lib/utils': {},
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
+    // The real formatters; only the browser clipboard write is replaced.
+    '@/lib/clipboard-format': { ...loadTsModule(sourcePath('lib/clipboard-format')), writeClipboard: async content => { copied.push(content.text); return 'text'; } },
     '@/lib/meetingCalendar': { getMeetingCalendar: () => null },
     '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: 'de' }) },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ startSummaryPolling() {}, stopSummaryPolling() {} }) },

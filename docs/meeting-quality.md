@@ -204,6 +204,44 @@ after restarting. Empty retranscription is rejected before replacement. A
 successful replacement retains the prior transcript as a database revision.
 Permanent capture gaps remain visible after retranscribing the available audio.
 
+## Reviewing a saved meeting
+
+The playback bar above a saved meeting plays the recording and has these controls:
+
+- **Speed** (0.5× to 2×, pitch preserved). The chosen speed is remembered in this
+  app's browser storage and applies to the next recording you open.
+- **Follow playback** keeps the passage being played in view. It scrolls only when
+  the spoken passage changes and turns itself off when you scroll the transcript by
+  hand, so it never fights the reader. It is on by default and applies while audio plays.
+- Bookmarks are drawn on the timeline and seek when chosen.
+
+Keyboard shortcuts work while the meeting page is open and stand down whenever you
+type (text fields and the summary editor), inside dialogs and menus, and on controls
+that already use the key (a focused button keeps Space; a focused slider keeps the
+arrows). Key combinations with Ctrl, Alt or Meta are never taken, except Ctrl+F.
+
+| Key | Action |
+| --- | --- |
+| Space | Play or pause |
+| Left, Right | Back or forward 5 seconds (hold Shift for 15) |
+| `<`, `>` | Slower or faster |
+| F | Follow playback |
+| B | Add a bookmark at the playback position |
+| Ctrl+F | Find in the transcript |
+
+**Find in transcript** searches the complete saved transcript, not only the loaded
+pages, ignores case, and treats the text literally. Matches are marked in the text;
+Enter and Shift+Enter move to the next and previous passage (wrapping at the ends)
+and Escape closes the bar. The count is of passages, not occurrences.
+
+**Copy** for the summary and the transcript puts plain, readable text and an HTML
+version on the clipboard. Neither contains Markdown markup, source-link anchors,
+the internal meeting id or the time of copying; the summary starts with the title
+and date, the transcript with the title, date and one line per passage with its
+time and speaker. The HTML uses a fixed set of formatting tags, escapes all text
+and links only to http and https addresses. Where the platform refuses rich copy,
+the plain text is still copied. The Confluence export keeps its own format.
+
 ## Notebook Resource Policy
 
 The hardware helper measures total physical RAM, not current free RAM. A valid

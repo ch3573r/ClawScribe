@@ -26,7 +26,8 @@ function timeline(props = {}) {
     '@/components/ui/button': { Button: 'button' },
     './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
-    'lucide-react': { Activity: 'Activity', Pause: 'Pause', Play: 'Play' },
+    'lucide-react': { Activity: 'Activity', Bookmark: 'Bookmark', Pause: 'Pause', Play: 'Play' },
+    './PlaybackOptions': { PlaybackOptions: 'PlaybackOptions' },
   });
   const sought = [], played = [];
   const tree = hooks.render(() => SpeakerLaneTimeline({
@@ -158,7 +159,8 @@ test('an open lane rename survives optimistic merge until explicitly closed', ()
     '@/components/ui/button': { Button: 'button' },
     './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
-    'lucide-react': { Pause: 'Pause', Play: 'Play' },
+    'lucide-react': { Bookmark: 'Bookmark', Pause: 'Pause', Play: 'Play' },
+    './PlaybackOptions': { PlaybackOptions: 'PlaybackOptions' },
   });
   const props = { segments: [
     { id: 'first', timestamp: 0, endTime: 1, speaker: 'A', text: 'Synthetic speech.' },

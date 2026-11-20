@@ -141,7 +141,14 @@ Unknown source language remains unset instead of being inferred from the engine
 name. Whisper's text normalization collapses whitespace and preserves words.
 
 Custom vocabulary is a local Tauri store preference (`custom_vocabulary.json`),
-exposed by `get_custom_vocabulary` and `set_custom_vocabulary`. Set normalizes
+exposed by `get_custom_vocabulary` and `set_custom_vocabulary`. Settings → Transcription
+→ Custom vocabulary has an opt-in switch, **Suggest words from my corrections**, kept in
+webview storage and off by default. When it is on, a saved transcript correction or
+find-and-replace that swaps words for a name or term (a capitalised word, a word with
+a digit or inner capital, up to three words, not already in the list) shows a notice
+offering to add that spelling. Nothing is written until the notice's **Add** is chosen,
+the add goes through `set_custom_vocabulary` with its normal limits, and the
+confirmation offers **Undo**. Set normalizes
 whitespace at entry edges, removes empty and case-insensitive duplicate entries,
 and rejects more than 500 unique entries, entries over 64 Unicode characters,
 control characters, and entries without a letter or number. Matching is adapted

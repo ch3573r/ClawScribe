@@ -24,6 +24,9 @@ import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperatio
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
+import { stepPlaybackRate } from '@/lib/playback-controls';
+import type { MeetingBookmark } from '@/lib/library';
 import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
 import { useSpeakerLabelVisibility } from '@/hooks/useSpeakerLabelVisibility';
 import { Button } from '@/components/ui/button';
@@ -46,6 +49,7 @@ export default function PageContent({
   // Pagination props for efficient transcript loading
   segments,
   timelineSegments,
+  timelineComplete,
   hasMore,
   isLoadingMore,
   totalCount,
@@ -66,6 +70,7 @@ export default function PageContent({
   // Pagination props
   segments?: any[];
   timelineSegments?: TranscriptSegmentData[];
+  timelineComplete?: boolean;
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
@@ -109,6 +114,12 @@ export default function PageContent({
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
+  // Review tools: follow-along, bookmarks on the timeline, and requests raised by keyboard shortcuts.
+  const [followPlayback, setFollowPlayback] = useState(true);
+  const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
+  const [findOpenRequest, setFindOpenRequest] = useState(0);
+  const [bookmarkRequest, setBookmarkRequest] = useState(0);
+  const stopFollowing = useCallback(() => setFollowPlayback(false), []);
   const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
   const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
@@ -280,6 +291,17 @@ export default function PageContent({
     }
   }, [audioPlayer.isPlaying, audioPlayer.pause, audioPlayer.play]);
 
+  // Space, arrows, speed, follow, bookmark and find. Resolved by playback-controls,
+  // which stands down while typing, in dialogs and menus, and on controls that own the key.
+  usePlaybackShortcuts({
+    toggle: isAudioReady ? handleTimelinePlayPause : undefined,
+    seek: isAudioReady ? ({ seconds }) => { void audioPlayer.seekBy(seconds); } : undefined,
+    rate: isAudioReady ? ({ direction }) => audioPlayer.setRate(stepPlaybackRate(audioPlayer.rate, direction)) : undefined,
+    follow: isAudioReady ? () => setFollowPlayback(value => !value) : undefined,
+    bookmark: isAudioReady ? () => setBookmarkRequest(value => value + 1) : undefined,
+    find: () => setFindOpenRequest(value => value + 1),
+  });
+
   // Track page view
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
@@ -328,6 +350,11 @@ export default function PageContent({
           isAudioReady={isAudioReady}
           onPlayPause={handleTimelinePlayPause}
           onSeek={isAudioReady ? handleTimelineSeek : undefined}
+          rate={audioPlayer.rate}
+          onRateChange={audioPlayer.setRate}
+          followPlayback={followPlayback}
+          onFollowChange={setFollowPlayback}
+          bookmarks={bookmarks}
         />
       )}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
@@ -335,6 +362,7 @@ export default function PageContent({
           openTranscription={archiveAction === 'transcribe'}
           focusedSource={focusedSource}
           speakerSegments={timelineSegments}
+          timelineComplete={timelineComplete}
           sourceAttributionEnabled={sourceAttributionEnabled}
           transcripts={meetingData.transcripts}
           onCopyTranscript={copyOperations.handleCopyTranscript}
@@ -359,6 +387,12 @@ export default function PageContent({
           onRefetchTranscripts={onRefetchTranscripts}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
+          onRevealSegment={onRevealTranscript}
+          followPlayback={isAudioReady && followPlayback && audioPlayer.isPlaying}
+          onFollowStop={stopFollowing}
+          findOpenRequest={findOpenRequest}
+          bookmarkRequest={bookmarkRequest}
+          onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
           onRevealSource={async (source) => {

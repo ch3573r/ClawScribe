@@ -26,6 +26,8 @@ function panel(overrides = {}) {
     './TranscriptButtonGroup': stubs(['TranscriptButtonGroup']),
     './MeetingBookmarks': stubs(['MeetingBookmarks']),
     './TranscriptCorrections': stubs(['TranscriptCorrections']),
+    './TranscriptFind': stubs(['TranscriptFind']),
+    sonner: { toast: { error() {} } },
     '@/components/ui/button': { Button: 'button' },
     '@/components/ui/textarea': { Textarea: 'textarea' },
   });

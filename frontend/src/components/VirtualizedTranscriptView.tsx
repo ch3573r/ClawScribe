@@ -14,6 +14,7 @@ import { Pencil } from "lucide-react";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { splitForHighlight } from "@/lib/transcript-find";
 
 export interface VirtualizedTranscriptViewProps {
     speakerSegments?: TranscriptSegmentData[];
@@ -44,6 +45,14 @@ export interface VirtualizedTranscriptViewProps {
     activeTime?: number;
     /** Seek recording playback to a transcript timestamp. */
     onSeekToTime?: (seconds: number) => void;
+    /** Keep the segment being played in view. */
+    followPlayback?: boolean;
+    /** The reader scrolled by hand, so following should stop. */
+    onUserScroll?: () => void;
+    /** Find in transcript: the text to mark, the current match and a request counter that scrolls to it. */
+    findQuery?: string;
+    activeFindId?: string | null;
+    findRequest?: number;
 
     // Pagination props (infinite scroll)
     hasMore?: boolean;
@@ -89,7 +98,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSeekToTime,
     onEdit,
     originalText,
+    highlight,
+    isFindCurrent = false,
 }: {
+    highlight?: string;
+    isFindCurrent?: boolean;
     onEdit?: () => void;
     originalText?: string | null;
     id: string;
@@ -110,6 +123,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSeekToTime?: (seconds: number) => void;
 }) {
     const displayText = formatTranscriptDisplayText(text);
+    const content = highlight && text.trim()
+        ? splitForHighlight(displayText, highlight).map((part, index) => part.match
+            ? <mark key={index} className="rounded-sm bg-warning px-0.5 text-foreground">{part.text}</mark>
+            : part.text)
+        : displayText;
     const currentSpeaker = showSpeakerLabels ? speakerLabel(speaker) : null;
     const canSeek = Boolean(onSeekToTime && Number.isFinite(timestamp) && timestamp >= 0);
 
@@ -122,7 +140,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
+            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isFindCurrent ? "bg-primary/10 ring-2 ring-ring" : isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
         >
             <div className="flex items-start gap-3">
                 <Tooltip>
@@ -162,10 +180,10 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     </div>}
                     {isStreaming ? (
                         <div className="bg-muted border border-border rounded-lg px-3 py-2">
-                            <p className="font-reading text-[15px] leading-[1.5] text-foreground/90">{displayText}</p>
+                            <p className="font-reading text-[15px] leading-[1.5] text-foreground/90">{content}</p>
                         </div>
                     ) : (
-                        <p className="font-reading text-[15px] leading-[1.5] text-foreground/90">{displayText}</p>
+                        <p className="font-reading text-[15px] leading-[1.5] text-foreground/90">{content}</p>
                     )}
                 </div>
             </div>
@@ -190,6 +208,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     showSpeakerLabels = true,
     activeTime,
     onSeekToTime,
+    followPlayback = false,
+    onUserScroll,
+    findQuery,
+    activeFindId = null,
+    findRequest = 0,
     hasMore = false,
     isLoadingMore = false,
     totalCount = 0,
@@ -230,6 +253,42 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         }, 60);
         return () => clearTimeout(timer);
     }, [focusedSource, segments, virtualizer]);
+
+    const segmentsRef = useRef(segments);
+    segmentsRef.current = segments;
+    const scrollToSegment = (id: string, align: 'auto' | 'center'): boolean => {
+        const index = segmentsRef.current.findIndex(segment => segment.id === id);
+        if (index < 0) return false;
+        if (segmentsRef.current.length >= VIRTUALIZATION_THRESHOLD) virtualizer.scrollToIndex(index, { align });
+        else scrollRef.current?.querySelectorAll('[data-segment-id]')[index]?.scrollIntoView({ block: align === 'center' ? 'center' : 'nearest' });
+        return true;
+    };
+
+    // Find in transcript: bring the current match into view once per request,
+    // waiting for its page to load if it is not loaded yet.
+    const scrolledFindRequest = useRef(-1);
+    useEffect(() => {
+        if (!activeFindId || scrolledFindRequest.current === findRequest) return;
+        const timer = setTimeout(() => { if (scrollToSegment(activeFindId, 'center')) scrolledFindRequest.current = findRequest; }, 60);
+        return () => clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeFindId, findRequest, segments]);
+
+    // Reading ahead by hand ends follow-along instead of fighting the reader.
+    useEffect(() => {
+        const element = scrollRef.current;
+        if (!element || !followPlayback || !onUserScroll) return;
+        const stop = () => onUserScroll();
+        const stopOnScrollbar = (event: MouseEvent) => { if (event.target === element) onUserScroll(); };
+        element.addEventListener('wheel', stop, { passive: true });
+        element.addEventListener('touchmove', stop, { passive: true });
+        element.addEventListener('mousedown', stopOnScrollbar);
+        return () => {
+            element.removeEventListener('wheel', stop);
+            element.removeEventListener('touchmove', stop);
+            element.removeEventListener('mousedown', stopOnScrollbar);
+        };
+    }, [followPlayback, onUserScroll]);
 
     const { autoScroll, scrollToBottom } = useAutoScroll({
         scrollRef,
@@ -322,6 +381,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         return null;
     }, [segments, activeTime]);
 
+    // Follow playback: scroll when the spoken segment changes, never on every clock tick.
+    const followedSegment = useRef<string | null>(null);
+    useEffect(() => {
+        if (!followPlayback) { followedSegment.current = null; return; }
+        if (!activeSegmentId || followedSegment.current === activeSegmentId) return;
+        if (scrollToSegment(activeSegmentId, 'auto')) followedSegment.current = activeSegmentId;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [followPlayback, activeSegmentId]);
+
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
@@ -406,6 +474,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         sourceAttributionEnabled={sourceAttributionEnabled}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
+                                        highlight={findQuery}
+                                        isFindCurrent={segment.id === activeFindId}
                                     />
                                 </div>
                             );
@@ -473,6 +543,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         sourceAttributionEnabled={sourceAttributionEnabled}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
+                                        highlight={findQuery}
+                                        isFindCurrent={segment.id === activeFindId}
                                     />
                                 </motion.div>
                             );
