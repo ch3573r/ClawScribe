@@ -301,6 +301,8 @@ guard each update. Native Stop closes edit admission and saves the calendar,
 transcript, recording outcome, timestamped notes and note-sharing choice in one
 transaction. Interrupted recording recovery uses the same handoff. Existing IDs
 and library-local deletion records prevent duplicate registration.
+If startup fails, the staged invitation is removed once the recorder confirms
+its empty folder was deleted. Retained folders keep the draft for recovery.
 
 The core wakes automatic notes after a live recording's transaction commits
 and releases the recording job. Recovery can wake the same job after it

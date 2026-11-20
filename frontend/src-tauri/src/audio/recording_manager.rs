@@ -169,9 +169,11 @@ impl RecordingManager {
             .await;
         if result.is_err() {
             self.state.stop_recording();
-            let _ = self.stream_manager.stop_streams();
-            let _ = self.pipeline_manager.stop().await;
-            self.recording_saver.failed_start().await;
+            let streams_stopped = self.stream_manager.stop_streams().is_ok();
+            let pipeline_drained = self.pipeline_manager.stop().await.is_ok();
+            self.recording_saver
+                .failed_start(streams_stopped && pipeline_drained)
+                .await;
             self.state.cleanup();
         }
         result
@@ -380,8 +382,8 @@ impl RecordingManager {
     pub async fn abort_start(&mut self, preserve_audio: bool) {
         if preserve_audio {
             self.continue_audio_only();
-            let _ = self.stop_streams_and_force_flush().await;
-            self.recording_saver.failed_start().await;
+            let drained = self.stop_streams_and_force_flush().await.is_ok();
+            self.recording_saver.failed_start(drained).await;
             self.state.cleanup();
             return;
         }
@@ -391,9 +393,11 @@ impl RecordingManager {
                     .await;
         }
         self.state.stop_recording();
-        let _ = self.stream_manager.stop_streams();
-        let _ = self.pipeline_manager.stop().await;
-        self.recording_saver.discard_abandoned_start().await;
+        let streams_stopped = self.stream_manager.stop_streams().is_ok();
+        let pipeline_drained = self.pipeline_manager.stop().await.is_ok();
+        self.recording_saver
+            .failed_start(streams_stopped && pipeline_drained)
+            .await;
         self.state.cleanup();
     }
 

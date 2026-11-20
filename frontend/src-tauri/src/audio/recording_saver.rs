@@ -329,59 +329,52 @@ impl RecordingSaver {
         }));
     }
 
-    /// Discard a start that never became a recording: the streams had opened
-    /// and the start was then abandoned, for example because the speech model
-    /// failed to load. The seconds captured meanwhile were never offered as a
-    /// recording and nothing in the app lists them, so they are deleted with
-    /// the folder this start created. A folder that cannot be removed is kept
-    /// and marked as failed, like any other failed start.
-    pub async fn discard_abandoned_start(&mut self) {
+    pub async fn failed_start(&mut self, capture_drained: bool) {
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
             let _ = task.await;
         }
-        let removed = self
-            .meeting_folder
-            .as_ref()
-            .is_some_and(|folder| std::fs::remove_dir_all(folder).is_ok());
-        if removed {
-            self.meeting_folder = None;
-            self.metadata = None;
-            self.incremental_saver = None;
-        } else {
-            self.failed_start().await;
+        let Some(folder) = &self.meeting_folder else {
+            return;
+        };
+        let owned = std::fs::symlink_metadata(folder)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && crate::database::meeting_files::read_marker(folder).is_some_and(|marker| {
+                self.recording_id().is_some_and(|id| {
+                    crate::database::meeting_files::recording_id(&marker) == Some(id)
+                        && marker.get("meeting_id").is_none_or(serde_json::Value::is_null)
+                })
+            });
+        if !owned {
+            return;
         }
-    }
 
-    pub async fn failed_start(&mut self) {
-        if let Some(task) = self.snapshot_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
-        // The recording manager has already stopped and drained the pipeline.
-        if self.transcript_segments.lock().unwrap().is_empty() {
-            if let Some(folder) = &self.meeting_folder {
-                // Only remove a newly owned folder containing metadata and empty
-                // capture directories. Unknown or possibly recoverable files stay.
-                let empty = std::fs::read_dir(folder).is_ok_and(|mut entries| {
-                    entries.all(|entry| {
-                        let Ok(entry) = entry else {
-                            return false;
-                        };
-                        entry.file_name() == "metadata.json"
-                            || ([".audio-spool", ".checkpoints"]
-                                .iter()
-                                .any(|name| entry.file_name() == *name)
-                                && std::fs::read_dir(entry.path())
-                                    .is_ok_and(|mut files| files.next().is_none()))
-                    })
-                });
-                if empty && std::fs::remove_dir_all(folder).is_ok() {
-                    self.meeting_folder = None;
-                    self.metadata = None;
-                    self.incremental_saver = None;
-                    return;
-                }
+        if capture_drained && self.transcript_segments.lock().unwrap().is_empty() {
+            const CAPTURE_DIRS: [&str; 2] = [".audio-spool", ".checkpoints"];
+            let only_start_files = std::fs::read_dir(folder).is_ok_and(|mut entries| {
+                entries.all(|entry| {
+                    let Ok(entry) = entry else {
+                        return false;
+                    };
+                    entry.file_name() == "metadata.json"
+                        || (CAPTURE_DIRS.iter().any(|name| entry.file_name() == *name)
+                            && entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                })
+            });
+            // Non-recursive removal also protects a late capture write that
+            // lands after enumeration.
+            if only_start_files
+                && CAPTURE_DIRS.iter().all(|name| match std::fs::remove_dir(folder.join(name)) {
+                    Ok(()) => true,
+                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                })
+                && std::fs::remove_file(folder.join("metadata.json")).is_ok()
+                && std::fs::remove_dir(folder).is_ok()
+            {
+                self.meeting_folder = None;
+                self.metadata = None;
+                self.incremental_saver = None;
+                return;
             }
         }
         // Never delete possible capture from a partially opened device. Mark
@@ -758,7 +751,7 @@ mod snapshot_tests {
         })
         .await
         .unwrap();
-        saver.failed_start().await;
+        saver.failed_start(true).await;
 
         let marker = crate::database::meeting_files::read_marker(&folder).unwrap();
         assert_eq!(marker["recording_mode"], "audio_only");
@@ -1165,7 +1158,7 @@ mod snapshot_tests {
         })
         .await
         .unwrap();
-        saver.failed_start().await;
+        saver.failed_start(true).await;
     }
 
     #[tokio::test]
@@ -1177,14 +1170,24 @@ mod snapshot_tests {
             .start_accumulation(true, super::super::recording_state::RecordingState::new())
             .unwrap();
         let folder = saver.meeting_folder.clone().unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        let pool = stage_synthetic_calendar(&id).await;
         drop(sender);
-        saver.failed_start().await;
+        saver.failed_start(true).await;
+        crate::library::recording_calendar::discard_failed_start_draft(
+            &pool,
+            Some(&id),
+            saver.get_meeting_folder().is_none(),
+        )
+        .await
+        .unwrap();
         assert!(!folder.exists());
         assert!(saver.snapshot_task.is_none());
+        assert_eq!(draft_ids(&pool).await, ["another-start"]);
     }
 
     #[tokio::test]
-    async fn abandoned_start_removes_its_folder_with_the_audio_captured_so_far() {
+    async fn failed_start_keeps_its_calendar_with_the_audio_captured_so_far() {
         let root = tempfile::tempdir().unwrap();
         let mut saver = RecordingSaver::new();
         saver.set_recordings_folder(root.path().to_path_buf());
@@ -1192,14 +1195,69 @@ mod snapshot_tests {
             .start_accumulation(true, super::super::recording_state::RecordingState::new())
             .unwrap();
         let folder = saver.meeting_folder.clone().unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        let pool = stage_synthetic_calendar(&id).await;
         drop(sender);
         let spool = folder.join(".audio-spool");
         std::fs::create_dir_all(&spool).unwrap();
-        std::fs::write(spool.join("captured"), b"first seconds").unwrap();
-        saver.discard_abandoned_start().await;
-        assert!(!folder.exists());
-        assert!(saver.meeting_folder.is_none());
+        let prefix = spool.join("captured");
+        std::fs::write(&prefix, b"first seconds").unwrap();
+        saver.failed_start(true).await;
+        crate::library::recording_calendar::discard_failed_start_draft(
+            &pool,
+            Some(&id),
+            saver.get_meeting_folder().is_none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(prefix).unwrap(), b"first seconds");
+        assert_eq!(saver.get_meeting_folder(), Some(&folder));
         assert!(saver.snapshot_task.is_none());
+        assert_eq!(draft_ids(&pool).await, ["another-start", id.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn uncertain_capture_shutdown_keeps_the_empty_folder_and_its_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        let id = saver.recording_id().unwrap().to_owned();
+        let pool = stage_synthetic_calendar(&id).await;
+
+        saver.failed_start(false).await;
+        crate::library::recording_calendar::discard_failed_start_draft(
+            &pool,
+            Some(&id),
+            saver.get_meeting_folder().is_none(),
+        )
+        .await
+        .unwrap();
+        assert!(saver.get_meeting_folder().unwrap().is_dir());
+        assert_eq!(draft_ids(&pool).await, ["another-start", id.as_str()]);
+    }
+
+    async fn stage_synthetic_calendar(recording_id: &str) -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for id in [recording_id, "another-start"] {
+            sqlx::query("INSERT INTO recording_calendar_drafts VALUES (?, ?, 1)")
+                .bind(id)
+                .bind(r#"{"source":"microsoft","eventId":"fixture","subject":"Synthetic invitation"}"#)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool
+    }
+
+    async fn draft_ids(pool: &sqlx::SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT recording_id FROM recording_calendar_drafts ORDER BY recording_id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

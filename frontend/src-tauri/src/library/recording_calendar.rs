@@ -78,10 +78,25 @@ pub(crate) async fn stage_initial<R: Runtime>(
     app: &AppHandle<R>,
     recording_id: Option<&str>,
     link: Option<CalendarLink>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if let Some(link) = link {
         let id = recording_id.ok_or("The recording folder is unavailable.")?;
         write(app, id, 0, Some(link)).await?;
+        return Ok(Some(id.to_owned()));
+    }
+    Ok(None)
+}
+
+pub(crate) async fn discard_failed_start_draft(
+    pool: &SqlitePool,
+    staged_id: Option<&str>,
+    empty_folder_removed: bool,
+) -> Result<(), sqlx::Error> {
+    if let (Some(id), true) = (staged_id, empty_folder_removed) {
+        sqlx::query("DELETE FROM recording_calendar_drafts WHERE recording_id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }

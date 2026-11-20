@@ -1140,66 +1140,93 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         .map(|device| device.name.clone())
         .collect::<Vec<_>>();
     let manager_timer = Instant::now();
-    let transcription_receiver = manager
-        .start_recording_with_preparation(
-            mic_device,
-            system_device,
-            mode.saves_audio(auto_save),
-            |recording_id| {
-                let app = &app;
-                let request = options.request;
-                async move {
-                    if let Some(request) = request {
-                        request.verify_call().await.map_err(anyhow::Error::msg)?;
-                    }
-                    if crate::library::recording_calendar::stage_initial(
-                        app,
-                        recording_id.as_deref(),
-                        options.calendar_link,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        let _ = app.emit(
-                            "recording-warning",
-                            "Could not link the selected calendar event. Audio capture continues.",
-                        );
-                    }
-                    if let Some(request) = request {
-                        request.check_call().map_err(anyhow::Error::msg)?;
-                    }
-                    Ok(())
-                }
-            },
-        )
-        .await
-        .map_err(|error| {
-            let message = error.to_string();
-            if message == crate::start_request::EXPIRED {
-                message
-            } else {
-                format!("Failed to start recording: {message}")
-            }
-        })?;
+    let mut staged_calendar_id = None;
     let requested_mode = mode;
-    let mode =
-        finish_recording_start(&app, &mut manager, model_validation, mode, auto_save).await?;
+    let startup = async {
+        let staged_id = &mut staged_calendar_id;
+        let transcription_receiver = manager
+            .start_recording_with_preparation(
+                mic_device,
+                system_device,
+                mode.saves_audio(auto_save),
+                |recording_id| {
+                    let app = &app;
+                    let request = options.request;
+                    async move {
+                        if let Some(request) = request {
+                            request.verify_call().await.map_err(anyhow::Error::msg)?;
+                        }
+                        match crate::library::recording_calendar::stage_initial(
+                            app,
+                            recording_id.as_deref(),
+                            options.calendar_link,
+                        )
+                        .await
+                        {
+                            Ok(id) => *staged_id = id,
+                            Err(_) => {
+                                let _ = app.emit(
+                                    "recording-warning",
+                                    "Could not link the selected calendar event. Audio capture continues.",
+                                );
+                            }
+                        }
+                        if let Some(request) = request {
+                            request.check_call().map_err(anyhow::Error::msg)?;
+                        }
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                if message == crate::start_request::EXPIRED {
+                    message
+                } else {
+                    format!("Failed to start recording: {message}")
+                }
+            })?;
+        let mode =
+            finish_recording_start(&app, &mut manager, model_validation, mode, auto_save).await?;
+        let (live_startup, live_sink) = match prepare_live_recording(
+            &app.state::<crate::knowledge::KnowledgeState>(),
+            &mut manager,
+            mode.transcribes(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                manager.abort_start(mode.saves_audio(auto_save)).await;
+                return Err(error);
+            }
+        };
+        Ok((transcription_receiver, mode, live_startup, live_sink))
+    }
+    .await;
+    let (transcription_receiver, mode, live_startup, live_sink) = match startup {
+        Ok(started) => started,
+        Err(error) => {
+            let state = app.state::<crate::state::AppState>();
+            // After preparation supplied an ID, the saver clears its folder
+            // only when it has removed this start's verified empty directory.
+            if crate::library::recording_calendar::discard_failed_start_draft(
+                state.db_manager.pool(),
+                staged_calendar_id.as_deref(),
+                manager.get_meeting_folder().is_none(),
+            )
+            .await
+            .is_err()
+            {
+                warn!("Could not remove the calendar draft for an empty failed start");
+            }
+            return Err(error);
+        }
+    };
     let recording_id = manager.recording_id().map(str::to_owned);
     let recording_folder = manager
         .get_meeting_folder()
         .map(|folder| folder.to_string_lossy().into_owned());
     let recording_name = manager.get_meeting_name();
-    let (live_startup, live_sink) = match prepare_live_recording(
-        &app.state::<crate::knowledge::KnowledgeState>(),
-        &mut manager,
-        mode.transcribes(),
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            manager.abort_start(mode.saves_audio(auto_save)).await;
-            return Err(error);
-        }
-    };
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     if options.request.is_some_and(|request| request.is_call()) {
