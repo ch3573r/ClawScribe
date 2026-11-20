@@ -48,6 +48,11 @@ on:
         required: true
         type: boolean
         default: false
+      measure-mai:
+        description: Compare local audio preparation time and memory on a synthetic ten-minute recording
+        required: false
+        type: boolean
+        default: false
       build-ref:
         description: Commit, branch, or tag to build
         required: false
@@ -81,6 +86,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CLAWSCRIBE_MEASURE_MAI: ${{ inputs['measure-mai'] && 'true' || 'false' }}
 
 jobs:
   build:

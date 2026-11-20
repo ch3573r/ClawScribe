@@ -233,6 +233,9 @@ measures the conversion and upload stream with synthetic audio only
 peak memory delta of the app process (FFmpeg is separate), source seconds,
 output bytes and cancellation latency for the current path, the earlier
 named-file path and the in-memory decode baseline.
+Select `measure-mai` when manually dispatching Windows validation to run the
+ten-minute synthetic comparison with the release-profile test binary and staged
+encoder. The fixture makes no provider requests.
 
 For an i5-1235U / 8 GB notebook, choose models based on a measured session with
 Teams/Webex and the normal concurrent workload. Compare sustained backlog,

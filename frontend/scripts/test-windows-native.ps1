@@ -144,6 +144,22 @@ try {
         & $testExecutable $filter --test-threads=1
         if ($LASTEXITCODE -ne 0) { throw "Native tests failed for '$filter'." }
     }
+
+    if ($env:CLAWSCRIBE_MEASURE_MAI -eq "true") {
+        $fixture = "audio::transcription::cloud::tests::mai_conversion_and_upload_stream_measurements"
+        $listing = & $testExecutable $fixture --exact --ignored --list
+        if ($LASTEXITCODE -ne 0 -or "${fixture}: test" -notin $listing) {
+            throw "The synthetic MAI performance fixture is missing."
+        }
+        $previousDuration = $env:CLAWSCRIBE_MAI_PERF_SECONDS
+        try {
+            $env:CLAWSCRIBE_MAI_PERF_SECONDS = "600"
+            & $testExecutable $fixture --exact --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw "Synthetic MAI audio measurements failed." }
+        } finally {
+            $env:CLAWSCRIBE_MAI_PERF_SECONDS = $previousDuration
+        }
+    }
 } finally {
     $env:PATH = $previousPath
     Pop-Location
