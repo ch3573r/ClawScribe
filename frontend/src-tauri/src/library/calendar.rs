@@ -143,7 +143,9 @@ impl CalendarLink {
         match self.source {
             CalendarSource::Microsoft => {
                 self.source_id = None;
-                self.series_id = None;
+                self.series_id = self
+                    .series_id
+                    .filter(|id| crate::exports::calendar::valid_series_id(id));
             }
             CalendarSource::Ical => {
                 if !self
@@ -224,7 +226,8 @@ impl CalendarLink {
     fn series_key(&self) -> Option<(&str, &str)> {
         match self.source {
             CalendarSource::Ical => Some((self.source_id.as_deref()?, self.series_id.as_deref()?)),
-            CalendarSource::Microsoft => None,
+            // The account scope is already part of the Graph series digest.
+            CalendarSource::Microsoft => Some(("microsoft", self.series_id.as_deref()?)),
         }
     }
 }
@@ -416,7 +419,13 @@ pub(crate) async fn migrate_legacy(
     for entry in entries {
         let stored = serde_json::from_value::<CalendarLink>(entry.link)
             .map_err(|_| ())
-            .and_then(|link| link.normalized().map_err(|_| ()))
+            .and_then(|mut link| {
+                // Pre-database Microsoft links never had a trusted series ID.
+                if link.source == CalendarSource::Microsoft {
+                    link.series_id = None;
+                }
+                link.normalized().map_err(|_| ())
+            })
             .and_then(|link| link.encoded().map_err(|_| ()));
         let outcome = match stored {
             Err(()) => LegacyOutcome::Invalid,
@@ -528,8 +537,15 @@ pub async fn set_meeting_series_template(
     meeting_id: String,
     template_id: Option<String>,
 ) -> Result<(), String> {
-    let pool = state.db_manager.pool();
-    let link = read(pool, &meeting_id)
+    save_series_template(state.db_manager.pool(), &meeting_id, template_id).await
+}
+
+async fn save_series_template(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    template_id: Option<String>,
+) -> Result<(), String> {
+    let link = read(pool, meeting_id)
         .await?
         .ok_or("This meeting has no linked calendar event.")?;
     let (source, series) = link
@@ -642,6 +658,9 @@ pub(crate) mod tests {
         .normalized()
         .unwrap()
     }
+
+    const GRAPH_SERIES: &str =
+        "graph:v1:5b910e68a596c61027e658aaf8baa621706d748d0af2b1e2ea52d49a13c6f49f";
 
     async fn add_meeting(pool: &SqlitePool, id: &str, title: &str) {
         sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -773,6 +792,7 @@ pub(crate) mod tests {
                     "review-test",
                     serde_json::json!({
                         "source": "microsoft", "eventId": "legacy-event",
+                        "seriesId": GRAPH_SERIES,
                         "attendees": [{"name": "Previously checked", "included": true}]
                     }),
                 ),
@@ -796,6 +816,7 @@ pub(crate) mod tests {
         let migrated = read(&pool, "review-test").await.unwrap().unwrap();
         // A checkbox that defaulted to checked is not a review.
         assert!(!migrated.reviewed);
+        assert!(migrated.series_key().is_none());
         assert!(read(&pool, "bad-id").await.unwrap().is_none());
     }
 
@@ -818,11 +839,16 @@ pub(crate) mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let reviewed = microsoft("Reviewed event", Attendance::Present, false);
+        let mut reviewed = microsoft("Reviewed event", Attendance::Present, false);
+        reviewed.series_id = Some(GRAPH_SERIES.into());
         write(&pool, "review-test", Some(reviewed.clone()), false)
             .await
             .unwrap();
-        let unreviewed = microsoft("Automatic event", Attendance::Unreviewed, false);
+        save_series_template(&pool, "review-test", Some("standard_meeting".into()))
+            .await
+            .unwrap();
+        let mut unreviewed = microsoft("Automatic event", Attendance::Unreviewed, false);
+        unreviewed.series_id = Some(GRAPH_SERIES.into());
         write(&pool, "automatic", Some(unreviewed), false)
             .await
             .unwrap();
@@ -836,7 +862,14 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         assert_eq!(cleared, "null");
-        assert_eq!(read(&pool, "review-test").await.unwrap(), Some(reviewed));
+        assert_eq!(
+            read(&pool, "review-test").await.unwrap(),
+            Some(reviewed.clone())
+        );
+        assert_eq!(
+            series_template(&pool, &reviewed).await.unwrap().as_deref(),
+            Some("standard_meeting")
+        );
         assert!(read(&pool, "automatic").await.unwrap().is_none());
         assert_eq!(
             read(&pool, "imported").await.unwrap(),
@@ -847,6 +880,63 @@ pub(crate) mod tests {
             knowledge_title(&pool, "automatic", "Automatic event", false).await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn microsoft_series_preference_applies_to_two_occurrences_and_can_be_reset() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let mut first = microsoft("First occurrence", Attendance::Unreviewed, false);
+        first.series_id = Some(GRAPH_SERIES.into());
+        write(&pool, "review-test", Some(first), false)
+            .await
+            .unwrap();
+        save_series_template(&pool, "review-test", Some("standard_meeting".into()))
+            .await
+            .unwrap();
+
+        let saved_first = read(&pool, "review-test").await.unwrap().unwrap();
+        assert!(!saved_first.is_reviewed());
+        add_meeting(&pool, "next", "Second occurrence").await;
+        let mut next = microsoft("Second occurrence", Attendance::Unreviewed, false);
+        next.event_id = "next-occurrence".into();
+        next.series_id = Some(GRAPH_SERIES.into());
+        write(&pool, "next", Some(next), false).await.unwrap();
+        let next = read(&pool, "next").await.unwrap().unwrap();
+        assert_eq!(
+            series_template(&pool, &next).await.unwrap().as_deref(),
+            Some("standard_meeting")
+        );
+        assert_eq!(next.with_attendance("Notes".into()), "Notes");
+        assert_eq!(
+            ProviderTitle::of(Some(&next)).for_provider("Second occurrence".into()),
+            None
+        );
+
+        let mut other_account = next.clone();
+        other_account.series_id = Some(format!("graph:v1:{}", "a".repeat(64)));
+        assert!(series_template(&pool, &other_account)
+            .await
+            .unwrap()
+            .is_none());
+        for series_id in [
+            None,
+            Some("".into()),
+            Some("ics:abc".into()),
+            Some("graph:v1:abc".into()),
+        ] {
+            let mut invalid = next.clone();
+            invalid.series_id = series_id;
+            assert!(series_template(&pool, &invalid.normalized().unwrap())
+                .await
+                .unwrap()
+                .is_none());
+        }
+        let mut imported = sample();
+        imported.source_id = Some("microsoft".into());
+        assert!(series_template(&pool, &imported).await.unwrap().is_none());
+
+        save_series_template(&pool, "next", None).await.unwrap();
+        assert!(series_template(&pool, &next).await.unwrap().is_none());
     }
 
     #[tokio::test]

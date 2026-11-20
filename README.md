@@ -300,7 +300,9 @@ subscription from a calendar provider. Upcoming meetings appear on Home, and
 the sidebar shows the next one. Choose **Use for next recording** or let
 ClawScribe link a single timed event in progress. Review attendance while
 recording or from the saved meeting. Summaries receive only calendar names you
-confirm. iCalendar works without a Microsoft account. See [Calendar sources and attendance](docs/integrations/icalendar.md).
+confirm. In a saved recurring meeting, open **Attendance** to choose a summary
+template for the series. This works with Microsoft 365 and iCalendar. iCalendar
+works without a Microsoft account. See [Calendar sources and attendance](docs/integrations/icalendar.md).
 
 Microsoft sign-in supports calendar context and exports. Windows call detection
 can prompt or start recording for the Teams, Zoom, Webex and Google Meet

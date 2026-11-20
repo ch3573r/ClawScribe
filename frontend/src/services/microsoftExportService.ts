@@ -116,6 +116,8 @@ export interface CalendarAttendee {
 }
 export interface CalendarEvent {
   id: string;
+  /** Opaque identity shared by occurrences and exceptions in the same account. */
+  seriesId?: string;
   subject: string | null;
   /** ISO-8601 UTC, e.g. "2026-06-19T21:00:00Z". */
   start: string | null;

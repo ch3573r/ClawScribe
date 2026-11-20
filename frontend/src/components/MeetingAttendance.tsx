@@ -11,8 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  ACTIVE_CALENDAR_CHANGED, getActiveRecordingCalendar, type MeetingCalendarLink,
-  sameCalendarEvent, setActiveRecordingCalendar,
+  ACTIVE_CALENDAR_CHANGED, getActiveRecordingCalendar, MICROSOFT_CALENDAR_CLEARED,
+  sameCalendarEvent, setActiveRecordingCalendar, type MeetingCalendarLink,
 } from "@/lib/meetingCalendar";
 import { readRecordingCalendar, writeRecordingCalendar } from "@/services/recordingCalendarService";
 import {
@@ -194,13 +194,13 @@ export function RecordingCalendarReview({ disabled, sessionId }: {
     };
     const signOut = () => { void hydrate(true); };
     window.addEventListener(ACTIVE_CALENDAR_CHANGED, sync);
-    window.addEventListener("clawscribe-microsoft-calendar-cleared", signOut);
+    window.addEventListener(MICROSOFT_CALENDAR_CLEARED, signOut);
     sync();
     void hydrate();
     return () => {
       disposed = true;
       window.removeEventListener(ACTIVE_CALENDAR_CHANGED, sync);
-      window.removeEventListener("clawscribe-microsoft-calendar-cleared", signOut);
+      window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, signOut);
     };
   }, [sessionId]);
   if (loadFailed) return <p role="status" className="text-sm text-muted-foreground">Could not load this recording’s calendar.</p>;
@@ -328,9 +328,15 @@ export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, 
   };
   useEffect(() => {
     void load();
-    const sync = () => { void load(); };
-    window.addEventListener("clawscribe-microsoft-calendar-cleared", sync);
-    return () => { request.current++; lookup.current++; window.removeEventListener("clawscribe-microsoft-calendar-cleared", sync); };
+    const sync = () => {
+      lookup.current++;
+      setCandidates(current => ({
+        ...current, loading: false, matches: current.matches.filter(event => event.source !== "microsoft"),
+      }));
+      void load();
+    };
+    window.addEventListener(MICROSOFT_CALENDAR_CLEARED, sync);
+    return () => { request.current++; lookup.current++; window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, sync); };
     // The parent keys this control by meeting ID.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meetingId]);

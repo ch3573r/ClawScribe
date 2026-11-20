@@ -51,11 +51,13 @@ still be the former event's subject.
 Older checked selections require review because earlier versions checked each
 invitation by default.
 
-For a linked recurring iCalendar event, **Template for this series** sets the
-default summary template for other linked occurrences from the same calendar.
-It uses the source and its recurring event ID. Single events and detached imports
-without a recurring master use the regular summary template settings. Series
-template preferences are local app settings.
+In a saved meeting linked to a recurring iCalendar or Microsoft 365 event,
+open **Attendance** and choose **Template for this series**. The choice becomes
+the default for linked occurrences from that iCalendar source or Microsoft 365
+account, including rescheduled occurrences. Choose **Use the default template**
+to clear the preference. Changing a series template leaves attendance as it was.
+Single events, detached iCalendar imports, and links without a stable series ID
+use the regular summary template settings. Series preferences are stored locally.
 
 ClawScribe checks for calendar updates while Home or the Calendars page is
 open. **Refresh** requests an immediate update. Use the calendar's menu

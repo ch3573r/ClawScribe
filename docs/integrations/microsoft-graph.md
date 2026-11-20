@@ -87,6 +87,7 @@ the next event list, including:
 - start/end
 - organizer
 - invited attendees
+- event type and the series master ID for recurring occurrences and exceptions
 
 The app uses a selected event for the next recording or links a single timed
 event in progress across enabled sources. The event body is excluded. The
@@ -98,10 +99,17 @@ Microsoft sign-out ends the connection and clears what came from the account
 and was never confirmed: current event choices, an unreviewed selection and
 automatically matched links on saved meetings. A link you reviewed is part of the
 local meeting record and stays, with its attendance, until you unlink it.
-iCalendar sources and their associations are unaffected. Series
-template memory is available for recurring iCalendar events with a stable source
-and series ID. The current Graph integration returns occurrence IDs and uses the
-app's regular summary template settings. See [Calendar sources and attendance](icalendar.md).
+iCalendar sources and their associations are unaffected.
+
+For a saved recurring meeting, **Attendance → Template for this series** sets
+the default summary template for linked occurrences and exceptions from the
+same account. The preference stays on this device and is available when you
+reconnect that account. The existing calendar read supplies the series master
+ID. ClawScribe hashes it together with the sign-in authority and the account's
+tenant-specific Graph user ID, and stores only that series key alongside the
+existing meeting link. Single events, legacy links, and events without a usable
+account or series ID use the regular summary template settings.
+See [Calendar sources and attendance](icalendar.md).
 
 ## OneNote
 

@@ -3,7 +3,10 @@
 import { useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
-import { calendarLinkFromEvent, sameCalendarEvent, setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
+import {
+  calendarLinkFromEvent, microsoftCalendarRevision, sameCalendarEvent,
+  setPendingCalendar, type MeetingCalendarLink,
+} from "@/lib/meetingCalendar";
 import { addICalendarSubscription, importICalendarFile } from "@/services/icalService";
 import { Button } from "@/components/ui/button";
 import {
@@ -136,10 +139,12 @@ export function UseEventButton({ event, pending }: { event: UpcomingEvent; pendi
   const link = calendarLinkFromEvent(event);
   const selected = sameCalendarEvent(pending, link);
   const title = event.subject || "Untitled meeting";
+  const selectionRevision = microsoftCalendarRevision;
   return (
     <Button type="button" variant="ghost" size="sm" disabled={selected}
       aria-label={selected ? `Selected ${title} for next recording` : `Use ${title} for next recording`}
       onClick={() => {
+        if (link.source === "microsoft" && selectionRevision !== microsoftCalendarRevision) return;
         if (!setPendingCalendar(link)) toast.error("Could not save the meeting selection on this device.");
       }}>
       {selected ? "Selected" : "Use"}

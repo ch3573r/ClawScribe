@@ -99,6 +99,7 @@ export function matchOngoingCalendar(events: Invitation[], now: number, incomple
 export const LEGACY_MEETING_CALENDAR_PREFIX = "clawscribe.meetingCalendar.";
 export const PENDING_CALENDAR_CHANGED = "clawscribe-pending-calendar-changed";
 export const ACTIVE_CALENDAR_CHANGED = "clawscribe-active-calendar-changed";
+export const MICROSOFT_CALENDAR_CLEARED = "clawscribe-microsoft-calendar-cleared";
 const PENDING_KEY = "clawscribe.pendingCalendar";
 const SKIP_VALUE = '"skip"';
 
@@ -231,5 +232,5 @@ export function clearMicrosoftCalendarLinks(): void {
       if (legacy?.source === "microsoft" && !isReviewedCalendar(legacy)) store.removeItem(key);
     }
   } catch { /* Best-effort cleanup of superseded webview storage. */ }
-  window.dispatchEvent(new Event("clawscribe-microsoft-calendar-cleared"));
+  window.dispatchEvent(new Event(MICROSOFT_CALENDAR_CLEARED));
 }

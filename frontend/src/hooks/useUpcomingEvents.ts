@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useICalendar } from "@/hooks/useICalendar";
 import { usePendingCalendar } from "@/hooks/usePendingCalendar";
-import { calendarLinkFromEvent, sameCalendarEvent, setPendingCalendar } from "@/lib/meetingCalendar";
+import {
+  calendarLinkFromEvent, MICROSOFT_CALENDAR_CLEARED, microsoftCalendarRevision,
+  sameCalendarEvent, setPendingCalendar,
+} from "@/lib/meetingCalendar";
 import { toast } from "sonner";
 import {
   microsoftExportService,
@@ -31,6 +34,7 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
   const ical = useICalendar();
   const pending = usePendingCalendar();
   const readVersion = useRef(0);
+  const selectionRevision = microsoftCalendarRevision;
 
   const refresh = useCallback(async (cancelled: () => boolean) => {
     const version = ++readVersion.current;
@@ -66,12 +70,19 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
     const onVisibility = () => {
       if (document.visibilityState === "visible") run();
     };
+    const onSignOut = () => {
+      readVersion.current++;
+      setMicrosoftAvailable(false);
+      setMicrosoftEvents([]);
+    };
     window.addEventListener("focus", run);
+    window.addEventListener(MICROSOFT_CALENDAR_CLEARED, onSignOut);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("focus", run);
+      window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, onSignOut);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [refresh]);
@@ -95,6 +106,7 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
   /** Use this event's title and invitees for the next recording. */
   const select = (entry: UpcomingEntry) => {
     const { event, sourceId } = entry;
+    if (!sourceId && selectionRevision !== microsoftCalendarRevision) return;
     const saved = setPendingCalendar(calendarLinkFromEvent({ ...event, sourceId }));
     if (!saved) toast.error("Could not save the calendar selection on this device.");
   };

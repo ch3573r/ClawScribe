@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
@@ -9,6 +10,7 @@ const now = Date.parse('2030-04-15T10:15:00Z');
 const event = (id, changes = {}) => ({
   id, subject: 'Planning', start, end, attendees: [{ name: 'Invitee', email: null }], ...changes,
 });
+const graphSeries = 'graph:v1:5b910e68a596c61027e658aaf8baa621706d748d0af2b1e2ea52d49a13c6f49f';
 
 test('a fresh invitation and a legacy checked invitee both require attendance review', t => {
   const before = globalThis.window;
@@ -54,6 +56,118 @@ function withStorage(t) {
   t.after(() => { globalThis.window = before; });
   return loadTsModule('src/lib/meetingCalendar.ts');
 }
+
+test('Calendars settings forwards the Microsoft series when selecting an occurrence for recording', async t => {
+  const links = withStorage(t);
+  const hooks = createHookHarness();
+  globalThis.window.setInterval = () => 1;
+  globalThis.window.clearInterval = () => {};
+  const previousDocument = globalThis.document;
+  globalThis.document = new EventTarget();
+  t.after(() => hooks.unmount());
+  t.after(() => { globalThis.document = previousDocument; });
+  const source = JSON.parse(readFileSync(new URL('../fixtures/microsoft-calendar-series.json', import.meta.url), 'utf8')).value;
+  const { id, subject, attendees } = source[0];
+  const graphEvent = event(id, {
+    subject, seriesId: graphSeries,
+    attendees: attendees.map(({ emailAddress }) => ({ name: emailAddress.name, email: emailAddress.address })),
+  });
+  const jsx = (type, props) => ({ type, props });
+  const ui = names => Object.fromEntries(names.split(' ').map(name => [name, name]));
+  const button = 'UseEventButton';
+  const settings = loadTsModule('src/components/settings/CalendarsSettings.tsx', {
+    react: hooks.react,
+    'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
+    '@/components/IntegrationIcons': {},
+    '@/components/ICalendarSettings': { UseEventButton: button, formatWhen: () => 'Upcoming' },
+    '@/components/ui/button': ui('Button'),
+    '@/components/ui/dropdown-menu': ui('DropdownMenu DropdownMenuContent DropdownMenuItem DropdownMenuTrigger'),
+    '@/components/ui/settings-layout': ui('SettingsCard SettingsColumns SettingsFooter SettingsRow StatusText'),
+    '@/components/settings/settings-parts': ui('IconAction IconTile NoteRow'),
+    '@/hooks/useICalendar': { useICalendar: () => ({ sources: [], events: [], issues: {} }) },
+    '@/hooks/useMicrosoftExport': { useMicrosoftExport: () => ({
+      connection: { state: 'connected' }, calendarEvents: [graphEvent], loadCalendar() {},
+    }) },
+    '@/hooks/usePendingCalendar': { usePendingCalendar: links.getPendingCalendar },
+    '@/lib/meetingCalendar': links,
+    '@/services/icalService': {},
+    '@/services/microsoftExportService': { microsoftExportService: { listCalendarEvents: async () => [] } },
+  });
+  const { UseEventButton } = loadTsModule('src/components/ICalendarSettings.tsx', {
+    'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {}, sonner: {},
+    '@/lib/meetingCalendar': links, '@/services/icalService': {},
+    '@/components/ui/button': ui('Button'), '@/components/ui/dialog': {},
+    '@/components/ui/input': {}, '@/components/ui/tabs': {},
+  });
+  const findEventButton = node => {
+    if (Array.isArray(node)) return node.map(findEventButton).find(Boolean);
+    if (node?.type === button) return node;
+    return node?.props && findEventButton(node.props.children);
+  };
+  const view = hooks.render(settings.CalendarsSettings);
+  const control = findEventButton(view.props.aside);
+  assert.ok(control);
+  const click = UseEventButton(control.props).props.onClick;
+  click();
+  const pending = links.getPendingCalendar();
+  assert.equal(pending.source, 'microsoft');
+  assert.equal(pending.eventId, id);
+  assert.equal(pending.seriesId, graphSeries);
+  assert.equal(pending.attendees[0].attendance, 'unreviewed');
+  links.clearMicrosoftCalendarLinks();
+  click();
+  assert.equal(links.getPendingCalendar(), null);
+});
+
+test('sign-out clears cached Microsoft series events and ignores an in-flight Home refresh', async t => {
+  const links = withStorage(t);
+  const hooks = createHookHarness();
+  const previousDocument = globalThis.document;
+  globalThis.document = new EventTarget();
+  t.after(() => hooks.unmount());
+  t.after(() => { globalThis.document = previousDocument; });
+  let refresh;
+  Object.assign(globalThis.window, {
+    setInterval: run => { refresh = run; return 1; },
+    clearInterval() {},
+  });
+  const when = {
+    start: new Date(Date.now() + 60_000).toISOString(),
+    end: new Date(Date.now() + 120_000).toISOString(),
+  };
+  const graphEvent = event('microsoft-series', { ...when, seriesId: graphSeries });
+  const imported = event('ics:abc:456', { ...when, sourceId: 'file', seriesId: 'ics:abc' });
+  const delayed = deferred();
+  let reads = 0;
+  const { useUpcomingEvents } = loadTsModule('src/hooks/useUpcomingEvents.ts', {
+    react: hooks.react, sonner: {},
+    '@/lib/meetingCalendar': links,
+    '@/hooks/useICalendar': { useICalendar: () => ({ events: [imported], sources: [{ id: 'file', name: 'File' }] }) },
+    '@/hooks/usePendingCalendar': { usePendingCalendar: links.getPendingCalendar },
+    '@/services/microsoftExportService': { microsoftExportService: {
+      connectionStatus: async () => ({ state: 'connected' }),
+      listCalendarEvents: async () => (++reads === 1 ? [graphEvent] : delayed.promise),
+    } },
+  });
+  const render = () => hooks.render(useUpcomingEvents);
+  render();
+  await flush();
+  const before = render();
+  const microsoft = before.entries.find(entry => entry.label === 'Microsoft 365');
+  assert.ok(microsoft);
+  before.select(microsoft);
+  assert.equal(links.getPendingCalendar().seriesId, graphSeries);
+  refresh();
+  await flush();
+  assert.equal(reads, 2);
+  links.clearMicrosoftCalendarLinks();
+  before.select(microsoft);
+  assert.equal(links.getPendingCalendar(), null);
+  assert.deepEqual(Array.from(render().entries, entry => entry.event.id), [imported.id]);
+  delayed.resolve([graphEvent]);
+  await flush();
+  assert.deepEqual(Array.from(render().entries, entry => entry.event.id), [imported.id]);
+});
 
 test('starting one recording preserves an explicit choice made for the next recording during startup', t => {
   const links = withStorage(t);
@@ -497,13 +611,15 @@ test('a partial calendar result can be checked again from the recording review',
 
 test('a saved meeting without a link can be linked from the current calendars, with failing sources retried', async t => {
   const links = withStorage(t);
-  const candidate = links.calendarLinkFromEvent(event('candidate', { attendees: [{ name: 'Invitee', email: null }] }));
+  const candidate = links.calendarLinkFromEvent(event('candidate', { seriesId: graphSeries }));
   const lookups = [];
   const saved = [];
+  const preferences = [];
   let result = { matches: [], unavailable: ['Microsoft 365'] };
   const page = createHookHarness();
   const dialog = createHookHarness();
-  t.after(() => { page.unmount(); dialog.unmount(); });
+  const picker = createHookHarness();
+  t.after(() => { page.unmount(); dialog.unmount(); picker.unmount(); });
   const jsx = (type, props) => ({ type, props });
   const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node?.props
     ? [node, ...nodes(node.props.children)] : [];
@@ -520,7 +636,10 @@ test('a saved meeting without a link can be linked from the current calendars, w
       useRef: (...args) => current.useRef(...args),
     },
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
-    '@tauri-apps/api/core': {}, sonner: {},
+    '@tauri-apps/api/core': { invoke: async (command, { meetingId, templateId }) => {
+      assert.equal(command, 'set_meeting_series_template');
+      preferences.push([meetingId, templateId]);
+    } }, sonner: {},
     '@/lib/meetingCalendar': links,
     '@/lib/meetingCalendarStore': {
       MEETING_SERIES_TEMPLATE_CHANGED: 'series-changed',
@@ -538,7 +657,7 @@ test('a saved meeting without a link can be linked from the current calendars, w
     current = page.react;
     return page.render(() => SavedMeetingAttendance({
       meetingId: 'saved', createdAt: '2030-04-15T11:00:00Z', durationSeconds: 3600,
-      templates: [], remembered: null,
+      templates: [{ id: 'standard_meeting', name: 'Standard meeting' }], remembered: null,
     }));
   };
   const renderDialog = () => {
@@ -574,4 +693,15 @@ test('a saved meeting without a link can be linked from the current calendars, w
   assert.equal(saved[0][0], 'saved');
   assert.equal(saved[0][1].eventId, 'candidate');
   assert.equal(saved[0][1].reviewed, true);
+  assert.equal(saved[0][1].attendees[0].attendance, 'unreviewed');
+  assert.equal(saved[0][1].seriesId, graphSeries);
+  ({ tree } = renderDialog());
+  const seriesControl = tree.find(node => node.type?.name === 'SeriesTemplatePreference');
+  assert.ok(seriesControl);
+  current = picker.react;
+  const select = nodes(picker.render(() => seriesControl.type(seriesControl.props)))
+    .find(node => node.type === 'Select');
+  await select.props.onValueChange('standard_meeting');
+  await select.props.onValueChange('use-default');
+  assert.deepEqual(preferences, [['saved', 'standard_meeting'], ['saved', null]]);
 });

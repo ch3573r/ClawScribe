@@ -11,6 +11,7 @@ import { IconAction, IconTile, NoteRow } from "@/components/settings/settings-pa
 import { useICalendar } from "@/hooks/useICalendar";
 import { useMicrosoftExport } from "@/hooks/useMicrosoftExport";
 import { usePendingCalendar } from "@/hooks/usePendingCalendar";
+import { MICROSOFT_CALENDAR_CLEARED, microsoftCalendarRevision } from "@/lib/meetingCalendar";
 import { removeICalendarSource } from "@/services/icalService";
 import { microsoftExportService, type CalendarEvent } from "@/services/microsoftExportService";
 
@@ -42,11 +43,12 @@ export function CalendarsSettings() {
     const reload = () => {
       if (cancelled) return;
       void ms.loadCalendar();
+      const revision = microsoftCalendarRevision;
       const now = new Date();
       const end = new Date(now);
       end.setDate(now.getDate() + 7);
       microsoftExportService.listCalendarEvents(now.toISOString(), end.toISOString())
-        .then(list => { if (!cancelled) setWeekEvents(list); })
+        .then(list => { if (!cancelled && revision === microsoftCalendarRevision) setWeekEvents(list); })
         .catch(() => { /* the connection row already reports calendar problems */ });
     };
     reload();
@@ -54,12 +56,15 @@ export function CalendarsSettings() {
     const onVisibility = () => {
       if (document.visibilityState === "visible") reload();
     };
+    const clear = () => setWeekEvents([]);
     window.addEventListener("focus", reload);
+    window.addEventListener(MICROSOFT_CALENDAR_CLEARED, clear);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("focus", reload);
+      window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, clear);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [calendarAvailable, ms.loadCalendar]);
@@ -73,6 +78,7 @@ export function CalendarsSettings() {
       for (const event of microsoft) {
         items.push({
           key: `microsoft:${event.id}`, source: "microsoft", sourceName: "Microsoft 365", id: event.id,
+          seriesId: event.seriesId,
           subject: event.subject, start: event.start, allDay: Boolean(event.allDay),
           organizer: event.organizer, attendees: event.attendees,
         });

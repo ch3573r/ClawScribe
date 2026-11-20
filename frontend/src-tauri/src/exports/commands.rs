@@ -1259,12 +1259,16 @@ pub async fn list_calendar_events(
     end_iso: String,
     require_complete: Option<bool>,
 ) -> Result<Vec<calendar::CalendarEvent>, String> {
-    let (token, _, _) = get_token_and_context(&state, "Calendars.Read").await?;
+    let (token, authority, user_id) = get_token_and_context(&state, "Calendars.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     calendar::list_calendar_events(
         &client,
         &token,
+        calendar::CalendarAccount {
+            authority: &authority,
+            user_id: &user_id,
+        },
         &start_iso,
         &end_iso,
         require_complete.unwrap_or(false),
@@ -1277,10 +1281,18 @@ pub async fn list_calendar_events(
 pub async fn current_or_next_meeting(
     state: tauri::State<'_, MicrosoftAuthState>,
 ) -> Result<Option<calendar::CalendarEvent>, String> {
-    let (token, _, _) = get_token_and_context(&state, "Calendars.Read").await?;
+    let (token, authority, user_id) = get_token_and_context(&state, "Calendars.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    calendar::current_or_next_meeting(&client, &token).await
+    calendar::current_or_next_meeting(
+        &client,
+        &token,
+        calendar::CalendarAccount {
+            authority: &authority,
+            user_id: &user_id,
+        },
+    )
+    .await
 }
 
 /// OneNote notebook names reject `?*\/:<>|'#` and must be 128 characters or
