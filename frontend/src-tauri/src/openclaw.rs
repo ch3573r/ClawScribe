@@ -144,20 +144,28 @@ pub async fn save_openclaw_config<R: Runtime>(
     use crate::summary::{automatic, llm_client::LLMProvider};
     let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
     let selected = match app.try_state::<crate::state::AppState>() {
-        Some(state) => crate::database::repositories::setting::SettingsRepository::get_model_config(state.db_manager.pool())
-            .await.map_err(|_| "Could not read the saved summary model settings")?,
+        Some(state) => {
+            crate::database::repositories::setting::SettingsRepository::get_model_config(
+                state.db_manager.pool(),
+            )
+            .await
+            .map_err(|_| "Could not read the saved summary model settings")?
+        }
         None => None,
     };
     let _guard = CONFIG_LOCK
         .lock()
         .map_err(|_| "Provider settings are unavailable")?;
     let path = config_path(&app)?;
-    if selected.is_some_and(|setting| LLMProvider::from_str(&setting.provider) == Ok(LLMProvider::OpenClaw)) {
+    if selected.is_some_and(|setting| {
+        LLMProvider::from_str(&setting.provider) == Ok(LLMProvider::OpenClaw)
+    }) {
         let old = load_config_from_path(&path).ok();
-        if old.is_none_or(|old| old.enabled != config.enabled
-            || old.allow_unencrypted != config.allow_unencrypted
-            || !automatic::same_endpoint(&old.model_endpoint, &config.model_endpoint))
-        {
+        if old.is_none_or(|old| {
+            old.enabled != config.enabled
+                || old.allow_unencrypted != config.allow_unencrypted
+                || !automatic::same_endpoint(&old.model_endpoint, &config.model_endpoint)
+        }) {
             automatic::invalidate_external_review(&app)?;
         }
     }

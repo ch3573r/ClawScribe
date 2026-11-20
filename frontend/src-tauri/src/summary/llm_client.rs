@@ -223,7 +223,9 @@ pub(crate) async fn generate_summary(
     let (api_url, mut headers) = match provider {
         LLMProvider::ClaudeCode => unreachable!("Claude Code is handled before HTTP setup"),
         LLMProvider::OpenAI | LLMProvider::Groq | LLMProvider::OpenRouter => (
-            fixed_summary_endpoint(provider).expect("known provider").to_string(),
+            fixed_summary_endpoint(provider)
+                .expect("known provider")
+                .to_string(),
             header::HeaderMap::new(),
         ),
         LLMProvider::Ollama => {
@@ -274,7 +276,9 @@ pub(crate) async fn generate_summary(
                     .map_err(|_| "Invalid anthropic version".to_string())?,
             );
             (
-                fixed_summary_endpoint(provider).expect("known provider").to_string(),
+                fixed_summary_endpoint(provider)
+                    .expect("known provider")
+                    .to_string(),
                 header_map,
             )
         }
@@ -290,7 +294,10 @@ pub(crate) async fn generate_summary(
         }
     };
 
-    let api_url = dispatch.and_then(|route| route.endpoint).map(url::Url::as_str).unwrap_or(&api_url);
+    let api_url = dispatch
+        .and_then(|route| route.endpoint)
+        .map(url::Url::as_str)
+        .unwrap_or(&api_url);
 
     // Add authorization header for non-Claude providers
     if provider != &LLMProvider::Claude {
@@ -319,7 +326,9 @@ pub(crate) async fn generate_summary(
                     check()?;
                 }
                 // Automatic jobs probed the approved endpoint through their frozen client.
-                route.ollama_context_tokens.ok_or("The approved Ollama context is unavailable.")?
+                route
+                    .ollama_context_tokens
+                    .ok_or("The approved Ollama context is unavailable.")?
             }
             None => super::context_budget::ollama_context(model_name, ollama_endpoint).await,
         };
@@ -1150,22 +1159,44 @@ mod response_tests {
         let revoked: crate::summary::request_config::DispatchCheck =
             std::sync::Arc::new(|| Err(crate::summary::automatic::REVIEW_REQUIRED.into()));
         for check in [None, Some(&revoked)] {
-            let dispatch = SummaryDispatch { endpoint: None, ollama_context_tokens: Some(128), check };
+            let dispatch = SummaryDispatch {
+                endpoint: None,
+                ollama_context_tokens: Some(128),
+                check,
+            };
             // The tiny frozen context rejects the request locally. A second model
             // probe would connect to the listener and wait for an HTTP response.
             let result = tokio::time::timeout(
                 Duration::from_secs(2),
                 generate_summary(
-                    &client, &LLMProvider::Ollama, "synthetic", "", "prompt", "question",
-                    Some(&endpoint), None, false, None, None, None, None, None, Some(dispatch),
+                    &client,
+                    &LLMProvider::Ollama,
+                    "synthetic",
+                    "",
+                    "prompt",
+                    "question",
+                    Some(&endpoint),
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(dispatch),
                 ),
-            ).await.unwrap().unwrap_err();
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
             if check.is_some() {
                 assert_eq!(result, crate::summary::automatic::REVIEW_REQUIRED);
             } else {
                 assert!(result.contains("context is too small"), "{result}");
             }
-            assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            );
         }
     }
 

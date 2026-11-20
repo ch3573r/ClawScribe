@@ -1265,9 +1265,7 @@ async fn stop_recording_session<R: Runtime>(
     }
     #[cfg(windows)]
     if let Some(attempt) = suspend_attempt {
-        if !IS_RECORDING.load(Ordering::Acquire)
-            || !crate::windows_lifecycle::is_current(attempt)
-        {
+        if !IS_RECORDING.load(Ordering::Acquire) || !crate::windows_lifecycle::is_current(attempt) {
             return Ok(false);
         }
         let _ = app.emit(
@@ -1791,7 +1789,8 @@ async fn stop_recording_session<R: Runtime>(
         warn!("Could not notify the webview that recording stopped");
     }
 
-    if suspend_attempt.is_none() && transcribes && !outcome.needs_recovery() && !library_save_failed {
+    if suspend_attempt.is_none() && transcribes && !outcome.needs_recovery() && !library_save_failed
+    {
         crate::openclaw::submit_completed_recording(
             app.clone(),
             folder_path_str.clone(),
@@ -1818,8 +1817,15 @@ async fn stop_recording_session<R: Runtime>(
 pub(crate) fn wake_saved_recording_summary<R: Runtime>(app: &AppHandle<R>, meeting_id: String) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let pool = app.state::<crate::state::AppState>().db_manager.pool().clone();
-        if crate::summary::automatic::start(app, pool, meeting_id).await.is_err() {
+        let pool = app
+            .state::<crate::state::AppState>()
+            .db_manager
+            .pool()
+            .clone();
+        if crate::summary::automatic::start(app, pool, meeting_id)
+            .await
+            .is_err()
+        {
             warn!("Could not dispatch automatic notes for the saved recording");
         }
     });

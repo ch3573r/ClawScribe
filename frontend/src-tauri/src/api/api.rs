@@ -467,14 +467,20 @@ pub async fn api_save_model_config<R: Runtime>(
     let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
     let new_provider = LLMProvider::from_str(&provider).ok();
     let saved = SettingsRepository::get_model_config(pool)
-        .await.map_err(|_| "Could not read the saved summary model settings")?;
+        .await
+        .map_err(|_| "Could not read the saved summary model settings")?;
     if saved.as_ref().is_some_and(|old| {
         LLMProvider::from_str(&old.provider).ok() != new_provider
             || old.model.trim() != model.trim()
-            || (new_provider == Some(LLMProvider::Ollama) && !automatic::same_endpoint(
-                old.ollama_endpoint.as_deref().unwrap_or("http://localhost:11434"),
-                ollama_endpoint.as_deref().unwrap_or("http://localhost:11434"),
-            ))
+            || (new_provider == Some(LLMProvider::Ollama)
+                && !automatic::same_endpoint(
+                    old.ollama_endpoint
+                        .as_deref()
+                        .unwrap_or("http://localhost:11434"),
+                    ollama_endpoint
+                        .as_deref()
+                        .unwrap_or("http://localhost:11434"),
+                ))
     }) {
         automatic::invalidate_external_review(&app)?;
     }
@@ -1501,7 +1507,10 @@ pub async fn api_save_transcript<R: Runtime>(
                     if crate::audio::recording_commands::active_recording_folder()
                         .protects(std::path::Path::new(&authorised))
                     {
-                        return Err("The recording is still being finalized. Try again after it stops.".into());
+                        return Err(
+                            "The recording is still being finalized. Try again after it stops."
+                                .into(),
+                        );
                     }
                     let marker = meeting_files::read_marker(std::path::Path::new(&authorised))
                         .ok_or("The recording folder is no longer available.")?;
@@ -1677,7 +1686,10 @@ pub async fn api_save_transcript<R: Runtime>(
                 }
             }
             if recovered_live {
-                crate::audio::recording_commands::wake_saved_recording_summary(&app, meeting_id.clone());
+                crate::audio::recording_commands::wake_saved_recording_summary(
+                    &app,
+                    meeting_id.clone(),
+                );
             }
             Ok(serde_json::json!({
                 "status": "success",
@@ -1852,17 +1864,23 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     use crate::summary::{automatic, llm_client::LLMProvider};
     let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
     let selected = SettingsRepository::get_model_config(pool)
-        .await.map_err(|_| "Could not read the saved summary model settings")?;
-    if selected.is_some_and(|setting| matches!(LLMProvider::from_str(&setting.provider),
-        Ok(LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible)))
-    {
+        .await
+        .map_err(|_| "Could not read the saved summary model settings")?;
+    if selected.is_some_and(|setting| {
+        matches!(
+            LLMProvider::from_str(&setting.provider),
+            Ok(LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible)
+        )
+    }) {
         let old = SettingsRepository::get_custom_openai_config(pool)
-            .await.map_err(|_| "Could not read the saved compatible provider settings")?;
+            .await
+            .map_err(|_| "Could not read the saved compatible provider settings")?;
         let same_route = old.is_some_and(|old| {
             automatic::same_endpoint(&old.endpoint, &config.endpoint)
                 && old.model.trim() == config.model
                 && old.allow_unencrypted == config.allow_unencrypted
-                && old.organization.as_deref().map(str::trim) == config.organization.as_deref().map(str::trim)
+                && old.organization.as_deref().map(str::trim)
+                    == config.organization.as_deref().map(str::trim)
                 && old.project.as_deref().map(str::trim) == config.project.as_deref().map(str::trim)
         });
         if !same_route {

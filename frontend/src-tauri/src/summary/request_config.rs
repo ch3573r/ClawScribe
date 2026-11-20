@@ -31,8 +31,15 @@ pub(crate) struct AutomaticRequest {
 #[derive(Clone)]
 pub(crate) enum Execution {
     BuiltIn,
-    Ollama { base: Url, client: reqwest::Client },
-    Standard { endpoint: Url, api_key: String, client: reqwest::Client },
+    Ollama {
+        base: Url,
+        client: reqwest::Client,
+    },
+    Standard {
+        endpoint: Url,
+        api_key: String,
+        client: reqwest::Client,
+    },
     Compatible(OpenAICompatibleProcessingProvider),
 }
 
@@ -58,7 +65,10 @@ fn canonical_endpoint(raw: &str) -> Result<Url, String> {
         || endpoint.query().is_some()
         || endpoint.fragment().is_some()
     {
-        return Err("Remove credentials, query parameters, and fragments from the summary endpoint URL.".into());
+        return Err(
+            "Remove credentials, query parameters, and fragments from the summary endpoint URL."
+                .into(),
+        );
     }
     Ok(endpoint)
 }
@@ -87,7 +97,10 @@ async fn credential(pool: &SqlitePool, provider: &'static str) -> Result<String,
 }
 
 impl AutomaticRequest {
-    pub async fn resolve<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool) -> Result<Self, String> {
+    pub async fn resolve<R: Runtime>(
+        app: &AppHandle<R>,
+        pool: &SqlitePool,
+    ) -> Result<Self, String> {
         let settings = SettingsRepository::get_model_config(pool)
             .await
             .map_err(|_| "Could not read the summary model settings")?
@@ -103,35 +116,51 @@ impl AutomaticRequest {
                 Execution::BuiltIn
             }
             LLMProvider::Ollama => {
-                let endpoint = settings.ollama_endpoint.as_deref().map(str::trim)
-                    .filter(|url| !url.is_empty()).unwrap_or("http://localhost:11434");
+                let endpoint = settings
+                    .ollama_endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or("http://localhost:11434");
                 let base = canonical_endpoint(endpoint)?;
                 let mut client = direct_client();
                 if base.host() == Some(Host::Domain("localhost")) {
                     // Keep the local exception local even if the OS resolver is changed.
                     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-                    let port = base.port_or_known_default().ok_or("The Ollama endpoint has no port")?;
-                    client = client.resolve_to_addrs("localhost", &[
-                        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
-                        SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port),
-                    ]);
+                    let port = base
+                        .port_or_known_default()
+                        .ok_or("The Ollama endpoint has no port")?;
+                    client = client.resolve_to_addrs(
+                        "localhost",
+                        &[
+                            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+                            SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port),
+                        ],
+                    );
                 }
-                let client = client.build().map_err(|_| "Could not initialize the Ollama connection")?;
+                let client = client
+                    .build()
+                    .map_err(|_| "Could not initialize the Ollama connection")?;
                 Execution::Ollama { base, client }
             }
             LLMProvider::OpenAI => Self::compatible(config_from_openai_api_key(
-                Some(credential(pool, "openai").await?), model.clone(),
+                Some(credential(pool, "openai").await?),
+                model.clone(),
             ))?,
             LLMProvider::OpenAICompatible | LLMProvider::CustomOpenAI => {
                 let configured = SettingsRepository::get_custom_openai_config(pool)
-                    .await.map_err(|_| "Could not read the compatible summary provider settings")?;
+                    .await
+                    .map_err(|_| "Could not read the compatible summary provider settings")?;
                 let config = match configured {
                     Some(mut config) => {
                         config.endpoint = canonical_endpoint(&config.endpoint)?.into();
                         config_from_custom_openai(config)
                     }
                     None if provider == LLMProvider::OpenAICompatible => {
-                        config_from_openai_api_key(Some(credential(pool, "openai").await?), model.clone())
+                        config_from_openai_api_key(
+                            Some(credential(pool, "openai").await?),
+                            model.clone(),
+                        )
                     }
                     None => return Err("Set the compatible summary endpoint in Settings.".into()),
                 };
@@ -147,18 +176,27 @@ impl AutomaticRequest {
                     base_url: canonical_endpoint(&config.model_endpoint)?.into(),
                     api_key: Some(config.bearer_token),
                     allow_unencrypted: config.allow_unencrypted,
-                    context_window: super::context_budget::resolve(&provider, &model, None, None).context_tokens,
+                    context_window: super::context_budget::resolve(&provider, &model, None, None)
+                        .context_tokens,
                     model: model.clone(),
                     temperature: None,
                     ..OpenAICompatibleProviderConfig::default()
                 })?
             }
             LLMProvider::Claude | LLMProvider::Groq | LLMProvider::OpenRouter => {
-                let endpoint = canonical_endpoint(fixed_summary_endpoint(&provider)
-                    .ok_or("Automatic notes cannot identify this provider's destination.")?)?;
+                let endpoint = canonical_endpoint(
+                    fixed_summary_endpoint(&provider)
+                        .ok_or("Automatic notes cannot identify this provider's destination.")?,
+                )?;
                 let api_key = credential(pool, canonical_provider(&provider)).await?;
-                let client = direct_client().build().map_err(|_| "Could not initialize the summary provider connection")?;
-                Execution::Standard { endpoint, api_key, client }
+                let client = direct_client()
+                    .build()
+                    .map_err(|_| "Could not initialize the summary provider connection")?;
+                Execution::Standard {
+                    endpoint,
+                    api_key,
+                    client,
+                }
             }
             LLMProvider::Codex | LLMProvider::ClaudeCode => {
                 return Err("This provider manages its own connection. Generate notes from the saved meeting.".into());
@@ -170,36 +208,70 @@ impl AutomaticRequest {
         if model.is_empty() {
             return Err("Choose a summary model in Settings.".into());
         }
-        Ok(Self { provider, model, execution })
+        Ok(Self {
+            provider,
+            model,
+            execution,
+        })
     }
 
     fn compatible(config: OpenAICompatibleProviderConfig) -> Result<Execution, String> {
         let endpoint = canonical_endpoint(&config.base_url)?;
-        crate::openai::secret_destination::validate_secret_destination(endpoint.as_str(), config.allow_unencrypted)?;
+        crate::openai::secret_destination::validate_secret_destination(
+            endpoint.as_str(),
+            config.allow_unencrypted,
+        )?;
         OpenAICompatibleProcessingProvider::new_direct(config).map(Execution::Compatible)
     }
 
     pub fn review(&self) -> DestinationReview {
         let (endpoint, external, policy, organization, project) = match &self.execution {
             Execution::BuiltIn => (None, false, "builtin", None, None),
-            Execution::Ollama { base, .. } => (Some(base.clone()), !is_loopback(base), "direct-ollama", None, None),
-            Execution::Standard { endpoint, .. } => (Some(endpoint.clone()), true, "direct-https", None, None),
+            Execution::Ollama { base, .. } => (
+                Some(base.clone()),
+                !is_loopback(base),
+                "direct-ollama",
+                None,
+                None,
+            ),
+            Execution::Standard { endpoint, .. } => {
+                (Some(endpoint.clone()), true, "direct-https", None, None)
+            }
             Execution::Compatible(provider) => {
                 let (url, allow_unencrypted, organization, project) = provider.destination();
-                let policy = if allow_unencrypted { "direct-lan-http" } else { "direct-secure" };
-                (Some(Url::parse(&url).expect("validated compatible endpoint")), true, policy, organization, project)
+                let policy = if allow_unencrypted {
+                    "direct-lan-http"
+                } else {
+                    "direct-secure"
+                };
+                (
+                    Some(Url::parse(&url).expect("validated compatible endpoint")),
+                    true,
+                    policy,
+                    organization,
+                    project,
+                )
             }
         };
         let provider = canonical_provider(&self.provider);
         let identity = serde_json::to_vec(&(
-            "automatic-summary-v2", provider, &self.model,
-            endpoint.as_ref().map(|url| url.as_str().trim_end_matches('/')),
-            policy, organization, project,
-        )).expect("serializable request identity");
+            "automatic-summary-v2",
+            provider,
+            &self.model,
+            endpoint
+                .as_ref()
+                .map(|url| url.as_str().trim_end_matches('/')),
+            policy,
+            organization,
+            project,
+        ))
+        .expect("serializable request identity");
         DestinationReview {
             provider,
             model: self.model.clone(),
-            endpoint: endpoint.as_ref().map(|url| url.as_str().trim_end_matches('/').to_owned()),
+            endpoint: endpoint
+                .as_ref()
+                .map(|url| url.as_str().trim_end_matches('/').to_owned()),
             external,
             unencrypted: endpoint.as_ref().is_some_and(|url| url.scheme() == "http"),
             fingerprint: format!("{:x}", Sha256::digest(identity)),
@@ -220,7 +292,8 @@ mod tests {
                 base: canonical_endpoint(url).unwrap(),
                 client: direct_client().build().unwrap(),
             },
-        }.review()
+        }
+        .review()
     }
 
     #[test]
@@ -231,15 +304,31 @@ mod tests {
         assert!(ollama("http://localhost.example.com:11434").external);
         assert!(ollama("http://localhost.:11434").external);
         let first = ollama("https://models.example.com/path");
-        assert_eq!(first.fingerprint, ollama("https://MODELS.example.com:443/path/").fingerprint);
-        assert_ne!(first.fingerprint, ollama("https://models.example.com/Path").fingerprint);
-        assert_ne!(first.fingerprint, ollama("https://models.example.org/path").fingerprint);
-        assert_eq!(first.endpoint.as_deref(), Some("https://models.example.com/path"));
+        assert_eq!(
+            first.fingerprint,
+            ollama("https://MODELS.example.com:443/path/").fingerprint
+        );
+        assert_ne!(
+            first.fingerprint,
+            ollama("https://models.example.com/Path").fingerprint
+        );
+        assert_ne!(
+            first.fingerprint,
+            ollama("https://models.example.org/path").fingerprint
+        );
+        assert_eq!(
+            first.endpoint.as_deref(),
+            Some("https://models.example.com/path")
+        );
     }
 
     #[test]
     fn automatic_urls_refuse_credentials_queries_and_fragments() {
-        for url in ["https://user@models.example.com", "https://models.example.com?token=example", "http://localhost/#route"] {
+        for url in [
+            "https://user@models.example.com",
+            "https://models.example.com?token=example",
+            "http://localhost/#route",
+        ] {
             assert!(canonical_endpoint(url).is_err());
         }
     }

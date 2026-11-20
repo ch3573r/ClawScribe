@@ -25,7 +25,10 @@ mod recording_save_tests {
         sqlx::query("INSERT INTO meeting_bookmarks (id, recording_id, folder_path, seconds, label) VALUES ('note', ?, 'old-folder', 42.0, 'Check the deployment')")
             .bind(id).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO recording_summary_bookmarks (recording_id) VALUES (?)")
-            .bind(id).execute(&pool).await.unwrap();
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
         let outcome = crate::audio::outcome::RecordingOutcome::default();
         let save = || {
             TranscriptsRepository::save_recording_handoff(
@@ -58,8 +61,11 @@ mod recording_save_tests {
             .unwrap(),
             link
         );
-        let pending: Option<String> = sqlx::query_scalar("SELECT recording_id FROM meeting_bookmarks WHERE id = 'note'")
-            .fetch_one(&pool).await.unwrap();
+        let pending: Option<String> =
+            sqlx::query_scalar("SELECT recording_id FROM meeting_bookmarks WHERE id = 'note'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(pending.as_deref(), Some(id));
         sqlx::query("DROP TRIGGER fail_outcome")
             .execute(&pool)
@@ -92,7 +98,8 @@ mod recording_save_tests {
         assert_eq!(source, "recording");
         assert_eq!(duration, 93.5);
         let context = crate::library::summary_bookmarks::append_context(&pool, id, String::new())
-            .await.unwrap();
+            .await
+            .unwrap();
         assert!(context.contains("[00:00:42] Check the deployment"));
         assert!(crate::library::calendar::read_snapshot(&pool, id)
             .await
@@ -130,14 +137,28 @@ mod recording_save_tests {
         sqlx::query("INSERT INTO meeting_bookmarks (id, recording_id, folder_path, seconds, label) VALUES ('private', ?, 'original-folder', 5.0, 'Local only')")
             .bind(id).execute(&pool).await.unwrap();
         TranscriptsRepository::save_recording_handoff(
-            &pool, id, "Recovered meeting", &[], "relocated-folder".into(), &Default::default(),
+            &pool,
+            id,
+            "Recovered meeting",
+            &[],
+            "relocated-folder".into(),
+            &Default::default(),
             RecordingProvenance::recording(None),
-        ).await.unwrap();
-        let saved_id: String = sqlx::query_scalar("SELECT meeting_id FROM meeting_bookmarks WHERE id = 'private'")
-            .fetch_one(&pool).await.unwrap();
+        )
+        .await
+        .unwrap();
+        let saved_id: String =
+            sqlx::query_scalar("SELECT meeting_id FROM meeting_bookmarks WHERE id = 'private'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(saved_id, id);
-        assert_eq!(crate::library::summary_bookmarks::append_context(&pool, id, "Saved context".into())
-            .await.unwrap(), "Saved context");
+        assert_eq!(
+            crate::library::summary_bookmarks::append_context(&pool, id, "Saved context".into())
+                .await
+                .unwrap(),
+            "Saved context"
+        );
     }
 
     #[tokio::test]

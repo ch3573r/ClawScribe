@@ -1,4 +1,3 @@
-
 use super::commands::ProcessTranscriptResponse;
 pub(crate) use super::request_config::AuthorizedRequest;
 use super::request_config::{AutomaticRequest, DestinationReview, DispatchCheck};
@@ -10,8 +9,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
@@ -20,7 +19,8 @@ const AUTO_SUMMARY: &str = "automatic_summary_v2";
 pub(super) const DISABLED: &str = "Automatic summaries are off. You can generate notes here.";
 pub(super) const REVIEW_REQUIRED: &str =
     "Review the summary provider in Settings to allow automatic notes at this destination.";
-pub(super) const DESTINATION_CHANGED: &str = "The summary destination changed. Review it and try again.";
+pub(super) const DESTINATION_CHANGED: &str =
+    "The summary destination changed. Review it and try again.";
 pub(crate) const CHANGED_EVENT: &str = "summary-job-changed";
 pub(crate) static ROUTE_CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static ROUTE_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -44,15 +44,18 @@ impl Preference {
     }
 
     fn allows(&self, review: &DestinationReview) -> bool {
-        self.enabled && (!review.external
-            || self.external_fingerprint.as_deref() == Some(review.fingerprint.as_str()))
+        self.enabled
+            && (!review.external
+                || self.external_fingerprint.as_deref() == Some(review.fingerprint.as_str()))
     }
 
     fn migrate(backing: &dyn Backing, legacy_enabled: Option<bool>) -> Result<Self, String> {
         let mut preference = Self::read(backing);
         if backing.read(AUTO_SUMMARY).is_none() {
-            if let Some(enabled) = backing.read(LEGACY_AUTO_SUMMARY)
-                .and_then(|v| v.as_bool()).or(legacy_enabled)
+            if let Some(enabled) = backing
+                .read(LEGACY_AUTO_SUMMARY)
+                .and_then(|v| v.as_bool())
+                .or(legacy_enabled)
             {
                 preference.enabled = enabled;
             }
@@ -70,8 +73,11 @@ fn with_preference<R: Runtime, T>(
     app: &AppHandle<R>,
     action: impl FnOnce(&dyn Backing) -> Result<T, String>,
 ) -> Result<T, String> {
-    let _guard = PREFERENCE_LOCK.lock().map_err(|_| "Automatic summary settings are unavailable")?;
-    let store = app.store(behavior_settings::STORE_FILE)
+    let _guard = PREFERENCE_LOCK
+        .lock()
+        .map_err(|_| "Automatic summary settings are unavailable")?;
+    let store = app
+        .store(behavior_settings::STORE_FILE)
         .map_err(|_| "Could not open automatic summary settings")?;
     action(store.as_ref())
 }
@@ -95,14 +101,17 @@ pub(crate) fn invalidate_external_review<R: Runtime>(app: &AppHandle<R>) -> Resu
 pub(crate) fn same_endpoint(old: &str, new: &str) -> bool {
     let normalize = |value: &str| {
         let value = value.trim().trim_end_matches('/');
-        url::Url::parse(value).map(|url| url.as_str().trim_end_matches('/').to_owned())
+        url::Url::parse(value)
+            .map(|url| url.as_str().trim_end_matches('/').to_owned())
             .unwrap_or_else(|_| value.to_owned())
     };
     normalize(old) == normalize(new)
 }
 
 #[tauri::command]
-pub async fn get_automatic_summary_preference<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+pub async fn get_automatic_summary_preference<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<bool, String> {
     with_preference(&app, |store| Ok(Preference::read(store).enabled))
 }
 
@@ -112,7 +121,9 @@ pub async fn migrate_automatic_summary_preference<R: Runtime>(
     legacy_enabled: Option<bool>,
 ) -> Result<bool, String> {
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
-    with_preference(&app, |store| Ok(Preference::migrate(store, legacy_enabled)?.enabled))
+    with_preference(&app, |store| {
+        Ok(Preference::migrate(store, legacy_enabled)?.enabled)
+    })
 }
 
 #[tauri::command]
@@ -121,7 +132,9 @@ pub async fn get_automatic_summary_destination<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<DestinationReview, String> {
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
-    let mut review = AutomaticRequest::resolve(&app, state.db_manager.pool()).await?.review();
+    let mut review = AutomaticRequest::resolve(&app, state.db_manager.pool())
+        .await?
+        .review();
     review.approved = with_preference(&app, |store| Ok(Preference::read(store).allows(&review)))?;
     Ok(review)
 }
@@ -135,8 +148,13 @@ pub async fn set_automatic_summary_preference<R: Runtime>(
 ) -> Result<(), String> {
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
     let external_fingerprint = if enabled {
-        let review = AutomaticRequest::resolve(&app, state.db_manager.pool()).await?.review();
-        if fingerprint.as_ref().is_some_and(|value| *value != review.fingerprint) {
+        let review = AutomaticRequest::resolve(&app, state.db_manager.pool())
+            .await?
+            .review();
+        if fingerprint
+            .as_ref()
+            .is_some_and(|value| *value != review.fingerprint)
+        {
             return Err(DESTINATION_CHANGED.into());
         }
         if review.external && fingerprint.is_none() {
@@ -146,24 +164,32 @@ pub async fn set_automatic_summary_preference<R: Runtime>(
     } else {
         None
     };
-    with_preference(&app, |store| Preference { enabled, external_fingerprint }.persist(store))
+    with_preference(&app, |store| {
+        Preference {
+            enabled,
+            external_fingerprint,
+        }
+        .persist(store)
+    })
 }
 
 fn dispatch_check<R: Runtime>(app: AppHandle<R>, review: DestinationReview) -> DispatchCheck {
     let epoch = ROUTE_EPOCH.load(Ordering::SeqCst);
-    Arc::new(move || with_preference(&app, |store| {
-        let preference = Preference::read(store);
-        if !preference.enabled {
-            return Err(DISABLED.into());
-        }
-        if !preference.allows(&review) {
-            return Err(REVIEW_REQUIRED.into());
-        }
-        if ROUTE_EPOCH.load(Ordering::SeqCst) != epoch {
-            return Err(DESTINATION_CHANGED.into());
-        }
-        Ok(())
-    }))
+    Arc::new(move || {
+        with_preference(&app, |store| {
+            let preference = Preference::read(store);
+            if !preference.enabled {
+                return Err(DISABLED.into());
+            }
+            if !preference.allows(&review) {
+                return Err(REVIEW_REQUIRED.into());
+            }
+            if ROUTE_EPOCH.load(Ordering::SeqCst) != epoch {
+                return Err(DESTINATION_CHANGED.into());
+            }
+            Ok(())
+        })
+    })
 }
 
 pub(crate) async fn prepare_import<R: Runtime>(
@@ -177,7 +203,8 @@ pub(crate) async fn prepare_import<R: Runtime>(
     let review = request.review();
     // Older import clients only offered explicit Built-in AI notes. A missing
     // review token must never authorize another provider on their behalf.
-    let legacy_builtin = !use_automatic_preference && fingerprint.is_none()
+    let legacy_builtin = !use_automatic_preference
+        && fingerprint.is_none()
         && request.provider == super::llm_client::LLMProvider::BuiltInAI;
     if !legacy_builtin && fingerprint != Some(review.fingerprint.as_str()) {
         return Err(DESTINATION_CHANGED.into());
@@ -187,12 +214,18 @@ pub(crate) async fn prepare_import<R: Runtime>(
     } else {
         let epoch = ROUTE_EPOCH.load(Ordering::SeqCst);
         Arc::new(move || {
-            if ROUTE_EPOCH.load(Ordering::SeqCst) == epoch { Ok(()) }
-            else { Err(DESTINATION_CHANGED.into()) }
+            if ROUTE_EPOCH.load(Ordering::SeqCst) == epoch {
+                Ok(())
+            } else {
+                Err(DESTINATION_CHANGED.into())
+            }
         })
     };
     check()?;
-    Ok(AuthorizedRequest { request, check: Some(check) })
+    Ok(AuthorizedRequest {
+        request,
+        check: Some(check),
+    })
 }
 
 #[tauri::command]
@@ -232,23 +265,39 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
         return;
     }
     let route_guard = ROUTE_CHANGE_LOCK.lock().await;
-    let Ok(request) = AutomaticRequest::resolve(&app, &pool).await else { return; };
+    let Ok(request) = AutomaticRequest::resolve(&app, &pool).await else {
+        return;
+    };
     let review = request.review();
     let fingerprint = review.fingerprint.clone();
     let check = dispatch_check(app.clone(), review);
     if check().is_err() {
         return;
     }
-    let request = AuthorizedRequest { request, check: Some(check) };
+    let request = AuthorizedRequest {
+        request,
+        check: Some(check),
+    };
     drop(route_guard);
 
-    let Ok(candidates) = SummaryProcessesRepository::automatic_resume_candidates(&pool, &fingerprint).await else {
+    let Ok(candidates) =
+        SummaryProcessesRepository::automatic_resume_candidates(&pool, &fingerprint).await
+    else {
         log::warn!("Could not read interrupted automatic notes");
         return;
     };
     for meeting in candidates {
-        match launch(app.clone(), pool.clone(), meeting, Start::Resume(request.clone())).await {
-            Ok(Some(worker)) => { let _ = worker.await; }
+        match launch(
+            app.clone(),
+            pool.clone(),
+            meeting,
+            Start::Resume(request.clone()),
+        )
+        .await
+        {
+            Ok(Some(worker)) => {
+                let _ = worker.await;
+            }
             Ok(None) => {}
             Err(_) => log::warn!("Could not resume automatic notes"),
         }
@@ -274,8 +323,10 @@ async fn launch<R: Runtime>(
     };
     // Stop and repair can both wake this path. Avoid even resolving a provider
     // for rows that cannot be claimed. The write repeats this eligibility check.
-    if !resume && !SummaryProcessesRepository::can_start_automatic_process(&pool, &meeting, origin)
-        .await.map_err(|_| "Could not read automatic notes status")?
+    if !resume
+        && !SummaryProcessesRepository::can_start_automatic_process(&pool, &meeting, origin)
+            .await
+            .map_err(|_| "Could not read automatic notes status")?
     {
         return Ok(None);
     }
@@ -317,8 +368,10 @@ async fn launch<R: Runtime>(
     let claimed = if resume {
         SummaryProcessesRepository::claim_automatic_resume(&pool, &meeting, &fingerprint).await
     } else {
-        SummaryProcessesRepository::create_automatic_process(&pool, &meeting, origin, &fingerprint).await
-    }.map_err(|_| "Could not start automatic notes")?;
+        SummaryProcessesRepository::create_automatic_process(&pool, &meeting, origin, &fingerprint)
+            .await
+    }
+    .map_err(|_| "Could not start automatic notes")?;
     if !claimed {
         return Ok(None);
     }
@@ -329,18 +382,28 @@ async fn launch<R: Runtime>(
         match prepare(&app, &pool, &meeting).await {
             Ok((context, language)) => {
                 SummaryService::process_transcript_background(
-                    app.clone(), pool.clone(), meeting.clone(), String::new(),
+                    app.clone(),
+                    pool.clone(),
+                    meeting.clone(),
+                    String::new(),
                     SummaryProviderRequest::Automatic(AuthorizedRequest { request, check }),
-                    context.prompt, context.title, context.template, language, true,
+                    context.prompt,
+                    context.title,
+                    context.template,
+                    language,
+                    true,
                     &job,
-                ).await;
+                )
+                .await;
             }
             Err(reason) => {
-                let _ = SummaryProcessesRepository::update_process_failed(&pool, &meeting, &reason).await;
+                let _ = SummaryProcessesRepository::update_process_failed(&pool, &meeting, &reason)
+                    .await;
             }
         }
         let ready = SummaryProcessesRepository::get_summary_data(&pool, &meeting)
-            .await.is_ok_and(|row| row.is_some_and(|row| row.status == "completed"));
+            .await
+            .is_ok_and(|row| row.is_some_and(|row| row.status == "completed"));
         drop(job);
         let _ = app.emit(CHANGED_EVENT, &meeting);
         if ready {
@@ -357,14 +420,20 @@ async fn record_outcome<R: Runtime>(
     reason: &str,
 ) -> Result<(), String> {
     if !origin.is_empty() {
-        SummaryProcessesRepository::record_automatic_outcome(pool, meeting, "skipped", reason, origin)
-            .await.map_err(|_| "Could not save automatic notes status")?;
+        SummaryProcessesRepository::record_automatic_outcome(
+            pool, meeting, "skipped", reason, origin,
+        )
+        .await
+        .map_err(|_| "Could not save automatic notes status")?;
         let _ = app.emit(CHANGED_EVENT, meeting);
     }
     Ok(())
 }
 
-async fn transcript_unavailable(pool: &SqlitePool, meeting: &str) -> Result<Option<&'static str>, String> {
+async fn transcript_unavailable(
+    pool: &SqlitePool,
+    meeting: &str,
+) -> Result<Option<&'static str>, String> {
     let needs_recovery = sqlx::query_as::<_, crate::audio::outcome::RecordingOutcome>(
         "SELECT * FROM recording_outcomes WHERE meeting_id = ?",
     )
@@ -398,7 +467,8 @@ async fn prepare<R: Runtime>(
             .fetch_one(pool)
             .await
             .map_err(|_| "Could not read the saved meeting")?;
-    let context = super::commands::meeting_summary_context(app, pool, meeting_id, context, None).await?;
+    let context =
+        super::commands::meeting_summary_context(app, pool, meeting_id, context, None).await?;
     let language = tauri::async_runtime::spawn_blocking(move || {
         let language = folder
             .filter(|path| !path.is_empty())
@@ -444,15 +514,25 @@ mod tests {
         let memory = Memory::default();
         let preference = Preference::migrate(&memory, Some(true)).unwrap();
         let mut review = DestinationReview {
-            provider: "ollama", model: "synthetic".into(), endpoint: None,
-            external: false, unencrypted: false, fingerprint: "first".into(), approved: false,
+            provider: "ollama",
+            model: "synthetic".into(),
+            endpoint: None,
+            external: false,
+            unencrypted: false,
+            fingerprint: "first".into(),
+            approved: false,
         };
         assert!(preference.allows(&review));
         review.external = true;
         assert!(!preference.allows(&review));
-        let approval = Preference { enabled: true, external_fingerprint: Some(review.fingerprint.clone()) };
+        let approval = Preference {
+            enabled: true,
+            external_fingerprint: Some(review.fingerprint.clone()),
+        };
         approval.persist(&memory).unwrap();
-        assert!(Preference::migrate(&memory, Some(false)).unwrap().allows(&review));
+        assert!(Preference::migrate(&memory, Some(false))
+            .unwrap()
+            .allows(&review));
         review.fingerprint = "second".into();
         assert!(!Preference::read(&memory).allows(&review));
 
@@ -473,11 +553,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            !SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "reviewed")
-                .await
-                .unwrap()
-        );
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "reviewed"
+        )
+        .await
+        .unwrap());
         let skipped = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
             .await
             .unwrap()
@@ -499,11 +582,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            !SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "reviewed")
-                .await
-                .unwrap()
-        );
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "reviewed"
+        )
+        .await
+        .unwrap());
         let saved = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
             .await
             .unwrap()
@@ -515,16 +601,22 @@ mod tests {
     async fn publishing_old_notes_cannot_overwrite_a_changed_transcript() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
-        assert!(
-            SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "reviewed")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "reviewed")
-                .await
-                .unwrap()
-        );
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "reviewed"
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "reviewed"
+        )
+        .await
+        .unwrap());
         let snapshot = super::super::sources::prepare_snapshot(
             &pool,
             meeting,

@@ -172,23 +172,38 @@ impl OpenAICompatibleProcessingProvider {
         Self::with_client(config, super::request_config::direct_client())
     }
 
-    fn with_client(config: OpenAICompatibleProviderConfig, client: reqwest::ClientBuilder) -> Result<Self, String> {
+    fn with_client(
+        config: OpenAICompatibleProviderConfig,
+        client: reqwest::ClientBuilder,
+    ) -> Result<Self, String> {
         let config = normalize_config(config)?;
         let client = client
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(config.timeout_seconds))
             .build()
             .map_err(|e| format!("Failed to create OpenAI-compatible HTTP client: {e}"))?;
-        Ok(Self { config, client, dispatch_check: None })
+        Ok(Self {
+            config,
+            client,
+            dispatch_check: None,
+        })
     }
 
-    pub(super) fn with_dispatch_check(mut self, check: super::request_config::DispatchCheck) -> Self {
+    pub(super) fn with_dispatch_check(
+        mut self,
+        check: super::request_config::DispatchCheck,
+    ) -> Self {
         self.dispatch_check = Some(check);
         self
     }
 
     pub(super) fn destination(&self) -> (String, bool, Option<&str>, Option<&str>) {
-        (self.chat_completions_url(), self.config.allow_unencrypted, self.config.organization.as_deref(), self.config.project.as_deref())
+        (
+            self.chat_completions_url(),
+            self.config.allow_unencrypted,
+            self.config.organization.as_deref(),
+            self.config.project.as_deref(),
+        )
     }
 
     pub async fn test_connection(&self) -> Result<CodexCommandStatus, String> {
@@ -957,21 +972,39 @@ mod tests {
             assert!(request.starts_with("POST /approved/v1/chat/completions HTTP/1.1"));
             received.fetch_add(1, Ordering::SeqCst);
             (200, chat_response("Approved notes"))
-        }).await;
+        })
+        .await;
         let mut settings = OpenAICompatibleProviderConfig {
             base_url: format!("{original}/approved/v1/chat/completions"),
             ..OpenAICompatibleProviderConfig::default()
         };
         let check = approved.clone();
-        let provider = OpenAICompatibleProcessingProvider::new_direct(settings.clone()).unwrap()
+        let provider = OpenAICompatibleProcessingProvider::new_direct(settings.clone())
+            .unwrap()
             .with_dispatch_check(Arc::new(move || {
-                if check.load(Ordering::SeqCst) { Ok(()) } else { Err("Review required".into()) }
+                if check.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("Review required".into())
+                }
             }));
         settings.base_url = "https://different.example.com/v1".into();
         assert_ne!(provider.destination().0, settings.base_url);
-        assert_eq!(provider.send_text_prompt("Use meeting facts", "A synthetic transcript").await.unwrap(), "Approved notes");
+        assert_eq!(
+            provider
+                .send_text_prompt("Use meeting facts", "A synthetic transcript")
+                .await
+                .unwrap(),
+            "Approved notes"
+        );
         approved.store(false, Ordering::SeqCst);
-        assert_eq!(provider.send_text_prompt("Use meeting facts", "Another transcript").await.unwrap_err(), "Review required");
+        assert_eq!(
+            provider
+                .send_text_prompt("Use meeting facts", "Another transcript")
+                .await
+                .unwrap_err(),
+            "Review required"
+        );
         assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 

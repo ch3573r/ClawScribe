@@ -131,9 +131,7 @@ fn normalize_utc(raw: Option<String>) -> Option<String> {
 }
 
 fn bounded_id(id: &str, max: usize) -> bool {
-    !id.is_empty()
-        && id.len() <= max
-        && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+    !id.is_empty() && id.len() <= max && !id.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 pub(crate) fn valid_series_id(id: &str) -> bool {
@@ -242,7 +240,11 @@ pub(super) async fn list_calendar_events<T: GraphTransport, S: Sleeper>(
         "{GRAPH_BASE}/me/calendarView?startDateTime={start_iso}&endDateTime={end_iso}\
          &$select={EVENT_SELECT}&$orderby=start/dateTime&$top=50"
     ));
-    parse_events(client.execute(&request, token).await, account, require_complete)
+    parse_events(
+        client.execute(&request, token).await,
+        account,
+        require_complete,
+    )
 }
 
 /// The meeting happening now, else the next one starting within ~12h. Returns
@@ -383,9 +385,11 @@ mod tests {
                 ..account
             },
         ] {
-            assert!(map_event(make_event("occurrence", master), incomplete_scope)
-                .series_id
-                .is_none());
+            assert!(
+                map_event(make_event("occurrence", master), incomplete_scope)
+                    .series_id
+                    .is_none()
+            );
         }
         let overlong_master = "x".repeat(2049);
         for (kind, invalid_master) in [

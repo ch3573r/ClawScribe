@@ -15,9 +15,12 @@ pub(super) fn capture(manifest: &mut Manifest, app_data: &Path) -> Result<(), St
     for (index, row) in manifest.tables["meetings"].iter().enumerate() {
         let id = text_field(row, "id")?;
         if let Some(mut ledger) = ExportLedger::read(&meeting_dir(app_data, id))
-            .map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))? {
+            .map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))?
+        {
             ledger.retain_microsoft_links();
-            ledger.validate_archive(id).map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))?;
+            ledger
+                .validate_archive(id)
+                .map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))?;
             debit_budget(&mut budget, &ledger)?;
             manifest.export_ledgers.insert(index, ledger);
         }

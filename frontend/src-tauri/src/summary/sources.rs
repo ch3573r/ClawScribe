@@ -188,13 +188,12 @@ pub(crate) async fn prepare_snapshot(
         .begin()
         .await
         .map_err(|_| "Could not read the saved transcript")?;
-    let revision = sqlx::query_scalar::<_, i64>(
-        "SELECT summary_content_revision FROM meetings WHERE id = ?",
-    )
-    .bind(meeting)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| "Could not read the saved transcript revision")?;
+    let revision =
+        sqlx::query_scalar::<_, i64>("SELECT summary_content_revision FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| "Could not read the saved transcript revision")?;
     let rows: Vec<Transcript> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 0), id",
     )

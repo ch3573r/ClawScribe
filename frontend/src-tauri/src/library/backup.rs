@@ -1284,7 +1284,9 @@ async fn import_manifest_impl(
             }
             if *table == "meetings" {
                 if let Some(revision) = row.remove("summary_content_revision") {
-                    let revision = revision.as_i64().ok_or("Invalid summary content revision.")?;
+                    let revision = revision
+                        .as_i64()
+                        .ok_or("Invalid summary content revision.")?;
                     summary_content_revisions.push((parent, revision));
                 }
                 // One unreadable link must not block the restore. The meeting is
@@ -1789,16 +1791,9 @@ mod tests {
             user_id: "user",
             bearer_token: "<redacted>",
         };
-        let report = export_planner(
-            &client,
-            &mut ledger,
-            &meeting,
-            &destination,
-            &account,
-            None,
-        )
-        .await
-        .unwrap();
+        let report = export_planner(&client, &mut ledger, &meeting, &destination, &account, None)
+            .await
+            .unwrap();
         assert_eq!(report.items[0].resource_id.as_deref(), Some("old-task"));
         assert!(!report.items[0].graph_called);
         assert_eq!(report.items[1].status, ExportStatus::UnknownAfterSubmit);
@@ -1808,16 +1803,9 @@ mod tests {
             ledger.entry(&pending_key).unwrap().status,
             ExportStatus::UnknownAfterSubmit
         );
-        let report = export_planner(
-            &client,
-            &mut ledger,
-            &shifted,
-            &destination,
-            &account,
-            None,
-        )
-        .await
-        .unwrap();
+        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account, None)
+            .await
+            .unwrap();
         assert_eq!(report.items[0].local_id, "action-5");
         assert_eq!(
             report.items[0].code.as_deref(),
@@ -1830,16 +1818,9 @@ mod tests {
             title_hash: hash,
         });
         action.local_action_id = saved_id.into();
-        let report = export_planner(
-            &client,
-            &mut ledger,
-            &shifted,
-            &destination,
-            &account,
-            None,
-        )
-        .await
-        .unwrap();
+        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account, None)
+            .await
+            .unwrap();
         assert_eq!(
             report.items[0].code.as_deref(),
             Some("task_identity_review_required")
@@ -2007,10 +1988,12 @@ mod tests {
             sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES (?1, ?1, 'Original passage', '00:00')")
                 .bind(meeting).execute(&source).await.unwrap();
         }
-        sqlx::query("UPDATE transcripts SET transcript = 'Corrected passage' WHERE id = 'matching'")
-            .execute(&source)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Corrected passage' WHERE id = 'matching'",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
         let fingerprint = "synthetic-approved-destination";
         assert!(
             Summaries::create_automatic_process(&source, "matching", "import", fingerprint)
@@ -2018,7 +2001,9 @@ mod tests {
                 .unwrap()
         );
         // Make the synthetic job eligible through the same interruption path as startup.
-        Summaries::fail_interrupted_processes(&source).await.unwrap();
+        Summaries::fail_interrupted_processes(&source)
+            .await
+            .unwrap();
         let (interrupted, _) = Summaries::get_summary_status_data(&source, "matching")
             .await
             .unwrap()
@@ -2038,16 +2023,30 @@ mod tests {
         Summaries::create_or_reset_process(&source, "stale")
             .await
             .unwrap();
-        assert!(
-            Summaries::fail_with_partial(&source, "stale", "Generation failed", 1, "Stale partial")
-                .await
-                .unwrap()
-        );
-        sqlx::query("UPDATE transcripts SET transcript = 'Edited after generation' WHERE id = 'stale'")
-            .execute(&source).await.unwrap();
-        Summaries::record_automatic_outcome(&source, "existing", "skipped", "Disabled", "recording")
-            .await
-            .unwrap();
+        assert!(Summaries::fail_with_partial(
+            &source,
+            "stale",
+            "Generation failed",
+            1,
+            "Stale partial"
+        )
+        .await
+        .unwrap());
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Edited after generation' WHERE id = 'stale'",
+        )
+        .execute(&source)
+        .await
+        .unwrap();
+        Summaries::record_automatic_outcome(
+            &source,
+            "existing",
+            "skipped",
+            "Disabled",
+            "recording",
+        )
+        .await
+        .unwrap();
         assert_eq!(
             Summaries::automatic_resume_candidates(&source, fingerprint)
                 .await
@@ -2060,18 +2059,29 @@ mod tests {
             .execute(&destination).await.unwrap();
         sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES ('existing', 'existing', 'Local passage', '00:00')")
             .execute(&destination).await.unwrap();
-        sqlx::query("UPDATE transcripts SET transcript = 'Edited local passage' WHERE id = 'existing'")
-            .execute(&destination).await.unwrap();
-        assert!(
-            Summaries::create_automatic_process(&destination, "existing", "recording", fingerprint)
-                .await
-                .unwrap()
-        );
-        assert!(
-            Summaries::fail_with_partial(&destination, "existing", &reason, 2, "Local partial")
-                .await
-                .unwrap()
-        );
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Edited local passage' WHERE id = 'existing'",
+        )
+        .execute(&destination)
+        .await
+        .unwrap();
+        assert!(Summaries::create_automatic_process(
+            &destination,
+            "existing",
+            "recording",
+            fingerprint
+        )
+        .await
+        .unwrap());
+        assert!(Summaries::fail_with_partial(
+            &destination,
+            "existing",
+            &reason,
+            2,
+            "Local partial"
+        )
+        .await
+        .unwrap());
 
         let root = tempfile::tempdir().unwrap();
         let archive = root.path().join("backup.zip");
@@ -2079,7 +2089,9 @@ mod tests {
         write_archive(&archive, manifest, folders).unwrap();
         let existing = HashSet::from(["existing".to_string()]);
         let (manifest, stage) = unpack(&archive, root.path(), &existing).unwrap();
-        let report = import_manifest(&destination, manifest, stage).await.unwrap();
+        let report = import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
         assert_eq!((report.meetings, report.skipped), (2, 1));
 
         let (matching, partial) = Summaries::get_summary_status_data(&destination, "matching")
@@ -2145,7 +2157,9 @@ mod tests {
         write_archive(&archive, manifest, folders).unwrap();
         let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
         let destination = empty_conversation_destination().await;
-        import_manifest(&destination, manifest, stage).await.unwrap();
+        import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
         let (summary, partial) = Summaries::get_summary_status_data(&destination, "review-test")
             .await
             .unwrap()
@@ -2367,13 +2381,27 @@ mod tests {
         // Export exactly the archive tables available before the evidence upgrade.
         // The current writer also attaches recording-ID bookmarks, introduced later.
         const HISTORICAL_TABLES: &[&str] = &[
-            "meetings", "transcripts", "summary_processes", "transcript_chunks",
-            "meeting_notes", "ai_chat_messages", "recording_outcomes", "transcript_revisions",
-            "transcript_edit_batches", "transcript_file_sync", "meeting_tags", "meeting_bookmarks",
-            "knowledge_owners", "knowledge_requests", "knowledge_messages",
-            "knowledge_request_evidence", "knowledge_request_sources",
+            "meetings",
+            "transcripts",
+            "summary_processes",
+            "transcript_chunks",
+            "meeting_notes",
+            "ai_chat_messages",
+            "recording_outcomes",
+            "transcript_revisions",
+            "transcript_edit_batches",
+            "transcript_file_sync",
+            "meeting_tags",
+            "meeting_bookmarks",
+            "knowledge_owners",
+            "knowledge_requests",
+            "knowledge_messages",
+            "knowledge_request_evidence",
+            "knowledge_request_sources",
         ];
-        let (old_backup, _) = snapshot_tables(&source, HISTORICAL_TABLES, false).await.unwrap();
+        let (old_backup, _) = snapshot_tables(&source, HISTORICAL_TABLES, false)
+            .await
+            .unwrap();
         assert!(!old_backup.tables.contains_key("meeting_summary_bookmarks"));
         let mut histories = Vec::new();
         for owner in &owners {
@@ -3300,8 +3328,17 @@ mod tests {
         let (manifest, folders) = snapshot(&pool).await.unwrap();
         write_archive(&archive, manifest, folders).unwrap();
         let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
-        sqlx::query("DELETE FROM meetings").execute(&pool).await.unwrap();
-        assert_eq!(import_manifest(&pool, manifest, stage).await.unwrap().meetings, 1);
+        sqlx::query("DELETE FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            import_manifest(&pool, manifest, stage)
+                .await
+                .unwrap()
+                .meetings,
+            1
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM meeting_summary_bookmarks")
                 .fetch_one(&pool)
@@ -3725,8 +3762,18 @@ mod tests {
         use crate::exports::model::ExportStatus;
 
         const SCOPE: &str = "planner:tenant-t:user-u:plan-p:bucket-b";
-        let key1 = task_key(SCOPE, "m-rollback", "11111111-1111-1111-1111-111111111111", "");
-        let key2 = task_key(SCOPE, "m-rollback", "22222222-2222-2222-2222-222222222222", "");
+        let key1 = task_key(
+            SCOPE,
+            "m-rollback",
+            "11111111-1111-1111-1111-111111111111",
+            "",
+        );
+        let key2 = task_key(
+            SCOPE,
+            "m-rollback",
+            "22222222-2222-2222-2222-222222222222",
+            "",
+        );
 
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let source = empty_conversation_destination().await;
@@ -3756,7 +3803,8 @@ mod tests {
         let mut leftover = ExportLedger::load_or_new(&leftover_dir, "m-rollback").unwrap();
         leftover.record_failure(&key2, ExportStatus::Failed, None, None);
         leftover.checkpoint().await.unwrap();
-        let prev_bytes = std::fs::read(leftover_dir.join(crate::exports::ledger::LEDGER_FILENAME)).unwrap();
+        let prev_bytes =
+            std::fs::read(leftover_dir.join(crate::exports::ledger::LEDGER_FILENAME)).unwrap();
 
         // Use a DB that will reject the commit (FK violation trigger).
         let rejected_pool = empty_conversation_destination().await;

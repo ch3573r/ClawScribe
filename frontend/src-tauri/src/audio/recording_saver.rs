@@ -200,8 +200,9 @@ impl RecordingSaver {
     }
 
     pub(crate) fn set_summary_language(&mut self, language: Option<&str>) {
-        self.summary_language =
-            language.and_then(|value| crate::summary::metadata::normalise_supported_summary_language(value).ok());
+        self.summary_language = language.and_then(|value| {
+            crate::summary::metadata::normalise_supported_summary_language(value).ok()
+        });
     }
 
     pub(crate) fn continue_audio_only(&mut self) {
@@ -399,7 +400,9 @@ impl RecordingSaver {
             && crate::database::meeting_files::read_marker(folder).is_some_and(|marker| {
                 self.recording_id().is_some_and(|id| {
                     crate::database::meeting_files::recording_id(&marker) == Some(id)
-                        && marker.get("meeting_id").is_none_or(serde_json::Value::is_null)
+                        && marker
+                            .get("meeting_id")
+                            .is_none_or(serde_json::Value::is_null)
                 })
             });
         if !owned {
@@ -426,10 +429,12 @@ impl RecordingSaver {
             // Non-recursive removal also protects a late capture write that
             // lands after enumeration.
             if only_start_files
-                && CAPTURE_DIRS.iter().all(|name| match std::fs::remove_dir(folder.join(name)) {
-                    Ok(()) => true,
-                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                })
+                && CAPTURE_DIRS
+                    .iter()
+                    .all(|name| match std::fs::remove_dir(folder.join(name)) {
+                        Ok(()) => true,
+                        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                    })
                 && std::fs::remove_file(folder.join("metadata.json")).is_ok()
                 && std::fs::remove_dir(folder).is_ok()
             {
@@ -693,7 +698,6 @@ impl RecordingSaver {
     pub fn get_meeting_name(&self) -> Option<String> {
         self.meeting_name.clone()
     }
-
 }
 
 const TRANSCRIPT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(15);
@@ -1375,10 +1379,12 @@ mod snapshot_tests {
     }
 
     async fn draft_ids(pool: &sqlx::SqlitePool) -> Vec<String> {
-        sqlx::query_scalar("SELECT recording_id FROM recording_calendar_drafts ORDER BY recording_id")
-            .fetch_all(pool)
-            .await
-            .unwrap()
+        sqlx::query_scalar(
+            "SELECT recording_id FROM recording_calendar_drafts ORDER BY recording_id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

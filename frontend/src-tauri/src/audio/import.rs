@@ -1515,11 +1515,18 @@ pub async fn start_import_audio_command<R: Runtime>(
         meeting_at
     };
     let summary_request = if summarize.unwrap_or(false) {
-        let state = app.try_state::<AppState>().ok_or("Meeting storage is unavailable")?;
-        Some(crate::summary::automatic::prepare_import(
-            &app, state.db_manager.pool(), summary_destination_fingerprint.as_deref(),
-            summary_use_automatic_preference.unwrap_or(false),
-        ).await?)
+        let state = app
+            .try_state::<AppState>()
+            .ok_or("Meeting storage is unavailable")?;
+        Some(
+            crate::summary::automatic::prepare_import(
+                &app,
+                state.db_manager.pool(),
+                summary_destination_fingerprint.as_deref(),
+                summary_use_automatic_preference.unwrap_or(false),
+            )
+            .await?,
+        )
     } else {
         None
     };

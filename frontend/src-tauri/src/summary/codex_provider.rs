@@ -1499,7 +1499,9 @@ impl CodexAppServerProvider {
                     super::context_budget::EXTRACT_FACTS
                 ))
                 .await
-                .and_then(|text| super::processor::require_summary_markdown(&text, "Meeting excerpt"))
+                .and_then(|text| {
+                    super::processor::require_summary_markdown(&text, "Meeting excerpt")
+                })
             },
         )
         .await?;

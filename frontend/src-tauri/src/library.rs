@@ -146,9 +146,16 @@ pub async fn add_meeting_bookmark<R: Runtime>(
     };
     let seconds = seconds.ok_or("Choose a bookmark time.")?;
     validate_bookmark_time(seconds)?;
-    sqlx::query("INSERT INTO meeting_bookmarks (id, meeting_id, seconds, label) VALUES (?, ?, ?, ?)")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(meeting_id).bind(seconds).bind(label)
-        .execute(app.state::<AppState>().db_manager.pool()).await.map_err(|_| "Could not save bookmark.")?;
+    sqlx::query(
+        "INSERT INTO meeting_bookmarks (id, meeting_id, seconds, label) VALUES (?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(meeting_id)
+    .bind(seconds)
+    .bind(label)
+    .execute(app.state::<AppState>().db_manager.pool())
+    .await
+    .map_err(|_| "Could not save bookmark.")?;
     let _ = app.emit("library-changed", ());
     Ok(())
 }
@@ -297,7 +304,9 @@ pub(crate) fn bookmark_active_recording<R: Runtime>(app: &AppHandle<R>) {
     };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let saved = save_live_bookmark(&app, &session_id, "Review this").await.is_ok();
+        let saved = save_live_bookmark(&app, &session_id, "Review this")
+            .await
+            .is_ok();
         if !saved {
             log::warn!("Could not save a recording bookmark");
         }

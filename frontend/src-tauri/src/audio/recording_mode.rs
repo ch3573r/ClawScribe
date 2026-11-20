@@ -81,9 +81,15 @@ mod tests {
     #[test]
     fn only_live_and_legacy_recordings_can_wake_recovered_summaries() {
         assert!(marker_transcribes(&serde_json::json!({})));
-        assert!(marker_transcribes(&serde_json::json!({"recording_mode": "live"})));
-        assert!(!marker_transcribes(&serde_json::json!({"recording_mode": "audio_only"})));
-        assert!(!marker_transcribes(&serde_json::json!({"recording_mode": "unknown"})));
+        assert!(marker_transcribes(
+            &serde_json::json!({"recording_mode": "live"})
+        ));
+        assert!(!marker_transcribes(
+            &serde_json::json!({"recording_mode": "audio_only"})
+        ));
+        assert!(!marker_transcribes(
+            &serde_json::json!({"recording_mode": "unknown"})
+        ));
     }
     #[test]
     fn audio_only_always_preserves_audio_and_never_transcribes() {

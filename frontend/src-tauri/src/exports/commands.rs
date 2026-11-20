@@ -926,7 +926,10 @@ impl<'a> SelectedTaskHistory<'a> {
         if let Some(actions) = reviewed {
             // Saved actions supersede the preview. Completed and unselected rows
             // still identify distinct suggestions that can own older history.
-            for legacy in actions.iter().filter_map(|action| action.legacy_action.as_ref()) {
+            for legacy in actions
+                .iter()
+                .filter_map(|action| action.legacy_action.as_ref())
+            {
                 siblings
                     .entry(legacy.title_hash.clone())
                     .or_default()
@@ -1507,12 +1510,14 @@ mod export_history_tests {
                         .remove("bucket")
                         .unwrap()
                 } else {
-                    todo_action_items(vec![serde_json::from_value(task).unwrap()], history)
-                        .unwrap()
+                    todo_action_items(vec![serde_json::from_value(task).unwrap()], history).unwrap()
                 }
             };
             let resolve = |meeting: &mut super::super::model::MeetingExport,
-                           history: &SelectedTaskHistory<'_>, id, original_hash, title| {
+                           history: &SelectedTaskHistory<'_>,
+                           id,
+                           original_hash,
+                           title| {
                 meeting.action_items = select(history, id, original_hash, title);
                 exporter::resolve_task_keys(
                     &ledger,
@@ -1536,12 +1541,24 @@ mod export_history_tests {
             let old_ipc = SelectedTaskHistory::new(None, None).unwrap();
             for history in [&initial, &old_ipc] {
                 assert_held(
-                    resolve(&mut meeting, history, "action-2", Some(hash.as_str()), "Edited second"),
+                    resolve(
+                        &mut meeting,
+                        history,
+                        "action-2",
+                        Some(hash.as_str()),
+                        "Edited second",
+                    ),
                     "action-2",
                 );
                 assert_eq!(
-                    resolve(&mut meeting, history, "action-1", Some(hash.as_str()), "Edited first")
-                        .unwrap(),
+                    resolve(
+                        &mut meeting,
+                        history,
+                        "action-1",
+                        Some(hash.as_str()),
+                        "Edited first"
+                    )
+                    .unwrap(),
                     known,
                 );
             }
@@ -1571,11 +1588,21 @@ mod export_history_tests {
 
             let saved = SelectedTaskHistory::new(Some(&persisted), Some(Vec::new())).unwrap();
             assert_held(
-                resolve(&mut meeting, &saved, persisted[1].id.as_str(), None, "Edited second"),
+                resolve(
+                    &mut meeting,
+                    &saved,
+                    persisted[1].id.as_str(),
+                    None,
+                    "Edited second",
+                ),
                 persisted[1].id.as_str(),
             );
             let new_key = resolve(
-                &mut meeting, &saved, persisted[2].id.as_str(), None, "Send the update",
+                &mut meeting,
+                &saved,
+                persisted[2].id.as_str(),
+                None,
+                "Send the update",
             )
             .unwrap();
             assert!(new_key.ends_with(persisted[2].id.as_str()));

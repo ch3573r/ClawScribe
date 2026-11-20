@@ -374,8 +374,13 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
     let url = format!("{GRAPH_BASE}/planner/tasks");
     let mut items = Vec::new();
     let scope = planner::task_scope(ctx.tenant_id, ctx.user_id, destination);
-    let keys =
-        resolve_task_keys(ledger, meeting, &scope, planner::action_hash, full_positional_siblings);
+    let keys = resolve_task_keys(
+        ledger,
+        meeting,
+        &scope,
+        planner::action_hash,
+        full_positional_siblings,
+    );
 
     for (action, key) in meeting.action_items.iter().zip(keys) {
         let dedupe_key = match key {
@@ -449,8 +454,13 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
     let url = todo_tasks_url(&destination.list_id);
     let mut items = Vec::new();
     let scope = todo::task_scope(ctx.tenant_id, ctx.user_id, destination);
-    let keys =
-        resolve_task_keys(ledger, meeting, &scope, todo::action_hash, full_positional_siblings);
+    let keys = resolve_task_keys(
+        ledger,
+        meeting,
+        &scope,
+        todo::action_hash,
+        full_positional_siblings,
+    );
 
     for (action, key) in meeting.action_items.iter().zip(keys) {
         let dedupe_key = match key {

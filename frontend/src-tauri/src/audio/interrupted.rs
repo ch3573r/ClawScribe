@@ -76,7 +76,10 @@ pub(crate) enum ActiveFolder {
 impl ActiveFolder {
     fn canonical(&self) -> Self {
         match self {
-            Self::Folder(path) => path.canonicalize().map(Self::Folder).unwrap_or(Self::Unknown),
+            Self::Folder(path) => path
+                .canonicalize()
+                .map(Self::Folder)
+                .unwrap_or(Self::Unknown),
             other => other.clone(),
         }
     }
@@ -739,9 +742,14 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
             .map_err(|_| "Could not read recovered recording details".to_string())?
         };
         let outcome_updated = commit_repaired_audio(
-            state.db_manager.pool(), &meeting_id, &registered_path, &authorised,
-            provenance, status.status == "partial",
-        ).await?;
+            state.db_manager.pool(),
+            &meeting_id,
+            &registered_path,
+            &authorised,
+            provenance,
+            status.status == "partial",
+        )
+        .await?;
         drop(job);
         if transcribes && outcome_updated {
             super::recording_commands::wake_saved_recording_summary(&app, meeting_id.clone());
@@ -778,11 +786,9 @@ async fn commit_repaired_audio(
     .map_err(|_| "Could not save recovered recording details")?;
     if meeting.rows_affected() != 1 {
         // Keep the recovered file and its originals available to their owner.
-        return Err(
-            "The recording was moved in your library during repair. \
+        return Err("The recording was moved in your library during repair. \
              Reload the library and try again."
-                .into(),
-        );
+            .into());
     }
     let updated = sqlx::query(
         "UPDATE recording_outcomes SET audio_save_failed = 0, capture_incomplete = capture_incomplete OR ? WHERE meeting_id = ?",
@@ -796,11 +802,7 @@ async fn commit_repaired_audio(
         .await
         .map_err(|_| "Could not save recovered recording details")?;
     // Release capture only once the repaired meeting is committed.
-    let _ = super::incremental_saver::release_registered_capture(
-        pool,
-        authorised,
-    )
-    .await;
+    let _ = super::incremental_saver::release_registered_capture(pool, authorised).await;
     if !partial {
         let checkpoints = Path::new(authorised).join(".checkpoints");
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checkpoints)).await;
@@ -877,8 +879,15 @@ pub(crate) fn discard_folder(
     let marker = crate::database::meeting_files::read_marker(&path).ok_or(REFUSED)?;
     let id = crate::database::meeting_files::stamped_meeting_id(&marker)
         .or_else(|| crate::database::meeting_files::recording_id(&marker));
-    crate::database::meeting_files::remove_recording_folder(&path, id.unwrap_or(""), roots, &others)?;
-    Ok(crate::database::meeting_files::recording_id(&marker).map(str::to_owned).or_else(|| id.map(str::to_owned)))
+    crate::database::meeting_files::remove_recording_folder(
+        &path,
+        id.unwrap_or(""),
+        roots,
+        &others,
+    )?;
+    Ok(crate::database::meeting_files::recording_id(&marker)
+        .map(str::to_owned)
+        .or_else(|| id.map(str::to_owned)))
 }
 
 #[cfg(test)]
@@ -1360,7 +1369,11 @@ mod tests {
                 "{}",
                 refused.display()
             );
-            assert_eq!(refused.exists(), existed, "the refused folder must be left alone");
+            assert_eq!(
+                refused.exists(),
+                existed,
+                "the refused folder must be left alone"
+            );
         }
         assert!(discard_folder(
             r"\\server\share\victim",
@@ -1408,30 +1421,59 @@ mod tests {
         let recovered = folder.path().join("audio-recovered.wav");
         std::fs::write(&recovered, b"synthetic materialised audio").unwrap();
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1).connect(":memory:").await.unwrap();
+            .max_connections(1)
+            .connect(":memory:")
+            .await
+            .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path)
-                     VALUES ('repair', 'Test', datetime('now'), datetime('now'), 'changed')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed) VALUES ('repair', 1)")
-            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path)
+                     VALUES ('repair', 'Test', datetime('now'), datetime('now'), 'changed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO recording_outcomes (meeting_id, audio_save_failed) VALUES ('repair', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let provenance = RecordingProvenance::recording(Some(5.0));
-        assert!(commit_repaired_audio(&pool, "repair", path, path, provenance, false)
-            .await.unwrap_err().contains("moved"));
+        assert!(
+            commit_repaired_audio(&pool, "repair", path, path, provenance, false)
+                .await
+                .unwrap_err()
+                .contains("moved")
+        );
         assert!(chunk.is_file() && recovered.is_file());
-        let failed: i64 = sqlx::query_scalar("SELECT audio_save_failed FROM recording_outcomes WHERE meeting_id = 'repair'")
-            .fetch_one(&pool).await.unwrap();
+        let failed: i64 = sqlx::query_scalar(
+            "SELECT audio_save_failed FROM recording_outcomes WHERE meeting_id = 'repair'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(failed, 1);
 
         sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'repair'")
-            .bind(path).execute(&pool).await.unwrap();
-        assert!(commit_repaired_audio(&pool, "repair", path, path, provenance, false).await.unwrap());
+            .bind(path)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            commit_repaired_audio(&pool, "repair", path, path, provenance, false)
+                .await
+                .unwrap()
+        );
         assert!(!checkpoints.exists() && recovered.is_file());
         let stored: (String, f64, i64) = sqlx::query_as(
             "SELECT recording_source, recording_duration_s, audio_save_failed FROM meetings
-             JOIN recording_outcomes ON meeting_id = id WHERE id = 'repair'")
-            .fetch_one(&pool).await.unwrap();
+             JOIN recording_outcomes ON meeting_id = id WHERE id = 'repair'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(stored, ("recording".into(), 5.0, 0));
     }
 }

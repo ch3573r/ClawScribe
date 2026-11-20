@@ -6,7 +6,8 @@ use tracing::{error, info as log_info};
 
 pub struct SummaryProcessesRepository;
 const INTERRUPTED: &str = "Summary generation was interrupted when ClawScribe closed";
-pub(crate) const RECOVERY_NEEDED: &str = "Review or retranscribe this meeting before generating notes.";
+pub(crate) const RECOVERY_NEEDED: &str =
+    "Review or retranscribe this meeting before generating notes.";
 
 #[cfg(test)]
 mod tests {
@@ -16,13 +17,46 @@ mod tests {
     async fn repaired_recording_can_claim_only_the_recoverable_skip_once() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
-        SummaryProcessesRepository::record_automatic_outcome(&pool, meeting, "skipped", RECOVERY_NEEDED, "recording").await.unwrap();
-        assert!(!SummaryProcessesRepository::create_automatic_process(&pool, meeting, "import", "approved").await.unwrap());
-        assert!(SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "approved").await.unwrap());
-        assert!(!SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "approved").await.unwrap());
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            RECOVERY_NEEDED,
+            "recording",
+        )
+        .await
+        .unwrap();
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool, meeting, "import", "approved"
+        )
+        .await
+        .unwrap());
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
         sqlx::query("UPDATE summary_processes SET status = 'skipped', error = 'Automatic summaries are off.' WHERE meeting_id = ?")
             .bind(meeting).execute(&pool).await.unwrap();
-        assert!(!SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "approved").await.unwrap());
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
@@ -33,36 +67,74 @@ mod tests {
         // A RECOVERY_NEEDED skip is the recoverable state; subsequent skip reasons
         // (disabled, review required) replace it so the UI shows the current reason.
         SummaryProcessesRepository::record_automatic_outcome(
-            &pool, meeting, "skipped", RECOVERY_NEEDED, "recording",
-        ).await.unwrap();
+            &pool,
+            meeting,
+            "skipped",
+            RECOVERY_NEEDED,
+            "recording",
+        )
+        .await
+        .unwrap();
         const DISABLED: &str = "Automatic summaries are off. You can generate notes here.";
         const REVIEW_REQUIRED: &str =
             "Review the summary provider in Settings to allow automatic notes at this destination.";
         SummaryProcessesRepository::record_automatic_outcome(
-            &pool, meeting, "skipped", DISABLED, "recording",
-        ).await.unwrap();
+            &pool,
+            meeting,
+            "skipped",
+            DISABLED,
+            "recording",
+        )
+        .await
+        .unwrap();
         let row = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.error.as_deref(), Some(DISABLED));
 
         // A second new reason must NOT overwrite the already-updated non-recoverable skip.
         SummaryProcessesRepository::record_automatic_outcome(
-            &pool, meeting, "skipped", REVIEW_REQUIRED, "recording",
-        ).await.unwrap();
+            &pool,
+            meeting,
+            "skipped",
+            REVIEW_REQUIRED,
+            "recording",
+        )
+        .await
+        .unwrap();
         let row2 = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row2.error.as_deref(), Some(DISABLED));
 
         // A completed summary must never be overwritten.
-        SummaryProcessesRepository::create_or_reset_process(&pool, meeting).await.unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
         SummaryProcessesRepository::update_process_completed(
-            &pool, meeting, serde_json::json!({"markdown": "Real notes"}), 1, 0.0,
-        ).await.unwrap();
+            &pool,
+            meeting,
+            serde_json::json!({"markdown": "Real notes"}),
+            1,
+            0.0,
+        )
+        .await
+        .unwrap();
         SummaryProcessesRepository::record_automatic_outcome(
-            &pool, meeting, "skipped", RECOVERY_NEEDED, "recording",
-        ).await.unwrap();
+            &pool,
+            meeting,
+            "skipped",
+            RECOVERY_NEEDED,
+            "recording",
+        )
+        .await
+        .unwrap();
         let completed = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(completed.status, "completed");
     }
 
@@ -70,24 +142,77 @@ mod tests {
     async fn startup_retries_only_interrupted_background_jobs_once_without_resetting_results() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
-        SummaryProcessesRepository::create_or_reset_process(&pool, meeting).await.unwrap();
-        SummaryProcessesRepository::fail_interrupted_processes(&pool).await.unwrap();
-        assert!(SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved").await.unwrap().is_empty());
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         sqlx::query("DELETE FROM summary_processes WHERE meeting_id = ?")
-            .bind(meeting).execute(&pool).await.unwrap();
-        assert!(SummaryProcessesRepository::create_automatic_process(&pool, meeting, "recording", "approved").await.unwrap());
+            .bind(meeting)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
         sqlx::query("UPDATE summary_processes SET result = 'previous', metadata = 'partial' WHERE meeting_id = ?")
             .bind(meeting).execute(&pool).await.unwrap();
-        SummaryProcessesRepository::fail_interrupted_processes(&pool).await.unwrap();
-        assert_eq!(SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved").await.unwrap(), vec![meeting.to_owned()]);
-        assert!(SummaryProcessesRepository::automatic_resume_candidates(&pool, "different").await.unwrap().is_empty());
-        assert!(!SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "different").await.unwrap());
-        assert!(SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved").await.unwrap());
-        SummaryProcessesRepository::fail_interrupted_processes(&pool).await.unwrap();
-        assert!(!SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved").await.unwrap());
-        assert!(SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved").await.unwrap().is_empty());
-        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting).await.unwrap().unwrap();
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+                .await
+                .unwrap(),
+            vec![meeting.to_owned()]
+        );
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "different")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "different")
+                .await
+                .unwrap()
+        );
+        assert!(
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
+                .await
+                .unwrap()
+        );
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
+                .await
+                .unwrap()
+        );
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.result.as_deref(), Some("previous"));
         assert_eq!(row.metadata.as_deref(), Some("partial"));
     }
@@ -96,22 +221,75 @@ mod tests {
     async fn full_and_partial_notes_follow_transcript_content_across_metadata_edits() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
-        let snapshot = crate::summary::sources::prepare_snapshot(&pool, meeting, String::new(), true).await.unwrap();
+        let snapshot =
+            crate::summary::sources::prepare_snapshot(&pool, meeting, String::new(), true)
+                .await
+                .unwrap();
         let revision = snapshot.revision.unwrap();
-        SummaryProcessesRepository::create_or_reset_process(&pool, meeting).await.unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
         sqlx::query("UPDATE meetings SET title = 'Renamed', created_at = '2026-10-20T12:00:00Z' WHERE id = ?")
             .bind(meeting).execute(&pool).await.unwrap();
         let result = serde_json::json!({"markdown": "Current notes"});
-        assert!(SummaryProcessesRepository::complete_for_revision(&pool, meeting, result.clone(), 1, 0.0, Some(revision)).await.unwrap());
-        SummaryProcessesRepository::fail_with_partial(&pool, meeting, "Failed", revision, "Äpfel").await.unwrap();
-        assert_eq!(SummaryProcessesRepository::get_summary_status_data(&pool, meeting).await.unwrap().unwrap().1.as_deref(), Some("Äpfel"));
+        assert!(SummaryProcessesRepository::complete_for_revision(
+            &pool,
+            meeting,
+            result.clone(),
+            1,
+            0.0,
+            Some(revision)
+        )
+        .await
+        .unwrap());
+        SummaryProcessesRepository::fail_with_partial(&pool, meeting, "Failed", revision, "Äpfel")
+            .await
+            .unwrap();
+        assert_eq!(
+            SummaryProcessesRepository::get_summary_status_data(&pool, meeting)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("Äpfel")
+        );
 
         sqlx::query("UPDATE transcripts SET transcript = 'Edited' WHERE id = 'a'")
-            .execute(&pool).await.unwrap();
-        assert!(!SummaryProcessesRepository::complete_for_revision(&pool, meeting, result, 1, 0.0, Some(revision)).await.unwrap());
-        assert!(!SummaryProcessesRepository::fail_with_partial(&pool, meeting, "Failed", revision, "Stale partial").await.unwrap());
-        assert!(SummaryProcessesRepository::get_summary_status_data(&pool, meeting).await.unwrap().unwrap().1.is_none());
-        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting).await.unwrap().unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!SummaryProcessesRepository::complete_for_revision(
+            &pool,
+            meeting,
+            result,
+            1,
+            0.0,
+            Some(revision)
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::fail_with_partial(
+            &pool,
+            meeting,
+            "Failed",
+            revision,
+            "Stale partial"
+        )
+        .await
+        .unwrap());
+        assert!(
+            SummaryProcessesRepository::get_summary_status_data(&pool, meeting)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .is_none()
+        );
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(row.result.unwrap().contains("Current notes"));
         assert!(row.metadata.unwrap().contains("Äpfel"));
     }
@@ -356,7 +534,14 @@ impl SummaryProcessesRepository {
                 SELECT 1 FROM transcript_chunks t WHERE t.meeting_id = p.meeting_id
             ))
         "#).bind(meeting_id).fetch_optional(pool).await?;
-        row.as_ref().map(|row| Ok((SummaryProcess::from_row(row)?, row.try_get("current_partial_notes")?))).transpose()
+        row.as_ref()
+            .map(|row| {
+                Ok((
+                    SummaryProcess::from_row(row)?,
+                    row.try_get("current_partial_notes")?,
+                ))
+            })
+            .transpose()
     }
 
     pub(crate) async fn can_start_automatic_process(
@@ -364,14 +549,21 @@ impl SummaryProcessesRepository {
         meeting: &str,
         origin: &str,
     ) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar(r#"
+        sqlx::query_scalar(
+            r#"
             SELECT NOT EXISTS (
                 SELECT 1 FROM summary_processes WHERE meeting_id = ?
                 AND NOT (? = 'recording' AND status = 'skipped'
                     AND error IS ? AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
                     AND result IS NULL AND result_backup IS NULL AND metadata IS NULL)
             )
-        "#).bind(meeting).bind(origin).bind(RECOVERY_NEEDED).fetch_one(pool).await
+        "#,
+        )
+        .bind(meeting)
+        .bind(origin)
+        .bind(RECOVERY_NEEDED)
+        .fetch_one(pool)
+        .await
     }
 
     pub(crate) async fn create_automatic_process(

@@ -249,11 +249,14 @@ where
                         output = Some(notes);
                         break;
                     }
-                    Err(reason) if [
-                        super::automatic::DISABLED,
-                        super::automatic::REVIEW_REQUIRED,
-                        super::automatic::DESTINATION_CHANGED,
-                    ].contains(&reason.as_str()) => {
+                    Err(reason)
+                        if [
+                            super::automatic::DISABLED,
+                            super::automatic::REVIEW_REQUIRED,
+                            super::automatic::DESTINATION_CHANGED,
+                        ]
+                        .contains(&reason.as_str()) =>
+                    {
                         reduction.report(index, total, level + 1);
                         return Err(reason);
                     }
@@ -312,12 +315,18 @@ mod tests {
                     Err(consent_error.to_string())
                 };
                 std::future::ready(result)
-            }).await;
-            assert_eq!(result.unwrap_err(), consent_error,
-                "consent error must pass through, not be wrapped");
+            })
+            .await;
+            assert_eq!(
+                result.unwrap_err(),
+                consent_error,
+                "consent error must pass through, not be wrapped"
+            );
             assert_eq!(calls, 2, "no retry on consent error");
-            assert!(reduction.partial_notes().contains("First excerpt notes."),
-                "successful excerpt must be retained as partial notes");
+            assert!(
+                reduction.partial_notes().contains("First excerpt notes."),
+                "successful excerpt must be retained as partial notes"
+            );
         }
     }
 
@@ -326,10 +335,17 @@ mod tests {
         let reduction = Reduction::default();
         let result = reduce("AAAABBBB", 4, 4, &reduction, None, |_| {
             std::future::ready(Err("arbitrary provider output".to_string()))
-        }).await;
+        })
+        .await;
         let error = result.unwrap_err();
-        assert!(error.contains("excerpt 1 of 2"), "must report excerpt position");
-        assert!(!error.contains("arbitrary provider"), "must not leak provider output");
+        assert!(
+            error.contains("excerpt 1 of 2"),
+            "must report excerpt position"
+        );
+        assert!(
+            !error.contains("arbitrary provider"),
+            "must not leak provider output"
+        );
     }
 
     #[tokio::test]
@@ -345,7 +361,8 @@ mod tests {
             };
             submitted.push(chunk);
             std::future::ready(result)
-        }).await;
+        })
+        .await;
         let error = result.unwrap_err();
         assert!(error.contains("excerpt 2 of 3"));
         assert!(!error.contains("Provider response"));

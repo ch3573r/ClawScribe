@@ -376,7 +376,8 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
     base_prompt: String,
     template_id: Option<String>,
 ) -> Result<MeetingSummaryContext, String> {
-    let (calendar, summary_title) = crate::library::calendar::read_snapshot(pool, meeting_id).await?;
+    let (calendar, summary_title) =
+        crate::library::calendar::read_snapshot(pool, meeting_id).await?;
     let final_prompt = match calendar.as_ref() {
         Some(link) => link.with_attendance(base_prompt),
         None => base_prompt,
@@ -433,8 +434,13 @@ pub async fn api_process_transcript<R: Runtime>(
 
     let pool = state.db_manager.pool().clone();
     let context = meeting_summary_context(
-        &app, &pool, &m_id, custom_prompt.unwrap_or_default(), template_id,
-    ).await?;
+        &app,
+        &pool,
+        &m_id,
+        custom_prompt.unwrap_or_default(),
+        template_id,
+    )
+    .await?;
 
     // Normalise empty / whitespace-only to None so "" and null behave identically
     let summary_language = summary_language.and_then(|s| {
@@ -561,7 +567,10 @@ fn spawn_summary<R: Runtime>(
             pool,
             meeting_id_clone.clone(),
             text,
-            super::service::SummaryProviderRequest::Manual { provider: model, model: model_name },
+            super::service::SummaryProviderRequest::Manual {
+                provider: model,
+                model: model_name,
+            },
             context.prompt,
             context.title,
             context.template,

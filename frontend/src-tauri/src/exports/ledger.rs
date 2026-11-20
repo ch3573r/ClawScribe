@@ -878,7 +878,10 @@ mod tests {
 
         existing.merge_incoming(&incoming);
 
-        assert_eq!(existing.entry("k-new").unwrap().status, ExportStatus::Succeeded);
+        assert_eq!(
+            existing.entry("k-new").unwrap().status,
+            ExportStatus::Succeeded
+        );
         assert_eq!(
             existing.entry("k-new").unwrap().resource_id.as_deref(),
             Some("id-new")
@@ -974,19 +977,30 @@ mod tests {
         let uuid_b = "00000000-0000-0000-0000-000000000002";
 
         let mut existing = ExportLedger::new("m");
-        existing.onenote_sections.insert(uuid_a.into(), section_a.clone());
+        existing
+            .onenote_sections
+            .insert(uuid_a.into(), section_a.clone());
 
         let mut incoming = ExportLedger::new("m");
         incoming.onenote_sections.insert(uuid_a.into(), section_b); // conflict — keep existing
-        incoming.onenote_sections.insert(uuid_b.into(), section_c.clone()); // new — add
+        incoming
+            .onenote_sections
+            .insert(uuid_b.into(), section_c.clone()); // new — add
 
         existing.merge_incoming(&incoming);
 
         assert_eq!(existing.onenote_sections[uuid_a].section_name, "Existing");
         assert_eq!(existing.onenote_sections[uuid_b].section_name, "New");
-        existing.onenote_sections.get_mut(uuid_b).unwrap().section_id = None;
+        existing
+            .onenote_sections
+            .get_mut(uuid_b)
+            .unwrap()
+            .section_id = None;
         existing.merge_incoming(&incoming);
-        assert_eq!(existing.onenote_sections[uuid_b].section_id.as_deref(), Some("s3"));
+        assert_eq!(
+            existing.onenote_sections[uuid_b].section_id.as_deref(),
+            Some("s3")
+        );
     }
 
     // ── existing_task_key positional dedup ──────────────────────────────────
