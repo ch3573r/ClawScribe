@@ -1,8 +1,8 @@
 # Microsoft Graph Integration
 
 ClawScribe uses Microsoft Graph as an optional delegated integration for
-calendar context, OneNote export, Planner task export, and Microsoft To Do task
-export. Microsoft auth is separate from OpenAI, OpenClaw, Codex, Ollama, and
+calendar context, OneNote, Planner, Microsoft To Do, and OneDrive or SharePoint
+file export. Microsoft auth is separate from OpenAI, OpenClaw, Codex, Ollama, and
 other summary providers.
 
 ## Current Capabilities
@@ -16,6 +16,7 @@ other summary providers.
   selected task export.
 - Microsoft To Do list discovery, task preview, and selected personal task
   export.
+- OneDrive or SharePoint destination selection and export of reviewed notes as Word or PDF.
 - Connection status surfaced in the integrations/settings UI.
 
 ## Delegated Scopes
@@ -30,6 +31,7 @@ Current scope set:
 - `Notes.ReadWrite.All`
 - `Tasks.ReadWrite`
 - `Calendars.Read`
+- `Files.ReadWrite`
 - `offline_access`
 
 Scope rules:
@@ -37,8 +39,7 @@ Scope rules:
 - Do not add Graph scopes unless code calls the matching endpoint.
 - Teams meeting detection is local process/window detection and does not require
   `OnlineMeetings.*` or `Presence.*`.
-- File access scopes should stay out unless a OneDrive/SharePoint file export
-  feature actually lands.
+- File export uses `Files.ReadWrite` to write documents to the selected destination.
 - Mail scopes should stay out unless an Outlook recap sender actually lands.
 - `Notes.ReadWrite.All` is intentionally broader than basic page creation so
   shared-notebook workflows can work, but it should remain visible in reviews.

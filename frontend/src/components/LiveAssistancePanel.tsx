@@ -143,7 +143,7 @@ export function LiveAssistancePanel() {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(question); }
           }} />
         <div className="flex flex-wrap items-center gap-2"><Button type="submit" disabled={!ready || !question.trim()}>Ask</Button>
-          <Button type="button" variant="outline" disabled={!ready} onClick={() => submit('Summarize the finalized conversation so far. Identify decisions and uncertainty, and acknowledge missing or delayed speech.')}>Summarize so far</Button>
+          <Button type="button" variant="outline" disabled={!ready} onClick={() => submit('Summarize the last 10 minutes of finalized speech. Identify decisions and uncertainty, and acknowledge missing or delayed speech.')}>Summarize the last 10 minutes</Button>
           <Button type="button" variant="outline" disabled={!ready} onClick={() => submit('List open questions from the finalized conversation. Do not invent answers, owners or commitments.')}>List open questions</Button>
           {state.pending && <Button type="button" variant="outline" onClick={actions.cancel}>Cancel</Button>}
         </div>

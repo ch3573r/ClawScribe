@@ -181,7 +181,7 @@ an external answer provider requires **Use selected references for answers** for
 conversation, off by default.
 
 Source also includes a collapsible **Live assistance** panel above the Home
-transcript. Explicitly choose **Ask**, **Summarize so far**, or **List open
+transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
 questions** using the configured summary provider; no provider request runs
 automatically. **Share live transcript with the provider** is off by default
 and remembered for future recordings. Switch it on in Memory settings; the panel
@@ -190,7 +190,7 @@ Selected saved meetings can supplement the current recording. Document selection
 is explicit, and document sharing is independent and resets for each recording.
 The panel and each answer show finalized-through time and incomplete status;
 recent speech may still be catching up. Context covers the last ten minutes of
-finalized backend speech, so “so far” does not mean a complete meeting summary.
+finalized speech.
 Cancel abandons assistance without waiting for the provider. Stop immediately
 clears temporary Live messages; navigation preserves the current request without
 starting another listener. Audio-only recordings and Built-in AI offer saved

@@ -63,7 +63,7 @@ test('existing Retry status shows global verification failure and retries both o
     assert.equal(reads, 3, 'Retry also performs the production Live owner canonical read');
     assert.equal(app.owner.getSnapshot().sessionId, 'session-ui'); assert.equal(app.owner.getSnapshot().snapshotError, null);
     assert.equal(app.owner.getSnapshot().snapshot.transcription_available, true);
-    assert.equal(app.button('Summarize so far').props.disabled, false); assert.equal(app.requests.length, 0);
+    assert.equal(app.button('Summarize the last 10 minutes').props.disabled, false); assert.equal(app.requests.length, 0);
   } finally { app.dispose(); }
 });
 
@@ -87,9 +87,9 @@ test('manual panel stays quiet, reports finalized lag while collapsed, and Enter
 test('each manual action displays the response finalized time and actual provider, even after newer status', async () => {
   const app = await panel();
   try {
-    app.expand(); assert.ok(app.button('Summarize so far')); assert.ok(app.button('List open questions'));
-    app.button('Summarize so far').props.onClick(); await flush();
-    assert.equal(app.requests.length, 1); assert.match(app.requests[0].search.query, /summar/i);
+    app.expand(); assert.ok(app.button('Summarize the last 10 minutes')); assert.ok(app.button('List open questions'));
+    app.button('Summarize the last 10 minutes').props.onClick(); await flush();
+    assert.equal(app.requests.length, 1); assert.match(app.requests[0].search.query, /summar.*last 10 minutes/i);
     assert.match(text(app.render()), /58:20/); assert.match(text(app.render()), /59:00/);
     app.button('List open questions').props.onClick(); await flush(); assert.equal(app.requests.length, 2);
     assert.match(app.requests[1].search.query, /open questions/i); assert.match(text(app.render()), /provider|OpenAI/i);
@@ -108,7 +108,7 @@ test('sharing remains an explicit separate control and unavailable modes offer s
     assert.ok(transcriptControl, 'the live transcript control renders as a child component');
     assert.equal(transcriptControl.props.state.transcriptSharing, false);
     assert.equal(controls.length, 1); assert.equal(controls[0].props.checked, false);
-    assert.equal(app.button('Summarize so far').props.disabled, true); assert.equal(app.requests.length, 0);
+    assert.equal(app.button('Summarize the last 10 minutes').props.disabled, true); assert.equal(app.requests.length, 0);
   } finally { app.dispose(); }
   for (const configuration of [{ available: false }, { provider: 'builtin-ai' }]) {
     const unavailable = await panel(configuration);

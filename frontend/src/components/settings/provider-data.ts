@@ -40,7 +40,7 @@ export function isLocalEndpoint(endpoint?: string | null): boolean {
   return host !== null && isLoopbackHost(host);
 }
 
-const AUDIO: ProviderDataItem = { title: "Audio", detail: "Never leaves this PC", tone: "neutral" };
+const AUDIO: ProviderDataItem = { title: "Audio", detail: "Summary requests do not include audio", tone: "neutral" };
 
 // Uses the same classification as the Privacy page, so the two can never disagree.
 export function describeProviderData(provider: string, ollamaEndpoint?: string | null, customEndpoint?: string | null): ProviderData {
@@ -50,7 +50,7 @@ export function describeProviderData(provider: string, ollamaEndpoint?: string |
     return {
       label,
       local: true,
-      items: [{ title: "Nothing leaves this PC", detail: `Summaries are written on this PC with ${label}`, tone: "neutral" }, AUDIO],
+      items: [{ title: "Local summary processing", detail: `Summaries are written on this PC with ${label}`, tone: "neutral" }, AUDIO],
     };
   }
   const items: ProviderDataItem[] = [

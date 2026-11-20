@@ -6,11 +6,13 @@ interface ConfirmationModalProps {
   onConfirm: () => void;
   onCancel: () => void;
   text: string;
+  title?: string;
+  confirmLabel?: string;
   isOpen: boolean;
   children?: React.ReactNode;
 }
 
-export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children }: ConfirmationModalProps) {
+export function ConfirmationModal({ onConfirm, onCancel, text, title = 'Confirm delete', confirmLabel = 'Delete', isOpen, children }: ConfirmationModalProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
 
@@ -25,7 +27,7 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children 
         onCloseAutoFocus={event => { event.preventDefault(); if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus(); }}
       >
         <DialogHeader>
-          <DialogTitle>Confirm delete</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{text}</DialogDescription>
         </DialogHeader>
         {children}
@@ -38,7 +40,7 @@ export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, children 
           <Button variant="destructive"
             onClick={onConfirm}
           >
-            Delete
+            {confirmLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

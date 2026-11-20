@@ -11,6 +11,7 @@ const reply=(content,count=2)=>({content,provider:'codex',model:'gpt-6.1-sol',re
 const stateFor=answer=>({scope,owner:{kind:'library',id:'saved'},messages:answer?[{id:1,role:'assistant',content:answer.content,status:'completed',reply:answer,created_at:'2026-09-01'}]:[],threads:[],historyLoading:false,sending:false,creating:false,inspect(){},ask:async()=>{}});
 const element=tag=>({children,asChild,node,...props})=>React.createElement(tag,props,children);
 const mocks={
+  '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
   'lucide-react':{Info:element('span'),MoreHorizontal:element('span')},
   '@/services/knowledgeService':{knowledgeService:{history:async()=>[]}},
   '@/components/ui/button':{Button:element('button')},
@@ -70,6 +71,29 @@ function chatSurface(extra={}) {
   });
   return {...hooks,state,render:()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider:'codex',model:'fixture',...extra}))};
 }
+
+test('clearing history requires confirmation for the same conversation', () => {
+  const app = chatSurface();
+  app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];
+  const cleared = [];
+  app.state.clear = async () => { cleared.push(app.state.owner.id); };
+  const requestClear = () => nodes(app.render()).find(node => node.props?.onSelect && text(node) === 'Clear conversation').props.onSelect();
+  const dialog = () => nodes(app.render()).find(node => node.props?.isOpen && node.props?.onConfirm);
+  try {
+    requestClear();
+    assert.deepEqual(cleared, []);
+    assert.match(dialog().props.text, /Launch checklist/);
+    dialog().props.onCancel();
+    assert.equal(dialog(), undefined);
+    assert.deepEqual(cleared, []);
+    requestClear();
+    app.state.owner = {kind:'meeting', id:'other'};
+    assert.equal(dialog(), undefined);
+    requestClear();
+    dialog().props.onConfirm();
+    assert.deepEqual(cleared, ['other']);
+  } finally { app.unmount(); }
+});
 
 test('compact layout isolates configuration from the single conversation scroll area',()=>{
   const context=jsx('context',{}),secondary=jsx('configuration',{}),start=jsx('paperclip',{}),attachments=jsx('chips',{}),menu=jsx('search-mode',{});

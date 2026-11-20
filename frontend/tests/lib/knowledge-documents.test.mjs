@@ -194,6 +194,7 @@ for(const [provider,selectedDocumentIds] of [['codex',[]],['builtin-ai',['select
     const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
       react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
       'lucide-react':{Info:'info',MoreHorizontal:'more'},
+      '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
       '@/services/knowledgeService':{knowledgeService:{}},
       '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},
       '@/components/ui/scroll-area':{ScrollArea:'scroll-area'},

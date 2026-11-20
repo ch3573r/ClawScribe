@@ -911,8 +911,6 @@ pub fn run() {
             api::api_save_model_config,
             api::api_get_api_key_status,
             api::api_clear_api_key,
-            // api::api_get_auto_generate_setting,
-            // api::api_save_auto_generate_setting,
             api::api_get_transcript_config,
             api::api_save_transcript_config,
             api::api_get_transcript_api_key_status,

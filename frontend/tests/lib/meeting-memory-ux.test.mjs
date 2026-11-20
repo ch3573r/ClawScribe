@@ -10,6 +10,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
   const hooks=createHookHarness();const exports=loadTsModule(file,{
     react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'next/navigation':{useRouter:()=>({push(){}})},
     'next/link':'link',
+    '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null,...sidebar})},
     '@/contexts/ImportDialogContext':{useImportDialog:()=>({openImportDialog:sidebar.openImportDialog})},
     '@/contexts/RecordingStateContext':{useRecordingState:()=>({})},

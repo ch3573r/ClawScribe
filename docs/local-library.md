@@ -84,8 +84,6 @@ English and German retrieval; its fixed tokenizer, pooling and 384-dimensional
 vectors must stay compatible with the saved index. ONNX Runtime runs this model
 locally on CPU. The configured summary provider answers questions using the
 retrieved passages; the embedding model itself does not write answers.
-Document and live-assistance controls are outside
-this preview.
 
 Automated helper and native resolver checks cover request ownership and
 canonical navigation. Installed offline retrieval, provider-failure recovery,

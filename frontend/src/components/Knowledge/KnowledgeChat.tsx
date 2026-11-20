@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PageSection } from "@/components/ui/page-section";
+import { ConfirmationModal } from "@/components/ConfirmationModel/confirmation-modal";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { citationParts, contextLinks, scopeReady, MAX_EVIDENCE_ENTRIES } from "@/lib/knowledge-state";
@@ -15,7 +16,7 @@ import { friendlyModel } from "@/lib/friendly-model";
 import { knowledgeService } from "@/services/knowledgeService";
 import { openExternal } from "@/lib/openExternal";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
-import type { AssistantReply, HistoryMessage, SearchMode } from "@/types/knowledge";
+import type { AssistantReply, ConversationOwner, HistoryMessage, SearchMode } from "@/types/knowledge";
 
 function sourceTime(reply: AssistantReply, tag: number) {
   const locator = reply.evidence[tag - 1].locator;
@@ -83,6 +84,8 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
 }) {
   const [question, setQuestion] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [clearTarget, setClearTarget] = useState<ConversationOwner | null>(null);
+  useEffect(() => setClearTarget(null), [state.owner?.kind, state.owner?.id]);
   const [names, setNames] = useState<Record<string, string>>({});
   const [namesLoading, setNamesLoading] = useState(false);
   const [namesError, setNamesError] = useState(false);
@@ -149,7 +152,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
           {compact && headerMenuExtra}
           <DropdownMenuLabel>Conversations</DropdownMenuLabel>
           {state.scope.kind === "library" && <DropdownMenuItem onSelect={() => void state.newConversation()}>New conversation</DropdownMenuItem>}
-          <DropdownMenuItem disabled={!state.messages.length || !state.owner} onSelect={() => { if (state.owner) setNames(current => { const next = { ...current }; delete next[state.owner!.id]; return next; }); void state.clear(); }}>Clear conversation</DropdownMenuItem>
+          <DropdownMenuItem disabled={!state.messages.length || !state.owner} onSelect={() => setClearTarget(state.owner)}>Clear conversation</DropdownMenuItem>
           {state.scope.kind === "library" && <><DropdownMenuSeparator />
             {state.threads.map(owner => <DropdownMenuItem key={owner.id} className="max-w-xs truncate" onSelect={() => state.selectConversation(owner)}>{owner.id === state.owner?.id ? conversationName(state.messages) : names[owner.id] ?? "Loading conversation…"}</DropdownMenuItem>)}
             {!state.threads.length && <DropdownMenuLabel>No saved conversations</DropdownMenuLabel>}
@@ -160,6 +163,17 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       </DropdownMenu>
       {headerActions}
     </header>
+    {clearTarget && clearTarget.kind === state.owner?.kind && clearTarget.id === state.owner.id &&
+      <ConfirmationModal isOpen title="Clear conversation?" confirmLabel="Clear conversation"
+        text={`Remove all messages and saved citations from “${conversationName(state.messages)}”?`}
+        onCancel={() => setClearTarget(null)}
+        onConfirm={() => {
+          setClearTarget(null);
+          if (state.sending || state.creating || state.historyLoading) return;
+          setNames(current => { const next = { ...current }; delete next[clearTarget.id]; return next; });
+          void state.clear();
+        }}
+      />}
     {compact && contextBar && <div className="shrink-0 border-b border-border px-3 py-1">{contextBar}</div>}
     <ScrollArea className={`min-h-0 flex-1 ${emptyState ? "[&_[data-radix-scroll-area-viewport]>div]:h-full" : ""}`}>
       <div className={`space-y-4 ${compact ? "p-3" : "p-5"} ${emptyState ? "flex h-full flex-col" : ""}`} aria-live="polite">
