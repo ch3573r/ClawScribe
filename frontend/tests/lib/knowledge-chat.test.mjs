@@ -95,6 +95,33 @@ test('clearing history requires confirmation for the same conversation', () => {
   } finally { app.unmount(); }
 });
 
+test('clearing names the opening trigger and cannot close silently while the conversation is busy', () => {
+  const app = chatSurface();
+  app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];
+  const cleared = [];
+  app.state.clear = async () => { cleared.push(app.state.owner.id); };
+  const clearItem = () => nodes(app.render()).find(node => node.props?.onSelect && text(node) === 'Clear conversation');
+  const dialog = () => nodes(app.render()).find(node => node.props?.isOpen && node.props?.onConfirm);
+  const trigger = () => nodes(app.render()).find(node => node.type === 'button' && /Conversations|More options/.test(node.props?.['aria-label'] ?? ''));
+  try {
+    assert.equal(clearItem().props.disabled, false);
+    clearItem().props.onSelect();
+    assert.equal(dialog().props.returnFocus, trigger().props.ref, 'focus returns to the visible Conversations trigger');
+    assert.equal(dialog().props.confirmDisabled, false);
+    app.state.sending = true;
+    assert.equal(dialog().props.confirmDisabled, true);
+    assert.match(dialog().props.text, /Wait for the current answer/);
+    assert.equal(clearItem().props.disabled, true);
+    dialog().props.onConfirm();
+    assert.ok(dialog(), 'the confirmation stays open instead of closing with nothing done');
+    assert.deepEqual(cleared, []);
+    app.state.sending = false;
+    dialog().props.onConfirm();
+    assert.deepEqual(cleared, ['saved']);
+    assert.equal(dialog(), undefined);
+  } finally { app.unmount(); }
+});
+
 test('compact layout isolates configuration from the single conversation scroll area',()=>{
   const context=jsx('context',{}),secondary=jsx('configuration',{}),start=jsx('paperclip',{}),attachments=jsx('chips',{}),menu=jsx('search-mode',{});
   const app=chatSurface({compact:true,contextBar:context,secondary,composerStart:start,attachments,headerMenuExtra:menu});

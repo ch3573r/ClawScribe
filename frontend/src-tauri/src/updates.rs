@@ -3,56 +3,177 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{sync::Mutex, time::Duration};
-use tauri::{AppHandle, Manager, ResourceId, Runtime, Webview};
+use tauri::{ipc::Channel, AppHandle, Manager, ResourceId, Runtime, Webview};
 use tauri_plugin_store::StoreExt;
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 const RELEASES_API: &str = "https://api.github.com/repos/ch3573r/ClawScribe/releases?per_page=100";
 const DOWNLOAD_ROOT: &str = "https://github.com/ch3573r/ClawScribe/releases/download/";
 const MAX_RELEASE_BYTES: usize = 4 * 1024 * 1024;
 static PREFERENCE_LOCK: Mutex<()> = Mutex::new(());
 
-// Summaries from remote providers can run alongside each other and audio work.
-// Installation needs both their shared gate and the existing native job slot.
-static SUMMARY_INSTALL_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+// Summaries, saved answers and Microsoft or Confluence exports can run beside
+// each other and beside audio work. They share this gate; installation needs
+// the exclusive side plus the native job slot (recording, transcription, import,
+// library backup). Rust owns every permit below. Nothing is parked in a
+// webview resource, so a page reload can neither strand nor release one.
+static WORK_INSTALL_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+const BUSY_MESSAGE: &str = "Wait for recording, transcription, summaries, answers, or exports to finish before installing.";
 
-pub(crate) fn admit_summary() -> Result<tokio::sync::RwLockReadGuard<'static, ()>, String> {
-    SUMMARY_INSTALL_GATE
+/// Admission for durable or outbound work that an installer restart would cut off.
+pub(crate) fn admit_work() -> Result<tokio::sync::RwLockReadGuard<'static, ()>, String> {
+    WORK_INSTALL_GATE
         .try_read()
         .map_err(|_| "ClawScribe is installing an update. Try again after it restarts.".into())
 }
 
 struct UpdateInstallPermit {
-    _summaries: tokio::sync::RwLockWriteGuard<'static, ()>,
+    _work: tokio::sync::RwLockWriteGuard<'static, ()>,
     _native: tokio::sync::OwnedSemaphorePermit,
 }
 
-impl tauri::Resource for UpdateInstallPermit {}
-
 impl UpdateInstallPermit {
     fn acquire() -> Result<Self, String> {
-        let summaries = SUMMARY_INSTALL_GATE
-            .try_write()
-            .map_err(|_| "Wait for the current summary or update to finish before installing.")?;
-        let native = crate::audio::inference::claim_job().map_err(|_| {
-            "Wait for recording, transcription, or other library work to finish before installing."
-        })?;
+        let work = WORK_INSTALL_GATE.try_write().map_err(|_| BUSY_MESSAGE)?;
+        let native = crate::audio::inference::claim_job().map_err(|_| BUSY_MESSAGE)?;
         Ok(Self {
-            _summaries: summaries,
+            _work: work,
             _native: native,
         })
     }
 }
 
-#[tauri::command]
-pub fn check_update_install_ready() -> Result<(), String> {
-    UpdateInstallPermit::acquire().map(drop)
+// The installer is bounded in memory and tied to the exact checked release.
+const MAX_INSTALLER_BYTES: u64 = 1024 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+struct StagedUpdate {
+    rid: ResourceId,
+    update: Update,
+    bytes: Vec<u8>,
 }
 
+// At most one verified installer is held, owned by Rust rather than the webview.
+static STAGED: Mutex<Option<StagedUpdate>> = Mutex::new(None);
+static DOWNLOAD_FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn staged() -> std::sync::MutexGuard<'static, Option<StagedUpdate>> {
+    STAGED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn over_installer_cap(content_length: Option<u64>, received: u64) -> bool {
+    content_length.is_some_and(|length| length > MAX_INSTALLER_BYTES)
+        || received > MAX_INSTALLER_BYTES
+}
+
+fn installer_url_allowed(url: &str) -> bool {
+    url.starts_with(DOWNLOAD_ROOT)
+}
+
+fn install_error(error: &tauri_plugin_updater::Error) -> String {
+    use tauri_plugin_updater::Error;
+    match error {
+        Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied || io.raw_os_error() == Some(5) => {
+            "Windows blocked the installer. Ask your administrator to review the device security policy.".into()
+        }
+        Error::Minisign(_) | Error::Base64(_) | Error::SignatureUtf8(_) => {
+            "The update signature could not be verified. Try again later.".into()
+        }
+        Error::Reqwest(_) | Error::Network(_) => {
+            "The update could not be downloaded. Check your connection and try again.".into()
+        }
+        _ => "The update could not be installed. Try again.".into(),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "event", content = "data")]
+pub enum DownloadEvent {
+    #[serde(rename_all = "camelCase")]
+    Started { content_length: Option<u64> },
+    #[serde(rename_all = "camelCase")]
+    Progress { chunk_length: usize },
+}
+
+/// Downloads and signature-verifies the checked update without blocking other
+/// work. The verified bytes stay in Rust until [`install_app_update`].
 #[tauri::command]
-pub fn reserve_update_install<R: Runtime>(webview: Webview<R>) -> Result<ResourceId, String> {
+pub async fn download_app_update<R: Runtime>(
+    webview: Webview<R>,
+    rid: ResourceId,
+    on_event: Channel<DownloadEvent>,
+) -> Result<(), String> {
+    let _flight = DOWNLOAD_FLIGHT
+        .try_lock()
+        .map_err(|_| "An update download is already running. Wait for it to finish.")?;
+    staged().take();
+    // Fail early instead of downloading a large installer that cannot be used.
+    drop(UpdateInstallPermit::acquire()?);
+    let update = webview
+        .resources_table()
+        .get::<Update>(rid)
+        .map_err(|_| "The selected update is no longer available. Check for updates again.")?;
+    if !installer_url_allowed(update.download_url.as_str()) {
+        return Err("The release metadata does not match its installer. Try again after the release is corrected.".into());
+    }
+    let mut update = (*update).clone();
+    update.timeout = Some(DOWNLOAD_TIMEOUT);
+
+    let over = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = over.clone();
+    let (mut received, mut first) = (0u64, true);
+    let download = update.download(
+        move |chunk_length, content_length| {
+            if first {
+                first = false;
+                let _ = on_event.send(DownloadEvent::Started { content_length });
+            }
+            received = received.saturating_add(chunk_length as u64);
+            if over_installer_cap(content_length, received) {
+                signal.notify_one();
+                return;
+            }
+            let _ = on_event.send(DownloadEvent::Progress { chunk_length });
+        },
+        || {},
+    );
+    // Dropping the download future stops reading and frees its buffer.
+    let bytes = tokio::select! {
+        result = download => result.map_err(|error| install_error(&error))?,
+        _ = over.notified() => return Err("The update download is larger than expected and was stopped.".into()),
+    };
+    *staged() = Some(StagedUpdate { rid, update, bytes });
+    Ok(())
+}
+
+/// Installs the exact bytes staged for `rid`. The permit lives on this task, so
+/// it covers the whole installer hand-off, survives a page reload, and is
+/// released when the installer fails; on success the installer ends the process.
+#[tauri::command]
+pub async fn install_app_update(rid: ResourceId) -> Result<(), String> {
+    let staged = {
+        let mut slot = staged();
+        match slot.take() {
+            Some(found) if found.rid == rid => found,
+            _ => {
+                return Err(
+                    "The downloaded update is no longer available. Check for updates again.".into(),
+                )
+            }
+        }
+    };
     let permit = UpdateInstallPermit::acquire()?;
-    Ok(webview.resources_table().add(permit))
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        staged
+            .update
+            .install(&staged.bytes)
+            .map_err(|error| install_error(&error))
+    })
+    .await
+    .map_err(|_| "The installer stopped unexpectedly. Try again.".to_string())?
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -105,6 +226,7 @@ pub fn set_update_channel<R: Runtime>(
         }
         return Err("Could not save the update channel. Your previous choice is unchanged.".into());
     }
+    staged().take();
     Ok(())
 }
 
@@ -264,6 +386,8 @@ pub struct UpdateCheck {
 
 #[tauri::command]
 pub async fn check_app_update<R: Runtime>(webview: Webview<R>) -> Result<UpdateCheck, String> {
+    // A new check supersedes any installer staged for an earlier result.
+    staged().take();
     let app = webview.app_handle();
     let channel = get_update_channel(app.clone())?;
     let builder = webview
@@ -364,6 +488,42 @@ mod tests {
         drop(update);
         assert!(claim_job().is_ok());
         assert!(SummaryService::register_job(meeting, "openai").is_ok());
+    }
+
+    #[test]
+    fn installer_download_is_bounded_and_limited_to_release_assets() {
+        assert!(!over_installer_cap(
+            Some(MAX_INSTALLER_BYTES),
+            MAX_INSTALLER_BYTES
+        ));
+        assert!(over_installer_cap(Some(MAX_INSTALLER_BYTES + 1), 0));
+        assert!(over_installer_cap(None, MAX_INSTALLER_BYTES + 1));
+        assert!(installer_url_allowed(&format!(
+            "{DOWNLOAD_ROOT}v1.2.3/ClawScribe_1.2.3_x64-setup.exe"
+        )));
+        assert!(!installer_url_allowed(
+            "https://example.com/ClawScribe_1.2.3_x64-setup.exe"
+        ));
+        assert!(!installer_url_allowed(&format!(
+            "{}x",
+            DOWNLOAD_ROOT.trim_end_matches('/')
+        )));
+    }
+
+    #[tokio::test]
+    async fn work_admission_waits_for_install_permit_and_never_outlives_it() {
+        use crate::audio::inference::GLOBAL_JOB_TEST_LOCK;
+
+        let _serial = GLOBAL_JOB_TEST_LOCK.lock().await;
+        let work = admit_work().unwrap();
+        assert!(UpdateInstallPermit::acquire().is_err());
+        drop(work);
+        // A failed installer drops its permit, so no job is stranded.
+        let permit = UpdateInstallPermit::acquire().unwrap();
+        assert!(admit_work().is_err());
+        drop(permit);
+        assert!(admit_work().is_ok());
+        assert!(UpdateInstallPermit::acquire().is_ok());
     }
 
     fn release(tag: &str, prerelease: bool) -> GithubRelease {

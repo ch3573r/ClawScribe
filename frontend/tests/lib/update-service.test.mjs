@@ -10,31 +10,23 @@ function deferred() {
 }
 
 function fixture(channel = 'stable') {
-  const calls = { checks: 0, downloads: [], installs: [], closed: [], relaunches: 0 };
-  const control = { channel, check: null, saveError: null, download: null, recording: false, backgroundJob: false, reserved: false, installError: null };
+  const calls = { checks: 0, downloads: [], installs: [], closed: [], relaunches: 0, native: [] };
+  const control = { channel, check: null, saveError: null, download: null, recording: false, backgroundJob: false, installError: null, closeError: null };
   const result = (rid = 1, selected = control.channel) => ({
     channel: selected,
     update: { rid, currentVersion: '0.5.36', version: '0.5.37', prerelease: selected === 'preview', rawJson: {} },
   });
+  // The webview never downloads or installs through the plugin: that would
+  // bypass the native job exclusion and keep the installer in the page.
   class FakeUpdate {
     constructor(metadata) { Object.assign(this, metadata); }
-    async close() { calls.closed.push(this.rid); }
-    async download(progress) {
-      calls.downloads.push(this.rid);
-      progress({ event: 'Started', data: { contentLength: 200 } });
-      progress({ event: 'Progress', data: { chunkLength: 200 } });
-      if (control.download) await control.download();
-    }
-    async install() {
-      assert.equal(control.reserved, true, 'installation requires native job exclusion');
-      if (control.installError) throw control.installError;
-      calls.installs.push(this.rid);
-    }
+    async close() { calls.closed.push(this.rid); if (control.closeError) throw control.closeError; }
+    async download() { throw new Error('The page must not download through the plugin'); }
+    async install() { throw new Error('The page must not install through the plugin'); }
   }
   const { UpdateService } = loadTsModule('src/services/updateService.ts', {
-    '@tauri-apps/api/core': { Resource: class {
-      async close() { assert.equal(control.reserved, true); control.reserved = false; }
-    }, invoke: async (command, args) => {
+    '@tauri-apps/api/core': { Channel: class { onmessage = () => {}; }, invoke: async (command, args) => {
+      calls.native.push(command);
       if (command === 'get_update_channel') return control.channel;
       if (command === 'set_update_channel') {
         if (control.saveError) throw control.saveError;
@@ -42,12 +34,19 @@ function fixture(channel = 'stable') {
         return;
       }
       if (command === 'is_recording') return control.recording;
-      if (command === 'reserve_update_install' || command === 'check_update_install_ready') {
+      if (command === 'download_app_update') {
         if (control.backgroundJob) throw new Error('Finish the active job before installing.');
-        assert.equal(control.reserved, false);
-        if (command === 'check_update_install_ready') return;
-        control.reserved = true;
-        return 700;
+        calls.downloads.push(args.rid);
+        args.onEvent.onmessage({ event: 'Started', data: { contentLength: 200 } });
+        args.onEvent.onmessage({ event: 'Progress', data: { chunkLength: 200 } });
+        if (control.download) await control.download();
+        return;
+      }
+      if (command === 'install_app_update') {
+        if (control.backgroundJob) throw new Error('Finish the active job before installing.');
+        if (control.installError) throw control.installError;
+        calls.installs.push(args.rid);
+        return;
       }
       if (command === 'check_app_update') {
         ++calls.checks;
@@ -57,7 +56,7 @@ function fixture(channel = 'stable') {
     } },
     '@tauri-apps/api/app': { getVersion: async () => '0.5.36' },
     '@tauri-apps/plugin-updater': { Update: FakeUpdate },
-    '@tauri-apps/plugin-process': { relaunch: async () => { assert.equal(control.reserved, true); ++calls.relaunches; } },
+    '@tauri-apps/plugin-process': { relaunch: async () => { ++calls.relaunches; } },
   });
   return { service: new UpdateService(), control, calls, result };
 }
@@ -209,15 +208,13 @@ test('an active background job before or during download preserves work and perm
     const f = fixture();
     f.control.backgroundJob = timing === 'before';
     f.control.download = () => {
-      assert.equal(f.control.reserved, false, 'work may start during the download');
-      f.control.backgroundJob = true;
+        f.control.backgroundJob = true;
     };
     const info = await f.service.checkForUpdates();
     await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => true), /active job/);
     assert.equal(f.calls.downloads.length, timing === 'before' ? 0 : 1);
     assert.deepEqual(f.calls.installs, []);
     assert.equal(f.calls.relaunches, 0);
-    assert.equal(f.control.reserved, false);
     f.control.backgroundJob = false;
     f.control.download = null;
     const retry = await f.service.checkForUpdates(true);
@@ -226,11 +223,33 @@ test('an active background job before or during download preserves work and perm
   }
 });
 
-test('installer failure releases native job exclusion without relaunching', async () => {
+test('install hands the exact checked resource to native code in order, with progress', async () => {
+  const f = fixture('preview');
+  f.control.check = () => f.result(42);
+  const info = await f.service.checkForUpdates();
+  const progress = [];
+  await f.service.downloadAndInstall(info, p => progress.push(p), () => true);
+  assert.deepEqual(f.calls.native.filter(c => /_app_update$/.test(c) && c !== 'check_app_update'), ['download_app_update', 'install_app_update']);
+  assert.deepEqual(progress.map(p => p.phase), ['downloading', 'downloading', 'installing']);
+  assert.equal(progress[1].percentage, 100);
+});
+
+test('installer failure never relaunches and keeps the original error when cleanup also fails', async () => {
   const f = fixture();
   const info = await f.service.checkForUpdates();
   f.control.installError = new Error('Installer failed');
+  f.control.closeError = new Error('Close failed');
   await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => true), /Installer failed/);
-  assert.equal(f.control.reserved, false);
+  assert.match(f.service.getSnapshot().error, /Installer failed/);
+  assert.equal(f.service.getSnapshot().isInstalling, false);
   assert.equal(f.calls.relaunches, 0);
+});
+
+test('page state changing after the download still blocks the installer hand-off', async () => {
+  const f = fixture();
+  let allowed = true;
+  const info = await f.service.checkForUpdates();
+  f.control.download = () => { allowed = false; };
+  await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => allowed), /Finish recording/);
+  assert.deepEqual(f.calls.installs, []);
 });

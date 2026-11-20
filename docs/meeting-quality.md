@@ -91,8 +91,10 @@ Live transcription failures produce one user-facing failure notice per recording
 later failures do not repeat it. Live wall-clock timestamps use local time.
 
 The **Live assistance** preview panel uses finalized backend speech from the
-latest ten-minute context window. **Summarize the last 10 minutes** summarizes that bounded
-context, which may omit earlier discussion and recent untranscribed speech.
+context window, a fixed span of up to ten minutes ending at the finalized-through
+time. It is shorter early in a recording or when the segment or size limit
+applies. **Summarize the last 10 minutes** summarizes that bounded context, which
+may omit earlier discussion and recent untranscribed speech.
 Current finalized-through time remains visible while collapsed, and each answer
 shows its own timestamp and incomplete status. Assistance/provider errors are
 separate from the recording health banner; they do not certify or change capture

@@ -92,6 +92,8 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const [namesRetry, setNamesRetry] = useState(0);
   const [settled, setSettled] = useState(0);
   const end = useRef<HTMLDivElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const busy = state.sending || state.creating || state.historyLoading;
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const pending = useRef<{ text: string; scope: string; owner?: string; provider?: string; model?: string; started: boolean; finished: boolean } | null>(null);
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
@@ -147,12 +149,12 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
       <h2 className={`min-w-0 flex-1 font-semibold ${compact ? "text-sm" : ""}`}>{title}</h2>
       <TooltipProvider><Tooltip><TooltipTrigger asChild><span tabIndex={0} className="max-w-48 truncate rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{friendlyModel(model)}</span></TooltipTrigger><TooltipContent>{model || "Choose a model"}</TooltipContent></Tooltip></TooltipProvider>
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={compact ? "More options" : "Conversations"} disabled={state.sending || state.creating || state.historyLoading}><MoreHorizontal /></Button></DropdownMenuTrigger>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button ref={menuTrigger} variant="ghost" size="icon" aria-label={compact ? "More options" : "Conversations"} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="max-w-sm">
           {compact && headerMenuExtra}
           <DropdownMenuLabel>Conversations</DropdownMenuLabel>
           {state.scope.kind === "library" && <DropdownMenuItem onSelect={() => void state.newConversation()}>New conversation</DropdownMenuItem>}
-          <DropdownMenuItem disabled={!state.messages.length || !state.owner} onSelect={() => setClearTarget(state.owner)}>Clear conversation</DropdownMenuItem>
+          <DropdownMenuItem disabled={!state.messages.length || !state.owner || busy} onSelect={() => setClearTarget(state.owner)}>Clear conversation</DropdownMenuItem>
           {state.scope.kind === "library" && <><DropdownMenuSeparator />
             {state.threads.map(owner => <DropdownMenuItem key={owner.id} className="max-w-xs truncate" onSelect={() => state.selectConversation(owner)}>{owner.id === state.owner?.id ? conversationName(state.messages) : names[owner.id] ?? "Loading conversation…"}</DropdownMenuItem>)}
             {!state.threads.length && <DropdownMenuLabel>No saved conversations</DropdownMenuLabel>}
@@ -165,11 +167,13 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
     </header>
     {clearTarget && clearTarget.kind === state.owner?.kind && clearTarget.id === state.owner.id &&
       <ConfirmationModal isOpen title="Clear conversation?" confirmLabel="Clear conversation"
-        text={`Remove all messages and saved citations from “${conversationName(state.messages)}”?`}
+        text={`Remove all messages and saved citations from “${conversationName(state.messages)}”?${busy ? " Wait for the current answer to finish." : ""}`}
+        returnFocus={menuTrigger} confirmDisabled={busy}
         onCancel={() => setClearTarget(null)}
         onConfirm={() => {
+          // Stay open instead of closing with nothing done.
+          if (busy) return;
           setClearTarget(null);
-          if (state.sending || state.creating || state.historyLoading) return;
           setNames(current => { const next = { ...current }; delete next[clearTarget.id]; return next; });
           void state.clear();
         }}

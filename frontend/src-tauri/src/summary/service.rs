@@ -325,7 +325,7 @@ pub struct SummaryService;
 
 impl SummaryService {
     pub(crate) fn register_job(meeting_id: &str, provider: &str) -> Result<SummaryJob, String> {
-        let install_guard = crate::updates::admit_summary()?;
+        let install_guard = crate::updates::admit_work()?;
         let mut registry = CANCELLATION_REGISTRY
             .lock()
             .map_err(|_| "Could not lock summary jobs")?;

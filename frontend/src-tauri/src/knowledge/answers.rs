@@ -62,6 +62,8 @@ impl AnswerRegistry {
         request: &AskRequest,
     ) -> Result<RequestLease, String> {
         let owner = conversations::owner_key(&request.owner)?;
+        // An installer restart would cut off the provider call and its durable record.
+        let install = crate::updates::admit_work()?;
         let mut active = self
             .active
             .lock()
@@ -87,6 +89,7 @@ impl AnswerRegistry {
             entry,
             operation_deadline: None,
             settled: false,
+            install: Some(install),
         })
     }
     #[cfg(test)]
@@ -114,6 +117,7 @@ struct RequestLease {
     entry: Arc<ActiveAnswer>,
     operation_deadline: Option<tokio::time::Instant>,
     settled: bool,
+    install: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
 }
 impl RequestLease {
     fn cleanup_deadline(&self) -> tokio::time::Instant {
@@ -132,10 +136,13 @@ impl Drop for RequestLease {
             let pool = self.pool.clone();
             let id = self.id.clone();
             let registry = self.registry.clone();
+            // The cancellation write is durable work too: keep the gate until it ends.
+            let install = self.install.take();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 // The bounded registry entry owns pending durable cancellation
                 // even when the invoking task disappears while the DB is busy.
                 runtime.spawn(async move {
+                    let _install = install;
                     let _ = conversations::cancel(&pool, &id).await;
                     if let Ok(mut active) = registry.active.lock() {
                         active.remove(&id);

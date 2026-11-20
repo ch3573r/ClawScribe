@@ -61,7 +61,6 @@
                         "notification:default",
                         "notification:allow-is-permission-granted",
                         "dialog:allow-message",
-                        "updater:default",
                         "process:default"
                     ]
                 }

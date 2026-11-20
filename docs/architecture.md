@@ -765,9 +765,11 @@ Producer ingestion preserves partial/final status: only non-empty finalized
 segments enter live context, including short, low-confidence responses. A failed
 start clears only its own session. The snapshot comes from the backend manager,
 with finalized-through recording time, transcript availability, and capture or
-transcription backlog/incompleteness. Context covers the latest ten minutes of
-finalized text, capped at 1,024 segments and 256 KiB; segment bodies are at most
-2,048 UTF-8 bytes. Capacity truncation is disclosed.
+transcription backlog/incompleteness. Context is a fixed window (not a setting)
+of up to ten minutes of recording time ending at the finalized-through time,
+capped at 1,024 segments and 256 KiB; segment bodies are at most 2,048 UTF-8
+bytes. The window is shorter early in a recording or when a cap applies; capacity
+truncation is disclosed.
 
 `knowledge_ask` accepts matching Live owner/scope IDs and one request UUID. It
 permits one request per recording in flight, limits setup through delivery to
@@ -828,7 +830,7 @@ state, and later canonical reloads can recover a fresh producer.
 
 The collapsible Home panel sits within the existing transcript scroll view,
 preserving recording controls and the global recording health banner. Ask,
-Summarize so far and List open questions are manual actions with one flight and
+Summarize the last 10 minutes and List open questions are manual actions with one flight and
 Cancel. Current metadata stays visible while collapsed; each answer retains its
 own finalized-through/incomplete snapshot and actual provider. Saved meetings
 and documents require explicit selection. The remembered live-transcript switch

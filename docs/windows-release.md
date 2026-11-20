@@ -424,10 +424,16 @@ and installer location, then returns a Tauri updater resource to the shared UI
 service. The dialog installs that exact checked release without a second stable
 check. Both channels use the existing pinned updater public key and Tauri's
 signature verification. Changing channels invalidates cached and in-flight
-results; leaving previews never downgrades an installed build. An update can
-install once recording, transcription, speaker detection, indexing and summaries finish.
-A job can start during the download. If it does, try the update again after
-the job finishes. Device security policy still applies
+results; leaving previews never downgrades an installed build. The native
+application downloads and signature-checks the installer itself (at most 1 GiB,
+held in memory, never handed to the page) and keeps the verified bytes until the
+install step, so a page reload cannot change what is installed. An update can
+install once recording, transcription, speaker detection, indexing, summaries,
+saved answers and Microsoft 365 or Confluence exports finish. Work can start
+during the download. If it does, the install step stops without losing that work;
+try the update again after it finishes. The exclusion is held by the native
+application for the whole installer hand-off and released if the installer
+fails, so it cannot be stranded by a reload. Device security policy still applies
 to the installer; selecting a channel does not bypass Windows security blocks.
 
 To distribute a preview, stage a draft, verify its assets, then publish it as a

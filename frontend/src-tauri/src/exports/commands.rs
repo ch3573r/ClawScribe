@@ -326,6 +326,22 @@ pub(crate) fn export_ledger_dir<R: Runtime>(
 // The desktop app is single-instance. Serialize ledger owners across export dialogs.
 static EXPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Serializes ledger owners and keeps an installer restart from interrupting
+/// an outbound write or its ledger checkpoint.
+fn export_guard() -> Result<
+    (
+        tokio::sync::RwLockReadGuard<'static, ()>,
+        tokio::sync::MutexGuard<'static, ()>,
+    ),
+    String,
+> {
+    let work = crate::updates::admit_work()?;
+    let export = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    Ok((work, export))
+}
+
 /// An unreadable history must never silently disable duplicate protection.
 async fn load_ledger<R: Runtime>(
     app: &AppHandle<R>,
@@ -429,9 +445,7 @@ pub async fn export_to_onenote<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     let ctx = ExportContext {
@@ -478,9 +492,7 @@ pub async fn export_to_planner<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
     let destination = PlannerDestination { plan_id, bucket_id };
 
@@ -535,9 +547,7 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     let ctx = ExportContext {
@@ -615,9 +625,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
 
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
     ledger.checkpoint().await?;
 
@@ -694,9 +702,7 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
     let destination = PlannerDestination { plan_id, bucket_id };
 
@@ -846,9 +852,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
     let mut expired = false;
     // One ledger for the whole meeting, shared across buckets, so re-exporting
     // the same reviewed tasks skips ones already created in Planner.
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     for (bucket_id, group) in by_bucket {
@@ -977,9 +981,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         summary_html: None,
     };
     let destination = ToDoDestination { list_id };
-    let _export_guard = EXPORT_LOCK
-        .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+    let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
     let report = exporter::export_todo(&client, &mut ledger, &meeting_export, &destination, &ctx)
         .await
@@ -1156,6 +1158,7 @@ pub async fn export_meeting_to_onedrive_files(
     state: tauri::State<'_, MicrosoftAuthState>,
     request: files::OneDriveExportRequest,
 ) -> Result<files::OneDriveExportResponse, String> {
+    let _work = crate::updates::admit_work()?;
     let (token, _, _) = get_token_and_context(&state, "Files.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());

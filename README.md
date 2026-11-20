@@ -189,8 +189,10 @@ shows during a recording only while it is on.
 Selected saved meetings can supplement the current recording. Document selection
 is explicit, and document sharing is independent and resets for each recording.
 The panel and each answer show finalized-through time and incomplete status;
-recent speech may still be catching up. Context covers the last ten minutes of
-finalized speech.
+recent speech may still be catching up. Context is a fixed window of up to ten
+minutes of finalized speech, ending at the finalized-through time. It is shorter
+early in a recording or when the segment or size limit applies, and the answer
+says so.
 Cancel abandons assistance without waiting for the provider. Stop immediately
 clears temporary Live messages; navigation preserves the current request without
 starting another listener. Audio-only recordings and Built-in AI offer saved
