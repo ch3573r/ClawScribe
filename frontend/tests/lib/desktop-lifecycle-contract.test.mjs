@@ -85,7 +85,11 @@ test('the power request is narrow, bounded and released on every way out', () =>
   for (const file of ['tray.rs', 'lib.rs', 'exit_guard.rs', 'start_request.rs']) {
     assert.doesNotMatch(rust(file), /SetThreadExecutionState/, `${file} leaves power requests to power.rs`);
   }
-  assert.match(lib, /tauri::RunEvent::Exit => \{\n\s*log::info!\("Application exiting, cleaning up resources\.\.\."\);\n\s*power::release\(\);/);
+  const exit = lib.split('tauri::RunEvent::Exit => {')[1];
+  assert.match(exit, /if windows_lifecycle::session_ending\(\) \{[^}]*return;[^}]*\}/,
+    'Windows session end can return immediately and release the request with the process');
+  assert.match(exit, /log::info!\("Application exiting, cleaning up resources\.\.\."\);\s*power::release\(\);\s*tauri::async_runtime::block_on/,
+    'normal exits explicitly release the request before database cleanup');
   assert.match(rust('tray.rs'), /crate::power::reconcile\(/);
   assert.match(read('src-tauri/Cargo.toml'), /"Win32_System_Power"/);
 });

@@ -78,6 +78,8 @@ pub mod tray;
 pub mod updates;
 pub mod utils;
 pub mod whisper_engine;
+#[cfg(windows)]
+mod windows_lifecycle;
 
 use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
 use log::{error as log_error, info as log_info};
@@ -666,6 +668,8 @@ pub fn run() {
                 return Ok(());
             }
             log::info!("Application setup complete");
+            #[cfg(windows)]
+            windows_lifecycle::install(_app.handle());
 
             // What an earlier version already had becomes trusted, once, before
             // any window exists and after the database is open: the recordings
@@ -1205,6 +1209,12 @@ pub fn run() {
                     exit_guard::handle_exit_request(_app_handle, code, || api.prevent_exit());
                 }
                 tauri::RunEvent::Exit => {
+                    #[cfg(windows)]
+                    if windows_lifecycle::session_ending() {
+                        // Tao can dispatch Exit synchronously from WM_ENDSESSION.
+                        // Windows will release the wake lease with the process.
+                        return;
+                    }
                     log::info!("Application exiting, cleaning up resources...");
                     power::release();
                     tauri::async_runtime::block_on(async {

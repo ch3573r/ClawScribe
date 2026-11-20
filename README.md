@@ -86,6 +86,9 @@ is not brought to the front. See
   leaves the recording available in **Interrupted recordings** if the library
   write fails. Recovery originals use about 700 MB per hour while recording. Choose a local
   folder with enough space. See [recording and recovery](docs/meeting-quality.md).
+- On Windows, a sleep notification asks ClawScribe to save the current recording.
+  Sign-out and shutdown use the recording recovery files if Windows closes the
+  app before it can finish. See [Windows sleep and sign-out](docs/tray-and-recording-control.md#windows-sleep-sign-out-and-shutdown).
 - Correct transcript passages or preview literal find-and-replace across the
   entire meeting. Original recognition and segment timing are retained; undo
   restores previous corrections. Regenerate notes after correcting a transcript.

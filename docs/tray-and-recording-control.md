@@ -54,6 +54,46 @@ meeting could suspend in the middle of the recording.
 
 `powercfg /requests` lists the request under ClawScribe while it is held.
 
+## Windows sleep, sign-out and shutdown
+
+When Windows reports that it is going to sleep, ClawScribe asks its recorder to
+save the current session, including a paused session. Windows can sleep while
+the save is pending. The save can continue after wake, and the old session
+does not restart automatically. Sleep during active capture flags a possible
+gap in the saved audio. If an audio driver prevents Stop from completing,
+ClawScribe asks you to retry Stop and keeps the available audio on disk.
+You can generate notes from the saved meeting. A wake notice reopens recording
+admission. It cannot identify which recording was running if Windows did not
+deliver a sleep notice.
+
+When Windows asks to sign out or shut down, ClawScribe requests a transcript
+recovery snapshot and acknowledges the request immediately. A canceled sign-out
+can leave the recording running. Windows may close the app before the snapshot
+or the latest audio buffers reach disk. The audio already written to the
+recovery spool remains available through **Interrupted recordings**. The same
+recovery applies if the process ends between notifications or without warning.
+If the recording had audio saving disabled, recovery depends on the transcript
+snapshots that reached disk.
+
+### Implementation and synthetic checks
+
+The locked Tao 0.35.2 Windows event loop
+(`src/platform_impl/windows/event_loop.rs`) ignores `WM_QUERYENDSESSION` and
+dispatches loop destruction on a confirmed `WM_ENDSESSION`. Tauri Runtime Wry
+2.11.1 (`src/lib.rs`, `handle_event_loop`) maps that to `RunEvent::Exit`,
+bypassing the normal `ExitRequested` recording gate. It maps `RunEvent::Resumed`
+from `NewEvents(StartCause::Poll)`. The pinned Windows event loop has no
+`WM_POWERBROADCAST` handler for Windows suspend and wake.
+
+ClawScribe listens on its own top-level window. The callback queues work and
+returns before the worker requests any checkpoint or Stop. System session end
+skips ClawScribe's synchronous normal-exit cleanup. The Windows shutdown metric
+covers delivery to Tao's separate window ahead of ClawScribe's window.
+
+On the designated runner, `cargo test -p clawscribe --lib windows_lifecycle::tests`
+exercises the message mappings, start admission, stale work and duplicate
+signals with synthetic messages.
+
 ## Windows smoke checks
 
 On the designated self-hosted machine with audio devices:

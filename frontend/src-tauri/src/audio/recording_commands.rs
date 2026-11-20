@@ -281,12 +281,17 @@ impl StartingState {
         if capture_active() || IS_STARTING.swap(true, Ordering::AcqRel) {
             return Err("Recording already in progress".into());
         }
-        Ok(Self)
+        let guard = Self;
+        #[cfg(windows)]
+        crate::windows_lifecycle::begin_start()?;
+        Ok(guard)
     }
 }
 impl Drop for StartingState {
     fn drop(&mut self) {
         IS_STARTING.store(false, Ordering::Release);
+        #[cfg(windows)]
+        crate::windows_lifecycle::start_settled();
     }
 }
 
@@ -1175,7 +1180,7 @@ pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
 ) -> Result<bool, String> {
-    stop_recording_session(app, None).await
+    stop_recording_session(app, None, None).await
 }
 
 #[tauri::command]
@@ -1183,7 +1188,41 @@ pub async fn stop_detected_call_recording<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
 ) -> Result<bool, String> {
-    stop_recording_session(app, Some(&session_id)).await
+    stop_recording_session(app, Some(&session_id), None).await
+}
+
+/// One nudge to the existing snapshot worker. The PCM spool is published
+/// independently; neither the signal handler nor this request waits on disk.
+#[cfg(windows)]
+pub(crate) fn request_recovery_snapshot(attempt: u64) {
+    if let Ok(manager) = RECORDING_MANAGER.try_lock() {
+        if let Some(manager) = manager
+            .as_ref()
+            .filter(|_| crate::windows_lifecycle::is_current(attempt))
+        {
+            let state = manager.get_state();
+            if crate::windows_lifecycle::suspend_requested() && state.is_active() {
+                state.mark_capture_incomplete();
+            }
+            state.request_recovery_snapshot();
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) async fn stop_after_windows_suspend<R: Runtime>(app: AppHandle<R>, attempt: u64) {
+    if stop_recording_session(app.clone(), None, Some(attempt))
+        .await
+        .is_err()
+        && crate::windows_lifecycle::is_current(attempt)
+    {
+        let _ = app.emit(
+            "recording-stop-failed",
+            serde_json::json!({
+                "message": "Windows sleep may have interrupted the audio. Press Stop again to save the available recording."
+            }),
+        );
+    }
 }
 
 /// A detected-call marking that arrived while a reconnection had the recording
@@ -1209,6 +1248,7 @@ pub(crate) fn mark_detected_call(session: &str) {
 async fn stop_recording_session<R: Runtime>(
     app: AppHandle<R>,
     expected_session: Option<&str>,
+    suspend_attempt: Option<u64>,
 ) -> Result<bool, String> {
     // All entry points share one owner through drain, save and completion.
     // A caller that waited takes over only if the Stop it waited for gave up
@@ -1222,6 +1262,18 @@ async fn stop_recording_session<R: Runtime>(
         RECORDING_EPOCH.load(Ordering::Acquire),
     ) {
         return Ok(false);
+    }
+    #[cfg(windows)]
+    if let Some(attempt) = suspend_attempt {
+        if !IS_RECORDING.load(Ordering::Acquire)
+            || !crate::windows_lifecycle::is_current(attempt)
+        {
+            return Ok(false);
+        }
+        let _ = app.emit(
+            "recording-warning",
+            "Windows sleep interrupted this session. ClawScribe is saving the recording.",
+        );
     }
     if waited {
         info!("The Stop this one waited for did not finish; stopping the recording now");
@@ -1289,6 +1341,10 @@ async fn stop_recording_session<R: Runtime>(
     drop(reconnecting);
 
     let stop_result = if let Some(mut manager) = manager_for_cleanup {
+        #[cfg(windows)]
+        if crate::windows_lifecycle::suspend_requested() && manager.get_state().is_active() {
+            manager.get_state().mark_capture_incomplete();
+        }
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
         info!("🚀 Using FORCE FLUSH to eliminate pipeline accumulation delays");
         let result = manager.stop_streams_and_force_flush().await;
@@ -1735,7 +1791,7 @@ async fn stop_recording_session<R: Runtime>(
         warn!("Could not notify the webview that recording stopped");
     }
 
-    if transcribes && !outcome.needs_recovery() && !library_save_failed {
+    if suspend_attempt.is_none() && transcribes && !outcome.needs_recovery() && !library_save_failed {
         crate::openclaw::submit_completed_recording(
             app.clone(),
             folder_path_str.clone(),
@@ -1749,7 +1805,7 @@ async fn stop_recording_session<R: Runtime>(
     crate::tray::update_tray_menu(&app);
 
     if let Some(id) = meeting_id {
-        if transcribes {
+        if suspend_attempt.is_none() && transcribes {
             wake_saved_recording_summary(&app, id);
         }
         info!("Recording stop committed to the library");

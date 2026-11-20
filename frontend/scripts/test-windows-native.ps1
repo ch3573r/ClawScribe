@@ -110,6 +110,7 @@ try {
         "start_request::tests",
         "tray::tests",
         "power::tests",
+        "windows_lifecycle::tests",
         "audio::transcription::queue::tests",
         "audio::transcription::source_language::tests",
         "audio::transcription::worker::metrics_lifecycle_tests",

@@ -305,7 +305,7 @@ impl RecordingSaver {
             .unwrap_or_else(|| "Meeting".into());
         self.initialize_meeting_folder(&name, auto_save)?;
         // Only a recording that writes audio can run out of space for it.
-        self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL, auto_save.then(|| state));
+        self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL, Some((state, auto_save)));
         if !auto_save {
             return Ok(None);
         }
@@ -320,12 +320,12 @@ impl RecordingSaver {
         Ok(Some(sender))
     }
 
-    /// The snapshot tick doubles as the free-space tick: `disk_state` is given
-    /// for a recording that writes audio, and the check runs once a minute.
+    /// Handle periodic snapshots and recovery requests. The free-space check
+    /// also runs once a minute for a recording that saves audio.
     fn start_snapshot_timer(
         &mut self,
         interval_duration: Duration,
-        disk_state: Option<Arc<super::recording_state::RecordingState>>,
+        state: Option<(Arc<super::recording_state::RecordingState>, bool)>,
     ) {
         let Some(folder) = self.meeting_folder.clone() else {
             return;
@@ -343,13 +343,13 @@ impl RecordingSaver {
                     _ = interval.tick() => {},
                     _ = transcripts.snapshot_notify.notified() => {},
                     _ = async {
-                        match &disk_state {
-                            Some(state) => state.wait_for_capture_gap().await,
+                        match &state {
+                            Some((state, _)) => state.wait_for_recovery_work().await,
                             None => std::future::pending().await,
                         }
                     } => {},
                 }
-                if let Some(state) = &disk_state {
+                if let Some((state, true)) = &state {
                     if !gap_saved && state.capture_incomplete() {
                         let gap = folder.join(".audio-spool/.incomplete");
                         gap_saved = tokio::task::spawn_blocking(move || {

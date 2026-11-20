@@ -97,7 +97,7 @@ pub struct RecordingState {
     // Core recording state
     is_recording: AtomicBool,
     capture_incomplete: AtomicBool,
-    capture_gap_signal: tokio::sync::Notify,
+    recovery_signal: tokio::sync::Notify,
     live_transcription_disabled: AtomicBool,
     is_paused: AtomicBool,
 
@@ -143,7 +143,7 @@ impl RecordingState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             capture_incomplete: AtomicBool::new(false),
-            capture_gap_signal: tokio::sync::Notify::new(),
+            recovery_signal: tokio::sync::Notify::new(),
             live_transcription_disabled: AtomicBool::new(false),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
@@ -314,13 +314,17 @@ impl RecordingState {
         self.capture_incomplete.load(Ordering::Acquire)
     }
 
-    pub(crate) async fn wait_for_capture_gap(&self) {
-        self.capture_gap_signal.notified().await;
+    pub(crate) async fn wait_for_recovery_work(&self) {
+        self.recovery_signal.notified().await;
+    }
+
+    pub(crate) fn request_recovery_snapshot(&self) {
+        self.recovery_signal.notify_one();
     }
 
     pub fn mark_capture_incomplete(&self) {
         if !self.capture_incomplete.swap(true, Ordering::AcqRel) {
-            self.capture_gap_signal.notify_one();
+            self.request_recovery_snapshot();
         }
     }
 
@@ -580,7 +584,7 @@ impl Default for RecordingState {
     fn default() -> Self {
         Self {
             capture_incomplete: AtomicBool::new(false),
-            capture_gap_signal: tokio::sync::Notify::new(),
+            recovery_signal: tokio::sync::Notify::new(),
             live_transcription_disabled: AtomicBool::new(false),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
