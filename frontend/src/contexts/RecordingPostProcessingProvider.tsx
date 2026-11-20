@@ -9,6 +9,7 @@ import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import { captureHalted, recordingErrorMessage } from '@/lib/recording-capture';
+import { STOP_FAILED_TITLE, stopFailureMessage } from '@/lib/stop-error';
 import { diskSpaceLowText, type DiskSpaceLowPayload } from '@/lib/disk-space';
 
 const DISK_SPACE_TOAST = 'recording-disk-space-low';
@@ -42,6 +43,15 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
   latest.current = { handleRecordingStop, setIsStopping, isRecording, isStopping, status, setStatus };
   const stopFlow = useRef<Promise<void> | null>(null);
 
+  // A Stop that failed leaves the recording running: say why and return to the
+  // recording state at once. `onlyIfStopping` leaves other states alone.
+  const showStopFailure = (error: unknown, onlyIfStopping = false) => {
+    toast.error(STOP_FAILED_TITLE, { id: 'recording-stop-failed', description: stopFailureMessage(error) });
+    if (!onlyIfStopping || latest.current.status === RecordingStatus.STOPPING) {
+      latest.current.setStatus(RecordingStatus.RECORDING);
+    }
+  };
+
   // Stop the recording and save it, exactly as the Stop button does.
   const stopRecording = useRef(async () => {
     if (stopFlow.current) return stopFlow.current;
@@ -55,8 +65,10 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
         await recordingService.stopRecording(`${dataDir}/recording-${timestamp}.wav`);
         await latest.current.handleRecordingStop(true);
       } catch (error) {
+        // The recording is still running: show why, skip the save flow and go
+        // back to the recording state at once.
         console.error('Failed to stop recording:', error);
-        await latest.current.handleRecordingStop(false);
+        showStopFailure(error);
       }
     })().finally(() => { stopFlow.current = null; });
     return stopFlow.current;
@@ -84,6 +96,12 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
           console.error('[RecordingPostProcessing] Post-stop save failed:', error);
         }
       })();
+    }));
+
+    // A Stop from the tray or the shortcuts failed in the core (for example the
+    // audio device is not responding). The recording is still running.
+    subscribe(listen<{ message?: string }>('recording-stop-failed', (event) => {
+      if (!disposed) showStopFailure(event.payload?.message, true);
     }));
 
     // The capture core ends the session itself after a fatal error. Tell the

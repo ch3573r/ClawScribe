@@ -323,6 +323,12 @@ fn resolve_program(config: &ClaudeCodeConfig) -> Result<Option<PathBuf>, String>
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
+        // A network or device path is refused before any filesystem call: asking
+        // whether it is a file would already reach a remote machine, and running
+        // it would execute remote code.
+        if crate::database::meeting_files::is_network_or_device_path(configured) {
+            return Err(INVALID_PROGRAM.into());
+        }
         let path = Path::new(configured);
         if !path.is_absolute() || !is_program_file(path) {
             return Err(INVALID_PROGRAM.into());

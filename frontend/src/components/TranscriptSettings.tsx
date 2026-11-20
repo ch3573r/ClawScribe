@@ -8,7 +8,7 @@ import { Button } from './ui/button';
 import { SettingsCard, SettingsFooter, SettingsRow } from '@/components/ui/settings-layout';
 import { TranscriptionPcTest } from './TranscriptionPcTest';
 import { TRANSCRIPTION_OPTIONS_ID } from '@/components/settings/transcriptionAnchors';
-import { Eye, EyeOff, FlaskConical, Loader2, Lock, Unlock } from 'lucide-react';
+import { FlaskConical, Loader2 } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { NemotronModelManager } from './NemotronModelManager';
@@ -16,11 +16,15 @@ import { WhisperAccelerationStatus } from './WhisperAccelerationStatus';
 import { useCloudTranscription } from '@/hooks/useCloudTranscription';
 import { toast } from 'sonner';
 import { UnencryptedHttpOptIn } from './UnencryptedHttpOptIn';
+import { SecretKeyRow } from '@/components/settings/SecretKeyControl';
+import { configService } from '@/services/configService';
+import { KEY_REQUIRED_FOR_NEW_ADDRESS, NO_SECRET, hasUsableKey, keyProblem, keyRequiredForAddress, newKeyPayload, removalNeedsConfirmation, type SecretStatus } from '@/lib/secret-key';
 
 
 export interface TranscriptModelProps {
     provider: 'localWhisper' | 'parakeet' | 'nemotron' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai' | 'cloud-whisper' | 'mai-transcribe';
     model: string;
+    /** A key the user has just typed, held only until it is saved. Never loaded from the core. */
     apiKey?: string | null;
     baseUrl?: string | null;
     endpoint?: string | null;
@@ -46,12 +50,11 @@ export interface TranscriptSettingsProps {
 }
 
 export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect, pcTest = false }: TranscriptSettingsProps) {
-    const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
-    const [apiKeyEdited, setApiKeyEdited] = useState(false);
+    // The key typed for the provider being looked at. A stored key is never loaded
+    // here: the core reports only whether one is stored.
+    const [apiKey, setApiKey] = useState<string | null>(null);
+    const [keyStatus, setKeyStatus] = useState<SecretStatus>(NO_SECRET);
     const [allowUnencrypted, setAllowUnencrypted] = useState(transcriptModelConfig.allowUnencrypted ?? false);
-    const [showApiKey, setShowApiKey] = useState<boolean>(false);
-    const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
-    const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
     const [cloudModel, setCloudModel] = useState<string>(transcriptModelConfig.model || 'whisper-1');
     const [cloudWhisperBaseUrl, setCloudWhisperBaseUrl] = useState<string>(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
@@ -88,17 +91,27 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         setMaiRegion(transcriptModelConfig.region || '');
     }, [transcriptModelConfig]);
 
-    const fetchApiKey = async (provider: string) => {
+    // Which hosted provider's key is stored. The key itself stays in the core.
+    const loadKeyStatus = async (provider: string) => {
+        setApiKey(null);
         try {
-
-            const data = await invoke('api_get_transcript_api_key', { provider }) as string;
-
-            setApiKey(data || '');
-            setApiKeyEdited(false);
-        } catch (err) {
-            console.error('Error fetching API key:', err);
-            setApiKey(null);
+            setKeyStatus(await configService.getTranscriptApiKeyStatus(provider));
+        } catch {
+            console.error('Error reading the API key status');
+            setKeyStatus(NO_SECRET);
         }
+    };
+
+    useEffect(() => {
+        if (transcriptModelConfig.provider === 'cloud-whisper' || transcriptModelConfig.provider === 'mai-transcribe') {
+            void loadKeyStatus(transcriptModelConfig.provider);
+        }
+    }, [transcriptModelConfig.provider]);
+
+    const removeStoredKey = async () => {
+        await configService.clearTranscriptApiKey(uiProvider);
+        setApiKey(null);
+        await loadKeyStatus(uiProvider);
     };
     const engineDescription = ({
         parakeet: 'Parakeet runs on this PC in real time',
@@ -135,13 +148,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         'mai-transcribe': ['mai-transcribe-1.5'],
     };
     const requiresApiKey = uiProvider === 'deepgram' || uiProvider === 'elevenLabs' || uiProvider === 'openai' || uiProvider === 'groq' || isCloudProvider;
-
-    const handleInputClick = () => {
-        if (isApiKeyLocked) {
-            setIsLockButtonVibrating(true);
-            setTimeout(() => setIsLockButtonVibrating(false), 500);
-        }
-    };
 
     const handleWhisperModelSelect = (modelName: string) => {
         // Always update config when model is selected, regardless of current provider
@@ -190,7 +196,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             ...transcriptModelConfig,
             provider: uiProvider,
             model,
-            apiKey: apiKey || null,
+            // Only a key typed now is sent; without one the stored key is kept.
+            apiKey: newKeyPayload(apiKey),
             allowUnencrypted,
             baseUrl: uiProvider === 'cloud-whisper' ? cloudWhisperBaseUrl.trim() || 'https://api.openai.com/v1' : null,
             endpoint: uiProvider === 'mai-transcribe' ? maiEndpoint.trim() || null : null,
@@ -198,8 +205,23 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         };
     };
 
+    // A stored key goes only to the address it was saved for: changing the
+    // address asks for the key again, and nothing is saved until it is entered.
+    const savedCloudAddress = uiProvider === 'cloud-whisper'
+        ? (transcriptModelConfig.baseUrl || 'https://api.openai.com/v1')
+        : (transcriptModelConfig.endpoint || '');
+    const editedCloudAddress = uiProvider === 'cloud-whisper'
+        ? (cloudWhisperBaseUrl.trim() || 'https://api.openai.com/v1')
+        : maiEndpoint.trim();
+    const cloudKeyRequired = (uiProvider === 'cloud-whisper' || uiProvider === 'mai-transcribe')
+        && !!savedCloudAddress.trim()
+        && keyRequiredForAddress(savedCloudAddress, editedCloudAddress, keyStatus, apiKey);
+
     const handleSaveCloudProvider = async () => {
         const nextConfig = getCloudProviderConfig();
+        const problem = keyProblem(apiKey);
+        if (problem) { toast.error(problem); return; }
+        if (cloudKeyRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
 
         try {
             await invoke('api_save_transcript_config', {
@@ -211,8 +233,9 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                 endpoint: nextConfig.endpoint,
                 region: nextConfig.region,
             });
-            setTranscriptModelConfig(nextConfig);
-            setApiKeyEdited(false);
+            // The typed key is stored now: keep and share only the rest.
+            setTranscriptModelConfig({ ...nextConfig, apiKey: null });
+            await loadKeyStatus(nextConfig.provider);
             toast.success('Transcription settings saved');
             if (onModelSelect) {
                 onModelSelect();
@@ -225,7 +248,9 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
     const handleTestCloudProvider = async () => {
         const nextConfig = getCloudProviderConfig();
-        if (!nextConfig.apiKey) {
+        const problem = keyProblem(apiKey);
+        if (problem) { toast.error(problem); return; }
+        if (!hasUsableKey(nextConfig.apiKey, keyStatus)) {
             toast.error('Enter an API key before testing');
             return;
         }
@@ -253,7 +278,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             const result = await invoke<TranscriptProviderTestResult>('api_test_transcript_provider', {
                 provider: nextConfig.provider,
                 model: nextConfig.model,
-                apiKey: apiKeyEdited ? nextConfig.apiKey : null,
+                // A typed key, or none: the stored key is used inside the core, for its own endpoint.
+                apiKey: nextConfig.apiKey,
                 allowUnencrypted: nextConfig.allowUnencrypted,
                 baseUrl: nextConfig.baseUrl,
                 endpoint: nextConfig.endpoint,
@@ -295,7 +321,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             setUiProvider(provider);
                             setAllowUnencrypted(false);
                             if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'nemotron') {
-                                fetchApiKey(provider);
+                                void loadKeyStatus(provider);
                             }
                             if (provider === 'cloud-whisper') {
                                 setCloudModel(transcriptModelConfig.provider === 'cloud-whisper' ? transcriptModelConfig.model : 'whisper-1');
@@ -453,49 +479,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                     )}
 
                     {requiresApiKey && (
-                        <SettingsRow title="API key" htmlFor="transcription-api-key">
-                            <div className="relative w-80 max-w-full">
-                                <Input
-                                    id="transcription-api-key"
-                                    type={showApiKey ? "text" : "password"}
-                                    className={`pr-20 ${isApiKeyLocked ? 'bg-muted cursor-not-allowed' : ''}`}
-                                    value={apiKey || ''}
-                                    onChange={(e) => { setApiKey(e.target.value); setApiKeyEdited(true); }}
-                                    disabled={isApiKeyLocked}
-                                    onClick={handleInputClick}
-                                    placeholder="Enter your API key"
-                                />
-                                {isApiKeyLocked && (
-                                    <div
-                                        onClick={handleInputClick}
-                                        className="absolute inset-0 flex items-center justify-center rounded-md cursor-not-allowed"
-                                    />
-                                )}
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-1">
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                                        className={`h-7 w-7 transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''}`}
-                                        aria-label={isApiKeyLocked ? "Unlock to edit the API key" : "Lock the API key"}
-                                        title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
-                                    >
-                                        {isApiKeyLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-7 w-7"
-                                        onClick={() => setShowApiKey(!showApiKey)}
-                                        aria-label={showApiKey ? "Hide the API key" : "Show the API key"}
-                                    >
-                                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                    </Button>
-                                </div>
-                            </div>
-                        </SettingsRow>
+                        <SecretKeyRow
+                            id="transcription-api-key" title="API key" status={keyStatus}
+                            draft={apiKey || ''} onDraftChange={(value) => setApiKey(value || null)}
+                            required={cloudKeyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+                            onRemove={removeStoredKey}
+                            removeWarning={removalNeedsConfirmation(uiProvider, transcriptModelConfig.provider)
+                                ? 'Hosted transcription with this provider will not work until you add a key again.'
+                                : null}
+                            description="Protected by your operating system. Saved when you choose Save"
+                        />
                     )}
 
                     {isCloudProvider && cloudTranscriptionEnabled && (

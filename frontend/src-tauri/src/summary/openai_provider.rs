@@ -20,7 +20,7 @@ const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 300;
 const TEST_PROMPT: &str = "What is 2 + 2? Reply with only the number.";
 const TEST_EXPECTED: &str = "4";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAICompatibleProviderConfig {
     #[serde(default)]
@@ -42,6 +42,12 @@ pub struct OpenAICompatibleProviderConfig {
     #[serde(default = "default_use_structured_outputs")]
     pub use_structured_outputs: bool,
 }
+
+crate::credentials::debug_without_secrets!(OpenAICompatibleProviderConfig {
+    allow_unencrypted, base_url, model, timeout_seconds, max_tokens, context_window, temperature, top_p,
+    organization, project, use_structured_outputs;
+    secret api_key
+});
 
 impl Default for OpenAICompatibleProviderConfig {
     fn default() -> Self {

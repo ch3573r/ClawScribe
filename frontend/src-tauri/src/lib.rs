@@ -796,6 +796,7 @@ pub fn run() {
             mcp::settings::set_mcp_access,
             openclaw::get_openclaw_config_status,
             openclaw::save_openclaw_config,
+            openclaw::clear_openclaw_bearer_token,
             // Teams meeting detection commands
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,
@@ -832,12 +833,14 @@ pub fn run() {
             api::api_search_transcripts,
             api::api_get_model_config,
             api::api_save_model_config,
-            api::api_get_api_key,
+            api::api_get_api_key_status,
+            api::api_clear_api_key,
             // api::api_get_auto_generate_setting,
             // api::api_save_auto_generate_setting,
             api::api_get_transcript_config,
             api::api_save_transcript_config,
-            api::api_get_transcript_api_key,
+            api::api_get_transcript_api_key_status,
+            api::api_clear_transcript_api_key,
             api::api_test_transcript_provider,
             api::api_delete_meeting,
             api::api_get_meeting,
@@ -852,6 +855,7 @@ pub fn run() {
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
+            api::api_clear_custom_openai_api_key,
             api::api_test_custom_openai_connection,
             api::api_test_custom_openai_processing,
             // Summary commands

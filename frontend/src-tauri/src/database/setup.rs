@@ -85,6 +85,18 @@ pub fn startup_failed() -> bool {
     STARTUP_FAILED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// How long the app stays alive for a startup-failure dialog nobody closes (or
+/// that never appeared). Ten minutes is long enough to read the message and
+/// find the log; after that the process ends with code 1 rather than staying
+/// alive invisibly without a window or a tray.
+pub(crate) const STARTUP_FAILURE_EXIT_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
+#[cfg(test)]
+pub(crate) fn set_startup_failed_for_tests(failed: bool) {
+    STARTUP_FAILED.store(failed, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Text of the dialog shown when the meeting database cannot be opened.
 /// The underlying error goes to the log only: it can contain paths and
 /// internals that mean nothing to the user.
@@ -130,6 +142,13 @@ pub fn report_startup_failure(app: &AppHandle, error: &str) {
         .title("ClawScribe cannot start")
         .kind(MessageDialogKind::Error)
         .show(move |_| exit_app.exit(1));
+    // Fallback: the dialog normally ends the process (above). If it never
+    // appears or is never closed, do not stay alive without a window.
+    tauri::async_runtime::spawn(async {
+        tokio::time::sleep(STARTUP_FAILURE_EXIT_AFTER).await;
+        log::error!("The startup error dialog was not closed in time; exiting");
+        std::process::exit(1);
+    });
 }
 
 #[cfg(test)]
@@ -147,6 +166,13 @@ mod startup_failure_tests {
         assert!(message.contains("App data folder: D:/data/app"));
         assert!(message.contains("Log folder: D:/data/app/logs"));
         assert!(!message.contains("panicked"));
+    }
+
+    #[test]
+    fn the_fallback_waits_long_enough_to_read_the_dialog_but_is_bounded() {
+        use super::STARTUP_FAILURE_EXIT_AFTER as limit;
+        assert!(limit >= std::time::Duration::from_secs(5 * 60));
+        assert!(limit <= std::time::Duration::from_secs(60 * 60));
     }
 
     #[test]

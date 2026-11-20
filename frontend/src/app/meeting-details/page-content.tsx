@@ -171,9 +171,10 @@ export default function PageContent({
         ollamaEndpoint: config.ollamaEndpoint ?? null,
       });
 
-      // Emit event so ConfigContext and other listeners stay in sync
+      // Emit event so ConfigContext and other listeners stay in sync. A typed key
+      // is stored now and is not shared.
       const { emit } = await import('@tauri-apps/api/event');
-      await emit('model-config-updated', config);
+      await emit('model-config-updated', { ...config, apiKey: null, customOpenAIApiKey: null });
 
       toast.success('Model settings saved successfully');
     } catch (error) {

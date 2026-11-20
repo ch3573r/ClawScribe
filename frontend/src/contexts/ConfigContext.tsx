@@ -8,6 +8,7 @@ import {
 } from '@/lib/audioDevicePreferences';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
+import { NO_SECRET, withRefreshedKeyStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
 
 export interface OllamaModel {
   name: string;
@@ -15,6 +16,9 @@ export interface OllamaModel {
   size: string;
   modified: string;
 }
+
+export type KeyProvider = 'claude' | 'groq' | 'openai' | 'openrouter';
+const KEY_PROVIDERS: KeyProvider[] = ['claude', 'groq', 'openai', 'openrouter'];
 
 export interface StorageLocations {
   database: string;
@@ -69,14 +73,9 @@ interface ConfigContextType {
   isAutoSummary: boolean;
   toggleIsAutoSummary: (checked: boolean) => void;
 
-  // Provider-specific API keys
-  providerApiKeys: {
-    claude: string | null;
-    groq: string | null;
-    openai: string | null;
-    openrouter: string | null;
-  };
-  updateProviderApiKey: (provider: string, apiKey: string | null) => void;
+  // Which providers have a stored API key. The keys themselves stay in the core.
+  providerKeyStatus: Record<KeyProvider, SecretStatus>;
+  refreshProviderKeyStatus: (provider: string) => Promise<void>;
 
   // Preference settings (lazy loaded)
   notificationSettings: NotificationSettings | null;
@@ -107,18 +106,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     apiKey: null
   });
 
-  // Provider-specific API keys (loaded once at startup)
-  // Note: Gemini omitted for now - add when UI support is added
-  const [providerApiKeys, setProviderApiKeys] = useState<{
-    claude: string | null;
-    groq: string | null;
-    openai: string | null;
-    openrouter: string | null;
-  }>({
-    claude: null,
-    groq: null,
-    openai: null,
-    openrouter: null,
+  // Whether each provider has a stored key (loaded at startup). The keys stay in the core.
+  const [providerKeyStatus, setProviderKeyStatus] = useState<Record<KeyProvider, SecretStatus>>({
+    claude: NO_SECRET,
+    groq: NO_SECRET,
+    openai: NO_SECRET,
+    openrouter: NO_SECRET,
   });
 
   // Ollama models list and error state
@@ -185,13 +178,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       try {
         const config = await configService.getTranscriptConfig();
         if (config) {
-          console.log('[ConfigContext] Loaded saved transcript config:', config);
+          console.log('[ConfigContext] Loaded saved transcript config');
           setTranscriptModelConfig({
             // A saved config with a blank provider runs Whisper in the core (the
             // Settings page reads it the same way); only no saved config means Parakeet.
             provider: config.provider || 'localWhisper',
             model: config.model || (config.provider ? 'parakeet-tdt-0.6b-v3-int8' : 'large-v3'),
-            apiKey: config.apiKey || null,
             baseUrl: config.baseUrl || null,
             allowUnencrypted: config.allowUnencrypted ?? false,
             endpoint: config.endpoint || null,
@@ -242,7 +234,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
                   whisperModel: data.whisperModel || prev.whisperModel,
                   customOpenAIEndpoint: customConfig.endpoint,
                   customOpenAIModel: customConfig.model,
-                  customOpenAIApiKey: customConfig.apiKey,
+                  customOpenAIKeyStatus: customConfig.apiKeyStatus,
                   maxTokens: customConfig.maxTokens,
                   contextWindow: customConfig.contextWindow,
                   temperature: customConfig.temperature,
@@ -270,6 +262,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             model: data.model || prev.model,
             whisperModel: data.whisperModel || prev.whisperModel,
             ollamaEndpoint: data.ollamaEndpoint,
+            apiKeyStatus: data.apiKeyStatus,
           }));
 
           // Seed per-provider model cache from DB
@@ -286,31 +279,25 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     fetchModelConfig();
   }, []);
 
-  // Load all provider API keys on mount
+  // Load which providers have a stored key on mount
   useEffect(() => {
-    const loadAllApiKeys = async () => {
+    const loadAllKeyStatus = async () => {
       try {
-        const providers = ['claude', 'groq', 'openai', 'openrouter'];
-        const keys = await Promise.all(
-          providers.map(p =>
-            invoke<string>('api_get_api_key', { provider: p })
-              .catch(() => null) // Gracefully handle missing keys
-          )
+        const statuses = await Promise.all(
+          KEY_PROVIDERS.map(p => configService.getApiKeyStatus(p).catch(() => NO_SECRET))
         );
-
-        setProviderApiKeys({
-          claude: keys[0],
-          groq: keys[1],
-          openai: keys[2],
-          openrouter: keys[3],
+        setProviderKeyStatus({
+          claude: statuses[0],
+          groq: statuses[1],
+          openai: statuses[2],
+          openrouter: statuses[3],
         });
-        console.log('[ConfigContext] Loaded provider API keys');
       } catch (error) {
-        console.error('[ConfigContext] Failed to load provider API keys:', error);
+        console.error('[ConfigContext] Failed to load provider key status');
       }
     };
 
-    loadAllApiKeys();
+    loadAllKeyStatus();
   }, []);
 
   // Listen for model config updates from other components
@@ -318,13 +305,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('[ConfigContext] Received model-config-updated event:', event.payload);
-        setModelConfig(event.payload);
+        console.log('[ConfigContext] Received model-config-updated event');
+        // Never keep a typed key: the core has it now.
+        setModelConfig(withoutSecrets(event.payload));
 
-        // Update provider-specific key when config changes
-        if (event.payload.apiKey && event.payload.provider !== 'custom-openai') {
-          updateProviderApiKey(event.payload.provider, event.payload.apiKey);
-        }
+        // The key may have changed with this save.
+        void refreshProviderKeyStatus(event.payload.provider);
       });
       return unlisten;
     };
@@ -374,9 +360,24 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Update individual provider API key
-  const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
-    setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
+  // Ask the core again whether a provider has a stored key (after a save or a removal)
+  // The shared model configuration carries the status too, so a removal shows
+  // at once for the provider in use, not only in the per-provider map.
+  const refreshProviderKeyStatus = useCallback(async (provider: string) => {
+    try {
+      if (provider === 'custom-openai') {
+        const config = await configService.getCustomOpenAIConfig();
+        const status = config?.apiKeyStatus ?? NO_SECRET;
+        setModelConfig(prev => withRefreshedKeyStatus(prev, provider, status));
+        return;
+      }
+      if (!KEY_PROVIDERS.includes(provider as KeyProvider)) return;
+      const status = await configService.getApiKeyStatus(provider);
+      setProviderKeyStatus(prev => ({ ...prev, [provider]: status }));
+      setModelConfig(prev => withRefreshedKeyStatus(prev, provider, status));
+    } catch {
+      console.error('[ConfigContext] Failed to read provider key status');
+    }
   }, []);
 
   // Lazy load preference settings (only loads if not already cached)
@@ -456,8 +457,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setModelConfig,
     isAutoSummary,
     toggleIsAutoSummary,
-    providerApiKeys,
-    updateProviderApiKey,
+    providerKeyStatus,
+    refreshProviderKeyStatus,
     transcriptModelConfig,
     setTranscriptModelConfig,
     selectedDevices,
@@ -476,8 +477,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     modelConfig,
     isAutoSummary,
     toggleIsAutoSummary,
-    providerApiKeys,
-    updateProviderApiKey,
+    providerKeyStatus,
+    refreshProviderKeyStatus,
     transcriptModelConfig,
     selectedDevices,
     selectedLanguage,

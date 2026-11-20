@@ -165,15 +165,16 @@ test('See everything in Privacy opens the Privacy tab', () => {
 
 // ---- Model settings: immediate-save mode versus the explicit Save button ----------------
 
-function modalHarness({ provider = 'claude', apiKey = null, onSave, autosave = true, model = 'claude-sonnet-5' } = {}) {
+function modalHarness({ provider = 'claude', stored = false, onSave, autosave = true, model = 'claude-sonnet-5' } = {}) {
   const hooks = createHookHarness();
   const calls = [];
-  const config = { provider, model, whisperModel: 'large-v3', apiKey, ollamaEndpoint: null };
+  // The core never returns a stored key: the settings only know whether one is stored.
+  const config = { provider, model, whisperModel: 'large-v3', apiKey: null, ollamaEndpoint: null };
   const context = {
     modelConfig: config,
     setModelConfig(next) { Object.assign(context, { modelConfig: typeof next === 'function' ? next(context.modelConfig) : next }); },
-    providerApiKeys: { claude: apiKey, groq: null, openai: null, openrouter: null },
-    updateProviderApiKey() {},
+    providerKeyStatus: { claude: { stored, hint: stored ? '0001' : null }, groq: { stored: false, hint: null }, openai: { stored: false, hint: null }, openrouter: { stored: false, hint: null } },
+    refreshProviderKeyStatus: async key => { context.providerKeyStatus = { ...context.providerKeyStatus, [key]: { stored: true, hint: null } }; },
   };
   const stub = name => ({ [name]: name });
   const mocks = {
@@ -202,6 +203,8 @@ function modalHarness({ provider = 'claude', apiKey = null, onSave, autosave = t
     '@/components/ui/switch': { Switch: 'switch' }, '@/components/ui/progress': { Progress: 'progress' },
     '@/components/ui/popover': { Popover: 'popover', PopoverContent: 'popover-content', PopoverTrigger: 'popover-trigger' },
     '@/components/ui/command': { Command: 'command', CommandEmpty: 'command-empty', CommandGroup: 'command-group', CommandInput: 'command-input', CommandItem: 'command-item', CommandList: 'command-list' },
+    '@/components/settings/SecretKeyControl': { SecretKeyControl: 'secret-key-control', SecretKeyRow: 'secret-key-row' },
+    '@/services/configService': { configService: { clearApiKey: async () => {}, clearCustomOpenAIApiKey: async () => {}, getCustomOpenAIConfig: async () => null } },
     '@/components/settings/settings-parts': { NoteRow: 'note-row', ROW_SELECT: 'w-60' },
     '@/components/settings/summary-provider-parts': {
       CommitInputRow: 'commit-input-row', CopyCommandRow: 'copy-command-row', SaveMark: 'save-mark',
@@ -221,7 +224,7 @@ function modalHarness({ provider = 'claude', apiKey = null, onSave, autosave = t
 }
 
 test('choosing another provider only previews it; the saved provider stays in use until the user switches', async () => {
-  const app = modalHarness({ provider: 'claude', apiKey: KEY });
+  const app = modalHarness({ provider: 'claude', stored: true });
   app.render(); await flush(); app.render();
   const select = () => nodes(app.render()).find(node => node.type === 'select' && ['claude', 'codex', 'groq'].includes(node.props.value));
   const button = label => nodes(app.render()).find(node => node.type === 'button' && text(node) === label);
@@ -253,7 +256,7 @@ test('choosing another provider only previews it; the saved provider stays in us
 });
 
 test('a provider that still needs a key cannot be switched to, and a failed switch shows no key', async () => {
-  const app = modalHarness({ provider: 'claude', apiKey: KEY });
+  const app = modalHarness({ provider: 'claude', stored: true });
   app.render(); await flush(); app.render();
   nodes(app.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
   await flush();
@@ -262,7 +265,7 @@ test('a provider that still needs a key cannot be switched to, and a failed swit
   assert.match(text(app.render()), /Enter an API key first/);
   assert.equal(app.saves.length, 0);
 
-  const failing = modalHarness({ provider: 'claude', apiKey: KEY, onSave: async () => { throw new Error(`database said ${KEY}`); } });
+  const failing = modalHarness({ provider: 'claude', stored: true, onSave: async () => { throw new Error(`database said ${KEY}`); } });
   failing.render(); await flush(); failing.render();
   nodes(failing.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
   await flush();
@@ -277,39 +280,50 @@ test('a provider that still needs a key cannot be switched to, and a failed swit
 });
 
 test('a key entered for a provider that is only being looked at is held, not saved', async () => {
-  const app = modalHarness({ provider: 'claude', apiKey: KEY });
+  const app = modalHarness({ provider: 'claude', stored: true });
   app.render(); await flush(); app.render();
   nodes(app.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
   await flush();
   const other = 'synthetic-placeholder-key-0002';
-  const held = await nodes(app.render()).find(node => node.type === 'commit-input-row' && node.props.id === 'summary-api-key').props.onCommit(other);
-  assert.equal(held, 'held', 'the field reports that nothing was saved');
+  const field = () => nodes(app.render()).find(node => node.type === 'secret-key-row' && node.props.id === 'summary-api-key');
+  assert.equal(field().props.draft, '', 'nothing is prefilled: no stored key reaches the field');
+  assert.equal(field().props.onCommit, undefined, 'a provider that is only being looked at has no commit-on-blur field');
+  field().props.onDraftChange(other);
+  await flush();
   assert.equal(app.saves.length, 0, 'entering a key does not switch the provider');
   assert.equal(app.context.modelConfig.provider, 'claude');
-  assert.equal(app.context.modelConfig.apiKey, KEY, 'the saved provider keeps its own key');
+  assert.equal(app.context.modelConfig.apiKey, null, 'the saved provider keeps its own key; a typed key is not put in the shared configuration');
   assert.match(text(app.render()), /Not in use yet/);
+  assert.equal(field().props.draft, other, 'the typed key is held with the preview');
+  // Using the provider saves the typed key, once, and then forgets it.
+  nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Use Groq').props.onClick();
+  await flush();
+  assert.equal(app.saves.length, 1);
+  assert.equal(app.saves[0].provider, 'groq');
+  assert.equal(app.saves[0].apiKey, other);
+  assert.equal(app.context.modelConfig.apiKey ?? null, null, 'after the switch no key stays in the shared configuration');
   app.hooks.unmount();
 });
 
 test('an API key is saved by committing the field and a half-typed key is never used to check the provider', async () => {
-  const app = modalHarness({ provider: 'claude', apiKey: null });
+  const app = modalHarness({ provider: 'claude', stored: false });
   app.render(); await flush(); app.render();
   assert.equal(app.calls.some(([command]) => command === 'get_anthropic_models'), false, 'no model request without a saved key');
-  const field = () => nodes(app.render()).find(node => node.type === 'commit-input-row' && node.props.id === 'summary-api-key');
-  assert.match(field().props.validate(''), /required/);
-  assert.equal(field().props.validate(KEY), null);
+  const field = () => nodes(app.render()).find(node => node.type === 'secret-key-row' && node.props.id === 'summary-api-key');
+  assert.equal(field().props.status.stored, false);
   await field().props.onCommit(KEY);
   assert.equal(app.saves.length, 1);
   assert.equal(app.saves[0].apiKey, KEY);
-  app.render(); await flush();
+  assert.equal(app.context.modelConfig.apiKey ?? null, null, 'a saved key is not kept in the configuration');
+  app.render(); await flush(); app.render(); await flush();
   assert.equal(app.calls.filter(([command]) => command === 'get_anthropic_models').length, 1, 'the committed key loads the model list');
   app.hooks.unmount();
 });
 
 test('a failed key save raises a message that does not contain the key', async () => {
-  const app = modalHarness({ provider: 'claude', apiKey: null, onSave: async () => { throw new Error(`rejected ${KEY}`); } });
+  const app = modalHarness({ provider: 'claude', stored: false, onSave: async () => { throw new Error(`rejected ${KEY}`); } });
   app.render(); await flush(); app.render();
-  const field = nodes(app.render()).find(node => node.type === 'commit-input-row' && node.props.id === 'summary-api-key');
+  const field = nodes(app.render()).find(node => node.type === 'secret-key-row' && node.props.id === 'summary-api-key');
   await assert.rejects(() => field.props.onCommit(KEY), error => {
     assert.equal(error.name, 'SaveError');
     assert.doesNotMatch(error.message, new RegExp(KEY));
@@ -320,12 +334,12 @@ test('a failed key save raises a message that does not contain the key', async (
 });
 
 test('the same component keeps its explicit Save button and draft behaviour for other callers', async () => {
-  const app = modalHarness({ provider: 'claude', apiKey: KEY, autosave: false });
+  const app = modalHarness({ provider: 'claude', stored: true, autosave: false });
   app.render(); await flush();
   const tree = app.render();
   const save = nodes(tree).find(node => node.type === 'button' && text(node) === 'Save');
   assert.ok(save, 'the Save button is present');
-  assert.equal(nodes(tree).some(node => node.type === 'commit-input-row'), false);
+  assert.equal(nodes(tree).some(node => node.type === 'commit-input-row' || node.type === 'secret-key-row'), false);
   assert.equal(app.saves.length, 0, 'nothing saves until Save is pressed');
   assert.equal(nodes(tree).some(node => node.type === 'select' && node.props.value === 'claude'), true, 'the provider select is the original one');
   app.hooks.unmount();

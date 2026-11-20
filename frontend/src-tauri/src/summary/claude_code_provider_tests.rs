@@ -777,3 +777,14 @@ async fn child_environment_excludes_secrets_inherited_from_the_test_process() {
     assert_eq!(observed["secretKeys"], json!([]));
     assert_eq!(observed["preservedTestVariable"], "preserved");
 }
+
+#[test]
+fn network_and_device_program_paths_are_refused_without_touching_them() {
+    for path in [r"\\server\share\claude.exe", r"\\?\C:\claude.exe", r"\\.\pipe\claude", "//host/share/claude"] {
+        let error = resolve_program(&ClaudeCodeConfig {
+            program_path: Some(path.to_string()),
+        })
+        .unwrap_err();
+        assert_eq!(error, INVALID_PROGRAM);
+    }
+}

@@ -94,18 +94,30 @@ pub(crate) fn get_legacy_default_recordings_folder() -> PathBuf {
 const PREVIOUS_SAVE_FOLDERS_KEY: &str = "previous_save_folders";
 const MAX_PREVIOUS_SAVE_FOLDERS: usize = 10;
 
-fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+/// A path as text for comparison: on Windows both slash directions count as the
+/// same and letter case is ignored; everywhere a trailing separator is ignored
+/// (a root such as `/` or `C:\` keeps its own).
+fn comparable(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
     #[cfg(target_os = "windows")]
-    {
-        a.to_string_lossy()
-            .eq_ignore_ascii_case(&b.to_string_lossy())
-    }
-
+    let text = text.replace('\\', "/").to_ascii_lowercase();
     #[cfg(not(target_os = "windows"))]
-    {
-        a == b
+    let text = text.into_owned();
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        text
+    } else {
+        trimmed.to_string()
     }
 }
+
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    comparable(a) == comparable(b)
+}
+
+/// Serialises "read the remembered folders, add one, write them back" so two
+/// saves at once cannot lose an entry.
+static PREVIOUS_FOLDERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The remembered folders after the save folder changed from `old` to `new`:
 /// the old folder first, most recent first, without duplicates and without the
@@ -281,6 +293,9 @@ pub async fn save_recording_preferences<R: Runtime>(
 
     // A changed save folder must not strand recordings made in the old one:
     // remember it so recovery and cleanup still accept it.
+    let _remembering = PREVIOUS_FOLDERS_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let old_folder = store
         .get("preferences")
         .and_then(|value| value.get("save_folder").cloned())
@@ -331,11 +346,114 @@ pub async fn get_recording_preferences<R: Runtime>(
         .map_err(|e| format!("Failed to load recording preferences: {}", e))
 }
 
+const SAVE_FOLDER_REFUSED: &str =
+    "Choose a normal folder for recordings, not a drive, system, profile or application-data folder.";
+
+/// Folders that must never become the recordings folder: `exact` ones as
+/// themselves (a drive root, the profile, the application-data roots) and
+/// `trees` with everything below them (Windows, Program Files, system folders).
+#[derive(Debug, Default)]
+pub(crate) struct ProtectedFolders {
+    pub exact: Vec<PathBuf>,
+    pub trees: Vec<PathBuf>,
+}
+
+/// The protected folders of this machine, from the platform's known folders
+/// and environment (never a hard-coded user name).
+pub(crate) fn protected_folders(app_data_dir: Option<PathBuf>) -> ProtectedFolders {
+    let mut protected = ProtectedFolders::default();
+    protected.exact.extend(dirs::home_dir());
+    protected.exact.extend(dirs::data_dir());
+    protected.exact.extend(dirs::data_local_dir());
+    protected.exact.extend(dirs::config_dir());
+    protected.exact.extend(app_data_dir);
+    for variable in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
+        protected.trees.extend(std::env::var_os(variable).map(PathBuf::from));
+    }
+    #[cfg(unix)]
+    protected.trees.extend(
+        ["/etc", "/usr", "/bin", "/sbin", "/lib", "/var", "/boot", "/dev", "/proc", "/sys", "/System", "/Library"]
+            .map(PathBuf::from),
+    );
+    protected
+}
+
+/// The recordings folder a caller asked for, if it may be one: an existing
+/// local directory that is not a drive root, UNC or device path, the profile or
+/// application-data root, or part of the system. UNC, device and
+/// extended-length text is refused before any filesystem call. Returns the
+/// resolved folder; the error never contains the path.
+pub(crate) fn validate_save_folder(
+    requested: &std::path::Path,
+    protected: &ProtectedFolders,
+) -> Result<PathBuf, String> {
+    let text = requested.to_string_lossy();
+    if text.trim().is_empty()
+        || crate::database::meeting_files::is_network_or_device_path(&text)
+        || !requested.is_absolute()
+    {
+        return Err(SAVE_FOLDER_REFUSED.into());
+    }
+    let canonical = requested
+        .canonicalize()
+        .map_err(|_| SAVE_FOLDER_REFUSED.to_string())?;
+    if !canonical.is_dir() {
+        return Err(SAVE_FOLDER_REFUSED.into());
+    }
+    let resolved = crate::database::meeting_files::plain_path(&canonical);
+    let resolved_text = resolved.to_string_lossy();
+    if crate::database::meeting_files::is_network_or_device_path(&resolved_text)
+        || resolved.parent().is_none()
+    {
+        return Err(SAVE_FOLDER_REFUSED.into());
+    }
+    let known = |folder: &PathBuf| {
+        folder
+            .canonicalize()
+            .ok()
+            .map(|folder| crate::database::meeting_files::plain_path(&folder))
+    };
+    if protected
+        .exact
+        .iter()
+        .filter_map(known)
+        .any(|folder| same_path(&folder, &resolved))
+        || protected
+            .trees
+            .iter()
+            .filter_map(known)
+            .any(|folder| resolved.starts_with(&folder) || same_path(&folder, &resolved))
+    {
+        return Err(SAVE_FOLDER_REFUSED.into());
+    }
+    Ok(resolved)
+}
+
 #[tauri::command]
 pub async fn set_recording_preferences<R: Runtime>(
     app: AppHandle<R>,
-    preferences: RecordingPreferences,
+    mut preferences: RecordingPreferences,
 ) -> Result<(), String> {
+    // A save folder that stays as it is needs no new check (other settings can
+    // still be saved); a changed one must be a proper recordings folder.
+    let current = load_recording_preferences(&app).await.ok();
+    let unchanged = current
+        .as_ref()
+        .is_some_and(|current| same_path(&current.save_folder, &preferences.save_folder));
+    if !unchanged {
+        let requested = preferences.save_folder.clone();
+        // The default folder may not exist yet; it is the app's own to create.
+        if same_path(&requested, &get_default_recordings_folder()) {
+            ensure_recordings_directory(&requested)
+                .map_err(|_| "The recordings folder could not be created".to_string())?;
+        }
+        let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
+        preferences.save_folder = tokio::task::spawn_blocking(move || {
+            validate_save_folder(&requested, &protected)
+        })
+        .await
+        .map_err(|_| "Could not check the recordings folder".to_string())??;
+    }
     save_recording_preferences(&app, &preferences)
         .await
         .map_err(|e| format!("Failed to save recording preferences: {}", e))
@@ -402,6 +520,11 @@ pub async fn select_recording_folder<R: Runtime>(
         let folder = PathBuf::from(&folder_path);
         ensure_recordings_directory(&folder)
             .map_err(|e| format!("Failed to create selected recordings folder: {}", e))?;
+        let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
+        let checked = folder.clone();
+        tokio::task::spawn_blocking(move || validate_save_folder(&checked, &protected))
+            .await
+            .map_err(|_| "Could not check the recordings folder".to_string())??;
 
         info!("User selected recordings folder: {}", folder_path);
         Ok(Some(folder_path))
@@ -579,6 +702,27 @@ mod previous_folder_tests {
     }
 
     #[test]
+    fn trailing_separators_do_not_make_a_folder_a_different_one() {
+        let remembered = remember_previous_folder(&[p("/data/old")], Path::new("/data/old/"), Path::new("/data/new"));
+        assert_eq!(remembered, vec![p("/data/old")], "the same folder with a trailing slash is not added twice");
+        let again = remember_previous_folder(&remembered, Path::new("/data/older//"), Path::new("/data/old/"));
+        // The folder now in use leaves the list whatever its trailing slash.
+        assert_eq!(again, vec![p("/data/older//")]);
+        assert!(same_path(Path::new("/"), Path::new("/")));
+        assert!(!same_path(Path::new("/"), Path::new("/data")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_slash_direction_and_case_do_not_matter() {
+        assert!(same_path(Path::new(r"D:\Recordings\"), Path::new("d:/recordings")));
+        assert!(same_path(Path::new(r"C:\"), Path::new("c:/")));
+        assert!(!same_path(Path::new(r"C:\"), Path::new(r"D:\")));
+        let list = remember_previous_folder(&[p(r"D:\Old")], Path::new("d:/old/"), Path::new(r"E:\New"));
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
     fn the_roots_include_previous_folders_defaults_and_restored_backups() {
         let roots = roots_from(
             Some(p("/current")),
@@ -596,5 +740,92 @@ mod previous_folder_tests {
             assert!(roots.contains(&expected), "{expected:?} missing");
         }
         assert_eq!(roots_from(None, vec![], None).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod save_folder_tests {
+    use super::*;
+
+    fn protected(base: &std::path::Path) -> ProtectedFolders {
+        ProtectedFolders {
+            exact: vec![base.join("profile"), base.join("appdata")],
+            trees: vec![base.join("system")],
+        }
+    }
+
+    fn layout() -> (tempfile::TempDir, ProtectedFolders) {
+        let base = tempfile::tempdir().unwrap();
+        for dir in ["profile/Documents/Recordings", "appdata", "system/sub", "ordinary/recordings"] {
+            std::fs::create_dir_all(base.path().join(dir)).unwrap();
+        }
+        let protected = protected(&base.path().canonicalize().unwrap());
+        (base, protected)
+    }
+
+    #[test]
+    fn an_ordinary_existing_folder_is_accepted_and_resolved() {
+        let (base, protected) = layout();
+        let folder = base.path().join("ordinary").join("recordings");
+        let resolved = validate_save_folder(&folder, &protected).unwrap();
+        assert!(same_path(&resolved, &crate::database::meeting_files::plain_path(&folder.canonicalize().unwrap())));
+        // A folder below the profile is fine; the profile itself is not.
+        assert!(validate_save_folder(&base.path().join("profile/Documents/Recordings"), &protected).is_ok());
+        // `..` segments are resolved before judging.
+        assert!(validate_save_folder(&folder.join("..").join("recordings"), &protected).is_ok());
+    }
+
+    #[test]
+    fn profile_app_data_system_and_drive_roots_are_refused() {
+        let (base, protected) = layout();
+        for refused in [
+            base.path().join("profile"),
+            base.path().join("appdata"),
+            base.path().join("system"),
+            base.path().join("system/sub"),
+            base.path().join("ordinary/recordings/../../profile"),
+        ] {
+            assert_eq!(validate_save_folder(&refused, &protected).unwrap_err(), SAVE_FOLDER_REFUSED);
+        }
+        // A filesystem root (a drive root on Windows) is never acceptable.
+        let root = base.path().ancestors().last().unwrap().to_path_buf();
+        assert_eq!(validate_save_folder(&root, &ProtectedFolders::default()).unwrap_err(), SAVE_FOLDER_REFUSED);
+    }
+
+    #[test]
+    fn missing_relative_empty_file_and_network_text_are_refused() {
+        let (base, protected) = layout();
+        std::fs::write(base.path().join("ordinary/file.txt"), b"x").unwrap();
+        for refused in [
+            base.path().join("ordinary/missing"),
+            base.path().join("ordinary/file.txt"),
+            PathBuf::from("relative/folder"),
+            PathBuf::new(),
+            PathBuf::from(r"\\server\share\recordings"),
+            PathBuf::from(r"\\?\C:\recordings"),
+            PathBuf::from(r"\\?\UNC\server\share\recordings"),
+            PathBuf::from("//server/share/recordings"),
+        ] {
+            let error = validate_save_folder(&refused, &protected).unwrap_err();
+            assert_eq!(error, SAVE_FOLDER_REFUSED);
+            assert!(!error.contains("server"), "the message never names the path");
+        }
+    }
+
+    #[test]
+    fn the_known_folders_of_this_machine_are_derived_not_hard_coded() {
+        let protected = protected_folders(Some(PathBuf::from("app-data-root")));
+        assert!(protected.exact.iter().any(|folder| folder == &PathBuf::from("app-data-root")));
+        if let Some(home) = dirs::home_dir() {
+            assert!(protected.exact.contains(&home));
+            assert_eq!(validate_save_folder(&home, &protected).unwrap_err(), SAVE_FOLDER_REFUSED);
+        }
+        #[cfg(windows)]
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            assert_eq!(
+                validate_save_folder(std::path::Path::new(&root), &protected).unwrap_err(),
+                SAVE_FOLDER_REFUSED
+            );
+        }
     }
 }

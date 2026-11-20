@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHookHarness, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
-function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, stop = async () => {}, exitSaveFailure = false } = {}) {
+function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, stop = async () => {}, exitSaveFailure = false, stopRecordingFails = null } = {}) {
   const previousWindow = globalThis.window;
   const hooks = createHookHarness();
   const events = new Map();
@@ -41,7 +41,10 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     },
     '@/services/recordingService': { recordingService: {
       getRecordingState: async () => recording,
-      stopRecording: async path => { calls.push(['stop_recording', path.startsWith('synthetic-data/recording-')]); },
+      stopRecording: async path => {
+        calls.push(['stop_recording', path.startsWith('synthetic-data/recording-')]);
+        if (stopRecordingFails !== null) throw stopRecordingFails;
+      },
     } },
     '@/lib/recording-capture': loadTsModule('src/lib/recording-capture.ts'),
   });
@@ -83,7 +86,7 @@ test('listeners subscribe once, however often the stop handler changes', async t
   await flush();
   for (let index = 0; index < 5; index++) app.render();
   await flush();
-  assert.deepEqual([...app.subscriptions].sort(), ['batch-job-preempted', 'recording-disk-space-low', 'recording-error', 'recording-stop-complete', 'recording-stopped']);
+  assert.deepEqual([...app.subscriptions].sort(), ['batch-job-preempted', 'recording-disk-space-low', 'recording-error', 'recording-stop-complete', 'recording-stop-failed', 'recording-stopped']);
   app.events.get('recording-stop-complete')({ payload: true });
   await flush();
   const versions = app.calls.filter(([name]) => name === 'version');
@@ -182,4 +185,45 @@ test('the low disk space warning goes away when the recording ends', async t => 
   await flush();
   app.events.get('recording-stopped')({ payload: {} });
   assert.deepEqual(app.dismissed, ['recording-disk-space-low']);
+});
+
+const NOT_RESPONDING = 'The audio device is not responding, so the recording cannot be stopped yet. Everything recorded so far is saved on disk. Try Stop again in a moment.';
+
+test('a Stop the core refuses shows its message, skips the save flow and returns to recording at once', async t => {
+  for (const failure of [NOT_RESPONDING, new Error(NOT_RESPONDING)]) {
+    const app = setup(t, { uiStatus: 'RECORDING', stopRecordingFails: failure });
+    await flush();
+    app.windowListeners.get('stop-recording-from-sidebar')();
+    await flush();
+    const names = app.calls.filter(([name]) => name !== 'version').map(([name]) => name);
+    assert.ok(!names.includes('handleRecordingStop'), 'the save flow is not run for a recording that is still running');
+    assert.deepEqual(app.calls.filter(([name]) => name === 'setStatus'), [['setStatus', 'RECORDING']]);
+    const shown = app.toasts.filter(toast => toast.title === 'Could not stop the recording');
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].description, NOT_RESPONDING);
+  }
+});
+
+test('an unusable or very long error shows a plain message instead', async t => {
+  const app = setup(t, { stopRecordingFails: 'x'.repeat(500) });
+  await flush();
+  app.windowListeners.get('stop-recording-from-sidebar')();
+  await flush();
+  const shown = app.toasts.find(toast => toast.title === 'Could not stop the recording');
+  assert.match(shown.description, /still running/);
+  assert.ok(shown.description.length < 100);
+});
+
+test('a Stop from the tray that failed is reported and, while stopping, returns to recording', async t => {
+  const stopping = setup(t, { uiStatus: 'STOPPING' });
+  await flush();
+  stopping.events.get('recording-stop-failed')({ payload: { message: NOT_RESPONDING } });
+  assert.equal(stopping.toasts.at(-1).description, NOT_RESPONDING);
+  assert.deepEqual(stopping.calls.filter(([name]) => name === 'setStatus'), [['setStatus', 'RECORDING']]);
+  // In any other state the message is shown and the state is left alone.
+  const idle = setup(t, { uiStatus: 'RECORDING' });
+  await flush();
+  idle.events.get('recording-stop-failed')({ payload: { message: NOT_RESPONDING } });
+  assert.equal(idle.toasts.at(-1).description, NOT_RESPONDING);
+  assert.deepEqual(idle.calls.filter(([name]) => name === 'setStatus'), []);
 });

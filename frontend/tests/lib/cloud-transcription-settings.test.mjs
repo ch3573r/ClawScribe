@@ -18,13 +18,15 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
     const { TranscriptSettings } = loadTsModule('src/components/TranscriptSettings.tsx', {
       react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
       'next/navigation': { useRouter: () => ({ push() {} }) },
-      'lucide-react': names('Eye EyeOff FlaskConical Loader2 Lock Unlock'),
+      'lucide-react': names('FlaskConical Loader2'),
       './ui/select': names('Select SelectContent SelectGroup SelectItem SelectLabel SelectTrigger SelectValue'),
       './ui/input': names('Input'), './ui/button': names('Button'), './ui/label': names('Label'),
       './WhisperModelManager': names('ModelManager'), './ParakeetModelManager': names('ParakeetModelManager'),
       './NemotronModelManager': names('NemotronModelManager'), './WhisperAccelerationStatus': names('WhisperAccelerationStatus'),
       './UnencryptedHttpOptIn': names('UnencryptedHttpOptIn'), './TranscriptionPcTest': names('TranscriptionPcTest'),
       '@/components/ui/settings-layout': names('SettingsCard SettingsFooter SettingsRow'),
+      '@/components/settings/SecretKeyControl': names('SecretKeyRow SecretKeyControl'),
+      '@/services/configService': { configService: { getTranscriptApiKeyStatus: async () => ({ stored: true, hint: null }), clearTranscriptApiKey: async () => {} } },
       '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: true, loaded: true }) },
       '@tauri-apps/plugin-dialog': { open: async () => 'test.wav' },
       '@tauri-apps/api/core': { invoke: async (command, args) => {
@@ -33,29 +35,41 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
       } },
       sonner: { toast: { success() {}, error(message) { assert.fail(message); } } },
     });
-    let config = { provider, model: 'test-model', apiKey: 'test-token',
+    let config = { provider, model: 'test-model',
       baseUrl: 'http://model.local/v1', endpoint: 'http://speech.local', allowUnencrypted: true };
     const render = () => hooks.render(() => TranscriptSettings({
       transcriptModelConfig: config, setTranscriptModelConfig: value => { config = value; },
     }));
     const button = label => nodes(render()).find(node => node.type === 'Button' && text(node).trim() === label);
+    const keyRow = () => nodes(render()).find(node => node.type === 'SecretKeyRow');
     render();
+    await new Promise(resolve => setTimeout(resolve, 0));
     assert.equal(nodes(render()).find(node => node.type === 'UnencryptedHttpOptIn').props.checked, true);
+    // The stored key is never loaded into the field: it only reports that one is stored.
+    assert.equal(keyRow().props.status.stored, true);
+    assert.equal(keyRow().props.draft, '');
     const endpoint = provider === 'cloud-whisper' ? config.baseUrl : config.endpoint;
     nodes(render()).find(node => node.type === 'Input' && node.props.value === endpoint)
       .props.onChange({ target: { value: 'https://other.example.com/v1' } });
     await button('Test').props.onClick();
-    assert.equal(calls.at(-1).args.apiKey, null, 'backend must bind the saved key to its endpoint');
+    assert.equal(calls.at(-1).command, 'api_test_transcript_provider');
+    assert.equal(calls.at(-1).args.apiKey, null, 'no key is sent unless one was typed; the core binds the stored key to its endpoint');
     assert.equal(calls.at(-1).args.allowUnencrypted, true);
-    nodes(render()).find(node => node.type === 'Input' && node.props.placeholder === 'Enter your API key')
-      .props.onChange({ target: { value: 'test-token' } });
+    keyRow().props.onDraftChange('test-token');
     await button('Test').props.onClick();
-    assert.equal(calls.at(-1).args.apiKey, 'test-token', 'explicitly entered key can test an edited endpoint');
+    assert.equal(calls.at(-1).args.apiKey, 'test-token', 'an explicitly entered key can test an edited endpoint');
     await button('Save').props.onClick();
     assert.equal(calls.at(-1).command, 'api_save_transcript_config');
+    assert.equal(calls.at(-1).args.apiKey, 'test-token');
     assert.equal(calls.at(-1).args.allowUnencrypted, true);
+    assert.equal(config.apiKey ?? null, null, 'a saved key is not kept in the shared configuration');
+    assert.equal(keyRow().props.draft, '', 'the typed key is forgotten once it is saved');
     await button('Test').props.onClick();
-    assert.equal(calls.at(-1).args.apiKey, null, 'after save the key is bound again');
+    assert.equal(calls.at(-1).args.apiKey, null, 'after save the stored key is used by the core again');
+    // Saving without touching the key field sends no key, so the stored one is kept.
+    await button('Save').props.onClick();
+    assert.equal(calls.at(-1).command, 'api_save_transcript_config');
+    assert.equal(calls.at(-1).args.apiKey, null);
     hooks.unmount();
   });
 }
@@ -79,13 +93,15 @@ for (const enabled of [true, false]) {
     const { TranscriptSettings } = loadTsModule('src/components/TranscriptSettings.tsx', {
       react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
       'next/navigation': { useRouter: () => ({ push: route => routes.push(route) }) },
-      'lucide-react': names('Eye EyeOff FlaskConical Loader2 Lock Unlock'),
+      'lucide-react': names('FlaskConical Loader2'),
       './ui/select': names('Select SelectContent SelectGroup SelectItem SelectLabel SelectTrigger SelectValue'),
       './ui/input': names('Input'), './ui/button': names('Button'), './ui/label': names('Label'),
       './WhisperModelManager': names('ModelManager'), './ParakeetModelManager': names('ParakeetModelManager'),
       './NemotronModelManager': names('NemotronModelManager'), './WhisperAccelerationStatus': names('WhisperAccelerationStatus'),
       './UnencryptedHttpOptIn': names('UnencryptedHttpOptIn'), './TranscriptionPcTest': names('TranscriptionPcTest'),
       '@/components/ui/settings-layout': names('SettingsCard SettingsFooter SettingsRow'),
+      '@/components/settings/SecretKeyControl': names('SecretKeyRow SecretKeyControl'),
+      '@/services/configService': { configService: { getTranscriptApiKeyStatus: async () => ({ stored: true, hint: null }), clearTranscriptApiKey: async () => {} } },
       '@/hooks/useCloudTranscription': { useCloudTranscription },
       '@tauri-apps/plugin-dialog': { open: async () => null },
       '@tauri-apps/api/core': { invoke: async () => null },
@@ -128,13 +144,15 @@ test('"Open options" scrolls to the Options card on the Transcription page inste
   const { TranscriptSettings } = loadTsModule('src/components/TranscriptSettings.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     'next/navigation': { useRouter: () => ({ push: route => routes.push(route) }) },
-    'lucide-react': names('Eye EyeOff FlaskConical Loader2 Lock Unlock'),
+    'lucide-react': names('FlaskConical Loader2'),
     './ui/select': names('Select SelectContent SelectGroup SelectItem SelectLabel SelectTrigger SelectValue'),
     './ui/input': names('Input'), './ui/button': names('Button'),
     './WhisperModelManager': names('ModelManager'), './ParakeetModelManager': names('ParakeetModelManager'),
     './NemotronModelManager': names('NemotronModelManager'), './WhisperAccelerationStatus': names('WhisperAccelerationStatus'),
     './UnencryptedHttpOptIn': names('UnencryptedHttpOptIn'), './TranscriptionPcTest': names('TranscriptionPcTest'),
     '@/components/ui/settings-layout': names('SettingsCard SettingsFooter SettingsRow'),
+      '@/components/settings/SecretKeyControl': names('SecretKeyRow SecretKeyControl'),
+      '@/services/configService': { configService: { getTranscriptApiKeyStatus: async () => ({ stored: true, hint: null }), clearTranscriptApiKey: async () => {} } },
     '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: false, loaded: true }) },
     '@tauri-apps/plugin-dialog': { open: async () => null },
     '@tauri-apps/api/core': { invoke: async () => null },

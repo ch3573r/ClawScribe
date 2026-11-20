@@ -774,7 +774,8 @@ mod tests {
                 Some("http://model.example.com"),
                 None,
                 None,
-                true
+                true,
+                false,
             )
             .await
             .is_err());
@@ -785,6 +786,7 @@ mod tests {
                 None,
                 None,
                 true,
+                false,
             )
             .await
             .unwrap();
@@ -794,6 +796,7 @@ mod tests {
                 None,
                 Some("https://speech.example.com"),
                 None,
+                false,
                 false,
             )
             .await

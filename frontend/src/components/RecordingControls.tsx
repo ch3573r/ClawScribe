@@ -19,6 +19,7 @@ import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks
 import { Button } from '@/components/ui/button';
 import { RecordingLevelMeter } from '@/components/RecordingLevelMeter';
 import { describeStartError } from '@/lib/start-error';
+import { STOP_FAILED_TITLE, isNothingToStop, stopFailureMessage } from '@/lib/stop-error';
 import { toast } from 'sonner';
 
 interface RecordingControlsProps {
@@ -155,23 +156,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       onRecordingStop(true);
     } catch (error) {
       console.error("Failed to stop recording:");
-      if (error instanceof Error) {
-        console.error("Error details:");
-        if (error.message.includes('No recording in progress')) {
-          return;
-        }
-      } else if (
-        typeof error === 'string' &&
-        error.includes('No recording in progress')
-      ) {
+      if (isNothingToStop(error)) {
         return;
-      } else if (error && typeof error === 'object' && 'toString' in error) {
-        if (error.toString().includes('No recording in progress')) {
-          return;
-        }
       }
+      // The recording is still running: say why, skip the save flow, and go
+      // back to the recording state at once instead of waiting for a poll.
+      toast.error(STOP_FAILED_TITLE, { description: stopFailureMessage(error) });
       setIsProcessing(false);
-      onRecordingStop(false);
+      recordingState.setStatus(RecordingStatus.RECORDING);
     } finally {
       setIsStopping(false);
     }

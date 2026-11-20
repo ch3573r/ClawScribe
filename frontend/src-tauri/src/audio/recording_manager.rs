@@ -729,7 +729,12 @@ impl RecordingManager {
                         .await
                     {
                         return Err(self
-                            .recover_after_failed_reconnect(previous_microphone, system_device, error)
+                            .recover_after_failed_reconnect(
+                                previous_microphone,
+                                system_device,
+                                DeviceMonitorType::Microphone,
+                                error,
+                            )
                             .await);
                     }
                     self.state.set_microphone_device(device_arc);
@@ -753,7 +758,12 @@ impl RecordingManager {
                         .await
                     {
                         return Err(self
-                            .recover_after_failed_reconnect(microphone_device, previous_system, error)
+                            .recover_after_failed_reconnect(
+                                microphone_device,
+                                previous_system,
+                                DeviceMonitorType::SystemAudio,
+                                error,
+                            )
                             .await);
                     }
                     self.state.set_system_device(device_arc);
@@ -771,35 +781,53 @@ impl RecordingManager {
 
     /// A reconnection stopped the streams and could not start them with the new
     /// device. Try the previous devices again so capture goes on as before. If
-    /// that fails too, the streams are stopped: say so (a warning, so the UI's
-    /// reconnect retry still applies) and mark the capture incomplete. The
-    /// returned error is the one to report to the caller.
+    /// the previous pair cannot start (the device being reconnected is the one
+    /// that was lost), try once more with only the source that was not being
+    /// reconnected, and say in a warning which source is missing. Only when that
+    /// fails too is the capture marked incomplete and reported as stopped. The
+    /// returned error is the one to report to the caller; in every case the
+    /// reconnect retry still applies.
     async fn recover_after_failed_reconnect(
         &mut self,
         microphone: Option<Arc<AudioDevice>>,
         system: Option<Arc<AudioDevice>>,
+        reconnecting: DeviceMonitorType,
         error: anyhow::Error,
     ) -> anyhow::Error {
         let _ = self.stream_manager.stop_streams();
-        match self
+        if self
             .stream_manager
-            .start_streams(microphone, system, None)
+            .start_streams(microphone.clone(), system.clone(), None)
             .await
+            .is_ok()
         {
-            Ok(()) => {
-                warn!("Reconnection failed; the previous audio devices were restarted");
-                error
-            }
-            Err(_) => {
-                self.state.mark_capture_incomplete();
-                self.state.report_warning(
-                    "Audio capture stopped after a failed reconnection. Try reconnecting again.",
-                );
-                anyhow::anyhow!(
-                    "The audio device could not be reconnected and capture is stopped: {error}"
-                )
-            }
+            warn!("Reconnection failed; the previous audio devices were restarted");
+            return error;
         }
+        // The previous pair failed to start, usually because the lost device is
+        // part of it. Keep the source that was not being reconnected.
+        let _ = self.stream_manager.stop_streams();
+        if let Some((kept_microphone, kept_system, missing)) =
+            kept_source(&reconnecting, microphone, system)
+        {
+            if self
+                .stream_manager
+                .start_streams(kept_microphone, kept_system, None)
+                .await
+                .is_ok()
+            {
+                self.state.report_warning(&missing_source_warning(missing));
+                return anyhow::anyhow!(
+                    "The {missing} could not be reconnected; the other source is still being recorded: {error}"
+                );
+            }
+            let _ = self.stream_manager.stop_streams();
+        }
+        self.state.mark_capture_incomplete();
+        self.state.report_warning(
+            "Audio capture stopped after a failed reconnection. Try reconnecting again.",
+        );
+        anyhow::anyhow!("The audio device could not be reconnected and capture is stopped: {error}")
     }
 
     /// Handle a device disconnect event
@@ -862,5 +890,57 @@ impl Drop for RecordingManager {
     fn drop(&mut self) {
         // Note: Can't call async cleanup in Drop, but streams have their own Drop implementations
         self.state.cleanup();
+    }
+}
+
+/// The source that keeps recording when the one being reconnected cannot be
+/// restored: the devices to start with, and the name of the missing source.
+/// None when there is nothing else to keep.
+fn kept_source<T>(
+    reconnecting: &DeviceMonitorType,
+    microphone: Option<T>,
+    system: Option<T>,
+) -> Option<(Option<T>, Option<T>, &'static str)> {
+    match reconnecting {
+        DeviceMonitorType::Microphone => system.map(|system| (None, Some(system), "microphone")),
+        DeviceMonitorType::SystemAudio => {
+            microphone.map(|microphone| (Some(microphone), None, "system audio"))
+        }
+    }
+}
+
+fn missing_source_warning(missing: &str) -> String {
+    format!("The {missing} is not available and is not being recorded. The other source is still recorded. Try reconnecting again.")
+}
+
+#[cfg(test)]
+mod reconnect_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn a_lost_microphone_keeps_system_audio_and_the_other_way_round() {
+        assert_eq!(
+            kept_source(&DeviceMonitorType::Microphone, Some("mic"), Some("system")),
+            Some((None, Some("system"), "microphone"))
+        );
+        assert_eq!(
+            kept_source(&DeviceMonitorType::SystemAudio, Some("mic"), Some("system")),
+            Some((Some("mic"), None, "system audio"))
+        );
+    }
+
+    #[test]
+    fn with_nothing_else_to_keep_there_is_no_fallback() {
+        assert_eq!(kept_source::<&str>(&DeviceMonitorType::Microphone, Some("mic"), None), None);
+        assert_eq!(kept_source::<&str>(&DeviceMonitorType::SystemAudio, None, Some("system")), None);
+        assert_eq!(kept_source::<&str>(&DeviceMonitorType::Microphone, None, None), None);
+    }
+
+    #[test]
+    fn the_warning_names_the_missing_source_and_says_the_other_still_records() {
+        let message = missing_source_warning("microphone");
+        assert!(message.contains("microphone") && message.contains("not being recorded"));
+        assert!(message.contains("other source is still recorded"));
+        assert!(missing_source_warning("system audio").contains("system audio"));
     }
 }

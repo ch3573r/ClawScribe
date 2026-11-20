@@ -71,7 +71,7 @@ impl MicrosoftAuthConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceCodeResponse {
     pub device_code: String,
     pub user_code: String,
@@ -82,7 +82,7 @@ pub struct DeviceCodeResponse {
     pub interval: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]
@@ -93,6 +93,15 @@ pub struct TokenResponse {
     #[serde(default)]
     pub scope: String,
 }
+
+crate::credentials::debug_without_secrets!(DeviceCodeResponse {
+    user_code, verification_uri, message, expires_in, interval;
+    secret device_code
+});
+crate::credentials::debug_without_secrets!(TokenResponse {
+    expires_in, token_type, scope;
+    secret access_token, refresh_token
+});
 
 #[derive(Debug, Clone)]
 pub enum PollResult {

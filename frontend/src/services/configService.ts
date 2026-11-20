@@ -7,21 +7,26 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
+import { readSecretStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
 
 export interface ModelConfig {
   provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openrouter' | 'openai' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
   model: string;
   whisperModel: string;
   /**
-   * @deprecated Use providerApiKeys from ConfigContext instead.
-   * This field may contain stale data when provider changes without saving.
+   * A key the user has just typed, held only until it is saved. It is never
+   * loaded from the core, which does not return stored keys.
    */
   apiKey?: string | null;
+  /** Whether the provider has a stored key, with a short hint. */
+  apiKeyStatus?: SecretStatus;
   ollamaEndpoint?: string | null;
   // Custom OpenAI fields (only populated when provider is 'custom-openai')
   customOpenAIEndpoint?: string | null;
   customOpenAIModel?: string | null;
+  /** A key just typed for the custom provider, held only until it is saved. */
   customOpenAIApiKey?: string | null;
+  customOpenAIKeyStatus?: SecretStatus;
   maxTokens?: number | null;
   contextWindow?: number | null;
   temperature?: number | null;
@@ -31,10 +36,12 @@ export interface ModelConfig {
   project?: string | null;
 }
 
+/** The custom provider settings as the core returns them: no key, only its status. */
 export interface CustomOpenAIConfig {
   allow_unencrypted?: boolean;
+  destination_problem?: string | null;
   endpoint: string;
-  apiKey: string | null;
+  apiKeyStatus: SecretStatus;
   model: string;
   maxTokens: number | null;
   contextWindow?: number | null;
@@ -44,6 +51,12 @@ export interface CustomOpenAIConfig {
   organization?: string | null;
   project?: string | null;
 }
+
+/** What a save sends for the custom provider. A null `apiKey` keeps the stored key. */
+export type CustomOpenAIConfigInput = Omit<CustomOpenAIConfig, 'apiKeyStatus' | 'destination_problem'> & {
+  apiKey?: string | null;
+  allowUnencrypted?: boolean;
+};
 
 export interface RecordingPreferences {
   preferred_mic_device: string | null;
@@ -68,7 +81,34 @@ export class ConfigService {
    * @returns Promise with { provider, model, whisperModel }
    */
   async getModelConfig(): Promise<ModelConfig> {
-    return invoke<ModelConfig>('api_get_model_config');
+    const raw = await invoke<ModelConfig & { apiKeyStatus?: unknown }>('api_get_model_config');
+    if (!raw) return raw;
+    return { ...withoutSecrets(raw), apiKeyStatus: readSecretStatus(raw.apiKeyStatus) };
+  }
+
+  /** Whether a summary provider has a stored key. The key itself is never returned. */
+  async getApiKeyStatus(provider: string): Promise<SecretStatus> {
+    return readSecretStatus(await invoke<unknown>('api_get_api_key_status', { provider }));
+  }
+
+  /** Removes a summary provider's stored key. */
+  async clearApiKey(provider: string): Promise<void> {
+    await invoke('api_clear_api_key', { provider });
+  }
+
+  /** Removes the custom provider's stored key; its other settings stay. */
+  async clearCustomOpenAIApiKey(): Promise<void> {
+    await invoke('api_clear_custom_openai_api_key');
+  }
+
+  /** Whether a hosted transcription provider has a stored key. The key itself is never returned. */
+  async getTranscriptApiKeyStatus(provider: string): Promise<SecretStatus> {
+    return readSecretStatus(await invoke<unknown>('api_get_transcript_api_key_status', { provider }));
+  }
+
+  /** Removes a hosted transcription provider's stored key. */
+  async clearTranscriptApiKey(provider: string): Promise<void> {
+    await invoke('api_clear_transcript_api_key', { provider });
   }
 
   /**
@@ -84,7 +124,9 @@ export class ConfigService {
    * @returns Promise with CustomOpenAIConfig or null if not configured
    */
   async getCustomOpenAIConfig(): Promise<CustomOpenAIConfig | null> {
-    return invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
+    const raw = await invoke<(CustomOpenAIConfig & { apiKeyStatus?: unknown }) | null>('api_get_custom_openai_config');
+    if (!raw) return null;
+    return { ...withoutSecrets(raw), apiKeyStatus: readSecretStatus(raw.apiKeyStatus) };
   }
 
   /**
@@ -92,10 +134,10 @@ export class ConfigService {
    * @param config - CustomOpenAIConfig to save
    * @returns Promise with result status
    */
-  async saveCustomOpenAIConfig(config: CustomOpenAIConfig): Promise<{ status: string; message: string }> {
+  async saveCustomOpenAIConfig(config: CustomOpenAIConfigInput): Promise<{ status: string; message: string }> {
     return invoke<{ status: string; message: string }>('api_save_custom_openai_config', {
       endpoint: config.endpoint,
-      apiKey: config.apiKey,
+      apiKey: config.apiKey ?? null,
       model: config.model,
       maxTokens: config.maxTokens,
       temperature: config.temperature,
@@ -109,7 +151,7 @@ export class ConfigService {
   /**
    * Test custom OpenAI connection
    * @param endpoint - API endpoint URL
-   * @param apiKey - Optional API key
+   * @param apiKey - A key typed for this test. Null uses the stored key, for the stored endpoint only
    * @param model - Model name
    * @returns Promise with test result
    */

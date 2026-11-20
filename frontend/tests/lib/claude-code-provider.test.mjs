@@ -115,7 +115,7 @@ test('Claude Code checks use the draft path, coalesce clicks and save only when 
   hooks.unmount();
 });
 
-test('summary settings never request an API key for Claude Code', async () => {
+test('summary settings never request an API key, for Claude Code or any other provider', async () => {
   for (const provider of ['claude-code', 'claude']) {
     for (const surface of ['settings']) {
       const hooks = createHookHarness();
@@ -139,7 +139,8 @@ test('summary settings never request an API key for Claude Code', async () => {
       const { SummaryModelSettings } = loadTsModule('src/components/SummaryModelSettings.tsx', mocks);
       hooks.render(() => SummaryModelSettings({}));
       await flush();
-      assert.equal(calls.includes('api_get_api_key'), provider === 'claude');
+      // No provider's key is ever requested: the core reports only a status, and never to this screen.
+      assert.equal(calls.includes('api_get_api_key'), false);
       hooks.unmount();
     }
   }

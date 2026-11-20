@@ -21,7 +21,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
-import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, Wrench } from 'lucide-react';
+import { Lock, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, Wrench } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   Command,
@@ -41,17 +41,29 @@ import { NoteRow, ROW_SELECT } from '@/components/settings/settings-parts';
 import { SaveError, safeMessage, useSaveFeedback, type CommitResult } from '@/components/settings/commit-field';
 import { CommitInputRow, CopyCommandRow, SaveMark, withError } from '@/components/settings/summary-provider-parts';
 import { providerLabel as summaryProviderLabel } from '@/components/settings/provider-data';
+import { SecretKeyControl, SecretKeyRow } from '@/components/settings/SecretKeyControl';
+import { configService } from '@/services/configService';
+import {
+  KEY_REQUIRED_FOR_NEW_ADDRESS, NO_SECRET, hasUsableKey, keyProblem, keyRequiredForAddress, newKeyPayload, readSecretStatus,
+  removalNeedsConfirmation, withoutSecrets, type SecretStatus,
+} from '@/lib/secret-key';
+import type { KeyProvider } from '@/contexts/ConfigContext';
 
 export interface ModelConfig {
   provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
   model: string;
   whisperModel: string;
+  /** A key the user has just typed, held only until it is saved. Never loaded from the core. */
   apiKey?: string | null;
+  /** Whether the provider has a stored key, with a short hint. */
+  apiKeyStatus?: SecretStatus;
   ollamaEndpoint?: string | null;
   // Custom OpenAI fields
   customOpenAIEndpoint?: string | null;
   customOpenAIModel?: string | null;
+  /** A key just typed for the custom provider, held only until it is saved. */
   customOpenAIApiKey?: string | null;
+  customOpenAIKeyStatus?: SecretStatus;
   maxTokens?: number | null;
   contextWindow?: number | null;
   temperature?: number | null;
@@ -301,15 +313,16 @@ export function ModelSettingsModal({
     else setSharedModelConfig(next);
   }, [setPreview, setSharedModelConfig]);
   const claudeCode = useClaudeCodeSettings(modelConfig.provider === 'claude-code');
-  const providerApiKeys = configContext?.providerApiKeys;
-  const updateProviderApiKey = configContext?.updateProviderApiKey;
+  const providerKeyStatus = configContext?.providerKeyStatus;
+  const refreshProviderKeyStatus = configContext?.refreshProviderKeyStatus;
 
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [error, setError] = useState<string>('');
+  // The key typed for the provider being looked at. A stored key is never loaded
+  // here: the core reports only whether one is stored (`keyStatus`).
   const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
-  const [showApiKey, setShowApiKey] = useState<boolean>(false);
-  const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(!!modelConfig.apiKey?.trim());
-  const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
+  const keyStatus: SecretStatus =
+    providerKeyStatus?.[modelConfig.provider as KeyProvider] ?? modelConfig.apiKeyStatus ?? NO_SECRET;
   const { serverAddress } = useSidebar();
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
   const [openRouterError, setOpenRouterError] = useState<string>('');
@@ -332,7 +345,11 @@ export function ModelSettingsModal({
   const [openClawAllowUnencrypted, setOpenClawAllowUnencrypted] = useState(false);
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+  // A key typed for the custom provider; the stored one is only reported as a status.
   const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
+  const [customKeyStatus, setCustomKeyStatus] = useState<SecretStatus>(modelConfig.customOpenAIKeyStatus ?? NO_SECRET);
+  // The address the stored custom key was saved for. Changing the address needs the key again.
+  const [savedCustomEndpoint, setSavedCustomEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || '');
   const [customContextWindow, setCustomContextWindow] = useState<string>(modelConfig.contextWindow?.toString() || '8192');
   const [customMaxTokens, setCustomMaxTokens] = useState<string>(modelConfig.maxTokens?.toString() || '');
   const [customTemperature, setCustomTemperature] = useState<string>(modelConfig.temperature?.toString() || '');
@@ -425,26 +442,6 @@ export function ModelSettingsModal({
     return () => clearTimeout(timer);
   }, [ollamaEndpoint]);
 
-  const fetchApiKey = async (provider: string) => {
-    try {
-      const data = (await invoke('api_get_api_key', {
-        provider,
-      })) as string;
-      setApiKey(data || '');
-    } catch (err) {
-      console.error('Error fetching API key:', err);
-      setApiKey(null);
-    }
-  };
-
-  // Auto-unlock when API key becomes empty, 
-  useEffect(() => {
-    const hasContent = !!apiKey?.trim();
-    if (!hasContent) {
-      setIsApiKeyLocked(false);
-    }
-  }, [apiKey]);
-
   const configuredCodexModel = codexConfig.model || modelConfig.model || CODEX_DEFAULT_MODEL;
   const codexPickerModels = codexModels.some((model) => model.id === configuredCodexModel)
     ? codexModels
@@ -491,7 +488,16 @@ export function ModelSettingsModal({
     !customTimeoutSeconds.trim()
   );
 
+  // A stored key goes only to the address it was saved for: changing the
+  // address asks for the key again, and nothing is saved until it is entered.
+  const customKeyRequired = keyRequiredForAddress(savedCustomEndpoint, customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, customOpenAIApiKey);
+  const openClawTokenRequired = !!openClawStatus?.bearer_token_configured && !openClawBearerToken.trim()
+    && (keyRequiredForAddress(openClawStatus.endpoint, openClawEndpoint, { stored: true, hint: null }, '')
+      || keyRequiredForAddress(openClawStatus.model_endpoint, openClawModelEndpoint, { stored: true, hint: null }, ''));
+  const typedKeyProblem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
+
   const isOpenClawInvalid = modelConfig.provider === 'openclaw' && (
+    openClawTokenRequired ||
     !openClawEndpoint.trim() ||
     !openClawModelEndpoint.trim() ||
     !openClawSource.trim() ||
@@ -500,9 +506,11 @@ export function ModelSettingsModal({
 
   const isDoneDisabled =
     (modelConfig.provider === 'claude-code' && claudeCode.busy) ||
-    (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
+    (requiresApiKey && !hasUsableKey(apiKey, keyStatus)) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
     isCustomOpenAIInvalid ||
+    (modelConfig.provider === 'custom-openai' && customKeyRequired) ||
+    typedKeyProblem !== null ||
     isOpenClawInvalid;
 
   useEffect(() => {
@@ -516,20 +524,7 @@ export function ModelSettingsModal({
       try {
         const data = (await invoke('api_get_model_config')) as any;
         if (data && data.provider !== null) {
-          setModelConfig(data);
-
-          // Fetch API key if not included in response and provider requires it
-          if (['claude', 'groq', 'openai', 'openrouter'].includes(data.provider) && !data.apiKey) {
-            try {
-              const apiKeyData = await invoke('api_get_api_key', {
-                provider: data.provider
-              }) as string;
-              data.apiKey = apiKeyData;
-              setApiKey(apiKeyData);
-            } catch (err) {
-              console.error('Failed to fetch API key:', err);
-            }
-          }
+          setModelConfig({ ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) });
 
           // Sync ollamaEndpoint state with fetched config
           if (data.ollamaEndpoint) {
@@ -547,7 +542,8 @@ export function ModelSettingsModal({
                 setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                 setCustomAllowUnencrypted(customConfig.allow_unencrypted ?? false);
                 setCustomDestinationProblem(customConfig.destination_problem ?? null);
-                setCustomOpenAIApiKey(customConfig.apiKey || '');
+                setCustomKeyStatus(readSecretStatus(customConfig.apiKeyStatus));
+                setSavedCustomEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                 setCustomMaxTokens(customConfig.maxTokens?.toString() || '');
                 setCustomContextWindow(customConfig.contextWindow?.toString() || '8192');
                 setCustomTemperature(customConfig.temperature?.toString() || '');
@@ -605,13 +601,13 @@ export function ModelSettingsModal({
       console.log('Syncing custom OpenAI fields from ConfigContext:', {
         endpoint: modelConfig.customOpenAIEndpoint,
         model: modelConfig.customOpenAIModel,
-        hasApiKey: !!modelConfig.customOpenAIApiKey,
+        hasStoredKey: !!modelConfig.customOpenAIKeyStatus?.stored,
       });
 
       // Always sync from modelConfig (which comes from context if available)
       setCustomOpenAIEndpoint(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
       setCustomOpenAIModel(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-      setCustomOpenAIApiKey(modelConfig.customOpenAIApiKey || '');
+      if (modelConfig.customOpenAIKeyStatus) setCustomKeyStatus(modelConfig.customOpenAIKeyStatus);
       setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
       setCustomContextWindow(modelConfig.contextWindow?.toString() || '8192');
       setCustomTemperature(modelConfig.temperature?.toString() || '');
@@ -624,7 +620,7 @@ export function ModelSettingsModal({
     modelConfig.provider,
     modelConfig.customOpenAIEndpoint,
     modelConfig.customOpenAIModel,
-    modelConfig.customOpenAIApiKey,
+    modelConfig.customOpenAIKeyStatus,
     modelConfig.maxTokens,
     modelConfig.contextWindow,
     modelConfig.temperature,
@@ -666,16 +662,10 @@ export function ModelSettingsModal({
     }
   }, [ollamaEndpoint, lastFetchedEndpoint, modelConfig.provider]);
 
-  // Sync local apiKey state when provider changes
+  // A key typed for one provider is never carried to another.
   useEffect(() => {
-    if (providerApiKeys && requiresApiKey && modelConfig.provider !== 'custom-openai') {
-      const correctKey = providerApiKeys[modelConfig.provider as keyof typeof providerApiKeys];
-      if (correctKey !== apiKey) {
-        setApiKey(correctKey || '');
-        setIsApiKeyLocked(!!correctKey?.trim());
-      }
-    }
-  }, [modelConfig.provider, providerApiKeys, requiresApiKey]);
+    setApiKey(modelConfig.apiKey || null);
+  }, [modelConfig.provider]);
 
   useEffect(() => {
     setAdvancedOpen(false);
@@ -802,14 +792,14 @@ export function ModelSettingsModal({
   };
 
   // Fetch OpenAI models from API
-  const loadOpenAIModels = async (key: string | null) => {
-    if (!key?.trim()) {
+  const loadOpenAIModels = async (key: string | null, useStoredKey = false) => {
+    if (!key?.trim() && !useStoredKey) {
       setOpenaiModels([]); // Will use fallback via modelOptions
       return;
     }
     setIsLoadingOpenAI(true);
     try {
-      const data = (await invoke('get_openai_models', { apiKey: key })) as OpenAIModel[];
+      const data = (await invoke('get_openai_models', { apiKey: newKeyPayload(key) })) as OpenAIModel[];
       setOpenaiModels(data.map((m) => m.id));
       setModelListFailed(false);
     } catch (err) {
@@ -822,14 +812,14 @@ export function ModelSettingsModal({
   };
 
   // Fetch Anthropic (Claude) models from API
-  const loadClaudeModels = async (key: string | null) => {
-    if (!key?.trim()) {
+  const loadClaudeModels = async (key: string | null, useStoredKey = false) => {
+    if (!key?.trim() && !useStoredKey) {
       setClaudeModels([]); // Will use fallback via modelOptions
       return;
     }
     setIsLoadingClaude(true);
     try {
-      const data = (await invoke('get_anthropic_models', { apiKey: key })) as AnthropicModel[];
+      const data = (await invoke('get_anthropic_models', { apiKey: newKeyPayload(key) })) as AnthropicModel[];
       setClaudeModels(data.map((m) => m.id));
       setModelListFailed(false);
     } catch (err) {
@@ -842,14 +832,14 @@ export function ModelSettingsModal({
   };
 
   // Fetch Groq models from API
-  const loadGroqModels = async (key: string | null) => {
-    if (!key?.trim()) {
+  const loadGroqModels = async (key: string | null, useStoredKey = false) => {
+    if (!key?.trim() && !useStoredKey) {
       setGroqModels([]); // Will use fallback via modelOptions
       return;
     }
     setIsLoadingGroq(true);
     try {
-      const data = (await invoke('get_groq_models', { apiKey: key })) as GroqModel[];
+      const data = (await invoke('get_groq_models', { apiKey: newKeyPayload(key) })) as GroqModel[];
       setGroqModels(data.map((m) => m.id));
       setModelListFailed(false);
     } catch (err) {
@@ -1050,10 +1040,10 @@ export function ModelSettingsModal({
 
   // Auto-fetch OpenAI models when provider is openai and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'openai' && apiKey?.trim()) {
-      loadOpenAIModels(apiKey);
+    if (modelConfig.provider === 'openai' && hasUsableKey(apiKey, keyStatus)) {
+      loadOpenAIModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored]);
 
   useEffect(() => {
     if (modelConfig.provider === 'openai') {
@@ -1069,17 +1059,17 @@ export function ModelSettingsModal({
 
   // Auto-fetch Claude models when provider is claude and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'claude' && apiKey?.trim()) {
-      loadClaudeModels(apiKey);
+    if (modelConfig.provider === 'claude' && hasUsableKey(apiKey, keyStatus)) {
+      loadClaudeModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored]);
 
   // Auto-fetch Groq models when provider is groq and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'groq' && apiKey?.trim()) {
-      loadGroqModels(apiKey);
+    if (modelConfig.provider === 'groq' && hasUsableKey(apiKey, keyStatus)) {
+      loadGroqModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored]);
 
   // Restore cached model when async model lists become available
   useEffect(() => {
@@ -1098,6 +1088,10 @@ export function ModelSettingsModal({
   }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, codexModels, modelConfig.provider]);
 
   const handleSave = async () => {
+    const problem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
+    if (problem) { toast.error(problem); return; }
+    if (modelConfig.provider === 'custom-openai' && customKeyRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
+    if (modelConfig.provider === 'openclaw' && openClawTokenRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
     if (modelConfig.provider === 'claude-code') {
       try { await claudeCode.save(); }
       catch { toast.error('Could not save Claude Code settings'); return; }
@@ -1108,7 +1102,7 @@ export function ModelSettingsModal({
         await invoke('api_save_custom_openai_config', {
         allowUnencrypted: customAllowUnencrypted,
           endpoint: customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
-          apiKey: customOpenAIApiKey.trim() || null,
+          apiKey: newKeyPayload(customOpenAIApiKey),
           model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
           maxTokens: customMaxTokens ? parseInt(customMaxTokens, 10) : null,
           contextWindow: Number(customContextWindow) || 8192,
@@ -1128,14 +1122,15 @@ export function ModelSettingsModal({
 
     let updatedConfig = {
       ...modelConfig,
-      apiKey: requiresApiKey && typeof apiKey === 'string' ? apiKey.trim() || null : null,
+      // Only a key typed now is sent; without one the stored key is kept.
+      apiKey: requiresApiKey ? newKeyPayload(apiKey) : null,
       ollamaEndpoint: modelConfig.provider === 'ollama'
         ? (ollamaEndpoint.trim() || null)
         : (modelConfig.ollamaEndpoint || null),
       // Include custom OpenAI fields
       customOpenAIEndpoint: modelConfig.provider === 'custom-openai' ? (customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT) : null,
       customOpenAIModel: modelConfig.provider === 'custom-openai' ? (customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL) : null,
-      customOpenAIApiKey: modelConfig.provider === 'custom-openai' && customOpenAIApiKey.trim() ? customOpenAIApiKey.trim() : null,
+      customOpenAIApiKey: modelConfig.provider === 'custom-openai' ? newKeyPayload(customOpenAIApiKey) : null,
       contextWindow: modelConfig.provider === 'custom-openai' ? Number(customContextWindow) || 8192 : null,
       maxTokens: modelConfig.provider === 'custom-openai' && customMaxTokens ? parseInt(customMaxTokens, 10) : null,
       temperature: modelConfig.provider === 'custom-openai' && customTemperature ? parseFloat(customTemperature) : null,
@@ -1153,11 +1148,6 @@ export function ModelSettingsModal({
       const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
       map[updatedConfig.provider] = updatedConfig.model;
       localStorage.setItem('providerModelMap', JSON.stringify(map));
-    }
-
-    // Update provider-specific key in context
-    if (updateProviderApiKey && updatedConfig.apiKey && updatedConfig.provider !== 'custom-openai') {
-      updateProviderApiKey(updatedConfig.provider, updatedConfig.apiKey);
     }
 
     if (updatedConfig.provider === 'openai') {
@@ -1214,14 +1204,57 @@ export function ModelSettingsModal({
 
     await Promise.resolve(onSave(updatedConfig));
 
+    // The typed key is stored now: drop it and ask the core what is stored.
+    await afterKeySaved(updatedConfig.provider);
+
     if (updatedConfig.provider === 'openai') {
       await loadOpenAIAuthStatus();
     }
   };
 
+  /** Forget a typed key once it is stored, and show what the core reports instead. */
+  const afterKeySaved = async (provider: string) => {
+    setApiKey(null);
+    setCustomOpenAIApiKey('');
+    setModelConfig((prev: ModelConfig) => ({ ...prev, apiKey: null, customOpenAIApiKey: null }));
+    await refreshProviderKeyStatus?.(provider);
+    if (provider === 'custom-openai') await refreshCustomKeyStatus();
+  };
+
+  const refreshCustomKeyStatus = async () => {
+    try {
+      const config = await configService.getCustomOpenAIConfig();
+      setCustomKeyStatus(config?.apiKeyStatus ?? NO_SECRET);
+      if (config?.endpoint) setSavedCustomEndpoint(config.endpoint);
+    } catch {
+      console.error('Failed to read the custom provider key status');
+    }
+  };
+
+  /** What removing a provider's key breaks, when that provider is the one in use. */
+  const removeWarning = (provider: string) =>
+    removalNeedsConfirmation(provider, sharedModelConfig.provider)
+      ? 'Summaries with this provider will not work until you add a key again.'
+      : null;
+
+  const removeStoredKey = async () => {
+    const provider = modelConfig.provider;
+    await configService.clearApiKey(provider);
+    setApiKey(null);
+    setModelConfig((prev: ModelConfig) => ({ ...prev, apiKey: null }));
+    await refreshProviderKeyStatus?.(provider);
+  };
+
+  const removeCustomKey = async () => {
+    await configService.clearCustomOpenAIApiKey();
+    setCustomOpenAIApiKey('');
+    await refreshCustomKeyStatus();
+    await refreshProviderKeyStatus?.('custom-openai');
+  };
+
   const customOpenAIInvokeConfig = () => ({
     endpoint: customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
-    apiKey: customOpenAIApiKey.trim() || null,
+    apiKey: newKeyPayload(customOpenAIApiKey),
     model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
     maxTokens: customMaxTokens ? parseInt(customMaxTokens, 10) : null,
           contextWindow: Number(customContextWindow) || 8192,
@@ -1275,17 +1308,14 @@ export function ModelSettingsModal({
     }
   };
 
-  const clearCustomOpenAICredentials = () => {
-    setCustomOpenAIApiKey('');
-    setCustomOrganization('');
-    setCustomProject('');
-    toast.success('Credentials cleared from this form. Click Save to persist.');
-  };
-
-  const handleInputClick = () => {
-    if (isApiKeyLocked) {
-      setIsLockButtonVibrating(true);
-      setTimeout(() => setIsLockButtonVibrating(false), 500);
+  const clearCustomOpenAICredentials = async () => {
+    try {
+      await removeCustomKey();
+      setCustomOrganization('');
+      setCustomProject('');
+      toast.success('The saved key was removed. Click Save to clear the organization and project.');
+    } catch {
+      toast.error('Could not remove the saved key');
     }
   };
 
@@ -1426,7 +1456,8 @@ export function ModelSettingsModal({
         ...sharedModelConfig,
         provider,
         model,
-        apiKey: needsKey(provider) ? (providerApiKeys?.[provider as keyof typeof providerApiKeys] ?? null) : null,
+        apiKey: null,
+        apiKeyStatus: needsKey(provider) ? providerKeyStatus?.[provider as KeyProvider] : undefined,
       };
       setPreview(next);
       if (provider === 'openrouter') void loadOpenRouterModels();
@@ -1438,7 +1469,8 @@ export function ModelSettingsModal({
           setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
           setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
           setCustomDestinationProblem(config.destination_problem ?? null);
-          setCustomOpenAIApiKey(config.apiKey || '');
+          setCustomKeyStatus(readSecretStatus(config.apiKeyStatus));
+          setSavedCustomEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
           setCustomMaxTokens(config.maxTokens?.toString() || '');
           setCustomContextWindow(config.contextWindow?.toString() || '8192');
           setCustomTemperature(config.temperature?.toString() || '');
@@ -1455,7 +1487,7 @@ export function ModelSettingsModal({
 
   /** What still has to be chosen before the provider being looked at can be used. */
   const draftProviderMissing = (): string | null => {
-    if (needsKey(modelConfig.provider) && !modelConfig.apiKey?.trim()) return 'Enter an API key first';
+    if (needsKey(modelConfig.provider) && !hasUsableKey(modelConfig.apiKey, keyStatus)) return 'Enter an API key first';
     if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
     if (modelConfig.provider === 'openclaw' && openClawMissing(openClawValues()).length > 0) return 'Fill in the OpenClaw settings first';
     if (modelConfig.provider === 'codex' && codexStatus && !codexStatus.found) return 'Install the Codex runtime first';
@@ -1470,18 +1502,19 @@ export function ModelSettingsModal({
         ...modelConfig,
         whisperModel: sharedModelConfig.whisperModel,
         ollamaEndpoint: modelConfig.provider === 'ollama' ? modelConfig.ollamaEndpoint : sharedModelConfig.ollamaEndpoint,
-        apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || null) : null,
+        apiKey: needsKey(modelConfig.provider) ? newKeyPayload(modelConfig.apiKey) : null,
       };
       await saveConfig(next, 'Could not save the provider', true);
       setError('');
-      setModelConfig(next);
-      if (next.apiKey) updateProviderApiKey?.(next.provider, next.apiKey);
+      setModelConfig({ ...next, apiKey: null });
+      setApiKey(null);
+      await refreshProviderKeyStatus?.(next.provider);
     });
   };
 
   const chooseModelAutosave = (model: string) => {
     void feedback.run('model', async () => {
-      const next: ModelConfig = { ...modelConfig, model, apiKey: needsKey(modelConfig.provider) ? (modelConfig.apiKey?.trim() || apiKey?.trim() || null) : null };
+      const next: ModelConfig = { ...modelConfig, model, apiKey: needsKey(modelConfig.provider) ? newKeyPayload(modelConfig.apiKey) : null };
       const held = await saveConfig(next, 'Could not save the model');
       rememberModel(modelConfig.provider, model);
       setModelConfig(next);
@@ -1504,13 +1537,12 @@ export function ModelSettingsModal({
   };
 
   const commitApiKey = async (value: string): Promise<CommitResult> => {
-    const next: ModelConfig = { ...modelConfig, apiKey: value };
+    const next: ModelConfig = { ...modelConfig, apiKey: newKeyPayload(value) };
     const held = await saveConfig(next, 'Could not save the API key');
-    setApiKey(value);
-    setModelConfig(next);
     // Kept with the preview. It is stored when the user switches to this provider.
-    if (held) return held;
-    updateProviderApiKey?.(modelConfig.provider, value);
+    if (held) { setApiKey(value); setModelConfig(next); return held; }
+    // Stored now: forget what was typed and show what the core reports.
+    await afterKeySaved(modelConfig.provider);
     if (modelConfig.provider === 'openai') {
       try {
         const status = (await invoke('api_save_openai_auth_config', { config: { mode: 'api_key' } })) as OpenAIAuthStatus;
@@ -1529,9 +1561,14 @@ export function ModelSettingsModal({
 
   const commitCustom = async (over: Partial<ReturnType<typeof customValues>>): Promise<CommitResult> => {
     const v = { ...customValues(), ...over };
+    if (keyRequiredForAddress(savedCustomEndpoint, v.endpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, v.apiKey)) {
+      // Keep the new address; it is saved together with the key.
+      setCustomOpenAIEndpoint(v.endpoint);
+      return 'held';
+    }
     const payload = {
       endpoint: v.endpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
-      apiKey: v.apiKey.trim() || null,
+      apiKey: newKeyPayload(v.apiKey),
       model: v.model.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
       maxTokens: v.maxTokens ? parseInt(v.maxTokens, 10) : null,
       contextWindow: Number(v.contextWindow) || 8192,
@@ -1548,7 +1585,7 @@ export function ModelSettingsModal({
     }
     const next: ModelConfig = {
       ...modelConfig, provider: 'custom-openai', apiKey: null, model: payload.model,
-      customOpenAIEndpoint: payload.endpoint, customOpenAIModel: payload.model, customOpenAIApiKey: payload.apiKey,
+      customOpenAIEndpoint: payload.endpoint, customOpenAIModel: payload.model, customOpenAIApiKey: null,
       contextWindow: payload.contextWindow, maxTokens: payload.maxTokens, temperature: payload.temperature, topP: payload.topP,
       timeoutSeconds: payload.timeoutSeconds, organization: payload.organization, project: payload.project,
     };
@@ -1558,6 +1595,8 @@ export function ModelSettingsModal({
     setCustomAllowUnencrypted(v.allowUnencrypted);
     setCustomDestinationProblem(null);
     setCustomCheck({ state: 'idle', message: '' });
+    setSavedCustomEndpoint(payload.endpoint);
+    if (payload.apiKey) { setCustomOpenAIApiKey(''); await refreshCustomKeyStatus(); await refreshProviderKeyStatus?.('custom-openai'); }
     return held;
   };
 
@@ -1570,6 +1609,14 @@ export function ModelSettingsModal({
     return held;
   };
 
+  // The core reports only that a token is saved, never the token.
+  const openClawTokenStatus: SecretStatus = { stored: !!openClawStatus?.bearer_token_configured, hint: null };
+  const removeOpenClawToken = async () => {
+    await invoke('clear_openclaw_bearer_token');
+    setOpenClawBearerToken('');
+    await loadOpenClawStatus();
+  };
+
   const openClawValues = () => ({
     enabled: openClawEnabled, endpoint: openClawEndpoint, modelEndpoint: openClawModelEndpoint, source: openClawSource,
     token: openClawBearerToken, includeAudioPath: openClawIncludeAudioPath, allowUnencrypted: openClawAllowUnencrypted,
@@ -1579,6 +1626,10 @@ export function ModelSettingsModal({
     !v.modelEndpoint.trim() && 'summary gateway URL',
     !v.source.trim() && 'source name',
     !v.token.trim() && !openClawStatus?.bearer_token_configured && 'bearer token',
+    !v.token.trim() && !!openClawStatus?.bearer_token_configured
+      && (keyRequiredForAddress(openClawStatus.endpoint, v.endpoint, { stored: true, hint: null }, '')
+        || keyRequiredForAddress(openClawStatus.model_endpoint, v.modelEndpoint, { stored: true, hint: null }, ''))
+      && 'bearer token for the new address',
   ].filter(Boolean) as string[];
 
   // Keeps what was entered. Saves once every required value is present.
@@ -1651,7 +1702,7 @@ export function ModelSettingsModal({
       return { tone: 'warning', text: 'No models found' };
     }
     if (needsKey(provider)) {
-      if (!apiKey?.trim()) return { tone: 'warning', text: 'Needs an API key' };
+      if (!hasUsableKey(apiKey, keyStatus)) return { tone: 'warning', text: 'Needs an API key' };
       if (modelListLoading) return { tone: 'neutral', text: 'Loading models…' };
       if (provider === 'openrouter' && openRouterError) return { tone: 'warning', text: 'Key saved, model list unavailable' };
       if (modelListFailed) return { tone: 'warning', text: 'Key saved, using the default model list' };
@@ -1699,9 +1750,9 @@ export function ModelSettingsModal({
     if (provider === 'openclaw') return loadOpenClawStatus();
     if (provider === 'ollama') return fetchOllamaModels(true);
     if (provider === 'custom-openai') return runCustomCheck();
-    if (provider === 'openai') { await loadOpenAIAuthStatus(); return loadOpenAIModels(apiKey); }
-    if (provider === 'claude') return loadClaudeModels(apiKey);
-    if (provider === 'groq') return loadGroqModels(apiKey);
+    if (provider === 'openai') { await loadOpenAIAuthStatus(); return loadOpenAIModels(apiKey, keyStatus.stored); }
+    if (provider === 'claude') return loadClaudeModels(apiKey, keyStatus.stored);
+    if (provider === 'groq') return loadGroqModels(apiKey, keyStatus.stored);
     if (provider === 'openrouter') { setOpenRouterModels([]); setOpenRouterError(''); return loadOpenRouterModels(); }
   };
 
@@ -1780,11 +1831,21 @@ export function ModelSettingsModal({
 
     if (needsKey(provider)) {
       rows.push(
-        <CommitInputRow
-          key="api-key" id="summary-api-key" title="API key" secret value={apiKey || ''}
-          placeholder="Enter your API key" validate={requiredProblem('The API key')} onCommit={commitApiKey}
-          description={provider === 'openai' ? 'For Codex sign-in, choose Codex app-server instead' : 'Protected by your operating system'}
-        />,
+        // While another provider is only being looked at, a typed key stays in the
+        // preview; otherwise it is saved the moment it is entered.
+        previewConfig ? (
+          <SecretKeyRow
+            key="api-key" id="summary-api-key" title="API key" status={keyStatus}
+            draft={modelConfig.apiKey || ''} onDraftChange={(value) => setModelConfig((prev: ModelConfig) => ({ ...prev, apiKey: value || null }))}
+            description="Protected by your operating system. It is saved when you use this provider"
+          />
+        ) : (
+          <SecretKeyRow
+            key="api-key" id="summary-api-key" title="API key" status={keyStatus}
+            onCommit={commitApiKey} onRemove={removeStoredKey} removeWarning={removeWarning(provider)}
+            description={provider === 'openai' ? 'For Codex sign-in, choose Codex app-server instead' : 'Protected by your operating system'}
+          />
+        ),
         renderModelPicker('model'),
       );
       if (provider === 'openai') {
@@ -1849,9 +1910,11 @@ export function ModelSettingsModal({
           description="The model identifier sent with each request" value={customOpenAIModel}
           validate={requiredProblem('The model name')} onCommit={(value) => commitCustom({ model: value })}
         />,
-        <CommitInputRow
-          key="custom-key" id="custom-api-key" title="API key" secret placeholder="Leave empty if not required"
-          description="Protected by your operating system" value={customOpenAIApiKey} onCommit={(value) => commitCustom({ apiKey: value })}
+        <SecretKeyRow
+          key="custom-key" id="custom-api-key" title="API key" status={customKeyStatus} placeholder="Leave empty if not required"
+          description="Protected by your operating system" onCommit={(value) => commitCustom({ apiKey: value })}
+          required={customKeyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+          onRemove={removeCustomKey} removeWarning={removeWarning('custom-openai')}
         />,
       );
       if (customCheck.state === 'error') {
@@ -1878,7 +1941,10 @@ export function ModelSettingsModal({
             {isTestingConnection && <RefreshCw aria-hidden="true" className="animate-spin" />}Test meeting processing
           </Button>
           <Button type="button" variant="outline" disabled={feedback.busy} onClick={() => {
-            void feedback.run('custom-clear', async () => { await commitCustom({ apiKey: '', organization: '', project: '' }); });
+            void feedback.run('custom-clear', async () => {
+              try { await removeCustomKey(); } catch { throw new SaveError('Could not remove the saved key'); }
+              await commitCustom({ organization: '', project: '' });
+            });
           }}>Clear credentials</Button>
         </SettingsRow>,
       );
@@ -1985,10 +2051,12 @@ export function ModelSettingsModal({
             urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted}
             onChange={(value) => { void feedback.run('oc-http', () => commitOpenClawSwitch({ allowUnencrypted: value })); }} />
         </div>,
-        <CommitInputRow key="oc-token" id="openclaw-bearer-token" title="Bearer token" secret clearAfterSave value={openClawBearerToken}
-          placeholder={openClawStatus?.bearer_token_configured ? 'Saved. Enter a new one to replace it' : 'Paste the OpenClaw ingest token'}
-          description={openClawStatus?.bearer_token_configured ? 'A token is saved. Leave this empty to keep it' : 'Must match the token on the OpenClaw ingest service'}
-          onCommit={(value) => commitOpenClaw({ token: value })} />,
+        <SecretKeyRow key="oc-token" id="openclaw-bearer-token" title="Bearer token" status={openClawTokenStatus}
+          placeholder="Paste the OpenClaw ingest token"
+          description="Must match the token on the OpenClaw ingest service"
+          onCommit={(value) => commitOpenClaw({ token: value })}
+          required={openClawTokenRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+          onRemove={removeOpenClawToken} removeWarning={removeWarning('openclaw')} />,
       );
       if (missing.length > 0) {
         rows.push(<NoteRow key="oc-missing" role="status">Not saved yet. Still needed: {missing.join(', ')}</NoteRow>);
@@ -2145,7 +2213,8 @@ export function ModelSettingsModal({
                       setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
                       setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
                       setCustomDestinationProblem(config.destination_problem ?? null);
-                      setCustomOpenAIApiKey(config.apiKey || '');
+                      setCustomKeyStatus(readSecretStatus(config.apiKeyStatus));
+                      setSavedCustomEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                       setCustomMaxTokens(config.maxTokens?.toString() || '');
       setCustomContextWindow(config.contextWindow?.toString() || '8192');
                       setCustomTemperature(config.temperature?.toString() || '');
@@ -2287,14 +2356,15 @@ export function ModelSettingsModal({
 
             <div>
               <Label htmlFor="custom-api-key">API key</Label>
-              <Input
-                id="custom-api-key"
-                type="password"
-                value={customOpenAIApiKey}
-                onChange={(e) => setCustomOpenAIApiKey(e.target.value)}
-                placeholder="Leave empty if the endpoint does not require one"
-                className="mt-1"
-              />
+              <div className="mt-1">
+                <SecretKeyControl
+                  id="custom-api-key" status={customKeyStatus}
+                  draft={customOpenAIApiKey} onDraftChange={setCustomOpenAIApiKey}
+                  required={customKeyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
+                  onRemove={removeCustomKey} removeWarning={removeWarning('custom-openai')}
+                  placeholder="Leave empty if the endpoint does not require one"
+                />
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
                 Protected by your operating system. Leave empty only for gateways that do not require a token.
               </p>
@@ -2700,14 +2770,14 @@ export function ModelSettingsModal({
             <div>
               <UnencryptedHttpOptIn destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null} urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
               <Label htmlFor="openclaw-bearer-token">Bearer token *</Label>
-              <Input
-                id="openclaw-bearer-token"
-                type="password"
-                value={openClawBearerToken}
-                onChange={(e) => setOpenClawBearerToken(e.target.value)}
-                placeholder={openClawStatus?.bearer_token_configured ? 'Token already saved; enter a new one to replace it' : 'Paste the OpenClaw ingest bearer token'}
-                className="mt-1"
-              />
+              <div className="mt-1">
+                <SecretKeyControl
+                  id="openclaw-bearer-token" label="bearer token" status={openClawTokenStatus}
+                  draft={openClawBearerToken} onDraftChange={setOpenClawBearerToken}
+                  onRemove={removeOpenClawToken} removeWarning={removeWarning('openclaw')}
+                  placeholder="Paste the OpenClaw ingest bearer token"
+                />
+              </div>
               <p className="mt-1 text-xs text-muted-foreground">
                 {openClawStatus?.bearer_token_configured
                   ? 'A token is already configured. Leaving this blank keeps the saved token.'
@@ -2744,44 +2814,13 @@ export function ModelSettingsModal({
 
         {requiresApiKey && (
           <div>
-            <Label>API key</Label>
-            <div className="relative mt-1">
-              <Input
-                type={showApiKey ? 'text' : 'password'}
-                value={apiKey || ''}
-                onChange={(e) => setApiKey(e.target.value)}
-                disabled={isApiKeyLocked}
-                placeholder="Enter your API key"
-                className="pr-24"
+            <Label htmlFor="legacy-api-key">API key</Label>
+            <div className="mt-1">
+              <SecretKeyControl
+                id="legacy-api-key" status={keyStatus}
+                draft={apiKey || ''} onDraftChange={(value) => setApiKey(value || null)}
+                onRemove={removeStoredKey} removeWarning={removeWarning(modelConfig.provider)}
               />
-              {isApiKeyLocked && apiKey?.trim() && (
-                <div
-                  onClick={handleInputClick}
-                  className="absolute inset-0 flex items-center justify-center bg-muted/50 rounded-md cursor-not-allowed"
-                />
-              )}
-              <div className="absolute inset-y-0 right-0 pr-1 flex items-center space-x-1">
-                {apiKey?.trim() && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                    className={isLockButtonVibrating ? 'animate-vibrate text-destructive' : ''}
-                    title={isApiKeyLocked ? 'Unlock to edit' : 'Lock to prevent editing'}
-                  >
-                    {isApiKeyLocked ? <Lock /> : <Unlock />}
-                  </Button>
-                )}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                >
-                  {showApiKey ? <EyeOff /> : <Eye />}
-                </Button>
-              </div>
             </div>
           </div>
         )}

@@ -9,13 +9,15 @@ use std::time::Duration;
 
 const MAX_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiWhisperProvider {
     base_url: String,
     api_key: String,
     model: String,
     allow_unencrypted: bool,
 }
+
+crate::credentials::debug_without_secrets!(OpenAiWhisperProvider { base_url, model, allow_unencrypted; secret api_key });
 
 impl OpenAiWhisperProvider {
     pub fn new(base_url: String, api_key: String, model: String) -> Self {
@@ -260,6 +262,14 @@ fn word_overlaps_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_never_contains_the_api_key() {
+        let provider = OpenAiWhisperProvider::new("https://api.example.com/v1".into(), "fake-provider-key-000000".into(), "model-a".into());
+        let shown = format!("{provider:?}");
+        assert!(!shown.contains("fake-provider-key-000000"));
+        assert!(shown.contains("model-a"));
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

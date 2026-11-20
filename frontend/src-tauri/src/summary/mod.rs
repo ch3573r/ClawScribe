@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Custom OpenAI-compatible endpoint configuration
 /// Stored as JSON in the database and used for connecting to any OpenAI-compatible API server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CustomOpenAIConfig {
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub destination_problem: Option<String>,
@@ -42,6 +42,12 @@ pub struct CustomOpenAIConfig {
     #[serde(rename = "topP")]
     pub top_p: Option<f32>,
 }
+
+crate::credentials::debug_without_secrets!(CustomOpenAIConfig {
+    destination_problem, allow_unencrypted, endpoint, model, timeout_seconds, organization, project,
+    max_tokens, context_window, temperature, top_p;
+    secret api_key
+});
 
 mod chunking;
 pub mod claude_code_provider;

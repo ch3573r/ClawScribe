@@ -102,7 +102,6 @@ export default function SettingsPage() {
           setTranscriptModelConfig({
             provider: config.provider || "localWhisper",
             model: config.model || "large-v3",
-            apiKey: config.apiKey || null,
             baseUrl: config.baseUrl || null,
             allowUnencrypted: config.allowUnencrypted ?? false,
             endpoint: config.endpoint || null,

@@ -97,7 +97,8 @@ export function useCommitField({ value, validate, onCommit, normalize = text => 
     setError("");
     try {
       const result = await current.onCommit(next);
-      committed.current = next;
+      // A write-only value (a key) is not kept in memory once it is saved.
+      committed.current = current.clearAfterSave && result !== "held" ? "" : next;
       // Do not overwrite what the user typed while the save was running.
       if (draftRef.current === started) {
         dirty.current = false;

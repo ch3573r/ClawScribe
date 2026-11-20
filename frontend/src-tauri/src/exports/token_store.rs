@@ -13,7 +13,7 @@ use crate::exports::auth::{refresh_access_token, MicrosoftAuthConfig, MsAuthErro
 const SERVICE_NAME: &str = "net.rismondo.openclaw.clawscribe.microsoft";
 const ACCOUNT_NAME: &str = "default";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredToken {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -80,7 +80,7 @@ impl std::fmt::Display for TokenStoreError {
 /// silently failed every keychain write and lost the sign-in on restart. Only
 /// the refresh token (plus metadata) is needed to restore a session; it is
 /// re-exchanged for an access token on first use.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PersistedToken {
     refresh_token: Option<String>,
     user_id: String,
@@ -90,6 +90,15 @@ struct PersistedToken {
     #[serde(default)]
     granted_scopes: String,
 }
+
+crate::credentials::debug_without_secrets!(StoredToken {
+    expires_at, user_id, user_display_name, user_email, tenant_id, granted_scopes;
+    secret access_token, refresh_token
+});
+crate::credentials::debug_without_secrets!(PersistedToken {
+    user_id, user_display_name, user_email, tenant_id, granted_scopes;
+    secret refresh_token
+});
 
 impl PersistedToken {
     fn from_stored(t: &StoredToken) -> Self {

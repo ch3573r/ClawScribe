@@ -391,19 +391,28 @@ fn read_small_json(path: &Path) -> Option<Value> {
 }
 
 fn saved_audio(app_data: &Path, folder: &Path, id: &str) -> Option<PathBuf> {
-    let mut roots = vec![
-        recording_preferences::get_default_recordings_folder(),
-        recording_preferences::get_legacy_default_recordings_folder(),
-        app_data.join("restored-recordings"),
-    ];
-    if let Some(prefs) = read_small_json(&app_data.join("recording_preferences.json")) {
-        if let Some(root) = prefs
-            .pointer("/preferences/save_folder")
-            .and_then(Value::as_str)
-        {
-            roots.push(root.into());
-        }
-    }
+    // The same roots the app uses (configured, defaults, folders configured
+    // before, restored backups), read from the preferences file because this
+    // runs without the app.
+    let prefs = read_small_json(&app_data.join("recording_preferences.json"));
+    let configured = prefs
+        .as_ref()
+        .and_then(|prefs| prefs.pointer("/preferences/save_folder"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    let previous = prefs
+        .as_ref()
+        .and_then(|prefs| prefs.pointer("/previous_save_folders"))
+        .and_then(Value::as_array)
+        .map(|folders| {
+            folders
+                .iter()
+                .filter_map(Value::as_str)
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let roots = recording_preferences::roots_from(configured, previous, Some(app_data.to_path_buf()));
     if !roots
         .iter()
         .any(|root| folder != root && folder.starts_with(root))
@@ -647,6 +656,38 @@ mod tests {
             .await
             .unwrap();
         assert!(run(root.path(), "get_audio", args).await["path"].is_null());
+    }
+
+    #[test]
+    fn audio_in_a_previously_configured_recordings_folder_is_found_but_an_unknown_folder_is_not() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("current");
+        let old = root.path().join("old-recordings");
+        let stranger = root.path().join("stranger");
+        for folder in [&current, &old, &stranger] {
+            let meeting = folder.join("meeting");
+            fs::create_dir_all(&meeting).unwrap();
+            fs::write(meeting.join("metadata.json"), "{}").unwrap();
+            fs::write(meeting.join("audio.wav"), b"synthetic").unwrap();
+        }
+        let write_preferences = |previous: serde_json::Value| {
+            fs::write(
+                root.path().join("recording_preferences.json"),
+                serde_json::to_vec(&json!({
+                    "preferences": { "save_folder": current },
+                    "previous_save_folders": previous,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write_preferences(json!([old]));
+        assert!(saved_audio(root.path(), &current.join("meeting"), "a").is_some());
+        assert!(saved_audio(root.path(), &old.join("meeting"), "a").is_some());
+        assert!(saved_audio(root.path(), &stranger.join("meeting"), "a").is_none());
+        // Once the folder is no longer remembered, its audio is out of reach again.
+        write_preferences(json!([]));
+        assert!(saved_audio(root.path(), &old.join("meeting"), "a").is_none());
     }
 
     #[cfg(unix)]

@@ -267,7 +267,17 @@ async fn stop_recording_then_exit<R: Runtime>(app: AppHandle<R>, code: i32) {
             }
         }
         StopOutcome::NotActive => {
-            log::info!("Recording had already stopped; checking that its library save finished");
+            if crate::audio::recording_commands::capture_active() {
+                // Only a different recording or a stop that is still running
+                // gets here; say so rather than claim the recording is saved.
+                log::warn!(
+                    "The stop for this exit did not finish the recording and it is still active; exiting anyway. Startup recovery will offer it."
+                );
+            } else {
+                log::info!(
+                    "The recording had already been stopped; checking that its library save finished"
+                );
+            }
             Some((early_save, remaining.min(ALREADY_STOPPED_SAVE_GRACE)))
         }
         StopOutcome::Failed(error) => {

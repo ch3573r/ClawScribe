@@ -40,6 +40,48 @@ pub(crate) fn needs_http_opt_in(value: &str) -> bool {
     }
 }
 
+/// True when two endpoint URLs name the same destination: same scheme, host,
+/// port (the scheme's default when absent) and path, ignoring letter case and
+/// a trailing slash. Used to keep a stored key bound to the address it was
+/// saved for; an unparsable value only equals a textually equal one.
+pub(crate) fn same_destination(a: &str, b: &str) -> bool {
+    fn key(value: &str) -> Option<(String, String, u16, String, String)> {
+        let url = Url::parse(value.trim()).ok()?;
+        Some((
+            url.scheme().to_string(),
+            url.host_str()?.trim_matches(['[', ']']).to_ascii_lowercase(),
+            url.port_or_known_default()?,
+            url.path().trim_end_matches('/').to_ascii_lowercase(),
+            url.query().unwrap_or("").to_string(),
+        ))
+    }
+    match (key(a), key(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.trim().trim_end_matches('/').to_ascii_lowercase()
+            == b.trim().trim_end_matches('/').to_ascii_lowercase(),
+    }
+}
+
+/// True when a stored key may stay with a changed address: the same
+/// destination, or the same host, port (as written) and path moved from HTTP
+/// to HTTPS. An upgrade adds no recipient and protects the key in transit.
+pub(crate) fn keeps_destination(stored: &str, requested: &str) -> bool {
+    if same_destination(stored, requested) {
+        return true;
+    }
+    let (Ok(stored), Ok(requested)) = (Url::parse(stored.trim()), Url::parse(requested.trim()))
+    else {
+        return false;
+    };
+    stored.scheme() == "http"
+        && requested.scheme() == "https"
+        && stored.host_str().map(str::to_ascii_lowercase)
+            == requested.host_str().map(str::to_ascii_lowercase)
+        && stored.port() == requested.port()
+        && stored.path().trim_end_matches('/').eq_ignore_ascii_case(requested.path().trim_end_matches('/'))
+        && stored.query() == requested.query()
+}
+
 pub(crate) fn validate_secret_destination(
     value: &str,
     allow_unencrypted: bool,
@@ -133,6 +175,28 @@ pub(crate) async fn secret_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn destinations_compare_by_scheme_host_port_and_path() {
+        assert!(same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v1/"));
+        assert!(same_destination(" HTTPS://Gateway.Example.com:443/V1 ", "https://gateway.example.com/v1"));
+        assert!(!same_destination("https://gateway.example.com/v1", "http://gateway.example.com/v1"));
+        assert!(!same_destination("https://gateway.example.com/v1", "https://other.example.com/v1"));
+        assert!(!same_destination("https://gateway.example.com/v1", "https://gateway.example.com:8443/v1"));
+        assert!(!same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v2"));
+        assert!(!same_destination("not a url", "https://gateway.example.com"));
+        assert!(same_destination("not a url/", "NOT A URL"));
+    }
+
+    #[test]
+    fn a_key_may_move_from_http_to_https_on_the_same_host_and_nowhere_else() {
+        assert!(keeps_destination("http://openclaw.example.com", "https://openclaw.example.com"));
+        assert!(keeps_destination("http://openclaw.example.com:8080/a", "https://OpenClaw.example.com:8080/a/"));
+        assert!(!keeps_destination("https://openclaw.example.com", "http://openclaw.example.com"));
+        assert!(!keeps_destination("http://openclaw.example.com", "https://other.example.com"));
+        assert!(!keeps_destination("http://openclaw.example.com:8080", "https://openclaw.example.com:9090"));
+        assert!(!keeps_destination("http://openclaw.example.com/a", "https://openclaw.example.com/b"));
+    }
+
     #[tokio::test]
     async fn legacy_custom_config_loads_with_problem_and_cannot_send() {
         use crate::database::repositories::setting::SettingsRepository;

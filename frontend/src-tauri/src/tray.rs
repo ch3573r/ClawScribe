@@ -128,6 +128,7 @@ pub(crate) fn recording_intent_handler<R: Runtime>(
                 }
                 Err(e) => {
                     log::error!("Tray toggle: Failed to stop recording: {}", e);
+                    report_stop_failure(&app_clone, &e);
                     // Revert tray state on error
                     update_tray_menu_async(&app_clone).await;
                 }
@@ -143,6 +144,15 @@ pub(crate) fn recording_intent_handler<R: Runtime>(
             }
         }
     });
+}
+
+/// Tells the window that a Stop from the tray (or a shortcut) failed and the
+/// recording is still running, so it can say why instead of staying silent.
+fn report_stop_failure<R: Runtime>(app: &AppHandle<R>, message: &str) {
+    let _ = app.emit(
+        "recording-stop-failed",
+        serde_json::json!({ "message": message }),
+    );
 }
 
 pub(crate) fn pause_recording_handler<R: Runtime>(app: &AppHandle<R>) {
@@ -228,6 +238,7 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
             }
             Err(e) => {
                 log::error!("Tray: Failed to stop recording: {}", e);
+                report_stop_failure(&app_clone, &e);
                 // Revert tray state on error
                 update_tray_menu_async(&app_clone).await;
             }
