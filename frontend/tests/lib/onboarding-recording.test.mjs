@@ -16,6 +16,19 @@ test('audio-only setup completes without a recommendation, model check, or downl
   ]);
 });
 
+test('an unreadable existing library stops setup before creating an empty library', async () => {
+  const calls = [];
+  const { finishRecordingSetup } = loadTsModule('src/lib/onboarding-recording', {
+    '@tauri-apps/api/core': { invoke: async command => {
+      calls.push(command);
+      if (command === 'check_first_launch') return true;
+      if (command === 'import_legacy_database_if_present') throw new Error('private diagnostic detail');
+    } },
+  });
+  await assert.rejects(finishRecordingSetup('audio_only', null), /existing meeting library/);
+  assert.deepEqual(calls, ['check_first_launch', 'import_legacy_database_if_present']);
+});
+
 test('an opted-in notes model remains separate from the live transcription choice', async () => {
   const calls = [];
   const { finishRecordingSetup } = loadTsModule('src/lib/onboarding-recording', {

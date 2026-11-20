@@ -45,8 +45,8 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     try {
       await finishRecordingSetup(choice.current.mode, choice.current.localNotesModel);
       onComplete();
-    } catch {
-      setError('Could not finish setup. Try again.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not finish setup. Try again.');
     } finally {
       finishingRef.current = false;
       setFinishing(false);
