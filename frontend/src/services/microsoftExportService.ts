@@ -37,7 +37,7 @@ export interface ExportReport {
 
 export const TASK_IDENTITY_REVIEW_CODE = "task_identity_review_required";
 export const TASK_IDENTITY_REVIEW_MESSAGE =
-  "Check the destination for the marked tasks. In Meeting actions, use Add action for each task you confirm is new, then save and export those actions.";
+  "These tasks may already exist in the destination. Check the destination for each marked task. Deselect tasks that are already there. For genuinely new tasks, add them in Meeting actions with Add action, save, and re-export.";
 
 export function taskIdentityReviewIds(report: ExportReport): Set<string> {
   return new Set(report.items.filter((item) => item.code === TASK_IDENTITY_REVIEW_CODE).map((item) => item.localId));
@@ -135,6 +135,19 @@ export interface PlannerTaskPreview {
   details: string;
   owner: string | null;
   dueDate: string | null;
+}
+
+export interface TaskPreviewCandidate {
+  readonly localId: string;
+  readonly originalTitleHash: string;
+}
+
+export function taskPreviewCandidates(
+  items: readonly Pick<PlannerTaskPreview, "localId" | "originalTitleHash">[],
+): readonly TaskPreviewCandidate[] {
+  return items.flatMap(({ localId, originalTitleHash }) =>
+    originalTitleHash ? [{ localId, originalTitleHash }] : [],
+  );
 }
 
 export interface PlannerTaskInput {
@@ -372,12 +385,14 @@ export const microsoftExportService = {
     meetingTitle: string,
     planId: string,
     tasks: PlannerTaskInput[],
+    previewCandidates: readonly TaskPreviewCandidate[],
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_selected_planner_tasks", {
       meetingId,
       meetingTitle,
       planId,
       tasks,
+      previewCandidates,
     });
   },
 
@@ -398,12 +413,14 @@ export const microsoftExportService = {
     meetingTitle: string,
     listId: string,
     tasks: ToDoTaskInput[],
+    previewCandidates: readonly TaskPreviewCandidate[],
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_selected_todo_tasks", {
       meetingId,
       meetingTitle,
       listId,
       tasks,
+      previewCandidates,
     });
   },
 

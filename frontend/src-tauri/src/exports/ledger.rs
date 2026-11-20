@@ -6,7 +6,7 @@
 //! statuses, and sanitized error codes — never tokens. See the idempotency
 //! sections of the OneNote/Planner design docs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,9 @@ pub(crate) const MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AmbiguousTaskIdentity;
+
+/// Original title hash → positional IDs in the complete current candidate set.
+pub type PositionalSiblings = HashMap<String, HashSet<String>>;
 
 pub(crate) fn meeting_dir(app_data: &Path, meeting_id: &str) -> PathBuf {
     let safe: String = meeting_id
@@ -478,6 +481,9 @@ impl ExportLedger {
 
     /// Resolve past task attempts within this destination and meeting. Older
     /// keys use a batch hash and are already scoped to a meeting by the ledger.
+    ///
+    /// A cross-positional match can be a shift only if the complete candidate
+    /// set is available and the matched ID and hash do not belong to a sibling.
     pub(crate) fn existing_task_key(
         &self,
         scope: &str,
@@ -485,6 +491,7 @@ impl ExportLedger {
         action_id: &str,
         title_hash: &str,
         legacy_action: Option<&super::actions::LegacyAction>,
+        full_positional_siblings: Option<&PositionalSiblings>,
     ) -> Result<Option<String>, AmbiguousTaskIdentity> {
         let current = task_key(scope, meeting_id, action_id, title_hash);
         let stable_id = uuid::Uuid::parse_str(action_id).is_ok();
@@ -530,6 +537,14 @@ impl ExportLedger {
                     exact_uuid = Some((key, entry));
                 }
             } else if id == old_id || (positional && is_positional_action_id(id)) {
+                if id != old_id
+                    && full_positional_siblings.is_none_or(|siblings| {
+                        siblings.get(hash).is_some_and(|ids| ids.contains(id))
+                    })
+                {
+                    ambiguous = true;
+                    continue;
+                }
                 if let Some((previous_id, previous_hash, _, previous)) = legacy_match {
                     ambiguous |= previous_id != id || previous_hash != hash;
                     if priority(entry) < priority(previous) {
@@ -707,7 +722,14 @@ mod tests {
         };
         let id = uuid::Uuid::new_v4().to_string();
         let restored = ledger
-            .existing_task_key(scope, "meeting", &id, "bbbbbbbbbbbbbbbb", Some(&selected))
+            .existing_task_key(
+                scope,
+                "meeting",
+                &id,
+                "bbbbbbbbbbbbbbbb",
+                Some(&selected),
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert_eq!(restored.as_deref(), Some(previous));
         assert!(!ledger.may_attempt(restored.as_deref().unwrap()));
@@ -717,7 +739,8 @@ mod tests {
                 "meeting",
                 &id,
                 "bbbbbbbbbbbbbbbb",
-                Some(&selected)
+                Some(&selected),
+                Some(&PositionalSiblings::new()),
             )
             .unwrap()
             .is_none());
@@ -979,7 +1002,14 @@ mod tests {
 
         // Now A is at action-2 (new item inserted before it)
         let found = ledger
-            .existing_task_key(scope, "meeting", "action-2", hash_a, None)
+            .existing_task_key(
+                scope,
+                "meeting",
+                "action-2",
+                hash_a,
+                None,
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert_eq!(found.as_deref(), Some(key_a1.as_str()));
         assert_eq!(
@@ -1012,7 +1042,14 @@ mod tests {
         );
 
         // action-2 with same hash — ambiguous, must not match either
-        let found = ledger.existing_task_key(scope, "meeting", "action-2", hash, None);
+        let found = ledger.existing_task_key(
+            scope,
+            "meeting",
+            "action-2",
+            hash,
+            None,
+            Some(&PositionalSiblings::new()),
+        );
         assert_eq!(found, Err(AmbiguousTaskIdentity));
     }
 
@@ -1031,7 +1068,14 @@ mod tests {
         );
         // Positional search for action-N should not find the UUID entry
         let found = ledger
-            .existing_task_key(scope, "meeting", "action-1", hash, None)
+            .existing_task_key(
+                scope,
+                "meeting",
+                "action-1",
+                hash,
+                None,
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert!(found.is_none());
     }
@@ -1057,7 +1101,14 @@ mod tests {
 
         // A shifts to action-2 (new item B shifts to action-3)
         let found_a = ledger
-            .existing_task_key(scope, "meeting", "action-2", hash_a, None)
+            .existing_task_key(
+                scope,
+                "meeting",
+                "action-2",
+                hash_a,
+                None,
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert_eq!(
             found_a.as_deref(),
@@ -1066,7 +1117,14 @@ mod tests {
 
         // B shifts to action-3
         let found_b = ledger
-            .existing_task_key(scope, "meeting", "action-3", hash_b, None)
+            .existing_task_key(
+                scope,
+                "meeting",
+                "action-3",
+                hash_b,
+                None,
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert_eq!(
             found_b.as_deref(),
@@ -1085,7 +1143,14 @@ mod tests {
 
         // action-2 lookup should find the old-format action-1 entry
         let found = ledger
-            .existing_task_key(scope, "meeting", "action-2", hash, None)
+            .existing_task_key(
+                scope,
+                "meeting",
+                "action-2",
+                hash,
+                None,
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert_eq!(found.as_deref(), Some(old_key.as_str()));
     }
@@ -1110,7 +1175,14 @@ mod tests {
             );
         }
         let found = ledger
-            .existing_task_key(scope, "meeting", "action-4", hash, None)
+            .existing_task_key(
+                scope,
+                "meeting",
+                "action-4",
+                hash,
+                None,
+                Some(&PositionalSiblings::new()),
+            )
             .unwrap();
         assert_eq!(found.as_deref(), Some(unknown.as_str()));
         assert!(!ledger.may_attempt(&unknown));

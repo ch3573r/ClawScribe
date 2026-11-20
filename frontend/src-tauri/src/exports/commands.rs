@@ -1,18 +1,20 @@
 //! Tauri commands for Microsoft Graph auth and exports.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+use crate::exports::actions::{LegacyAction, ReviewedAction};
 use crate::exports::auth;
 use crate::exports::calendar;
 use crate::exports::client::{GraphClient, RetryPolicy, TokioSleeper};
 use crate::exports::discovery;
 use crate::exports::exporter::{self, ExportContext, OneNoteTarget};
 use crate::exports::files;
-use crate::exports::ledger::ExportLedger;
-use crate::exports::model::{ExportStatus, MicrosoftConnectionState};
+use crate::exports::ledger::{is_positional_action_id, ExportLedger, PositionalSiblings};
+use crate::exports::model::{ExportActionItem, ExportStatus, MicrosoftConnectionState};
 use crate::exports::ms_auth_state::MicrosoftAuthState;
 use crate::exports::planner::PlannerDestination;
 use crate::exports::reqwest_transport::ReqwestGraphTransport;
@@ -487,8 +489,15 @@ pub async fn export_to_planner<R: Runtime>(
         bearer_token: &token,
     };
 
-    let result =
-        exporter::export_planner(&client, &mut ledger, &meeting_export, &destination, &ctx).await;
+    let result = exporter::export_planner(
+        &client,
+        &mut ledger,
+        &meeting_export,
+        &destination,
+        &ctx,
+        Some(&summary_positional_siblings(&meeting_export.action_items)),
+    )
+    .await;
     ledger.checkpoint().await?;
     let report = result.map_err(|e| e.to_string())?;
 
@@ -758,8 +767,15 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
         bearer_token: &token,
     };
 
-    let result =
-        exporter::export_planner(&client, &mut ledger, &meeting_export, &destination, &ctx).await;
+    let result = exporter::export_planner(
+        &client,
+        &mut ledger,
+        &meeting_export,
+        &destination,
+        &ctx,
+        Some(&summary_positional_siblings(&meeting_export.action_items)),
+    )
+    .await;
     ledger.checkpoint().await?;
     let report = result.map_err(|e| e.to_string())?;
 
@@ -772,6 +788,10 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
 }
 
 // ── Planner export preview / selected export ─────────────────────────────
+
+const MAX_TASK_PREVIEW_CANDIDATES: usize = 250;
+const REFRESH_TASK_PREVIEW: &str =
+    "Meeting actions or the export preview have changed. Reopen the preview and review your selection again.";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -813,6 +833,8 @@ pub async fn preview_planner_tasks(
                 legacy_action: action.legacy_action,
             })
             .collect();
+    } else if meeting_export.action_items.len() > MAX_TASK_PREVIEW_CANDIDATES {
+        return Err("This summary has more than 250 suggestions. Review and save up to 250 items in Meeting actions before exporting.".into());
     }
     let previews = meeting_export
         .action_items
@@ -876,26 +898,165 @@ pub struct ToDoTaskInput {
     pub details: Option<String>,
 }
 
-fn selected_action_history(
-    reviewed: Option<&[super::actions::ReviewedAction]>,
-    local_id: &str,
-    original_title_hash: Option<String>,
-) -> Option<super::actions::LegacyAction> {
-    if super::ledger::is_positional_action_id(local_id) {
-        // Title edits and Planner polish must not hide an earlier attempt for
-        // the original summary suggestion.
-        return original_title_hash
-            .filter(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .map(|title_hash| super::actions::LegacyAction {
-                id: local_id.into(),
-                title_hash,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskPreviewCandidate {
+    local_id: String,
+    original_title_hash: String,
+}
+
+struct SelectedTaskHistory<'a> {
+    reviewed: Option<&'a [ReviewedAction]>,
+    preview: Option<Vec<TaskPreviewCandidate>>,
+    siblings: Option<PositionalSiblings>,
+}
+
+impl<'a> SelectedTaskHistory<'a> {
+    fn new(
+        reviewed: Option<&'a [ReviewedAction]>,
+        preview: Option<Vec<TaskPreviewCandidate>>,
+    ) -> Result<Self, String> {
+        if preview
+            .as_ref()
+            .is_some_and(|candidates| candidates.len() > MAX_TASK_PREVIEW_CANDIDATES)
+        {
+            return Err(REFRESH_TASK_PREVIEW.into());
+        }
+        let mut siblings = PositionalSiblings::new();
+        if let Some(actions) = reviewed {
+            // Saved actions supersede the preview. Completed and unselected rows
+            // still identify distinct suggestions that can own older history.
+            for legacy in actions.iter().filter_map(|action| action.legacy_action.as_ref()) {
+                siblings
+                    .entry(legacy.title_hash.clone())
+                    .or_default()
+                    .insert(legacy.id.clone());
+            }
+            return Ok(Self {
+                reviewed,
+                preview: None,
+                siblings: Some(siblings),
+            });
+        }
+        if let Some(candidates) = &preview {
+            for (index, candidate) in candidates.iter().enumerate() {
+                if candidate.local_id != format!("action-{}", index + 1)
+                    || !valid_task_title_hash(&candidate.original_title_hash)
+                {
+                    return Err(REFRESH_TASK_PREVIEW.into());
+                }
+                siblings
+                    .entry(candidate.original_title_hash.clone())
+                    .or_default()
+                    .insert(candidate.local_id.clone());
+            }
+        }
+        let siblings = preview.as_ref().map(|_| siblings);
+        Ok(Self {
+            reviewed,
+            preview,
+            siblings,
+        })
+    }
+
+    fn legacy_action(
+        &self,
+        local_id: &str,
+        original_title_hash: Option<String>,
+    ) -> Result<Option<LegacyAction>, String> {
+        if let Some(actions) = self.reviewed {
+            return actions
+                .iter()
+                .find(|action| action.id == local_id && !action.done)
+                .map(|action| action.legacy_action.clone())
+                .ok_or_else(|| REFRESH_TASK_PREVIEW.into());
+        }
+
+        let title_hash = if let Some(candidates) = &self.preview {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.local_id == local_id)
+                .ok_or(REFRESH_TASK_PREVIEW)?;
+            if original_title_hash
+                .as_ref()
+                .is_some_and(|hash| hash != &candidate.original_title_hash)
+            {
+                return Err(REFRESH_TASK_PREVIEW.into());
+            }
+            Some(candidate.original_title_hash.clone())
+        } else {
+            // Older IPC clients may carry only a selected row's original hash.
+            original_title_hash
+                .filter(|hash| is_positional_action_id(local_id) && valid_task_title_hash(hash))
+        };
+        Ok(title_hash.map(|title_hash| LegacyAction {
+            id: local_id.into(),
+            title_hash,
+        }))
+    }
+}
+
+fn valid_task_title_hash(hash: &str) -> bool {
+    hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn summary_positional_siblings(actions: &[ExportActionItem]) -> PositionalSiblings {
+    let mut siblings = PositionalSiblings::new();
+    for action in actions {
+        if is_positional_action_id(&action.local_action_id) {
+            siblings
+                .entry(super::planner::action_hash(action))
+                .or_default()
+                .insert(action.local_action_id.clone());
+        }
+    }
+    siblings
+}
+
+fn planner_action_items(
+    tasks: Vec<PlannerTaskInput>,
+    history: &SelectedTaskHistory<'_>,
+) -> Result<BTreeMap<String, Vec<ExportActionItem>>, String> {
+    let mut by_bucket: BTreeMap<String, Vec<ExportActionItem>> = BTreeMap::new();
+    for task in tasks {
+        let legacy_action = history.legacy_action(&task.local_id, task.original_title_hash)?;
+        by_bucket
+            .entry(task.bucket_id)
+            .or_default()
+            .push(ExportActionItem {
+                local_action_id: task.local_id,
+                task: task.title,
+                owner: task.owner,
+                due_date: task.due_date,
+                details: task.details,
+                legacy_action,
             });
     }
-    reviewed?
-        .iter()
-        .find(|action| action.id == local_id)?
-        .legacy_action
-        .clone()
+    // Fill missing IDs for older clients while retaining IDs from the preview.
+    for actions in by_bucket.values_mut() {
+        super::planner::ensure_local_action_ids(actions);
+    }
+    Ok(by_bucket)
+}
+
+fn todo_action_items(
+    tasks: Vec<ToDoTaskInput>,
+    history: &SelectedTaskHistory<'_>,
+) -> Result<Vec<ExportActionItem>, String> {
+    let mut actions = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let legacy_action = history.legacy_action(&task.local_id, task.original_title_hash)?;
+        actions.push(ExportActionItem {
+            local_action_id: task.local_id,
+            task: task.title,
+            owner: task.owner,
+            due_date: task.due_date,
+            details: task.details,
+            legacy_action,
+        });
+    }
+    super::planner::ensure_local_action_ids(&mut actions);
+    Ok(actions)
 }
 
 /// Export a user-reviewed set of Planner tasks. Each task carries its own bucket,
@@ -910,9 +1071,8 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
     meeting_title: String,
     plan_id: String,
     tasks: Vec<PlannerTaskInput>,
+    preview_candidates: Option<Vec<TaskPreviewCandidate>>,
 ) -> Result<ExportReportResponse, String> {
-    use std::collections::BTreeMap;
-
     let tasks: Vec<PlannerTaskInput> = tasks
         .into_iter()
         .filter(|t| !t.title.trim().is_empty() && !t.bucket_id.trim().is_empty())
@@ -926,15 +1086,9 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         &meeting_id,
     )
     .await?;
+    let history = SelectedTaskHistory::new(reviewed.as_deref(), preview_candidates)?;
+    let by_bucket = planner_action_items(tasks, &history)?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
-
-    let mut by_bucket: BTreeMap<String, Vec<PlannerTaskInput>> = BTreeMap::new();
-    for task in tasks {
-        by_bucket
-            .entry(task.bucket_id.clone())
-            .or_default()
-            .push(task);
-    }
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -951,28 +1105,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
     let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
-    for (bucket_id, group) in by_bucket {
-        let mut action_items: Vec<crate::exports::model::ExportActionItem> = group
-            .into_iter()
-            .map(|t| crate::exports::model::ExportActionItem {
-                // Preserve the preview's local id so the dedupe key is stable
-                // across reordering/deselection; do not regenerate per bucket.
-                legacy_action: selected_action_history(
-                    reviewed.as_deref(),
-                    &t.local_id,
-                    t.original_title_hash,
-                ),
-                local_action_id: t.local_id,
-                task: t.title,
-                owner: t.owner,
-                due_date: t.due_date,
-                details: t.details,
-            })
-            .collect();
-        // Fallback only: fills ids for any task that arrived without one (older
-        // clients); preserves the preview ids set above.
-        crate::exports::planner::ensure_local_action_ids(&mut action_items);
-
+    for (bucket_id, action_items) in by_bucket {
         let meeting_export = crate::exports::model::MeetingExport {
             meeting_id: meeting_id.clone(),
             title: meeting_title.clone(),
@@ -989,9 +1122,15 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
             bucket_id,
         };
 
-        let result =
-            exporter::export_planner(&client, &mut ledger, &meeting_export, &destination, &ctx)
-                .await;
+        let result = exporter::export_planner(
+            &client,
+            &mut ledger,
+            &meeting_export,
+            &destination,
+            &ctx,
+            history.siblings.as_ref(),
+        )
+        .await;
         let report = match result {
             Ok(report) => report,
             Err(e) => {
@@ -1042,6 +1181,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
     meeting_title: String,
     list_id: String,
     tasks: Vec<ToDoTaskInput>,
+    preview_candidates: Option<Vec<TaskPreviewCandidate>>,
 ) -> Result<ExportReportResponse, String> {
     let tasks: Vec<ToDoTaskInput> = tasks
         .into_iter()
@@ -1056,6 +1196,8 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         &meeting_id,
     )
     .await?;
+    let history = SelectedTaskHistory::new(reviewed.as_deref(), preview_candidates)?;
+    let action_items = todo_action_items(tasks, &history)?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -1064,23 +1206,6 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         user_id: &user_id,
         bearer_token: &token,
     };
-    let mut action_items: Vec<crate::exports::model::ExportActionItem> = tasks
-        .into_iter()
-        .map(|t| crate::exports::model::ExportActionItem {
-            legacy_action: selected_action_history(
-                reviewed.as_deref(),
-                &t.local_id,
-                t.original_title_hash,
-            ),
-            local_action_id: t.local_id,
-            task: t.title,
-            owner: t.owner,
-            due_date: t.due_date,
-            details: t.details,
-        })
-        .collect();
-    crate::exports::planner::ensure_local_action_ids(&mut action_items);
-
     let meeting_export = crate::exports::model::MeetingExport {
         meeting_id: meeting_id.clone(),
         title: meeting_title,
@@ -1094,9 +1219,16 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
     let destination = ToDoDestination { list_id };
     let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
-    let report = exporter::export_todo(&client, &mut ledger, &meeting_export, &destination, &ctx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let report = exporter::export_todo(
+        &client,
+        &mut ledger,
+        &meeting_export,
+        &destination,
+        &ctx,
+        history.siblings.as_ref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     ledger.checkpoint().await?;
 
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
@@ -1310,6 +1442,160 @@ pub async fn list_todo_lists(
 #[cfg(test)]
 mod export_history_tests {
     use super::*;
+
+    #[test]
+    fn selected_exports_use_full_preview_or_saved_action_history() {
+        let mut meeting = super::super::markdown_notes::meeting_export_for_planner(
+            "meeting",
+            "Test meeting",
+            None,
+            "## Action items\n- Send the update\n- Send the update",
+        );
+        assert_eq!(meeting.action_items.len(), 2);
+        let hash = super::super::planner::action_hash(&meeting.action_items[0]);
+        let preview = || {
+            serde_json::from_value(serde_json::json!([
+                {"localId": "action-1", "originalTitleHash": hash},
+                {"localId": "action-2", "originalTitleHash": hash}
+            ]))
+            .unwrap()
+        };
+        let persisted = super::super::actions::decode(
+            &serde_json::json!([
+                {"id": "00000000-0000-4000-8000-000000000001", "title": "Edited first",
+                 "done": true, "legacyAction": {"id": "action-1", "titleHash": hash}},
+                {"id": "00000000-0000-4000-8000-000000000002", "title": "Edited second",
+                 "done": false, "legacyAction": {"id": "action-2", "titleHash": hash}},
+                {"id": "00000000-0000-4000-8000-000000000003", "title": "Send the update",
+                 "done": false}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        for planner in [true, false] {
+            let (scope, action_hash) = if planner {
+                (
+                    "planner:tenant:user:plan:bucket",
+                    super::super::planner::action_hash as fn(&ExportActionItem) -> String,
+                )
+            } else {
+                ("todo:tenant:user:list", super::super::todo::action_hash)
+            };
+            let mut ledger = ExportLedger::new("meeting");
+            let known = super::super::ledger::task_key(scope, "meeting", "action-1", &hash);
+            ledger.record_success(&known, Some("existing-task".into()), None, None);
+            let select = |history: &SelectedTaskHistory<'_>, local_id, original_hash, title| {
+                let mut task = serde_json::json!({
+                    "localId": local_id, "originalTitleHash": original_hash, "title": title,
+                });
+                if planner {
+                    task["bucketId"] = "bucket".into();
+                    planner_action_items(vec![serde_json::from_value(task).unwrap()], history)
+                        .unwrap()
+                        .remove("bucket")
+                        .unwrap()
+                } else {
+                    todo_action_items(vec![serde_json::from_value(task).unwrap()], history)
+                        .unwrap()
+                }
+            };
+            let resolve = |meeting: &mut super::super::model::MeetingExport,
+                           history: &SelectedTaskHistory<'_>, id, original_hash, title| {
+                meeting.action_items = select(history, id, original_hash, title);
+                exporter::resolve_task_keys(
+                    &ledger,
+                    meeting,
+                    scope,
+                    action_hash,
+                    history.siblings.as_ref(),
+                )
+                .pop()
+                .unwrap()
+            };
+            let assert_held = |result: Result<String, exporter::ItemResult>, id| {
+                let item = result.unwrap_err();
+                assert_eq!(item.local_id, id);
+                assert_eq!(item.code.as_deref(), Some("task_identity_review_required"));
+                assert!(item.resource_id.is_none());
+                assert!(!item.graph_called);
+            };
+
+            let initial = SelectedTaskHistory::new(None, Some(preview())).unwrap();
+            let old_ipc = SelectedTaskHistory::new(None, None).unwrap();
+            for history in [&initial, &old_ipc] {
+                assert_held(
+                    resolve(&mut meeting, history, "action-2", Some(hash.as_str()), "Edited second"),
+                    "action-2",
+                );
+                assert_eq!(
+                    resolve(&mut meeting, history, "action-1", Some(hash.as_str()), "Edited first")
+                        .unwrap(),
+                    known,
+                );
+            }
+
+            if planner {
+                let tasks = serde_json::from_value(serde_json::json!([
+                    {"localId": "action-1", "title": "Edited first", "bucketId": "other"},
+                    {"localId": "action-2", "title": "Edited second", "bucketId": "bucket"}
+                ]))
+                .unwrap();
+                let mut groups = planner_action_items(tasks, &initial).unwrap();
+                assert_eq!(groups["other"][0].local_action_id, "action-1");
+                meeting.action_items = groups.remove("bucket").unwrap();
+                assert_held(
+                    exporter::resolve_task_keys(
+                        &ledger,
+                        &meeting,
+                        scope,
+                        action_hash,
+                        initial.siblings.as_ref(),
+                    )
+                    .pop()
+                    .unwrap(),
+                    "action-2",
+                );
+            }
+
+            let saved = SelectedTaskHistory::new(Some(&persisted), Some(Vec::new())).unwrap();
+            assert_held(
+                resolve(&mut meeting, &saved, persisted[1].id.as_str(), None, "Edited second"),
+                persisted[1].id.as_str(),
+            );
+            let new_key = resolve(
+                &mut meeting, &saved, persisted[2].id.as_str(), None, "Send the update",
+            )
+            .unwrap();
+            assert!(new_key.ends_with(persisted[2].id.as_str()));
+            assert!(ledger.may_attempt(&new_key));
+        }
+    }
+
+    #[test]
+    fn selected_exports_reject_invalid_or_inconsistent_preview_context() {
+        let candidate = |local_id: &str| TaskPreviewCandidate {
+            local_id: local_id.into(),
+            original_title_hash: "0123456789abcdef".into(),
+        };
+        for invalid in [
+            vec![candidate("action-2")],
+            vec![candidate("action-1"), candidate("action-1")],
+            (1..=MAX_TASK_PREVIEW_CANDIDATES + 1)
+                .map(|i| candidate(&format!("action-{i}")))
+                .collect(),
+            vec![TaskPreviewCandidate {
+                original_title_hash: "bad".into(),
+                ..candidate("action-1")
+            }],
+        ] {
+            assert!(SelectedTaskHistory::new(None, Some(invalid)).is_err());
+        }
+        let history = SelectedTaskHistory::new(None, Some(vec![candidate("action-1")])).unwrap();
+        assert!(history.legacy_action("action-2", None).is_err());
+        assert!(history
+            .legacy_action("action-1", Some("ffffffffffffffff".into()))
+            .is_err());
+    }
 
     fn partial_session(http: reqwest::Client) -> MicrosoftAuthState {
         let mut token = token_store::StoredToken::from_token_response(

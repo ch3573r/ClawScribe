@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::error::GraphErrorKind;
-use crate::exports::ledger::{task_key_for_action, ExportLedger};
+use crate::exports::ledger::{task_key_for_action, ExportLedger, PositionalSiblings};
 use crate::exports::model::{
     ExportActionItem, ExportStatus, MeetingExport, MicrosoftConnectionState,
 };
@@ -306,11 +306,12 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
 
 /// Resolve the selection before sending anything so one row can't claim the
 /// history written for another row during the same export.
-fn resolve_task_keys(
+pub(super) fn resolve_task_keys(
     ledger: &ExportLedger,
     meeting: &MeetingExport,
     scope: &str,
     action_hash: fn(&ExportActionItem) -> String,
+    full_positional_siblings: Option<&PositionalSiblings>,
 ) -> Vec<Result<String, ItemResult>> {
     let mut claims = HashMap::new();
     let keys: Vec<_> = meeting
@@ -326,6 +327,7 @@ fn resolve_task_keys(
                 local_id,
                 &hash,
                 action.legacy_action.as_ref(),
+                full_positional_siblings,
             );
             if let Ok(Some(key)) = &existing {
                 claims
@@ -359,17 +361,21 @@ fn resolve_task_keys(
 }
 
 /// Export a meeting's reviewed action items as Planner tasks.
+///
+/// Pass the full set of candidate identities across all buckets when available.
 pub async fn export_planner<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     ledger: &mut ExportLedger,
     meeting: &MeetingExport,
     destination: &PlannerDestination,
     ctx: &ExportContext<'_>,
+    full_positional_siblings: Option<&PositionalSiblings>,
 ) -> Result<ExportReport, planner::PlannerBuildError> {
     let url = format!("{GRAPH_BASE}/planner/tasks");
     let mut items = Vec::new();
     let scope = planner::task_scope(ctx.tenant_id, ctx.user_id, destination);
-    let keys = resolve_task_keys(ledger, meeting, &scope, planner::action_hash);
+    let keys =
+        resolve_task_keys(ledger, meeting, &scope, planner::action_hash, full_positional_siblings);
 
     for (action, key) in meeting.action_items.iter().zip(keys) {
         let dedupe_key = match key {
@@ -430,17 +436,21 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
 }
 
 /// Export a meeting's reviewed action items as personal Microsoft To Do tasks.
+///
+/// Pass the full set of candidate identities when available.
 pub async fn export_todo<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     ledger: &mut ExportLedger,
     meeting: &MeetingExport,
     destination: &ToDoDestination,
     ctx: &ExportContext<'_>,
+    full_positional_siblings: Option<&PositionalSiblings>,
 ) -> Result<ExportReport, todo::ToDoBuildError> {
     let url = todo_tasks_url(&destination.list_id);
     let mut items = Vec::new();
     let scope = todo::task_scope(ctx.tenant_id, ctx.user_id, destination);
-    let keys = resolve_task_keys(ledger, meeting, &scope, todo::action_hash);
+    let keys =
+        resolve_task_keys(ledger, meeting, &scope, todo::action_hash, full_positional_siblings);
 
     for (action, key) in meeting.action_items.iter().zip(keys) {
         let dedupe_key = match key {
@@ -871,7 +881,7 @@ mod tests {
             bucket_id: "bucket-1".into(),
         };
 
-        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx())
+        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
 
@@ -930,10 +940,10 @@ mod tests {
         );
         let client = client(transport);
         for report in [
-            export_planner(&client, &mut history, &next, &planner, &account)
+            export_planner(&client, &mut history, &next, &planner, &account, None)
                 .await
                 .unwrap(),
-            export_todo(&client, &mut history, &next, &todo, &account)
+            export_todo(&client, &mut history, &next, &todo, &account, None)
                 .await
                 .unwrap(),
         ] {
@@ -956,14 +966,14 @@ mod tests {
                 plan_id: "plan-1".into(),
                 bucket_id: "bucket-1".into(),
             };
-            export_planner(client, ledger, meeting, &destination, &ctx())
+            export_planner(client, ledger, meeting, &destination, &ctx(), None)
                 .await
                 .unwrap()
         } else {
             let destination = ToDoDestination {
                 list_id: "list-1".into(),
             };
-            export_todo(client, ledger, meeting, &destination, &ctx())
+            export_todo(client, ledger, meeting, &destination, &ctx(), None)
                 .await
                 .unwrap()
         }
@@ -1046,7 +1056,9 @@ mod tests {
             meeting.action_items.truncate(2);
             meeting.action_items[1].task = meeting.action_items[0].task.clone();
             let repeated = export_tasks_for_test(&client, &mut ledger, &meeting, planner).await;
-            repeated.items.iter().for_each(assert_task_identity_review);
+            assert_eq!(repeated.items[0].resource_id.as_deref(), Some("old-task"));
+            assert!(!repeated.items[0].graph_called);
+            assert_task_identity_review(&repeated.items[1]);
             assert_eq!(client.transport().calls_for(&url), 1);
 
             for (action, id) in meeting.action_items.iter_mut().zip([
@@ -1114,7 +1126,7 @@ mod tests {
         ledger.record_success(&key, Some("task-1".into()), Some("http://t".into()), None);
 
         let client = client(transport);
-        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx())
+        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
 
@@ -1146,7 +1158,7 @@ mod tests {
             bucket_id: "bucket-1".into(),
         };
 
-        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx())
+        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
 
@@ -1160,7 +1172,7 @@ mod tests {
 
         // 403 (access denied) is not auto-retriable, so a second run does not
         // re-attempt any item, and successes are not duplicated.
-        let report2 = export_planner(&client, &mut ledger, &m, &dest, &ctx())
+        let report2 = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
         assert!(report2.items.iter().all(|i| !i.graph_called));
@@ -1192,7 +1204,7 @@ mod tests {
             bucket_id: "bucket-1".into(),
         };
 
-        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx())
+        let report = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
         assert_eq!(report.overall, ExportStatus::PartialFailure);
@@ -1204,7 +1216,7 @@ mod tests {
             &planner_url(),
             [GraphResponse::success(201, r#"{"id":"task-2"}"#)],
         );
-        let report2 = export_planner(&client, &mut ledger, &m, &dest, &ctx())
+        let report2 = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
         assert_eq!(report2.overall, ExportStatus::Succeeded);
@@ -1224,7 +1236,7 @@ mod tests {
             plan_id: "".into(),
             bucket_id: "bucket-1".into(),
         };
-        let err = export_planner(&client, &mut ledger, &m, &bad, &ctx()).await;
+        let err = export_planner(&client, &mut ledger, &m, &bad, &ctx(), None).await;
         assert_eq!(err, Err(planner::PlannerBuildError::MissingPlanId));
     }
 
@@ -1244,7 +1256,7 @@ mod tests {
         let dest = ToDoDestination {
             list_id: "list-1".into(),
         };
-        let report = export_todo(&client, &mut ledger, &m, &dest, &ctx())
+        let report = export_todo(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
         assert_eq!(report.overall, ExportStatus::Succeeded);
@@ -1280,7 +1292,7 @@ mod tests {
             list_id: "list-1".into(),
         };
 
-        let report = export_todo(&client, &mut ledger, &m, &dest, &ctx())
+        let report = export_todo(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
 
@@ -1296,7 +1308,7 @@ mod tests {
         assert_eq!(ledger_entry.status, ExportStatus::Succeeded);
         assert_eq!(ledger_entry.resource_id.as_deref(), Some("todo-1"));
 
-        let report2 = export_todo(&client, &mut ledger, &m, &dest, &ctx())
+        let report2 = export_todo(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
         assert_eq!(report2.overall, ExportStatus::Succeeded);
@@ -1319,5 +1331,197 @@ mod tests {
             todo_task_url("list/with/slash", "task/with/slash"),
             format!("{GRAPH_BASE}/me/todo/lists/list%2Fwith%2Fslash/tasks/task%2Fwith%2Fslash")
         );
+    }
+
+    // ── Regression: sibling-aware cross-positional dedup ──────────────────
+
+    /// action-1 was exported as a positional suggestion (old-style key). The
+    /// user then saves both action-1 and action-2 as reviewed UUID actions
+    /// (same title). Exporting only UUID-B (legacy→action-2) must NOT inherit
+    /// action-1's history — they are distinct actions.
+    #[tokio::test]
+    async fn selected_action_with_same_title_as_completed_sibling_is_held_not_matched() {
+        for (is_planner, url) in [(true, planner_url()), (false, todo_tasks_url("list-1"))] {
+            let transport = MockGraphTransport::new();
+            // No responses queued: must not make any Graph call.
+            let client = client(transport);
+            let mut ledger = ExportLedger::new("meeting");
+
+            let (scope, hash) = if is_planner {
+                (
+                    "planner:tenant:user:plan-1:bucket-1",
+                    planner::action_hash(&meeting().action_items[0]),
+                )
+            } else {
+                (
+                    "todo:tenant:user:list-1",
+                    todo::action_hash(&meeting().action_items[0]),
+                )
+            };
+            // Seed action-1's positional key as already succeeded (old-style export).
+            let key_a1 = crate::exports::ledger::task_key(scope, "meeting", "action-1", &hash);
+            ledger.record_success(&key_a1, Some("task-old".into()), None, None);
+
+            // Export only UUID-B (legacy→action-2, same title hash as action-1).
+            let uuid_b = uuid::Uuid::new_v4().to_string();
+            let m = crate::exports::model::MeetingExport {
+                meeting_id: "meeting".into(),
+                title: "T".into(),
+                created_at: None,
+                executive_summary: String::new(),
+                decisions: Vec::new(),
+                action_items: vec![crate::exports::model::ExportActionItem {
+                    local_action_id: uuid_b.clone(),
+                    task: "Same title".into(),
+                    owner: None,
+                    due_date: None,
+                    details: None,
+                    legacy_action: Some(crate::exports::actions::LegacyAction {
+                        id: "action-2".into(),
+                        title_hash: hash.clone(),
+                    }),
+                }],
+                transcript_excerpt: None,
+                summary_html: None,
+            };
+
+            // Full set: both action-1 and action-2 are known siblings.
+            let mut siblings: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+            siblings
+                .entry(hash.clone())
+                .or_default()
+                .insert("action-1".into());
+            siblings
+                .entry(hash.clone())
+                .or_default()
+                .insert("action-2".into());
+
+            let report = if is_planner {
+                export_planner(
+                    &client,
+                    &mut ledger,
+                    &m,
+                    &PlannerDestination {
+                        plan_id: "plan-1".into(),
+                        bucket_id: "bucket-1".into(),
+                    },
+                    &ctx(),
+                    Some(&siblings),
+                )
+                .await
+                .unwrap()
+            } else {
+                export_todo(
+                    &client,
+                    &mut ledger,
+                    &m,
+                    &ToDoDestination {
+                        list_id: "list-1".into(),
+                    },
+                    &ctx(),
+                    Some(&siblings),
+                )
+                .await
+                .unwrap()
+            };
+
+            assert_task_identity_review(&report.items[0]);
+            assert_eq!(
+                client.transport().calls_for(&url),
+                0,
+                "must not call Graph when held"
+            );
+        }
+    }
+
+    /// Same scenario but the full set has only action-2 (action-1 was removed
+    /// from reviewed actions). The shift is legitimate and should match.
+    #[tokio::test]
+    async fn uuid_action_inherits_shifted_positional_when_no_known_sibling() {
+        for is_planner in [true, false] {
+            let transport = MockGraphTransport::new();
+            let client = client(transport);
+            let mut ledger = ExportLedger::new("meeting");
+
+            let (scope, hash) = if is_planner {
+                (
+                    "planner:tenant:user:plan-1:bucket-1",
+                    planner::action_hash(&meeting().action_items[0]),
+                )
+            } else {
+                (
+                    "todo:tenant:user:list-1",
+                    todo::action_hash(&meeting().action_items[0]),
+                )
+            };
+            let key_a1 = crate::exports::ledger::task_key(scope, "meeting", "action-1", &hash);
+            ledger.record_success(&key_a1, Some("task-shifted".into()), None, None);
+
+            let uuid_b = uuid::Uuid::new_v4().to_string();
+            let m = crate::exports::model::MeetingExport {
+                meeting_id: "meeting".into(),
+                title: "T".into(),
+                created_at: None,
+                executive_summary: String::new(),
+                decisions: Vec::new(),
+                action_items: vec![crate::exports::model::ExportActionItem {
+                    local_action_id: uuid_b.clone(),
+                    task: "Same title".into(),
+                    owner: None,
+                    due_date: None,
+                    details: None,
+                    legacy_action: Some(crate::exports::actions::LegacyAction {
+                        id: "action-2".into(),
+                        title_hash: hash.clone(),
+                    }),
+                }],
+                transcript_excerpt: None,
+                summary_html: None,
+            };
+
+            // Full set has only action-2 — no cross-positional sibling to block.
+            let mut siblings: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+            siblings
+                .entry(hash.clone())
+                .or_default()
+                .insert("action-2".into());
+
+            let report = if is_planner {
+                export_planner(
+                    &client,
+                    &mut ledger,
+                    &m,
+                    &PlannerDestination {
+                        plan_id: "plan-1".into(),
+                        bucket_id: "bucket-1".into(),
+                    },
+                    &ctx(),
+                    Some(&siblings),
+                )
+                .await
+                .unwrap()
+            } else {
+                export_todo(
+                    &client,
+                    &mut ledger,
+                    &m,
+                    &ToDoDestination {
+                        list_id: "list-1".into(),
+                    },
+                    &ctx(),
+                    Some(&siblings),
+                )
+                .await
+                .unwrap()
+            };
+
+            // action-1's key was found as a legitimate shift — already succeeded.
+            assert_eq!(
+                report.items[0].resource_id.as_deref(),
+                Some("task-shifted"),
+                "must inherit action-1 history when no blocking sibling"
+            );
+            assert!(!report.items[0].graph_called);
+        }
     }
 }

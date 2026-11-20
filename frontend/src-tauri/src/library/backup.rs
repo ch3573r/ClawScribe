@@ -1781,9 +1781,16 @@ mod tests {
             user_id: "user",
             bearer_token: "<redacted>",
         };
-        let report = export_planner(&client, &mut ledger, &meeting, &destination, &account)
-            .await
-            .unwrap();
+        let report = export_planner(
+            &client,
+            &mut ledger,
+            &meeting,
+            &destination,
+            &account,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.items[0].resource_id.as_deref(), Some("old-task"));
         assert!(!report.items[0].graph_called);
         assert_eq!(report.items[1].status, ExportStatus::UnknownAfterSubmit);
@@ -1793,9 +1800,16 @@ mod tests {
             ledger.entry(&pending_key).unwrap().status,
             ExportStatus::UnknownAfterSubmit
         );
-        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account)
-            .await
-            .unwrap();
+        let report = export_planner(
+            &client,
+            &mut ledger,
+            &shifted,
+            &destination,
+            &account,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.items[0].local_id, "action-5");
         assert_eq!(
             report.items[0].code.as_deref(),
@@ -1808,9 +1822,16 @@ mod tests {
             title_hash: hash,
         });
         action.local_action_id = saved_id.into();
-        let report = export_planner(&client, &mut ledger, &shifted, &destination, &account)
-            .await
-            .unwrap();
+        let report = export_planner(
+            &client,
+            &mut ledger,
+            &shifted,
+            &destination,
+            &account,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report.items[0].code.as_deref(),
             Some("task_identity_review_required")
