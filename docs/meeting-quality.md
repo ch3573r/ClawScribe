@@ -217,10 +217,12 @@ real-time performance from this setting alone.
 
 Native speech-model loading runs outside the async executor. Import and
 retranscription pass each bounded speech buffer into inference without making
-another full copy. Cloud upload requests can be cancelled while waiting for a
-response. MAI conversion from other formats remains a separate limitation: it
-decodes the whole file in memory, and that background conversion can continue
-after cancellation. Its memory use is not covered by the local ASR segment bound.
+another full copy. MAI uses a 64 KiB file-read buffer for multipart audio.
+Conversion uses bounded copies into a temporary WAV, which is limited to
+300 MB before upload. For two hours at 16 kHz mono PCM16, allow about 230 MB
+of temporary disk space. These are buffer and file-size bounds. FFmpeg, HTTP
+transport, and transcript responses have their own memory needs. Cancellation
+stops conversion and can drop an in-flight upload or retry delay.
 
 For an i5-1235U / 8 GB notebook, choose models based on a measured session with
 Teams/Webex and the normal concurrent workload. Compare sustained backlog,

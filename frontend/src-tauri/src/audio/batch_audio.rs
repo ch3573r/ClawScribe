@@ -29,13 +29,22 @@ pub(crate) async fn cancel_aware<T>(
     work: impl std::future::Future<Output = Result<T>>,
     cancelled: &'static AtomicBool,
 ) -> Result<T> {
+    unless_cancelled(work, cancelled)
+        .await
+        .ok_or_else(|| anyhow!("Transcription cancelled"))?
+}
+
+pub(crate) async fn unless_cancelled<T>(
+    work: impl std::future::Future<Output = T>,
+    cancelled: &AtomicBool,
+) -> Option<T> {
     tokio::pin!(work);
     loop {
         if cancelled.load(Ordering::Acquire) {
-            return Err(anyhow!("Transcription cancelled"));
+            return None;
         }
         tokio::select! {
-            result = &mut work => return result,
+            result = &mut work => return Some(result),
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
         }
     }
@@ -159,25 +168,38 @@ pub(crate) async fn prepare(
     .map_err(|_| anyhow!("Speech preparation task failed"))?
 }
 
-async fn decode_to_pcm(path: &Path, pcm: &Path, cancelled: &AtomicBool) -> Result<()> {
+pub(crate) fn audio_decoder_command(path: &Path) -> Result<tokio::process::Command> {
     let ffmpeg = super::ffmpeg::find_ffmpeg_path().ok_or_else(|| {
         anyhow!("FFmpeg is required to prepare meeting audio. Repair the ClawScribe installation.")
     })?;
     let mut command = tokio::process::Command::new(ffmpeg);
     command
-        .args(["-nostdin", "-nostats", "-loglevel", "error", "-y", "-i"])
-        .arg(path)
         .args([
-            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le",
+            "-nostdin",
+            "-nostats",
+            "-loglevel",
+            "error",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
         ])
-        .arg(&pcm)
+        .arg(path)
+        .args(["-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     command.creation_flags(0x08000000);
+    Ok(command)
+}
+
+async fn decode_to_pcm(path: &Path, pcm: &Path, cancelled: &AtomicBool) -> Result<()> {
+    let mut command = audio_decoder_command(path)?;
     let mut child = command
+        .args(["-f", "f32le"])
+        .arg(pcm)
         .spawn()
         .map_err(|_| anyhow!("Could not start audio decoder"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);

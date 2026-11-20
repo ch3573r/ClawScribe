@@ -7,7 +7,7 @@ use crate::credentials::SecretStatus;
 use crate::{
     audio::transcription::cloud::{
         mai_transcribe::MaiTranscribeProvider, mime_type_for_path,
-        openai_whisper::OpenAiWhisperProvider, validate_provider_upload_size,
+        openai_whisper::OpenAiWhisperProvider, transcribe_mai_file, validate_provider_upload_size,
         CloudTranscriptSegment, CloudTranscriptionProvider, DEFAULT_CLOUD_WHISPER_MODEL,
         DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER, PROVIDER_MAI_TRANSCRIBE,
     },
@@ -866,24 +866,10 @@ async fn test_transcript_provider_with(
             let endpoint = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
-            validate_provider_upload_size(
-                PROVIDER_MAI_TRANSCRIBE,
-                Some(&endpoint),
-                audio_size_bytes,
-            )
-            .map_err(|error| {
-                format!(
-                    "MAI-Transcribe test failed ({}): {error}",
-                    error.category().as_str()
-                )
-            })?;
-            let audio = tokio::fs::read(audio_path)
-                .await
-                .map_err(|e| format!("Failed to read test audio file: {e}"))?;
             let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone())
                 .with_http_opt_in(allow_unencrypted);
-            let segments = provider_client
-                .transcribe_file(audio, file_name, mime_type, language)
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let segments = transcribe_mai_file(&provider_client, audio_path, language, &cancelled)
                 .await
                 .map_err(|error| {
                     format!(

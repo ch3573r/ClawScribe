@@ -253,21 +253,19 @@ async fn run_retranscription<R: Runtime>(
                 5,
                 "Uploading audio for cloud transcription...",
             );
-            match super::batch_audio::cancel_aware(
-                async {
-                    Ok(super::transcription::cloud::transcribe_whole_file(
-                        &app,
-                        &provider_id,
-                        model.as_deref(),
-                        &audio_path,
-                        language.as_deref(),
-                    )
-                    .await)
-                },
+            let outcome = super::transcription::cloud::transcribe_whole_file(
+                &app,
+                &provider_id,
+                model.as_deref(),
+                &audio_path,
+                language.as_deref(),
                 &RETRANSCRIPTION_CANCELLED,
             )
-            .await?
-            {
+            .await;
+            if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {
+                return Err(anyhow!("Retranscription cancelled"));
+            }
+            match outcome {
                 Ok(outcome) => {
                     let mut duration_seconds =
                         crate::audio::import::validate_audio_file(&audio_path)

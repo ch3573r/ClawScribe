@@ -77,6 +77,10 @@ window titles are returned only when the settings diagnostics panel requests the
 - MAI-Transcribe uses Azure Speech Fast Transcription with its own Cognitive
   Services key or Azure Speech credential. Microsoft Graph sign-in/export
   scopes are not reused for Azure Speech.
+- MAI-Transcribe streams WAV, MP3, and FLAC from disk. Other supported media
+  are converted to temporary 16 kHz mono PCM16 WAV. The 300 MB cap applies to
+  the audio submitted to Azure. Cancelling stops local conversion or the
+  multipart request and leaves the source audio intact.
 - MAI sentence-level timing is never promoted to word timestamps. If Azure
   returns a combined-only or single-phrase transcript, ClawScribe can remap the
   cloud text onto the local VAD speech grid for readable rows, but those row

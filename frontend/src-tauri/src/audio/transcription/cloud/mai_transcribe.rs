@@ -1,17 +1,38 @@
 use super::{
-    classify_status_with_body, should_retry_status, CloudTranscriptSegment,
-    CloudTranscriptionError, CloudTranscriptionProvider,
+    classify_status_with_body, should_retry_status, validate_provider_upload_size,
+    CloudTranscriptSegment, CloudTranscriptionError, PROVIDER_MAI_TRANSCRIBE,
 };
-use async_trait::async_trait;
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use serde_json::json;
+use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 
 const MAX_ATTEMPTS: usize = 3;
 const API_VERSION: &str = "2025-10-15";
 const MAX_SINGLE_PHRASE_SECONDS: f64 = 90.0;
 const MAX_SINGLE_PHRASE_WORDS: usize = 120;
+const UPLOAD_BUFFER_BYTES: usize = 64 * 1024;
+
+async fn open_audio_body(path: &Path) -> Result<(reqwest::Body, u64), CloudTranscriptionError> {
+    let file = tokio::fs::File::open(path).await.map_err(|_| {
+        CloudTranscriptionError::auth_config("Could not open audio for MAI-Transcribe")
+    })?;
+    let metadata = file.metadata().await.map_err(|_| {
+        CloudTranscriptionError::auth_config("Could not inspect audio for MAI-Transcribe")
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(CloudTranscriptionError::unsupported_media(
+            "MAI-Transcribe needs a non-empty audio file",
+        ));
+    }
+    let length = metadata.len();
+    validate_provider_upload_size(PROVIDER_MAI_TRANSCRIBE, None, length)?;
+    let stream = ReaderStream::with_capacity(file.take(length), UPLOAD_BUFFER_BYTES);
+    Ok((reqwest::Body::wrap_stream(stream), length))
+}
 
 #[derive(Clone)]
 pub struct MaiTranscribeProvider {
@@ -44,16 +65,14 @@ impl MaiTranscribeProvider {
 
     fn form(
         &self,
-        audio: bytes::Bytes,
+        body: reqwest::Body,
+        length: u64,
         file_name: &str,
         mime_type: &str,
         language: Option<&str>,
     ) -> Result<Form, CloudTranscriptionError> {
-        // Bytes clones are refcounted, so retries never duplicate the audio
-        // buffer (uploads can be hundreds of MB). stream_with_length keeps a
-        // Content-Length header instead of switching to chunked encoding.
-        let length = audio.len() as u64;
-        let audio = Part::stream_with_length(reqwest::Body::from(audio), length)
+        // MAI expects Content-Length on the multipart request.
+        let audio = Part::stream_with_length(body, length)
             .file_name(file_name.to_string())
             .mime_str(mime_type)
             .map_err(|e| {
@@ -80,19 +99,17 @@ impl MaiTranscribeProvider {
             .part("audio", audio)
             .part("definition", definition))
     }
-}
 
-#[async_trait]
-impl CloudTranscriptionProvider for MaiTranscribeProvider {
-    async fn transcribe_file(
+    pub(super) async fn transcribe_path(
         &self,
-        audio: Vec<u8>,
+        audio: &Path,
         file_name: &str,
         mime_type: &str,
         language: Option<&str>,
     ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
-        let audio = bytes::Bytes::from(audio);
         for attempt in 1..=MAX_ATTEMPTS {
+            // Reopen for each attempt. A failed request consumes its stream.
+            let (body, length) = open_audio_body(audio).await?;
             let client = crate::openai::secret_destination::secret_client(
                 reqwest::Client::builder(),
                 &self.endpoint(),
@@ -104,7 +121,7 @@ impl CloudTranscriptionProvider for MaiTranscribeProvider {
                 .post(self.endpoint())
                 .timeout(Duration::from_secs(30 * 60))
                 .header("Ocp-Apim-Subscription-Key", &self.api_key)
-                .multipart(self.form(audio.clone(), file_name, mime_type, language)?)
+                .multipart(self.form(body, length, file_name, mime_type, language)?)
                 .send()
                 .await;
 
@@ -275,6 +292,8 @@ mod tests {
         assert!(!shown.contains("fake-provider-key-000000"));
         assert!(shown.contains("model-a"));
     }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -379,8 +398,13 @@ mod tests {
             "mai-transcribe-1.5".to_string(),
         );
 
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("synthetic.wav");
+        tokio::fs::write(&audio, b"synthetic-audio-payload")
+            .await
+            .unwrap();
         let segments = provider
-            .transcribe_file(b"abc".to_vec(), "audio.wav", "audio/wav", Some("en-US"))
+            .transcribe_path(&audio, "synthetic.wav", "audio/wav", Some("en-US"))
             .await
             .unwrap();
         let request = request_handle.await.unwrap();
@@ -390,6 +414,12 @@ mod tests {
         assert!(request
             .starts_with("POST /speechtotext/transcriptions:transcribe?api-version=2025-10-15 "));
         assert!(request.contains(r#"name="audio""#));
+        assert!(request.contains(r#"filename="synthetic.wav""#));
+        assert!(request.contains("synthetic-audio-payload"));
+        assert!(request.to_ascii_lowercase().contains("content-length: "));
+        assert!(!request
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"));
         assert!(request.contains(r#"name="definition""#));
         assert!(request.contains("enhancedMode"));
         assert!(request.contains("mai-transcribe-1.5"));
@@ -407,8 +437,11 @@ mod tests {
             "mai-transcribe-1.5".to_string(),
         );
 
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("synthetic.wav");
+        tokio::fs::write(&audio, b"synthetic-audio").await.unwrap();
         let error = provider
-            .transcribe_file(b"abc".to_vec(), "audio.wav", "audio/wav", None)
+            .transcribe_path(&audio, "synthetic.wav", "audio/wav", None)
             .await
             .unwrap_err();
         let _ = request_handle.await.unwrap();
@@ -417,6 +450,80 @@ mod tests {
             error.category(),
             super::super::CloudFallbackReasonCategory::AuthConfig
         );
+    }
+
+    #[tokio::test]
+    async fn file_upload_reopens_the_same_audio_for_a_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in [
+                ("503 Service Unavailable", "{}"),
+                (
+                    "200 OK",
+                    r#"{"phrases":[{"text":"synthetic speech","offsetMilliseconds":0,"durationMilliseconds":1000}]}"#,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_request(&mut socket).await);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("synthetic.mp3");
+        let payload = b"synthetic audio content to replay".repeat(5_000);
+        tokio::fs::write(&audio, &payload).await.unwrap();
+        let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
+        let segments = tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.transcribe_path(&audio, "synthetic.mp3", "audio/mpeg", None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(segments[0].text, "synthetic speech");
+        for request in server.await.unwrap() {
+            assert!(request
+                .windows(payload.len())
+                .any(|bytes| bytes == payload.as_slice()));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_file_upload_drops_the_in_flight_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            signal.store(true, Ordering::Release);
+            let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut [0_u8; 1]))
+                .await
+                .expect("request connection closed when cancelled");
+            assert!(matches!(read, Ok(0) | Err(_)));
+            assert!(request_complete(&request));
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("synthetic.wav");
+        tokio::fs::write(&audio, b"synthetic audio").await.unwrap();
+        let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::super::transcribe_mai_file(&provider, &audio, None, &cancelled),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        server.await.unwrap();
     }
 
     async fn spawn_one_response_server(
@@ -428,18 +535,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = socket.read(&mut buffer).await.unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..read]);
-                if request_complete(&request) {
-                    break;
-                }
-            }
+            let request = read_request(&mut socket).await;
             let response = format!(
                 "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -449,6 +545,22 @@ mod tests {
         });
 
         (format!("http://{addr}"), handle)
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request_complete(&request) {
+                break;
+            }
+        }
+        request
     }
 
     fn request_complete(request: &[u8]) -> bool {
