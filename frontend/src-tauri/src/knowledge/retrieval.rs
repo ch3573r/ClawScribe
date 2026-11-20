@@ -1258,9 +1258,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let update = runtime.scheduler.begin_model_update(true);
+        let update = runtime.scheduler.begin_model_update(true, root.clone());
         update.drain().await;
-        update.finish(&Ok(verified), root);
+        update.finish(&Ok(verified));
         let started = Instant::now();
         while let Some(job) = store::next_job(&pool).await.unwrap() {
             super::super::indexer::index_source(&pool, &runtime.scheduler, &job)

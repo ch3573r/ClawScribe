@@ -317,7 +317,7 @@ pub async fn knowledge_model_download(
             .await
             .map_err(|_| "Knowledge storage failed")?
             == 1;
-    let update = runtime.scheduler.begin_model_update(enabled);
+    let update = runtime.scheduler.begin_model_update(enabled, root.clone());
     let result = runtime
         .downloads
         .download_after(
@@ -326,7 +326,7 @@ pub async fn knowledge_model_download(
             update.drain(),
         )
         .await;
-    update.finish(&result, root);
+    update.finish(&result);
     runtime.index_worker.wake();
     result.map(|_| ()).map_err(|e| e.to_string())
 }

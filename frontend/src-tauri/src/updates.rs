@@ -46,6 +46,8 @@ impl UpdateInstallPermit {
 // The installer is bounded in memory and tied to the exact checked release.
 const MAX_INSTALLER_BYTES: u64 = 1024 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+// Staged bytes are cleared if unused for this long; a newer download resets the timer.
+const STAGED_TTL: Duration = Duration::from_secs(30 * 60);
 
 struct StagedUpdate {
     rid: ResourceId,
@@ -53,11 +55,45 @@ struct StagedUpdate {
     bytes: Vec<u8>,
 }
 
-// At most one verified installer is held, owned by Rust rather than the webview.
-static STAGED: Mutex<Option<StagedUpdate>> = Mutex::new(None);
+// The generation covers the download in flight as well as its retained bytes.
+struct UpdateStage<T> {
+    generation: u64,
+    installer: Option<T>,
+}
+
+impl<T> UpdateStage<T> {
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            installer: None,
+        }
+    }
+
+    fn invalidate(&mut self) -> u64 {
+        self.installer = None;
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn publish(&mut self, generation: u64, installer: T) -> Result<(), String> {
+        if generation != self.generation {
+            return Err("The selected update changed. Check for updates again.".into());
+        }
+        self.installer = Some(installer);
+        Ok(())
+    }
+
+    fn expire(&mut self, generation: u64) {
+        if self.generation == generation {
+            self.installer = None;
+        }
+    }
+}
+
+static STAGED: Mutex<UpdateStage<StagedUpdate>> = Mutex::new(UpdateStage::new());
 static DOWNLOAD_FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn staged() -> std::sync::MutexGuard<'static, Option<StagedUpdate>> {
+fn staged() -> std::sync::MutexGuard<'static, UpdateStage<StagedUpdate>> {
     STAGED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -66,6 +102,10 @@ fn staged() -> std::sync::MutexGuard<'static, Option<StagedUpdate>> {
 fn over_installer_cap(content_length: Option<u64>, received: u64) -> bool {
     content_length.is_some_and(|length| length > MAX_INSTALLER_BYTES)
         || received > MAX_INSTALLER_BYTES
+}
+
+fn bytes_exceed_install_cap(len: usize) -> bool {
+    len as u64 > MAX_INSTALLER_BYTES
 }
 
 fn installer_url_allowed(url: &str) -> bool {
@@ -108,7 +148,7 @@ pub async fn download_app_update<R: Runtime>(
     let _flight = DOWNLOAD_FLIGHT
         .try_lock()
         .map_err(|_| "An update download is already running. Wait for it to finish.")?;
-    staged().take();
+    let generation = staged().invalidate();
     // Fail early instead of downloading a large installer that cannot be used.
     drop(UpdateInstallPermit::acquire()?);
     let update = webview
@@ -144,7 +184,17 @@ pub async fn download_app_update<R: Runtime>(
         result = download => result.map_err(|error| install_error(&error))?,
         _ = over.notified() => return Err("The update download is larger than expected and was stopped.".into()),
     };
-    *staged() = Some(StagedUpdate { rid, update, bytes });
+    if bytes_exceed_install_cap(bytes.len()) {
+        return Err("The update download is larger than expected and was stopped.".into());
+    }
+    staged().publish(generation, StagedUpdate { rid, update, bytes })?;
+    // Expire the staged bytes after STAGED_TTL so the heap cannot hold 1 GiB
+    // indefinitely after a page reload. The generation key ensures a stale timer
+    // does not discard bytes from a newer download.
+    tokio::spawn(async move {
+        tokio::time::sleep(STAGED_TTL).await;
+        staged().expire(generation);
+    });
     Ok(())
 }
 
@@ -153,17 +203,10 @@ pub async fn download_app_update<R: Runtime>(
 /// released when the installer fails; on success the installer ends the process.
 #[tauri::command]
 pub async fn install_app_update(rid: ResourceId) -> Result<(), String> {
-    let staged = {
-        let mut slot = staged();
-        match slot.take() {
-            Some(found) if found.rid == rid => found,
-            _ => {
-                return Err(
-                    "The downloaded update is no longer available. Check for updates again.".into(),
-                )
-            }
-        }
-    };
+    let staged = staged()
+        .installer
+        .take_if(|installer| installer.rid == rid)
+        .ok_or("The downloaded update is no longer available. Check for updates again.")?;
     let permit = UpdateInstallPermit::acquire()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
@@ -226,7 +269,7 @@ pub fn set_update_channel<R: Runtime>(
         }
         return Err("Could not save the update channel. Your previous choice is unchanged.".into());
     }
-    staged().take();
+    staged().invalidate();
     Ok(())
 }
 
@@ -386,8 +429,7 @@ pub struct UpdateCheck {
 
 #[tauri::command]
 pub async fn check_app_update<R: Runtime>(webview: Webview<R>) -> Result<UpdateCheck, String> {
-    // A new check supersedes any installer staged for an earlier result.
-    staged().take();
+    staged().invalidate();
     let app = webview.app_handle();
     let channel = get_update_channel(app.clone())?;
     let builder = webview
@@ -452,8 +494,8 @@ pub async fn check_app_update<R: Runtime>(webview: Webview<R>) -> Result<UpdateC
             body: update.body.clone(),
             raw_json: update.raw_json.clone(),
             prerelease,
-            // Use the plugin's actual Update resource so the official JS API
-            // downloads this exact release and verifies the pinned public key.
+            // Keep the plugin's Update resource in Rust; the caller passes this
+            // rid back to download_app_update and install_app_update.
             rid: webview.resources_table().add(update),
         };
         metadata
@@ -488,6 +530,29 @@ mod tests {
         drop(update);
         assert!(claim_job().is_ok());
         assert!(SummaryService::register_job(meeting, "openai").is_ok());
+    }
+
+    #[test]
+    fn post_download_bytes_cap_uses_same_boundary_as_streaming_cap() {
+        // Both caps must draw the line at exactly MAX_INSTALLER_BYTES bytes.
+        // Test through the production helpers so the boundary lives in one place.
+        assert!(!bytes_exceed_install_cap(MAX_INSTALLER_BYTES as usize));
+        assert!(bytes_exceed_install_cap(MAX_INSTALLER_BYTES as usize + 1));
+        assert!(!over_installer_cap(None, MAX_INSTALLER_BYTES));
+        assert!(over_installer_cap(None, MAX_INSTALLER_BYTES + 1));
+    }
+
+    #[test]
+    fn generation_expiry_does_not_clear_a_newer_download() {
+        let mut slot = UpdateStage::new();
+        let first = slot.invalidate();
+        let current = slot.invalidate();
+        assert!(slot.publish(first, vec![1]).is_err());
+        slot.publish(current, vec![2]).unwrap();
+        slot.expire(first);
+        assert_eq!(slot.installer, Some(vec![2]));
+        slot.expire(current);
+        assert!(slot.installer.is_none());
     }
 
     #[test]

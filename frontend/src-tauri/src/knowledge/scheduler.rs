@@ -216,18 +216,23 @@ impl Activation {
 pub(super) struct ModelUpdate {
     scheduler: Arc<Scheduler>,
     enabled: bool,
+    root: PathBuf,
 }
 
 impl ModelUpdate {
     pub(super) async fn drain(&self) {
         self.scheduler.reset_worker().await;
     }
-    pub(super) fn finish(self, result: &Result<VerifiedModel, KnowledgeError>, root: PathBuf) {
+    /// Call after verification completes. Busy and Cancelled are retryable; any other
+    /// error leaves the model unavailable until the next explicit recheck.
+    pub(super) fn finish(self, result: &Result<VerifiedModel, KnowledgeError>) {
         if self.enabled {
             let mut activation = self.scheduler.activation.lock().unwrap();
             *activation = match result {
                 Ok(verified) => Activation::Verified(verified.clone()),
-                Err(KnowledgeError::Cancelled) => Activation::Pending(root),
+                Err(KnowledgeError::Cancelled) | Err(KnowledgeError::Busy) => {
+                    Activation::Pending(self.root.clone())
+                }
                 Err(_) => Activation::Unavailable,
             };
         }
@@ -236,10 +241,18 @@ impl ModelUpdate {
 
 impl Drop for ModelUpdate {
     fn drop(&mut self) {
-        let mut activation = self.scheduler.activation.lock().unwrap();
+        // Use into_inner on poison so a panic during the update does not strand
+        // callers in Updating forever.
+        let mut activation = self
+            .scheduler
+            .activation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if matches!(*activation, Activation::Updating) {
+            // Unwind without finish: leave a retryable Pending rather than
+            // Unavailable so the next enable/download can recover.
             *activation = if self.enabled {
-                Activation::Unavailable
+                Activation::Pending(self.root.clone())
             } else {
                 Activation::Inactive
             };
@@ -308,10 +321,15 @@ impl Scheduler {
         *self.activation.lock().unwrap() = Activation::Inactive;
         self.reset_worker().await;
     }
-    pub(super) fn begin_model_update(self: &Arc<Self>, enabled: bool) -> ModelUpdate {
+    pub(super) fn begin_model_update(
+        self: &Arc<Self>,
+        enabled: bool,
+        root: PathBuf,
+    ) -> ModelUpdate {
         let update = ModelUpdate {
             scheduler: self.clone(),
             enabled,
+            root,
         };
         *self.activation.lock().unwrap() = Activation::Updating;
         if enabled {
@@ -325,9 +343,18 @@ impl Scheduler {
         let scheduler = self.clone();
         // A running native call retains its model. Cleanup happens off the runtime.
         let _ = tokio::task::spawn_blocking(move || {
-            scheduler.worker.lock().unwrap().model = None;
+            scheduler.lock_worker().model = None;
         })
         .await;
+    }
+
+    fn lock_worker(&self) -> std::sync::MutexGuard<'_, Worker> {
+        self.worker.lock().unwrap_or_else(|poisoned| {
+            let mut worker = poisoned.into_inner();
+            worker.model = None;
+            self.worker.clear_poison();
+            worker
+        })
     }
     pub fn notify(&self, source_id: String, revision: i64) -> Result<(), KnowledgeError> {
         self.check_available()?;
@@ -379,7 +406,7 @@ impl Scheduler {
         self.check_available()?;
         let scheduler = self.clone();
         run_indexing_with_token(self.cancellation.clone(), move |cancelled| {
-            let mut worker = scheduler.worker.lock().unwrap();
+            let mut worker = scheduler.lock_worker();
             scheduler.prepare_backend(
                 &mut worker,
                 cancelled,
@@ -419,7 +446,29 @@ impl Scheduler {
             }
         };
         if let Some(root) = root {
-            let result = verify(&root, cancelled);
+            struct VerificationAttempt<'a> {
+                activation: &'a Mutex<Activation>,
+                pending_root: Option<&'a Path>,
+            }
+            impl Drop for VerificationAttempt<'_> {
+                fn drop(&mut self) {
+                    if let Some(root) = self.pending_root {
+                        let mut state = self.activation.lock().unwrap_or_else(|p| p.into_inner());
+                        if matches!(*state, Activation::Verifying) {
+                            *state = Activation::Pending(root.to_owned());
+                        }
+                    }
+                }
+            }
+            let result = {
+                let mut attempt = VerificationAttempt {
+                    activation: &self.activation,
+                    pending_root: Some(&root),
+                };
+                let checked = verify(&root, cancelled);
+                attempt.pending_root = None;
+                checked
+            };
             let mut activation = self.activation.lock().unwrap();
             if !matches!(*activation, Activation::Verifying) {
                 return Err(KnowledgeError::Cancelled);
@@ -649,7 +698,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         std::fs::write(root.join("model"), b"wrong!").unwrap();
 
-        let update = scheduler.begin_model_update(true);
+        let update = scheduler.begin_model_update(true, root.into());
         assert_eq!(
             scheduler.verification_status(),
             VerificationStatus::Updating
@@ -659,23 +708,98 @@ mod tests {
         assert!(scheduler.worker.lock().unwrap().model.is_none());
         let checked = VerifiedModel::verify_pinned(root, &pins, &cancelled, |_| {});
         assert!(matches!(&checked, Err(KnowledgeError::ModelUnavailable)));
-        update.finish(&checked, root.into());
+        update.finish(&checked);
         assert_eq!(
             scheduler.verification_status(),
             VerificationStatus::Unavailable
         );
 
-        let update = scheduler.begin_model_update(true);
+        let update = scheduler.begin_model_update(true, root.into());
         update.drain().await;
         std::fs::write(root.join("model"), b"abcdef").unwrap();
         let checked = VerifiedModel::verify_pinned(root, &pins, &cancelled, |_| {});
         assert!(checked.is_ok());
-        update.finish(&checked, root.into());
+        update.finish(&checked);
         assert_eq!(
             scheduler.verification_status(),
             VerificationStatus::Verified
         );
     }
+    #[tokio::test]
+    async fn update_drop_without_finish_leaves_a_retryable_pending_state() {
+        let scheduler = synthetic_query_scheduler();
+        let (dir, _) = verification_fixture();
+        let update = scheduler.begin_model_update(true, dir.path().into());
+        assert_eq!(
+            scheduler.verification_status(),
+            VerificationStatus::Updating
+        );
+        drop(update);
+        assert_eq!(scheduler.verification_status(), VerificationStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn update_finish_with_busy_error_is_retryable_not_unavailable() {
+        let scheduler = synthetic_query_scheduler();
+        let (dir, _) = verification_fixture();
+        let update = scheduler.begin_model_update(true, dir.path().into());
+        update.drain().await;
+        update.finish(&Err(KnowledgeError::Busy));
+        assert_eq!(scheduler.verification_status(), VerificationStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn panicking_verifier_leaves_pending_for_retry() {
+        let scheduler = Scheduler::new(Arc::new(CancellationRegistry::default()));
+        let (dir, pins) = verification_fixture();
+        scheduler.enable(dir.path().into());
+        assert_eq!(scheduler.verification_status(), VerificationStatus::Pending);
+        let cancelled = AtomicBool::new(false);
+
+        {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut worker = scheduler.lock_worker();
+                scheduler.prepare_backend(
+                    &mut worker,
+                    &cancelled,
+                    |_, _| panic!("synthetic verifier panic"),
+                    |_| unreachable!("load must not be reached"),
+                )
+            }));
+            assert!(result.is_err(), "caught panic must propagate as Err");
+        }
+        assert_eq!(
+            scheduler.verification_status(),
+            VerificationStatus::Pending,
+            "stuck Verifying after panic would prevent all future use"
+        );
+
+        // Second demand: real verifier should complete and leave Verified.
+        let bytes = Cell::new(0);
+        {
+            assert!(scheduler.worker.is_poisoned());
+            let mut worker = scheduler.lock_worker();
+            assert!(!scheduler.worker.is_poisoned());
+            scheduler
+                .prepare_backend(
+                    &mut worker,
+                    &cancelled,
+                    |root, token| {
+                        VerifiedModel::verify_pinned(root, &pins, token, |n| {
+                            bytes.set(bytes.get() + n)
+                        })
+                    },
+                    synthetic_loader,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            scheduler.verification_status(),
+            VerificationStatus::Verified
+        );
+        assert!(bytes.get() > 0, "real verifier must have read the files");
+    }
+
     #[test]
     fn idle_unload_releases_model_only_after_sixty_seconds() {
         struct DropProbe(Arc<AtomicBool>);
