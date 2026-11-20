@@ -29,24 +29,52 @@ static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Global flag to signal cancellation
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// True once the import has begun saving its meeting. From then on a cancel
-/// cannot take effect; the lock makes "cancel accepted" and "save begins"
-/// mutually exclusive.
-static IMPORT_SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+/// Where the import is, as far as a cancel from a starting recording is
+/// concerned. The lock makes "cancel accepted" and "save begins" mutually
+/// exclusive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Before the meeting is saved: a cancel takes effect.
+    Open,
+    /// The meeting is being created and the import runs to completion.
+    Saving,
+    /// The import is over, successfully or not.
+    Finished,
+}
 
-fn set_import_saving(saving: bool) {
-    *IMPORT_SAVING
+static IMPORT_PHASE: std::sync::Mutex<Phase> = std::sync::Mutex::new(Phase::Finished);
+
+fn set_import_phase(phase: Phase) {
+    *IMPORT_PHASE
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) = saving;
+        .unwrap_or_else(|error| error.into_inner()) = phase;
+}
+
+/// Opens the cancel window for one import and closes it when dropped. Declared
+/// after the job registration, so it is dropped (and cancel starts reporting
+/// false) before the registration is cleared.
+struct PhaseGuard;
+
+impl PhaseGuard {
+    fn open() -> Self {
+        set_import_phase(Phase::Open);
+        PhaseGuard
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        set_import_phase(Phase::Finished);
+    }
 }
 
 /// Cancels for a starting recording. Returns false when the import is already
-/// saving and will finish instead.
+/// saving, or over, and a cancel cannot take effect.
 fn cancel_import_if_possible() -> bool {
-    let saving = IMPORT_SAVING
+    let phase = IMPORT_PHASE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if *saving {
+    if *phase != Phase::Open {
         return false;
     }
     IMPORT_CANCELLED.store(true, Ordering::SeqCst);
@@ -55,13 +83,13 @@ fn cancel_import_if_possible() -> bool {
 
 /// The last cancel check: after this the meeting is created.
 fn begin_import_save() -> Result<()> {
-    let mut saving = IMPORT_SAVING
+    let mut phase = IMPORT_PHASE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Import cancelled"));
     }
-    *saving = true;
+    *phase = Phase::Saving;
     Ok(())
 }
 
@@ -78,14 +106,12 @@ impl ImportGuard {
         {
             return Err("Import already in progress".to_string());
         }
-        set_import_saving(false);
         Ok(ImportGuard)
     }
 }
 
 impl Drop for ImportGuard {
     fn drop(&mut self) {
-        set_import_saving(false);
         IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
@@ -335,6 +361,8 @@ pub async fn start_import<R: Runtime>(
     )
     .await
     .map_err(anyhow::Error::msg)?;
+    // Dropped before `_job`, so a cancel is refused once the import is over.
+    let _phase = PhaseGuard::open();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
@@ -1345,12 +1373,6 @@ pub async fn cancel_import_command() -> Result<(), String> {
     Ok(())
 }
 
-/// Check if import is in progress
-#[tauri::command]
-pub async fn is_import_in_progress_command() -> bool {
-    is_import_in_progress()
-}
-
 fn accept_import_segment<T>(
     result: Result<T>,
     segment: usize,
@@ -1943,5 +1965,29 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    /// A cancel from a starting recording is accepted only while the import
+    /// can still stop, and reports false once it is saving or over, so no
+    /// "being stopped" notice is sent for a job that has already succeeded.
+    #[test]
+    fn cancel_is_accepted_only_before_the_save_and_never_after_the_job_ends() {
+        set_import_phase(Phase::Finished);
+        assert!(!cancel_import_if_possible(), "no job is running");
+        {
+            let _phase = PhaseGuard::open();
+            assert!(cancel_import_if_possible(), "before the save a cancel takes effect");
+            assert!(cancel_import_if_possible(), "repeats stay accepted");
+            set_import_phase(Phase::Saving);
+            assert!(!cancel_import_if_possible(), "a save in progress cannot be cancelled");
+        }
+        // Dropping the guard (declared after the job registration) ends the
+        // window before the registration is cleared.
+        assert!(!cancel_import_if_possible(), "the finished job refuses a cancel");
     }
 }

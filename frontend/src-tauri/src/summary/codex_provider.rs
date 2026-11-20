@@ -1712,13 +1712,6 @@ pub async fn codex_find_automatically<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn codex_browse_for_binary<R: Runtime>(
-    _app: AppHandle<R>,
-) -> Result<Option<String>, String> {
-    Err("Browsing to a global codex.exe is no longer supported. Codex app-server mode uses a bundled/pinned ClawScribe runtime or a controlled ClawScribe runtime installer.".to_string())
-}
-
-#[tauri::command]
 pub fn codex_prepare_install_command() -> CodexInstallRepairPlan {
     codex_install_repair_plan()
 }
@@ -1765,50 +1758,6 @@ pub async fn codex_test_processing<R: Runtime>(
 ) -> Result<CodexCommandStatus, String> {
     let provider = provider_from_app(&app)?;
     provider.test_processing(None).await
-}
-
-#[tauri::command]
-pub async fn codex_process_meeting<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, crate::state::AppState>,
-    meeting_id: String,
-) -> Result<CodexProcessingResult, String> {
-    let pool = state.db_manager.pool();
-    let meeting =
-        crate::database::repositories::meeting::MeetingsRepository::get_meeting(pool, &meeting_id)
-            .await
-            .map_err(|e| format!("Failed to load meeting: {e}"))?
-            .ok_or_else(|| format!("Meeting not found: {meeting_id}"))?;
-    let transcript = meeting
-        .transcripts
-        .iter()
-        .map(|t| {
-            let stamp = t
-                .audio_start_time
-                .map(format_seconds)
-                .unwrap_or_else(|| t.timestamp.clone());
-            format!("[{stamp}] {}", t.text)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let data = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "Could not locate meeting output storage")?;
-    let output_dir =
-        Some(ensure_meeting_output_dir(state.db_manager.pool(), &meeting_id, &data).await?);
-    let provider = provider_from_app(&app)?;
-    provider
-        .process_meeting(CodexMeetingProcessRequest {
-            sources: Vec::new(),
-            meeting_id,
-            meeting_title: Some(meeting.title),
-            transcript,
-            custom_prompt: None,
-            output_dir,
-            scratch_root: None,
-        })
-        .await
 }
 
 pub fn provider_from_app<R: Runtime>(
@@ -3749,18 +3698,6 @@ fn sanitize_path_segment(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn format_seconds(seconds: f64) -> String {
-    let total = seconds.max(0.0).round() as u64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let secs = total % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{secs:02}")
-    } else {
-        format!("{minutes:02}:{secs:02}")
-    }
 }
 
 #[cfg(all(test, any()))]

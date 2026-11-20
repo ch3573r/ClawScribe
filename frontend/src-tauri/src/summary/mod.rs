@@ -43,7 +43,6 @@ pub struct CustomOpenAIConfig {
     pub top_p: Option<f32>,
 }
 
-pub mod chat_commands;
 mod chunking;
 pub mod claude_code_provider;
 pub mod codex_provider;
@@ -82,27 +81,21 @@ pub use commands::{
 };
 
 pub use codex_provider::{
-    __cmd__codex_browse_for_binary, __cmd__codex_check_installation,
-    __cmd__codex_find_automatically, __cmd__codex_get_config, __cmd__codex_login_browser,
-    __cmd__codex_login_device, __cmd__codex_logout, __cmd__codex_prepare_install_command,
-    __cmd__codex_process_meeting, __cmd__codex_save_config, __cmd__codex_test_processing,
-    __tauri_command_name_codex_browse_for_binary, __tauri_command_name_codex_check_installation,
-    __tauri_command_name_codex_find_automatically, __tauri_command_name_codex_get_config,
-    __tauri_command_name_codex_login_browser, __tauri_command_name_codex_login_device,
-    __tauri_command_name_codex_logout, __tauri_command_name_codex_prepare_install_command,
-    __tauri_command_name_codex_process_meeting, __tauri_command_name_codex_save_config,
-    __tauri_command_name_codex_test_processing, codex_browse_for_binary, codex_check_installation,
-    codex_find_automatically, codex_get_config, codex_login_browser, codex_login_device,
-    codex_logout, codex_prepare_install_command, codex_process_meeting, codex_save_config,
-    codex_test_processing,
+    __cmd__codex_check_installation, __cmd__codex_find_automatically, __cmd__codex_get_config,
+    __cmd__codex_login_browser, __cmd__codex_login_device, __cmd__codex_logout,
+    __cmd__codex_prepare_install_command, __cmd__codex_save_config, __cmd__codex_test_processing,
+    __tauri_command_name_codex_check_installation, __tauri_command_name_codex_find_automatically,
+    __tauri_command_name_codex_get_config, __tauri_command_name_codex_login_browser,
+    __tauri_command_name_codex_login_device, __tauri_command_name_codex_logout,
+    __tauri_command_name_codex_prepare_install_command, __tauri_command_name_codex_save_config,
+    __tauri_command_name_codex_test_processing, codex_check_installation, codex_find_automatically,
+    codex_get_config, codex_login_browser, codex_login_device, codex_logout,
+    codex_prepare_install_command, codex_save_config, codex_test_processing,
 };
 
 // Re-export template commands
 pub use template_commands::{
-    __cmd__api_get_template_details, __cmd__api_list_templates, __cmd__api_validate_template,
-    __tauri_command_name_api_get_template_details, __tauri_command_name_api_list_templates,
-    __tauri_command_name_api_validate_template, api_get_template_details, api_list_templates,
-    api_validate_template,
+    __cmd__api_list_templates, __tauri_command_name_api_list_templates, api_list_templates,
 };
 
 // Re-export commonly used items
@@ -115,4 +108,3 @@ pub use service::SummaryService;
 
 pub(crate) mod context_budget;
 
-mod chat_context;

@@ -109,6 +109,7 @@ export async function startAutomaticSummary(request: AutoSummaryRequest): Promis
     request.startSummaryPolling(meetingId, result.process_id, async update => {
       if (update.status === 'completed') {
         toast.success('Summary ready', {
+          id: `summary-ready:${meetingId}`,
           action: { label: 'View meeting', onClick: () => request.openMeeting(meetingId) },
           duration: 8000,
         });

@@ -83,7 +83,7 @@ fn save_bindings(bindings: &ShortcutBindings) {
 
 /// The handler invoked by the plugin when any registered shortcut fires.
 pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: ShortcutState) {
-    if state != ShortcutState::Pressed {
+    if state != ShortcutState::Pressed || crate::database::setup::startup_failed() {
         return;
     }
     let action = {

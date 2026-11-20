@@ -60,10 +60,6 @@ interface ConfigContextType {
   selectedLanguage: string;
   setSelectedLanguage: (lang: string) => void;
 
-  // UI preferences
-  showConfidenceIndicator: boolean;
-  toggleConfidenceIndicator: (checked: boolean) => void;
-
   // Ollama models
   models: OllamaModel[];
   modelOptions: Record<ModelConfig['provider'], string[]>;
@@ -142,15 +138,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       return saved || 'auto';
     }
     return 'auto';
-  });
-
-  // UI preferences state
-  const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('showConfidenceIndicator');
-      return saved !== null ? saved === 'true' : true;
-    }
-    return true;
   });
 
   // Summary configs
@@ -380,16 +367,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     'claude-code': ['sonnet', 'opus', 'haiku'],
   };
 
-  // Toggle confidence indicator with localStorage persistence
-  const toggleConfidenceIndicator = useCallback((checked: boolean) => {
-    setShowConfidenceIndicator(checked);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('showConfidenceIndicator', checked.toString());
-    }
-    // Trigger a custom event to notify other components
-    window.dispatchEvent(new CustomEvent('confidenceIndicatorChanged', { detail: checked }));
-  }, []);
-
   const toggleIsAutoSummary = useCallback((checked: boolean) => {
     setisAutoSummary(checked);
     if (typeof window !== 'undefined') {
@@ -487,8 +464,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setSelectedDevices,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     models,
     modelOptions,
     error,
@@ -507,8 +482,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     selectedDevices,
     selectedLanguage,
     handleSetSelectedLanguage,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     models,
     modelOptions,
     error,

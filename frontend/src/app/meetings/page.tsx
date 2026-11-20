@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 import {
+  AlertCircle,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -72,6 +73,8 @@ export default function MeetingsPage() {
   const recording = useRecordingState();
   const {
     meetings,
+    meetingsError,
+    meetingsLoading,
     setCurrentMeeting,
     handleRecordingToggle,
     refetchMeetings,
@@ -260,6 +263,12 @@ export default function MeetingsPage() {
         )}
 
         <div className="min-h-0">
+          {meetingsError && meetings.length > 0 && (
+            <div role="alert" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-error-border/30 bg-error px-4 py-3 text-sm text-error-foreground">
+              <span>Could not refresh your meetings. The list may be out of date.</span>
+              <Button variant="outline" size="sm" disabled={meetingsLoading} onClick={() => void refetchMeetings()}>{meetingsLoading ? "Retrying…" : "Retry"}</Button>
+            </div>
+          )}
           <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm">
             {visibleMeetings.length > 0 ? (
               <TooltipProvider><div className="divide-y divide-border">
@@ -285,6 +294,15 @@ export default function MeetingsPage() {
                   </Tooltip>
                 ))}
               </div></TooltipProvider>
+            ) : meetingsError && meetings.length === 0 ? (
+              <div role="alert" className="flex flex-col items-center justify-center px-6 py-16 text-center">
+                <span className="flex h-12 w-12 items-center justify-center rounded-md border border-error-border/30 bg-error text-error-foreground">
+                  <AlertCircle className="h-5 w-5" />
+                </span>
+                <h3 className="mt-4 text-base font-semibold text-foreground">Could not load your meetings</h3>
+                <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">Your meetings are not lost. Check that ClawScribe is running normally, then try again.</p>
+                <Button className="mt-6" disabled={meetingsLoading} onClick={() => void refetchMeetings()}>{meetingsLoading ? "Retrying…" : "Retry"}</Button>
+              </div>
             ) : (
               <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
                 <span className="flex h-12 w-12 items-center justify-center rounded-md border border-border bg-muted text-primary">

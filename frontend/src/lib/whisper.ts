@@ -10,6 +10,8 @@ export interface ModelInfo {
 }
 
 export type ModelAccuracy = 'High' | 'Good' | 'Decent';
+// The core's spelling (config.rs). It is data, not display text: compare it
+// case-insensitively and show it through speedLabel().
 export type ProcessingSpeed = 'Slow' | 'Medium' | 'Fast' | 'Very Fast';
 
 export type ModelStatus =
@@ -177,7 +179,7 @@ export function getModelPerformanceBadge(modelName: string): { label: string; co
   const type = getModelType(modelName);
   switch (type) {
     case 'f16':
-      return { label: 'Full Precision', color: 'blue' };
+      return { label: 'Full precision', color: 'blue' };
     case 'q5_1':
       return { label: 'Balanced+', color: 'green' };
     case 'q5_0':
@@ -190,23 +192,29 @@ export function getModelPerformanceBadge(modelName: string): { label: string; co
 }
 
 // Helper function to get concise tagline for model (similar to Parakeet style)
-export function getModelTagline(modelName: string, speed: ProcessingSpeed, accuracy: ModelAccuracy): string {
+/** A speed string from the core as shown to the user: "Very Fast" reads "Very fast". */
+export function speedLabel(speed: string): string {
+  const text = String(speed ?? '').trim().toLowerCase();
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function getModelTagline(modelName: string, speed: ProcessingSpeed | string, accuracy: ModelAccuracy | string): string {
   const isQuantized = isQuantizedModel(modelName);
   const baseName = getModelBaseName(modelName);
 
   // Speed prefix
   let speedText = '';
-  switch (speed) {
-    case 'Very Fast':
+  switch (String(speed ?? '').trim().toLowerCase()) {
+    case 'very fast':
       speedText = 'Real time';
       break;
-    case 'Fast':
+    case 'fast':
       speedText = 'Fast processing';
       break;
-    case 'Medium':
+    case 'medium':
       speedText = 'Moderate speed';
       break;
-    case 'Slow':
+    case 'slow':
       speedText = 'Slower processing';
       break;
   }
@@ -218,7 +226,7 @@ export function getModelTagline(modelName: string, speed: ProcessingSpeed, accur
   } else if (baseName === 'large-v3-turbo') {
     featureText = 'Best accuracy with speed';
   } else if (baseName === 'medium') {
-    featureText = accuracy === 'High' ? 'Professional quality' : 'Balanced quality';
+    featureText = String(accuracy).toLowerCase() === 'high' ? 'Professional quality' : 'Balanced quality';
   } else if (baseName === 'small') {
     featureText = 'Good accuracy';
   } else if (baseName === 'base') {
@@ -237,7 +245,7 @@ export function getModelTagline(modelName: string, speed: ProcessingSpeed, accur
     }
   }
 
-  return `${speedText} • ${featureText}`;
+  return [speedText, featureText].filter(Boolean).join(' • ');
 }
 
 // Group models by their base name for better UI organization

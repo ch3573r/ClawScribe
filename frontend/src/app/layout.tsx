@@ -124,8 +124,6 @@ function AppImportDialog({
   );
 }
 
-// export { metadata } from './metadata'
-
 export default function RootLayout({
   children,
 }: {

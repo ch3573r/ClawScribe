@@ -108,7 +108,7 @@ export function PermissionWarning({
                   <p className="font-medium">Please check:</p>
                   <ul className="list-disc list-inside ml-2 space-y-1">
                     <li>Your microphone is connected and powered on</li>
-                    <li>Microphone permission is granted in System Settings</li>
+                    <li>Microphone access is allowed for ClawScribe in {isMacOS ? 'System Settings' : 'Windows privacy settings'}</li>
                     <li>No other app is exclusively using the microphone</li>
                   </ul>
                 </div>

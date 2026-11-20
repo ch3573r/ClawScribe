@@ -242,14 +242,15 @@ impl RecordingSaver {
     pub fn start_accumulation(
         &mut self,
         auto_save: bool,
-        _state: Arc<super::recording_state::RecordingState>,
+        state: Arc<super::recording_state::RecordingState>,
     ) -> Result<Option<super::transcription::queue::TranscriptionQueueSender>> {
         let name = self
             .meeting_name
             .clone()
             .unwrap_or_else(|| "Meeting".into());
         self.initialize_meeting_folder(&name, auto_save)?;
-        self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL);
+        // Only a recording that writes audio can run out of space for it.
+        self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL, auto_save.then(|| state));
         if !auto_save {
             return Ok(None);
         }
@@ -264,7 +265,13 @@ impl RecordingSaver {
         Ok(Some(sender))
     }
 
-    fn start_snapshot_timer(&mut self, interval_duration: Duration) {
+    /// The snapshot tick doubles as the free-space tick: `disk_state` is given
+    /// for a recording that writes audio, and the check runs once a minute.
+    fn start_snapshot_timer(
+        &mut self,
+        interval_duration: Duration,
+        disk_state: Option<Arc<super::recording_state::RecordingState>>,
+    ) {
         let Some(folder) = self.meeting_folder.clone() else {
             return;
         };
@@ -274,8 +281,17 @@ impl RecordingSaver {
         self.snapshot_task = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
             interval.tick().await;
+            let mut disk_watch = super::disk_space::DiskWatch::new(Instant::now());
             loop {
                 interval.tick().await;
+                if let Some(state) = &disk_state {
+                    if disk_watch.due(Instant::now()) {
+                        let free = super::disk_space::free_space_bounded(&folder).await;
+                        if let Some(free) = disk_watch.evaluate(free) {
+                            state.report_disk_space_low(free, &folder);
+                        }
+                    }
+                }
                 if !dirty.load(Ordering::Acquire) {
                     continue;
                 }
@@ -999,7 +1015,7 @@ mod snapshot_tests {
         saver
             .initialize_meeting_folder("Synthetic meeting", false)
             .unwrap();
-        saver.start_snapshot_timer(Duration::from_millis(20));
+        saver.start_snapshot_timer(Duration::from_millis(20), None);
         saver.add_transcript_chunk("First synthetic sentence".into());
         saver.add_transcript_segment(TranscriptSegment {
             id: "second".into(),

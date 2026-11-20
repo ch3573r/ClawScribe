@@ -22,6 +22,9 @@ interface MeetingDetailsResponse {
   folder_path?: string;
 }
 
+// Summary states the core reports while a run is in progress.
+const RUNNING_SUMMARY = ['pending', 'processing', 'summarizing', 'regenerating'];
+
 function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
@@ -33,6 +36,9 @@ function MeetingDetailsContent() {
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
   const [meetingSummary, setMeetingSummary] = useState<Summary | null>(null);
   const [isSummaryLoading, setIsSummaryLoading] = useState(true);
+  // The core is generating a summary for this meeting right now (started by the
+  // automatic summary after a recording, or here before the user left and came back).
+  const [summaryRunning, setSummaryRunning] = useState(false);
   const autoGenRequest = useRef(0);
   const autoGenPending = useRef(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +86,7 @@ function MeetingDetailsContent() {
     const request = autoGenRequest.current;
     autoGenPending.current = true;
     try {
-      if (source !== 'recording' || !isAutoSummary) return;
+      if (source !== 'recording' || !isAutoSummary || summaryRunning) return;
       const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
       if (request !== autoGenRequest.current || recordingBlocksAutoSummary(outcome)) return;
       const config = await invoke<{ model?: string }>('api_get_model_config');
@@ -94,7 +100,7 @@ function MeetingDetailsContent() {
         setHasCheckedAutoGen(true);
       }
     }
-  }, [hasCheckedAutoGen, source, isAutoSummary, meetingId]);
+  }, [hasCheckedAutoGen, source, isAutoSummary, meetingId, summaryRunning]);
 
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {
@@ -181,6 +187,7 @@ function MeetingDetailsContent() {
     setMeetingDetails(null);
     setMeetingSummary(null);
     setIsSummaryLoading(true);
+    setSummaryRunning(false);
     setError(null);
     let active = true;
 
@@ -190,6 +197,14 @@ function MeetingDetailsContent() {
           meetingId: meetingId,
         }) as any;
         if (!active) return;
+
+        const running = RUNNING_SUMMARY.includes(String(summary.status));
+        setSummaryRunning(running);
+        // Nothing to show yet; the run's own progress is shown by the summary panel.
+        if (running && !summary.data) {
+          setMeetingSummary(null);
+          return;
+        }
 
         // Check if the summary request failed with 404 or error status, or if no summary exists yet (idle)
         // Note: 'cancelled' and 'failed' statuses can still have data if backup was restored
@@ -347,6 +362,7 @@ function MeetingDetailsContent() {
     meeting={meetingDetails}
     evidenceToken={evidenceToken}
     summaryData={meetingSummary}
+    summaryRunning={summaryRunning}
     shouldAutoGenerate={shouldAutoGenerate}
     onAutoGenerateComplete={() => setShouldAutoGenerate(false)}
     onMeetingUpdated={async () => {

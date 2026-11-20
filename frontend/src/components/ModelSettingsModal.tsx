@@ -1245,7 +1245,7 @@ export function ModelSettingsModal({
         allowUnencrypted: customAllowUnencrypted,
         ...customOpenAIInvokeConfig(),
       });
-      toast.success(result.message || 'Connection successful!');
+      toast.success(result.message || 'Connection successful');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       toast.error(errorMsg);

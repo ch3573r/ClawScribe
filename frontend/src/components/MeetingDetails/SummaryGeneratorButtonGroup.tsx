@@ -43,6 +43,11 @@ interface SummaryGeneratorButtonGroupProps {
   hasSummary?: boolean;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
+  /** Filled with the generate action, so the empty summary view can offer the same one. */
+  generateRef?: { current: (() => void) | null };
+  onCheckingChange?: (checking: boolean) => void;
+  /** The empty summary view shows the primary action; this one steps back. */
+  secondaryGenerate?: boolean;
 }
 
 export function SummaryGeneratorButtonGroup({
@@ -60,7 +65,8 @@ export function SummaryGeneratorButtonGroup({
   hasSummary = false,
   isModelConfigLoading = false,
   onOpenModelSettings,
-  languageSlot, actionsSlot, compact = true, onActionsCloseAutoFocus
+  languageSlot, actionsSlot, compact = true, onActionsCloseAutoFocus,
+  generateRef, onCheckingChange, secondaryGenerate = false
 }: SummaryGeneratorButtonGroupProps) {
   const [isCheckingModels, setIsCheckingModels] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -240,6 +246,9 @@ export function SummaryGeneratorButtonGroup({
     }
   };
 
+  if (generateRef) generateRef.current = () => { void checkOllamaModelsAndGenerate(); };
+  useEffect(() => { onCheckingChange?.(isCheckingModels); }, [isCheckingModels, onCheckingChange]);
+
   const isGenerating = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
 
   const templateItems = availableTemplates.map(template => <DropdownMenuItem key={template.id} onSelect={() => onTemplateSelect(template.id, template.name)} title={template.description} className="flex items-center justify-between gap-2">
@@ -250,7 +259,7 @@ export function SummaryGeneratorButtonGroup({
     {!compact && availableTemplates.length > 0 && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="px-2">Template</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{templateItems}</DropdownMenuContent></DropdownMenu>}
     {!compact && <Button variant="ghost" size="sm" className="px-2" onClick={() => setSettingsDialogOpen(true)}>AI model</Button>}
     {isGenerating ? <Button variant="outline" size="sm" onClick={() => { Analytics.trackButtonClick('stop_summary_generation', 'meeting_details'); onStopGeneration(); }}><Square className="h-4 w-4" />Stop</Button>
-      : <Button size="sm" className="px-2 text-xs" disabled={!hasTranscripts || isCheckingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details'); void checkOllamaModelsAndGenerate(); }}>
+      : <Button size="sm" variant={secondaryGenerate ? 'outline' : 'default'} className="px-2 text-xs" disabled={!hasTranscripts || isCheckingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details'); void checkOllamaModelsAndGenerate(); }}>
         {isCheckingModels || isModelConfigLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
         {isCheckingModels || isModelConfigLoading ? 'Checking models…' : hasSummary ? 'Regenerate summary' : 'Generate summary'}
       </Button>}

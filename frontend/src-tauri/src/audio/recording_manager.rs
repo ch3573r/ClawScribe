@@ -553,6 +553,22 @@ impl RecordingManager {
         self.state.set_warning_callback(callback);
     }
 
+    /// Set a callback for the live input levels (about ten calls a second).
+    pub fn set_levels_callback<F>(&self, callback: F)
+    where
+        F: Fn(&super::recording_levels::RecordingLevels) + Send + Sync + 'static,
+    {
+        self.state.set_levels_callback(callback);
+    }
+
+    /// Set a callback for the recordings volume running low on space.
+    pub fn set_disk_space_callback<F>(&self, callback: F)
+    where
+        F: Fn(u64, &std::path::Path) + Send + Sync + 'static,
+    {
+        self.state.set_disk_space_callback(callback);
+    }
+
     pub fn set_warning_cleared_callback<F>(&self, callback: F)
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -703,12 +719,19 @@ impl RecordingManager {
                     let system_device = self.state.get_system_device();
 
                     // Restart streams with new microphone
+                    let previous_microphone = self.state.get_microphone_device();
                     self.stream_manager.stop_streams()?;
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                    self.stream_manager
-                        .start_streams(Some(device_arc.clone()), system_device, None)
-                        .await?;
+                    if let Err(error) = self
+                        .stream_manager
+                        .start_streams(Some(device_arc.clone()), system_device.clone(), None)
+                        .await
+                    {
+                        return Err(self
+                            .recover_after_failed_reconnect(previous_microphone, system_device, error)
+                            .await);
+                    }
                     self.state.set_microphone_device(device_arc);
                     self.state.stop_reconnecting();
 
@@ -720,12 +743,19 @@ impl RecordingManager {
                     let microphone_device = self.state.get_microphone_device();
 
                     // Restart streams with new system audio
+                    let previous_system = self.state.get_system_device();
                     self.stream_manager.stop_streams()?;
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                    self.stream_manager
-                        .start_streams(microphone_device, Some(device_arc.clone()), None)
-                        .await?;
+                    if let Err(error) = self
+                        .stream_manager
+                        .start_streams(microphone_device.clone(), Some(device_arc.clone()), None)
+                        .await
+                    {
+                        return Err(self
+                            .recover_after_failed_reconnect(microphone_device, previous_system, error)
+                            .await);
+                    }
                     self.state.set_system_device(device_arc);
                     self.state.stop_reconnecting();
 
@@ -736,6 +766,39 @@ impl RecordingManager {
         } else {
             warn!("Audio device still unavailable");
             Ok(false)
+        }
+    }
+
+    /// A reconnection stopped the streams and could not start them with the new
+    /// device. Try the previous devices again so capture goes on as before. If
+    /// that fails too, the streams are stopped: say so (a warning, so the UI's
+    /// reconnect retry still applies) and mark the capture incomplete. The
+    /// returned error is the one to report to the caller.
+    async fn recover_after_failed_reconnect(
+        &mut self,
+        microphone: Option<Arc<AudioDevice>>,
+        system: Option<Arc<AudioDevice>>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let _ = self.stream_manager.stop_streams();
+        match self
+            .stream_manager
+            .start_streams(microphone, system, None)
+            .await
+        {
+            Ok(()) => {
+                warn!("Reconnection failed; the previous audio devices were restarted");
+                error
+            }
+            Err(_) => {
+                self.state.mark_capture_incomplete();
+                self.state.report_warning(
+                    "Audio capture stopped after a failed reconnection. Try reconnecting again.",
+                );
+                anyhow::anyhow!(
+                    "The audio device could not be reconnected and capture is stopped: {error}"
+                )
+            }
         }
     }
 

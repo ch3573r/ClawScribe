@@ -114,7 +114,7 @@ function transcriptView(props = {}) {
 
 test('home empty transcript retains the Welcome text without an override', () => {
   const tree = transcriptView();
-  assert.match(text(tree), /Welcome to ClawScribe!/);
+  assert.match(text(tree), /Welcome to ClawScribe/);
   assert.match(text(tree), /Start recording to see live transcription/);
 });
 

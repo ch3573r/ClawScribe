@@ -35,6 +35,6 @@ export function SummaryUpdaterButtonGroup({
     {onFind && <DropdownMenuItem disabled={!hasSummary || disabled} onSelect={onFind}><Search className="mr-2 h-4 w-4" />Find in summary</DropdownMenuItem>}
     {onReplace && <DropdownMenuItem disabled={!hasSummary || disabled} onSelect={onReplace}>Replace text</DropdownMenuItem>}
     {onRestore && <DropdownMenuItem disabled={isSaving || disabled} onSelect={onRestore}>Restore previous summary</DropdownMenuItem>}
-    <DropdownMenuItem onSelect={() => void onOpenFolder()}><FolderOpen className="mr-2 h-4 w-4" />Open meeting folder</DropdownMenuItem>
+    <DropdownMenuItem onSelect={() => void onOpenFolder()}><FolderOpen className="mr-2 h-4 w-4" />Open recording folder</DropdownMenuItem>
   </>;
 }

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { appDataDir } from '@tauri-apps/api/path';
 import { toast } from 'sonner';
@@ -8,6 +9,9 @@ import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import { captureHalted, recordingErrorMessage } from '@/lib/recording-capture';
+import { diskSpaceLowText, type DiskSpaceLowPayload } from '@/lib/disk-space';
+
+const DISK_SPACE_TOAST = 'recording-disk-space-low';
 
 /**
  * RecordingPostProcessingProvider
@@ -109,6 +113,24 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
       });
       if (halted) await stopRecording();
     }));
+
+    // The recordings volume is running low. The recording continues, so this is a
+    // warning that stays until it is dismissed or the recording ends.
+    subscribe(listen<DiskSpaceLowPayload>('recording-disk-space-low', (event) => {
+      toast.warning('Low disk space', {
+        id: DISK_SPACE_TOAST,
+        description: diskSpaceLowText(event.payload),
+        duration: Infinity,
+        action: {
+          label: 'Open recordings folder',
+          onClick: () => {
+            invoke('open_recordings_folder').catch(() => toast.error('Could not open the folder.'));
+          },
+        },
+      });
+    }));
+    // The warning is about the recording that has ended.
+    subscribe(listen('recording-stopped', () => { toast.dismiss(DISK_SPACE_TOAST); }));
 
     // A recording takes priority over a running batch job. Say which job it stopped.
     subscribe(listen<{ job: string }>('batch-job-preempted', (event) => {

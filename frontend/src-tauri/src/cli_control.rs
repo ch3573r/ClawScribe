@@ -28,6 +28,10 @@ pub fn parse_cli_action<S: AsRef<str>>(args: &[S]) -> Option<CliAction> {
 /// global start/stop shortcut uses). Start and stop carry their intent, so
 /// repeating a command is harmless and a request never does the opposite.
 pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
+    // Without the meeting database nothing may start a recording.
+    if crate::database::setup::startup_failed() {
+        return;
+    }
     let want_recording = match action {
         CliAction::ToggleRecording => None,
         CliAction::StartRecording => Some(true),

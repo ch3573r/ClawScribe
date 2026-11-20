@@ -32,27 +32,7 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/BlockNoteEditor/BasicBlockNoteTest.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/BluetoothPlaybackWarning.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/BuiltInModelManager.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/ChunkProgressDisplay.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/ComplianceNotification.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
@@ -67,27 +47,12 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/DatabaseImport/HomebrewDatabaseDetector.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/DatabaseImport/LegacyDatabaseImport.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/DeviceSelection.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
     },
     "frontend/src/components/EditableTitle.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/EmptyStateSummary.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
@@ -118,11 +83,6 @@
       "nativeControls": 0
     },
     "frontend/src/components/LanguagePickerPopover.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/LanguageSelection.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
@@ -198,11 +158,6 @@
       "nativeControls": 0
     },
     "frontend/src/components/MeetingDetails/TranscriptPanel.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/ModelDownloadProgress.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
@@ -288,11 +243,6 @@
       "nativeControls": 0
     },
     "frontend/src/components/WhisperModelManager.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/molecules/form-components/form-select-item.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0

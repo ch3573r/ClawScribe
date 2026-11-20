@@ -2137,11 +2137,6 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     }
 }
 
-#[tauri::command]
-pub fn is_speaker_diarization_in_progress_command() -> bool {
-    DIARIZATION_IN_PROGRESS.load(Ordering::SeqCst)
-}
-
 async fn run_speaker_diarization_for_meeting<R: Runtime>(
     app: AppHandle<R>,
     meeting_id: String,

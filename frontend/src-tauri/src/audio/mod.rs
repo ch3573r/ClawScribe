@@ -24,6 +24,7 @@ pub mod async_logger;
 mod audio_spool;
 mod batch_audio;
 pub mod buffer_pool;
+pub mod disk_space;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
 pub mod hardware_detector;
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
@@ -35,6 +36,7 @@ pub mod pipeline;
 pub mod playback_monitor;
 pub mod post_processor;
 pub mod recording_commands;
+pub mod recording_levels;
 pub mod recording_manager;
 pub mod recording_mode;
 pub mod recording_preferences;
@@ -42,7 +44,6 @@ pub mod recording_saver;
 pub mod recording_state;
 pub mod simple_level_monitor;
 pub mod stream;
-pub mod system_audio_commands;
 pub mod system_detector; // NEW: Playback device detection for BT warnings
 
 // Transcription module (provider abstraction, engine management, worker pool)
@@ -75,14 +76,6 @@ pub use capture::{
 // Export system audio detection functionality
 pub use system_detector::{
     new_system_audio_callback, SystemAudioCallback, SystemAudioDetector, SystemAudioEvent,
-};
-
-// Export system audio commands
-pub use system_audio_commands::{
-    check_system_audio_permissions_command, get_system_audio_capture_status,
-    get_system_audio_monitoring_status, init_system_audio_capture_state, init_system_audio_state,
-    list_system_audio_devices_command, start_system_audio_capture_command,
-    start_system_audio_monitoring, stop_system_audio_capture_command, stop_system_audio_monitoring,
 };
 
 // Export new simplified components

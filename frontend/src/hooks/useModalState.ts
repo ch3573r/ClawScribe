@@ -4,17 +4,11 @@ import { toast } from 'sonner';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 
 export type ModalType =
-  | 'modelSettings'
-  | 'deviceSettings'
-  | 'languageSettings'
   | 'modelSelector'
   | 'errorAlert'
   | 'chunkDropWarning';
 
 interface ModalState {
-  modelSettings: boolean;
-  deviceSettings: boolean;
-  languageSettings: boolean;
   modelSelector: boolean;
   errorAlert: boolean;
   chunkDropWarning: boolean;
@@ -46,9 +40,6 @@ interface UseModalStateReturn {
 export function useModalState(transcriptModelConfig?: TranscriptModelProps): UseModalStateReturn {
   // Modal visibility state
   const [modals, setModals] = useState<ModalState>({
-    modelSettings: false,
-    deviceSettings: false,
-    languageSettings: false,
     modelSelector: false,
     errorAlert: false,
     chunkDropWarning: false,
@@ -84,9 +75,6 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
   // Hide all modals
   const hideAllModals = useCallback(() => {
     setModals({
-      modelSettings: false,
-      deviceSettings: false,
-      languageSettings: false,
       modelSelector: false,
       errorAlert: false,
       chunkDropWarning: false,
@@ -175,7 +163,7 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
 
         // Auto-close modal if the downloaded model matches the selected one
         if (transcriptModelConfig?.provider === 'localWhisper' && transcriptModelConfig?.model === modelName) {
-          toast.success('Model ready! Closing window...', { duration: 1500 });
+          toast.success('Model ready, closing this window', { duration: 1500 });
           setTimeout(() => hideModal('modelSelector'), 1500);
         }
       });

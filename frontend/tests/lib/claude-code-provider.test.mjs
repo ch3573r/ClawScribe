@@ -115,9 +115,9 @@ test('Claude Code checks use the draft path, coalesce clicks and save only when 
   hooks.unmount();
 });
 
-test('summary settings and meeting details never request an API key for Claude Code', async () => {
+test('summary settings never request an API key for Claude Code', async () => {
   for (const provider of ['claude-code', 'claude']) {
-    for (const surface of ['settings', 'meeting']) {
+    for (const surface of ['settings']) {
       const hooks = createHookHarness();
       const calls = [];
       const mocks = {
@@ -136,13 +136,8 @@ test('summary settings and meeting details never request an API key for Claude C
         '@/lib/analytics': { __esModule: true, default: {} },
         sonner: { toast: { error() {}, success() {} } },
       };
-      if (surface === 'settings') {
-        const { SummaryModelSettings } = loadTsModule('src/components/SummaryModelSettings.tsx', mocks);
-        hooks.render(() => SummaryModelSettings({}));
-      } else {
-        const { useModelConfiguration } = loadTsModule('src/hooks/meeting-details/useModelConfiguration.ts', mocks);
-        hooks.render(() => useModelConfiguration({ serverAddress: null }));
-      }
+      const { SummaryModelSettings } = loadTsModule('src/components/SummaryModelSettings.tsx', mocks);
+      hooks.render(() => SummaryModelSettings({}));
       await flush();
       assert.equal(calls.includes('api_get_api_key'), provider === 'claude');
       hooks.unmount();

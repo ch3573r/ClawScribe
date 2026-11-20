@@ -22,6 +22,11 @@ import {
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
+// The stored title of a meeting with no name. The core compares it exactly (a
+// generated summary may rename only a meeting that still has this title), so
+// it is a value, not display text: do not re-case it.
+const NEW_MEETING_TITLE = 'New Meeting';
+
 // Shared by the recording page and app-wide tray handler.
 let stopInProgress = false;
 let lastSavedFolder: string | null = null;
@@ -281,7 +286,7 @@ export function useRecordingStop(
 
         try {
           const responseData = await storageService.saveMeeting(
-            savedMeetingName || meetingTitle || 'New Meeting',  // PREFER savedMeetingName (backend source)
+            savedMeetingName || meetingTitle || NEW_MEETING_TITLE,  // PREFER savedMeetingName (backend source)
             freshTranscripts,
             folderPath,
             recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')),
@@ -361,7 +366,7 @@ export function useRecordingStop(
             }
           } catch (error) {
             console.warn("Could not fetch meeting details, using ID only:");
-            setCurrentMeeting({ id: meetingId, title: savedMeetingName || meetingTitle || 'New Meeting' });
+            setCurrentMeeting({ id: meetingId, title: savedMeetingName || meetingTitle || NEW_MEETING_TITLE });
           }
 
           // Mark as completed
@@ -369,7 +374,7 @@ export function useRecordingStop(
 
           // Show success toast with navigation option
           const recoveryMessage = recordingRecoveryMessage(recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')));
-          (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with warnings' : 'Recording saved successfully!', {
+          (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with warnings' : 'Recording saved', {
             description: recoveryMessage || (audioOnly ? 'Audio saved. Open the meeting and choose Transcribe when ready.' : `${freshTranscripts.length} transcript segments saved.`),
             action: {
               label: 'View meeting',

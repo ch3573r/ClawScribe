@@ -121,6 +121,11 @@ pub struct RecordingState {
     // Non-fatal warnings surfaced to the UI (e.g. system audio is silent).
     warning_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     warning_cleared_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+    // Called once per recording when the recordings volume runs low.
+    disk_space_callback: Mutex<Option<Box<dyn Fn(u64, &std::path::Path) + Send + Sync>>>,
+    // Called about ten times a second with the live input levels.
+    levels_callback:
+        Mutex<Option<Box<dyn Fn(&super::recording_levels::RecordingLevels) + Send + Sync>>>,
 
     // Statistics
     stats: Mutex<RecordingStats>,
@@ -152,6 +157,8 @@ impl RecordingState {
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
             warning_cleared_callback: Mutex::new(None),
+            disk_space_callback: Mutex::new(None),
+            levels_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),
@@ -347,6 +354,35 @@ impl RecordingState {
         *self.warning_cleared_callback.lock().unwrap() = Some(Box::new(callback));
     }
 
+    pub fn set_disk_space_callback<F>(&self, callback: F)
+    where
+        F: Fn(u64, &std::path::Path) + Send + Sync + 'static,
+    {
+        *self.disk_space_callback.lock().unwrap() = Some(Box::new(callback));
+    }
+
+    pub fn set_levels_callback<F>(&self, callback: F)
+    where
+        F: Fn(&super::recording_levels::RecordingLevels) + Send + Sync + 'static,
+    {
+        *self.levels_callback.lock().unwrap() = Some(Box::new(callback));
+    }
+
+    pub fn report_levels(&self, levels: &super::recording_levels::RecordingLevels) {
+        if let Some(callback) = self.levels_callback.lock().unwrap().as_ref() {
+            callback(levels);
+        }
+    }
+
+    /// Tell the UI the recordings volume is running low. Does not affect
+    /// recording state.
+    pub fn report_disk_space_low(&self, free_bytes: u64, folder: &std::path::Path) {
+        log::warn!("Free disk space for the recording is low: {free_bytes} bytes");
+        if let Some(callback) = self.disk_space_callback.lock().unwrap().as_ref() {
+            callback(free_bytes, folder);
+        }
+    }
+
     /// Resolve one recoverable warning without clearing unrelated recording failures.
     pub fn clear_warning(&self, message: &str) {
         if let Some(callback) = self.warning_cleared_callback.lock().unwrap().as_ref() {
@@ -538,6 +574,8 @@ impl Default for RecordingState {
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
             warning_cleared_callback: Mutex::new(None),
+            disk_space_callback: Mutex::new(None),
+            levels_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),

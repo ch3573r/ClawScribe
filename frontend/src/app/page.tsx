@@ -110,7 +110,7 @@ export default function Home() {
       const result = await recoverMeeting(meetingId);
 
       if (result.success) {
-        toast.success('Meeting recovered successfully!', {
+        toast.success('Meeting recovered', {
           description: result.audioRecoveryStatus?.status === 'partial'
             ? 'Available audio recovered with gaps. You can transcribe it from the saved meeting.'
             : result.audioRecoveryStatus?.status === 'success'
@@ -195,7 +195,6 @@ export default function Home() {
             <TranscriptPanel
               isProcessingStop={isProcessingStop}
               isStopping={isStopping}
-              showModal={showModal}
               assistance={<LiveAssistancePanel />}
             />
 

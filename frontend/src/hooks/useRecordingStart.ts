@@ -9,6 +9,7 @@ import { showRecordingNotification } from '@/lib/recordingNotification';
 import { offerSpeakerDetectionCancellation } from '@/lib/speakerDetectionCancellation';
 import { getPendingCalendar, beginRecordingCalendar } from '@/lib/meetingCalendar';
 import { toast } from 'sonner';
+import { isDiskSpaceRefusal, startErrorText } from '@/lib/start-error';
 
 interface UseRecordingStartReturn {
   handleRecordingStart: () => Promise<void>;
@@ -24,6 +25,19 @@ function isTranscriptionReadinessError(error: unknown): boolean {
     message.includes('model') ||
     message.includes('provider')
   );
+}
+
+/**
+ * Tells the user why a start from the sidebar or the tray failed. A refusal for
+ * a nearly full disk keeps its whole message; engine problems are explained by
+ * their own dialogs; anything else gets the general hint.
+ */
+function reportStartFailure(error: unknown): void {
+  if (isDiskSpaceRefusal(error)) {
+    toast.error('Not enough disk space', { description: startErrorText(error), duration: 15000 });
+  } else if (!isTranscriptionReadinessError(error)) {
+    toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
+  }
 }
 
 /**
@@ -129,7 +143,8 @@ export function useRecordingStart(
       setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording');
       setIsRecording(false); // Reset state on error
       Analytics.trackButtonClick('start_recording_error', 'home_page');
-      if (isTranscriptionReadinessError(error)) return;
+      // The Start button shows a refused start (full disk) in its own panel.
+      if (!isDiskSpaceRefusal(error) && isTranscriptionReadinessError(error)) return;
       // Re-throw so RecordingControls can handle device-specific errors
       throw error;
     }
@@ -152,9 +167,7 @@ export function useRecordingStart(
           } catch (error) {
             console.error('Failed to auto-start recording:', error);
             setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to auto-start recording');
-            if (!isTranscriptionReadinessError(error)) {
-              toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
-            }
+            reportStartFailure(error);
             Analytics.trackButtonClick('start_recording_error', 'sidebar_auto');
           } finally {
             setIsAutoStarting(false);
@@ -188,9 +201,7 @@ export function useRecordingStart(
       } catch (error) {
         console.error('Failed to start recording from sidebar:', error);
         setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording from sidebar');
-        if (!isTranscriptionReadinessError(error)) {
-          toast.error('Could not start recording. Check your audio devices and microphone permissions, then try again.');
-        }
+        reportStartFailure(error);
         Analytics.trackButtonClick('start_recording_error', 'sidebar_direct');
       } finally {
         setIsAutoStarting(false);

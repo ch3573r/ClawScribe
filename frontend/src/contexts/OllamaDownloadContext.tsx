@@ -78,7 +78,7 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
             const { modelName } = event.payload;
             console.log(`✅ [OllamaDownloadContext] Download complete for ${modelName}`);
 
-            toast.success(`Model ${modelName} downloaded!`, {
+            toast.success(`Model ${modelName} downloaded`, {
               description: 'Model is now ready to use',
               duration: 4000
             });

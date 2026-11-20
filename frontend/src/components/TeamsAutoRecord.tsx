@@ -6,6 +6,7 @@ import { RecordingStatus, useRecordingState } from "@/contexts/RecordingStateCon
 import { useStartRecordingSession } from "@/hooks/useRecordingStart";
 import { getCallDetectionStatus } from "@/services/teamsDetectionService";
 import { recordingService } from "@/services/recordingService";
+import { isDiskSpaceRefusal, startErrorText } from "@/lib/start-error";
 import { CALL_PROVIDERS, CALL_SETTINGS_CHANGED, getCallSettings, ObservedCalls, type CallWindow } from "@/lib/autoRecord";
 
 const POLL_INTERVAL_MS = 12_000;
@@ -62,8 +63,13 @@ export function TeamsAutoRecord() {
         if (disposed) return;
         if (sessionId && version === revision && getCallSettings().autoStop) owner = { call, sessionId };
         toast.success(`Recording started for ${CALL_PROVIDERS[call.provider]}`);
-      } catch {
+      } catch (error) {
         if (disposed) return;
+        if (isDiskSpaceRefusal(error)) {
+          // A retry cannot help until space is freed, so no Retry action.
+          toast.error("Not enough disk space", { description: startErrorText(error), duration: 15000 });
+          return;
+        }
         if (attempted) {
           const snapshot = await recordingService.getRecordingState().catch(() => null);
           const { state } = current.current;

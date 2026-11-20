@@ -2397,7 +2397,7 @@ mod tests {
     #[tokio::test]
     async fn saved_recovery_releases_registered_spool_and_clears_backup_exclusion() {
         use crate::audio::incremental_saver::{
-            recover_audio_from_checkpoints, release_registered_capture,
+            recover_audio_in_folder, release_registered_capture,
         };
         use crate::audio::recording_state::{AudioChunk, DeviceType};
         for gap_marker in [false, true] {
@@ -2421,7 +2421,7 @@ mod tests {
                 std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap();
             }
             let folder = root.path().to_string_lossy().into_owned();
-            let recovered = recover_audio_from_checkpoints(folder.clone())
+            let recovered = recover_audio_in_folder(folder.clone())
                 .await
                 .unwrap();
             assert!(recovered

@@ -94,6 +94,14 @@ impl ExitGate {
             self.state = GateState::Released;
         }
     }
+
+    /// The exit the gate asked for was held back by something else (the
+    /// unsaved-edits prompt) and did not happen, so the release is spent.
+    fn exit_not_taken(&mut self) {
+        if self.state == GateState::Released {
+            self.state = GateState::Idle;
+        }
+    }
 }
 
 static GATE: Mutex<ExitGate> = Mutex::new(ExitGate::new());
@@ -185,6 +193,14 @@ pub(crate) async fn bounded_stop(
         Ok(Err(error)) => StopOutcome::Failed(error),
         Err(_) => StopOutcome::TimedOut,
     }
+}
+
+/// Call when another handler deferred an exit request before the gate saw it.
+/// If that request was the gate's own follow-up exit (the user chose to keep
+/// the app open), the release is withdrawn so the next exit stops a recording
+/// again.
+pub fn exit_deferred_elsewhere() {
+    gate().exit_not_taken();
 }
 
 /// Call from `RunEvent::ExitRequested`. Returns true when the exit was
@@ -335,6 +351,27 @@ mod tests {
             ExitDecision::Allow
         );
         assert_eq!(gate.state, GateState::Finalizing);
+    }
+
+    #[test]
+    fn a_follow_up_exit_that_does_not_happen_withdraws_the_release() {
+        let mut gate = ExitGate::new();
+        assert_eq!(gate.request(Some(0), true), ExitDecision::StopRecordingFirst);
+        gate.finish();
+        // The unsaved-edits prompt held the exit back and the user kept the
+        // app open; a new recording must be stopped again on the next Quit.
+        gate.exit_not_taken();
+        assert_eq!(gate.state, GateState::Idle);
+        assert_eq!(gate.request(Some(0), true), ExitDecision::StopRecordingFirst);
+    }
+
+    #[test]
+    fn withdrawing_never_disturbs_a_stop_in_progress() {
+        let mut gate = ExitGate::new();
+        gate.request(Some(0), true);
+        gate.exit_not_taken();
+        assert_eq!(gate.state, GateState::Finalizing);
+        assert_eq!(gate.request(Some(0), true), ExitDecision::Defer);
     }
 
     #[test]

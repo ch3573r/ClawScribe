@@ -194,7 +194,7 @@ export function PreferenceSettings() {
               onClick={() => void handleOpenFolder(row.kind)}
             >
               {openingFolder === row.kind ? <Loader2 aria-hidden="true" className="animate-spin" /> : <FolderOpen aria-hidden="true" />}
-              Open folder
+              {row.kind === "recordings" ? "Open recordings folder" : "Open folder"}
             </Button>
           </SettingsRow>
         ))}

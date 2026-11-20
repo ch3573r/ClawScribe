@@ -308,15 +308,16 @@ pub async fn run_transcription_pc_test(
     let cancel = tokio_util::sync::CancellationToken::new();
     // Once the measurement has finished only the model restore is left, which
     // a cancel cannot shorten, so a late cancel reports that it has no effect.
-    let measured = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let window = Arc::new(CancelWindow::new());
     let cancel_job: super::inference::CancelBatchJob = {
-        let (cancel, measured) = (cancel.clone(), measured.clone());
+        let (cancel, window) = (cancel.clone(), window.clone());
         Arc::new(move || {
-            if measured.load(Ordering::SeqCst) {
-                return false;
+            if window.cancel() {
+                cancel.cancel();
+                true
+            } else {
+                false
             }
-            cancel.cancel();
-            true
         })
     };
     let job = super::inference::claim_batch_job_without_preemption(
@@ -329,9 +330,50 @@ pub async fn run_transcription_pc_test(
             .map_err(|_| MODEL_UNAVAILABLE)?;
     }
     // Closing a settings view cannot strand the tested model in the shared slot.
-    tokio::spawn(run_test(job, cancel, measured, provider, model))
+    tokio::spawn(run_test(job, cancel, window, provider, model))
         .await
         .map_err(|_| "The PC test could not finish.".to_string())?
+}
+
+/// Decides, exactly once, whether a cancel or the end of the measurement came
+/// first. A cancel that was reported as accepted is always honoured.
+struct CancelWindow(std::sync::atomic::AtomicU8);
+
+impl CancelWindow {
+    const OPEN: u8 = 0;
+    const CANCELLED: u8 = 1;
+    const CLOSED: u8 = 2;
+
+    fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(Self::OPEN))
+    }
+
+    /// True while the cancel can still take effect (and on repeats of an
+    /// accepted cancel); false once the measurement is over.
+    fn cancel(&self) -> bool {
+        match self.0.compare_exchange(
+            Self::OPEN,
+            Self::CANCELLED,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == Self::CANCELLED,
+        }
+    }
+
+    /// Ends the window when the measurement finishes. Returns true if a cancel
+    /// had been accepted before that.
+    fn close(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::OPEN,
+                Self::CLOSED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err_and(|state| state == Self::CANCELLED)
+    }
 }
 
 const PC_TEST_STOPPED: &str = "The PC test was stopped because a recording started.";
@@ -344,7 +386,7 @@ enum Interrupted {
 async fn run_test(
     job: super::inference::BatchPermit,
     cancel: tokio_util::sync::CancellationToken,
-    measured_flag: Arc<std::sync::atomic::AtomicBool>,
+    window: Arc<CancelWindow>,
     provider: String,
     model: String,
 ) -> Result<PcTestResult, String> {
@@ -365,7 +407,13 @@ async fn run_test(
             measure(&engine, actual_model).await
         }) => result.map_err(|_| Interrupted::TimedOut),
     };
-    measured_flag.store(true, Ordering::SeqCst);
+    // Decide once: a cancel reported as accepted before this point wins, even
+    // if the measurement happened to finish in the same instant.
+    let result = if window.close() {
+        Err(Interrupted::Cancelled)
+    } else {
+        result
+    };
     // A cancelled or timed-out in-process call can still own its native model
     // lock. Cleanup retains both gates until FFI is finished and the previous
     // model is restored, even if the UI has returned.
@@ -479,6 +527,35 @@ mod tests {
             assert!((14 * SAMPLE_RATE..16 * SAMPLE_RATE).contains(&audio.len()));
             assert!(audio.iter().all(|sample| (-1.0..=1.0).contains(sample)));
             assert!(audio.iter().filter(|sample| sample.abs() > 0.01).count() > SAMPLE_RATE);
+        }
+    }
+
+    #[test]
+    fn a_cancel_before_the_measurement_ends_is_accepted_and_wins() {
+        let window = CancelWindow::new();
+        assert!(window.cancel());
+        assert!(window.cancel(), "repeats of an accepted cancel stay accepted");
+        assert!(window.close(), "the measurement result is discarded");
+    }
+
+    #[test]
+    fn a_cancel_after_the_measurement_ended_is_refused() {
+        let window = CancelWindow::new();
+        assert!(!window.close());
+        assert!(!window.cancel());
+        assert!(!window.cancel());
+    }
+
+    #[test]
+    fn exactly_one_of_cancel_and_close_wins_when_they_race() {
+        for _ in 0..200 {
+            let window = Arc::new(CancelWindow::new());
+            let racer = window.clone();
+            let cancel = std::thread::spawn(move || racer.cancel());
+            let closed_after_cancel = window.close();
+            let cancel_accepted = cancel.join().unwrap();
+            // Never "accepted" while the result is also kept.
+            assert_eq!(cancel_accepted, closed_after_cancel);
         }
     }
 

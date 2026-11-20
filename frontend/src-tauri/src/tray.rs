@@ -49,7 +49,11 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "check_updates" => check_updates_handler(app),
         // `exit` raises `RunEvent::ExitRequested`; `exit_guard` stops and saves
         // an active recording before this exit goes through.
-        "quit" => app.exit(0),
+        "quit" => app.exit(if crate::database::setup::startup_failed() {
+            1
+        } else {
+            0
+        }),
         _ => {}
     }
 }
@@ -446,6 +450,10 @@ fn build_menu<R: Runtime>(
 }
 
 pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
+    // After a database failure the window stays hidden behind the error dialog.
+    if crate::database::setup::startup_failed() {
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
         if let Err(e) = window.unminimize() {
             log::error!("Failed to unminimize main window: {}", e);

@@ -267,7 +267,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             <Button variant="outline" size="sm" onClick={handleChooseFolder} disabled={saving}>Choose folder</Button>
             <Button variant="outline" size="sm" onClick={handleOpenFolder}>
               <FolderOpen aria-hidden="true" />
-              Open folder
+              Open recordings folder
             </Button>
           </SettingsRow>
         )}

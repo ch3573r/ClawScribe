@@ -932,6 +932,8 @@ pub struct AudioPipeline {
     recording_buffer: Vec<f32>,
     recording_buffer_timestamp: f64,
     queue_write_failures: QueueWriteFailureTracker,
+    // Live input levels for the UI meters, folded from the chunks seen here.
+    levels: super::recording_levels::LevelMeter,
 }
 
 impl AudioPipeline {
@@ -1031,6 +1033,7 @@ impl AudioPipeline {
             recording_buffer_timestamp: 0.0,
             recording_sender_for_mixed: None, // Will be set by manager
             queue_write_failures: QueueWriteFailureTracker::default(),
+            levels: super::recording_levels::LevelMeter::new(std::time::Instant::now()),
         }
     }
 
@@ -1131,6 +1134,25 @@ impl AudioPipeline {
                         && self.state.is_recording()
                     {
                         self.state.clear_warning(SYSTEM_AUDIO_SILENCE_WARNING);
+                    }
+
+                    // Live meters: one snapshot per ~100 ms, none while paused
+                    // or stopping. This is the pipeline task, not the capture
+                    // callback, and the meter does not allocate.
+                    let state = &self.state;
+                    if let Some(levels) = self.levels.observe(
+                        &chunk.device_type,
+                        &chunk.data,
+                        std::time::Instant::now(),
+                        state.is_recording() && !state.is_paused(),
+                        || {
+                            (
+                                state.get_microphone_device().is_some(),
+                                state.get_system_device().is_some(),
+                            )
+                        },
+                    ) {
+                        state.report_levels(&levels);
                     }
 
                     // STEP 1: Add raw audio to ring buffer for mixing

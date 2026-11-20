@@ -601,6 +601,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             }
         };
 
+    // Refuse before opening any device when a minimum meeting cannot fit.
+    if mode.saves_audio(auto_save) {
+        super::disk_space::ensure_space_to_record(&save_folder).await?;
+    }
+
     // ============================================================================
     // MICROPHONE DEVICE RESOLUTION: Preference → Default → Error
     // ============================================================================
@@ -732,6 +737,19 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     let app_for_warning_cleared = app.clone();
     manager.set_warning_cleared_callback(move |message| {
         let _ = app_for_warning_cleared.emit("recording-warning-cleared", message);
+    });
+    // Live input levels for the meters, about ten a second.
+    let app_for_levels = app.clone();
+    manager.set_levels_callback(move |levels| {
+        let _ = app_for_levels.emit("recording-levels", levels);
+    });
+    // One warning per recording when free space for the audio runs low.
+    let app_for_disk_space = app.clone();
+    manager.set_disk_space_callback(move |free_bytes, folder| {
+        let _ = app_for_disk_space.emit(
+            "recording-disk-space-low",
+            serde_json::json!({ "freeBytes": free_bytes, "folder": folder.to_string_lossy() }),
+        );
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
@@ -936,6 +954,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             }
         };
 
+    // Refuse before opening any stream when a minimum meeting cannot fit.
+    if mode.saves_audio(auto_save) {
+        super::disk_space::ensure_space_to_record(&save_folder).await?;
+    }
+
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
         let now = chrono::Local::now();
@@ -970,6 +993,19 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let app_for_warning_cleared = app.clone();
     manager.set_warning_cleared_callback(move |message| {
         let _ = app_for_warning_cleared.emit("recording-warning-cleared", message);
+    });
+    // Live input levels for the meters, about ten a second.
+    let app_for_levels = app.clone();
+    manager.set_levels_callback(move |levels| {
+        let _ = app_for_levels.emit("recording-levels", levels);
+    });
+    // One warning per recording when free space for the audio runs low.
+    let app_for_disk_space = app.clone();
+    manager.set_disk_space_callback(move |free_bytes, folder| {
+        let _ = app_for_disk_space.emit(
+            "recording-disk-space-low",
+            serde_json::json!({ "freeBytes": free_bytes, "folder": folder.to_string_lossy() }),
+        );
     });
 
     // Start recording with specified devices and auto_save setting
@@ -1120,6 +1156,19 @@ async fn stop_recording_session<R: Runtime>(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
     );
 
+    // A reconnection in flight owns the recording manager, so every check
+    // below would see none. Wait for it first, but not forever: a driver that
+    // never returns must not make Stop hang. Then nothing has changed: the
+    // recording is still running (and everything captured is already on disk),
+    // and the next Stop, or a Quit, finishes it once the device call returns.
+    let reconnecting = match wait_for_reconnect(STOP_RECONNECT_WAIT).await {
+        Ok(guard) => guard,
+        Err(()) => {
+            warn!("Stop is waiting on an audio device call that has not returned");
+            return Err("The audio device is not responding, so the recording cannot be stopped yet. Everything recorded so far is saved on disk. Try Stop again in a moment.".to_string());
+        }
+    };
+
     // Check if recording is active
     if !IS_RECORDING.load(Ordering::SeqCst) {
         info!("Recording was not active");
@@ -1162,6 +1211,8 @@ async fn stop_recording_session<R: Runtime>(
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
         global_manager.take()
     };
+    // The manager is ours now; a reconnection can no longer take it.
+    drop(reconnecting);
 
     let stop_result = if let Some(mut manager) = manager_for_cleanup {
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
@@ -1637,6 +1688,11 @@ pub async fn pause_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String
         return Err("No recording is currently active".to_string());
     }
 
+    // A reconnection in flight owns the manager; wait for it briefly.
+    let _reconnecting = wait_for_reconnect(PAUSE_RECONNECT_WAIT)
+        .await
+        .map_err(|()| AUDIO_DEVICE_NOT_RESPONDING.to_string())?;
+
     // Access the recording manager and pause it
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
     if let Some(manager) = manager_guard.as_ref() {
@@ -1671,6 +1727,11 @@ pub async fn resume_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
         return Err("No recording is currently active".to_string());
     }
 
+    // A reconnection in flight owns the manager; wait for it briefly.
+    let _reconnecting = wait_for_reconnect(PAUSE_RECONNECT_WAIT)
+        .await
+        .map_err(|()| AUDIO_DEVICE_NOT_RESPONDING.to_string())?;
+
     // Access the recording manager and resume it
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
     if let Some(manager) = manager_guard.as_ref() {
@@ -1696,7 +1757,6 @@ pub async fn resume_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
 }
 
 /// Check if recording is currently paused
-#[tauri::command]
 pub async fn is_recording_paused() -> bool {
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
     if let Some(manager) = manager_guard.as_ref() {
@@ -1895,15 +1955,6 @@ pub async fn get_reconnection_status() -> Result<ReconnectionStatus, String> {
     }
 }
 
-/// Get information about the active audio output device
-/// Used to warn users about Bluetooth playback issues
-#[tauri::command]
-pub async fn get_active_audio_output() -> Result<super::playback_monitor::AudioOutputInfo, String> {
-    super::playback_monitor::get_active_audio_output()
-        .await
-        .map_err(|e| format!("Failed to get audio output info: {}", e))
-}
-
 /// Manually trigger device reconnection attempt
 /// Useful for UI "Retry" button
 #[tauri::command]
@@ -1918,43 +1969,95 @@ pub async fn attempt_device_reconnect(
         _ => return Err(format!("Invalid device type: {}", device_type)),
     };
 
-    // Check if recording is active
-    {
-        let manager_guard = RECORDING_MANAGER.lock().unwrap();
-        if manager_guard.is_none() {
-            return Err("Recording not active".to_string());
-        }
-    } // Release lock
-
     super::com_anchor::ensure_device_enumerator();
-    // Spawn blocking task to handle the async reconnection
-    let result = tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(async {
-            let mut manager_guard = RECORDING_MANAGER.lock().unwrap();
-            if let Some(manager) = manager_guard.as_mut() {
-                manager
-                    .attempt_device_reconnect(&device_name, monitor_type)
-                    .await
-            } else {
-                Err(anyhow::anyhow!("Recording not active"))
-            }
-        })
+    let handle = tokio::runtime::Handle::current();
+    let outcome = with_recording_manager_out(RECONNECT_TIMEOUT, move |manager| {
+        // No timeout inside: cancelling between `stop_streams` and
+        // `start_streams` would leave the streams stopped. The work runs to
+        // its end; only the caller stops waiting for it.
+        handle.block_on(manager.attempt_device_reconnect(&device_name, monitor_type))
     })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?;
+    .await?;
+    let result = outcome.map_err(|e| e.to_string())?;
 
     match result {
-        Ok(success) => {
-            if success {
-                info!("✅ Manual reconnection successful");
-            } else {
-                warn!("❌ Manual reconnection failed - device not available");
-            }
-            Ok(success)
-        }
-        Err(e) => {
-            error!("Manual reconnection error");
-            Err(e.to_string())
+        true => info!("✅ Manual reconnection successful"),
+        false => warn!("❌ Manual reconnection failed - device not available"),
+    }
+    Ok(result)
+}
+
+/// Serialises device reconnection with itself, Stop, and Pause/Resume. It is
+/// held for as long as a reconnection owns the recording manager, which is
+/// until the (possibly blocked) device call has actually returned.
+static RECONNECT_OWNER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// How long a reconnection command waits for its result. Listing devices and
+/// reopening a stream take well under a second on a healthy driver. This
+/// bounds only the wait: a cpal/WASAPI call that hangs inside the driver
+/// cannot be interrupted, so it keeps the manager (and `RECONNECT_OWNER`) until
+/// it returns, and then puts the manager back by itself.
+const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long Stop waits for a reconnection that owns the manager: the
+/// reconnection wait plus a margin. Past it Stop fails with an error instead
+/// of waiting forever; see `stop_recording_session`.
+const STOP_RECONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long Pause and Resume wait for a reconnection before reporting that the
+/// device is not responding.
+const PAUSE_RECONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+const AUDIO_DEVICE_NOT_RESPONDING: &str =
+    "The audio device is not responding. Try again in a moment.";
+
+/// Waits (bounded) until no reconnection owns the recording manager and holds
+/// that ownership for the caller.
+async fn wait_for_reconnect(
+    limit: std::time::Duration,
+) -> Result<tokio::sync::MutexGuard<'static, ()>, ()> {
+    tokio::time::timeout(limit, RECONNECT_OWNER.lock())
+        .await
+        .map_err(|_| ())
+}
+
+/// Runs `work` on a blocking thread with the active recording manager taken out
+/// of the global lock, and always puts the manager back: after success, after
+/// an error value, after a panic, and after a call that outlives `limit`.
+///
+/// While the manager is out, the other recording commands see "no manager" (as
+/// during Stop) and transcript updates are buffered, then replayed by
+/// `store_recording_manager`. Stop, Pause and Resume wait on `RECONNECT_OWNER`.
+/// If `work` has not finished after `limit`, this returns an error and leaves
+/// it running; the thread keeps `RECONNECT_OWNER`, and releases it only after
+/// the manager is back.
+async fn with_recording_manager_out<T: Send + 'static>(
+    limit: std::time::Duration,
+    work: impl FnOnce(&mut RecordingManager) -> T + Send + 'static,
+) -> Result<T, String> {
+    let Ok(owner) = RECONNECT_OWNER.try_lock() else {
+        return Err("A device reconnection is already in progress.".to_string());
+    };
+    if is_stopping() {
+        return Err("The recording is stopping.".to_string());
+    }
+    let taken = RECORDING_MANAGER.lock().unwrap().take();
+    let Some(mut manager) = taken else {
+        return Err("Recording not active".to_string());
+    };
+    let task = tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut manager)));
+        store_recording_manager(manager);
+        drop(owner);
+        result
+    });
+    match tokio::time::timeout(limit, task).await {
+        Ok(Ok(Ok(value))) => Ok(value),
+        Ok(Ok(Err(_panic))) => Err("The device reconnection failed unexpectedly.".to_string()),
+        Ok(Err(error)) => Err(format!("Task join error: {error}")),
+        Err(_) => {
+            warn!("A device reconnection is taking longer than {limit:?}; it keeps running");
+            Err(AUDIO_DEVICE_NOT_RESPONDING.to_string())
         }
     }
 }
@@ -2010,12 +2113,6 @@ pub async fn set_source_attribution_enabled(enabled: bool) -> Result<(), String>
     Ok(())
 }
 
-/// Read the current source-attribution toggle state.
-#[tauri::command]
-pub async fn get_source_attribution_enabled() -> Result<bool, String> {
-    Ok(crate::audio::transcription::worker::SOURCE_ATTRIBUTION_ENABLED.load(Ordering::Relaxed))
-}
-
 static CLOUD_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Beta (opt-in, default off): allow hosted whole-file transcription providers
@@ -2025,12 +2122,6 @@ pub async fn set_cloud_transcription_enabled(enabled: bool) -> Result<(), String
     CLOUD_TRANSCRIPTION_ENABLED.store(enabled, Ordering::Relaxed);
     info!("Cloud transcription set to {enabled}");
     Ok(())
-}
-
-/// Read the current cloud-transcription toggle state.
-#[tauri::command]
-pub async fn get_cloud_transcription_enabled() -> Result<bool, String> {
-    Ok(CLOUD_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed))
 }
 
 pub(crate) fn cloud_transcription_enabled() -> bool {
@@ -2070,5 +2161,155 @@ mod start_halt_tests {
         // The last error is recoverable, but capture has stopped itself.
         assert!(!state.has_fatal_error());
         assert!(capture_halted_during_start(&state));
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Restores the process-wide recording manager after a test.
+    struct Restore(Option<RecordingManager>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            *RECORDING_MANAGER.lock().unwrap() = self.0.take();
+        }
+    }
+
+    fn install_manager() -> Restore {
+        let restore = Restore(RECORDING_MANAGER.lock().unwrap().take());
+        *RECORDING_MANAGER.lock().unwrap() = Some(RecordingManager::new());
+        restore
+    }
+
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("condition was not reached");
+    }
+
+    #[tokio::test]
+    async fn the_manager_is_out_of_the_lock_during_the_work_and_restored_after() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _restore = install_manager();
+        let value = with_recording_manager_out(Duration::from_secs(5), |_manager| {
+            // No std guard is held while the work runs: the lock is free and
+            // other commands see no manager, exactly as during Stop.
+            let free = RECORDING_MANAGER.try_lock();
+            assert!(matches!(free, Ok(ref guard) if guard.is_none()));
+            7
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, 7);
+        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        assert!(RECONNECT_OWNER.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_second_reconnection_is_refused_while_one_runs() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _restore = install_manager();
+        let (release, wait) = mpsc::channel::<()>();
+        let first = tokio::spawn(with_recording_manager_out(Duration::from_secs(5), move |_| {
+            wait.recv().unwrap();
+        }));
+        until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
+        let second = with_recording_manager_out(Duration::from_secs(5), |_| ()).await;
+        assert_eq!(
+            second.unwrap_err(),
+            "A device reconnection is already in progress."
+        );
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn without_an_active_recording_nothing_runs() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _restore = Restore(RECORDING_MANAGER.lock().unwrap().take());
+        let result = with_recording_manager_out(Duration::from_secs(5), |_| {
+            panic!("work must not run without a manager")
+        })
+        .await;
+        assert_eq!(result.unwrap_err(), "Recording not active");
+    }
+
+    #[tokio::test]
+    async fn a_failing_or_panicking_reconnection_still_returns_the_manager() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _restore = install_manager();
+        // An error value from the work.
+        let failed: Result<Result<bool, String>, String> =
+            with_recording_manager_out(Duration::from_secs(5), |_| {
+                Err("device unavailable".to_string())
+            })
+            .await;
+        assert_eq!(failed.unwrap().unwrap_err(), "device unavailable");
+        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        // A panic in the work.
+        let panicked = with_recording_manager_out(Duration::from_secs(5), |_| {
+            panic!("driver crashed");
+        })
+        .await;
+        assert_eq!(
+            panicked.unwrap_err(),
+            "The device reconnection failed unexpectedly."
+        );
+        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        assert!(RECONNECT_OWNER.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_device_call_that_outlives_the_wait_keeps_the_manager_and_returns_it_later() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _restore = install_manager();
+        let (release, wait) = mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let result = with_recording_manager_out(Duration::from_millis(50), move |_| {
+            wait.recv().unwrap();
+        })
+        .await;
+        assert_eq!(result.unwrap_err(), AUDIO_DEVICE_NOT_RESPONDING);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // The hung call still owns the manager and the reconnect slot.
+        assert!(RECORDING_MANAGER.lock().unwrap().is_none());
+        assert!(RECONNECT_OWNER.try_lock().is_err());
+        // Stop, Pause and Resume do not wait forever on it.
+        assert!(wait_for_reconnect(Duration::from_millis(30)).await.is_err());
+        // When the call finally returns, the manager is back and the slot free.
+        release.send(()).unwrap();
+        until(|| RECORDING_MANAGER.lock().unwrap().is_some()).await;
+        until(|| RECONNECT_OWNER.try_lock().is_ok()).await;
+        assert!(wait_for_reconnect(Duration::from_millis(30)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stop_style_waiters_proceed_as_soon_as_the_reconnection_ends() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let _restore = install_manager();
+        let (release, wait) = mpsc::channel::<()>();
+        let reconnect = tokio::spawn(with_recording_manager_out(Duration::from_secs(5), move |_| {
+            wait.recv().unwrap();
+        }));
+        until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
+        let waiter = tokio::spawn(async {
+            let _guard = wait_for_reconnect(Duration::from_secs(5)).await.unwrap();
+            // Holding the slot, the manager is back: this is where the Stop
+            // path checks the detected-call owner and takes the manager.
+            RECORDING_MANAGER.lock().unwrap().is_some()
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!waiter.is_finished(), "the waiter is held back");
+        release.send(()).unwrap();
+        reconnect.await.unwrap().unwrap();
+        assert!(waiter.await.unwrap(), "the manager was restored before the waiter ran");
     }
 }

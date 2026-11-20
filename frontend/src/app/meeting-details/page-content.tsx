@@ -30,6 +30,7 @@ export default function PageContent({
   meeting,
   evidenceToken,
   summaryData,
+  summaryRunning = false,
   shouldAutoGenerate = false,
   onAutoGenerateComplete,
   onMeetingUpdated,
@@ -49,6 +50,7 @@ export default function PageContent({
   meeting: any;
   evidenceToken?: string | null;
   summaryData: Summary | null;
+  summaryRunning?: boolean;
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
@@ -193,6 +195,13 @@ export default function PageContent({
     setAiSummary: meetingData.setAiSummary,
     onOpenModelSettings: handleOpenModelSettings,
   });
+
+  // A summary is already running for this meeting: show it as generating and
+  // take its result, instead of offering Generate.
+  useEffect(() => {
+    if (summaryRunning) summaryGeneration.attachToRunningSummary(Boolean(summaryData));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summaryRunning, meeting.id]);
 
   const copyOperations = useCopyOperations({
     meeting,

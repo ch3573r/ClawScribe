@@ -317,7 +317,7 @@ export function ImportAudioDialog({
             ) : (
               <>
                 <Upload className="h-5 w-5 text-primary" />
-                Import audio file
+                Import audio or video
               </>
             )}
           </DialogTitle>
@@ -330,7 +330,7 @@ export function ImportAudioDialog({
               ? 'An error occurred during import'
               : status === 'complete'
               ? 'Your meeting is ready. Transcription benchmark below.'
-              : 'Import an audio file to create a new meeting with transcripts'}
+              : 'Create a new meeting from an audio or video file'}
           </DialogDescription>
         </DialogHeader>
 

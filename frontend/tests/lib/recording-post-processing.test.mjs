@@ -11,6 +11,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
   const toasts = [];
   const calls = [];
   const subscriptions = [];
+  const dismissed = [];
   globalThis.window = {
     addEventListener: (name, callback) => windowListeners.set(name, callback),
     removeEventListener: name => windowListeners.delete(name),
@@ -26,6 +27,8 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     sonner: { toast: {
       error: (title, options) => toasts.push({ title, ...options }),
       info: (title, options) => toasts.push({ kind: 'info', title, ...options }),
+      warning: (title, options) => toasts.push({ kind: 'warning', title, ...options }),
+      dismiss: id => dismissed.push(id),
     } },
     '@/hooks/useRecordingStop': { useRecordingStop: () => {
       // A new function every render, as the real hook gives while meetings change.
@@ -45,7 +48,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
   t.after(() => { hooks.unmount(); globalThis.window = previousWindow; });
   const render = () => hooks.render(() => RecordingPostProcessingProvider({ children: null }));
   render();
-  return { render, events, windowListeners, toasts, calls, subscriptions };
+  return { render, events, windowListeners, toasts, calls, subscriptions, dismissed };
 }
 
 test('Stop from the sidebar saves the recording without needing the Home page', async t => {
@@ -80,7 +83,7 @@ test('listeners subscribe once, however often the stop handler changes', async t
   await flush();
   for (let index = 0; index < 5; index++) app.render();
   await flush();
-  assert.deepEqual([...app.subscriptions].sort(), ['batch-job-preempted', 'recording-error', 'recording-stop-complete']);
+  assert.deepEqual([...app.subscriptions].sort(), ['batch-job-preempted', 'recording-disk-space-low', 'recording-error', 'recording-stop-complete', 'recording-stopped']);
   app.events.get('recording-stop-complete')({ payload: true });
   await flush();
   const versions = app.calls.filter(([name]) => name === 'version');
@@ -138,4 +141,45 @@ test('the listener runs the stop handler and leaves the exit confirmation to it'
   await flush();
   assert.ok(app.calls.some(([name, value]) => name === 'handleRecordingStop' && value === true));
   assert.ok(!app.calls.some(([name]) => name === 'invoke'), 'the provider does not confirm itself');
+});
+
+test('low disk space shows a lasting warning with the free space, no path, and one action', async t => {
+  const app = setup(t);
+  await flush();
+  app.events.get('recording-disk-space-low')({ payload: { freeBytes: 612_345_678, folder: 'D:\\Private\\Recordings' } });
+  assert.equal(app.toasts.length, 1);
+  const toast = app.toasts[0];
+  assert.equal(toast.kind, 'warning');
+  assert.equal(toast.title, 'Low disk space');
+  assert.equal(toast.id, 'recording-disk-space-low');
+  assert.equal(toast.duration, Infinity);
+  assert.equal(toast.description, '612 MB is free where recordings are saved. The recording continues, but it may be cut short if the disk fills up.');
+  assert.doesNotMatch(JSON.stringify(toast.description), /Private|Recordings|\\/, 'the folder path is not shown');
+  assert.equal(toast.action.label, 'Open recordings folder');
+});
+
+test('the warning action opens the recordings folder with the existing command', async t => {
+  const app = setup(t);
+  await flush();
+  app.events.get('recording-disk-space-low')({ payload: { freeBytes: 1_234_567_890, folder: 'x' } });
+  app.toasts[0].action.onClick();
+  await flush();
+  assert.ok(app.calls.some(([name, value]) => name === 'invoke' && value === 'open_recordings_folder'));
+  assert.match(app.toasts[0].description, /^1\.2 GB is free/);
+});
+
+test('a folder that cannot be opened is reported', async t => {
+  const app = setup(t, { exitSaveFailure: true });
+  await flush();
+  app.events.get('recording-disk-space-low')({ payload: { freeBytes: 500_000_000, folder: 'x' } });
+  app.toasts[0].action.onClick();
+  await flush();
+  assert.equal(app.toasts.at(-1).title, 'Could not open the folder.');
+});
+
+test('the low disk space warning goes away when the recording ends', async t => {
+  const app = setup(t);
+  await flush();
+  app.events.get('recording-stopped')({ payload: {} });
+  assert.deepEqual(app.dismissed, ['recording-disk-space-low']);
 });

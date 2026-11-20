@@ -356,7 +356,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                         </>
                     ) : emptyState || (
                         <>
-                            <p className="text-lg font-semibold">Welcome to ClawScribe!</p>
+                            <p className="text-lg font-semibold">Welcome to ClawScribe</p>
                             <p className="text-xs mt-1">Start recording to see live transcription</p>
                         </>
                     )}

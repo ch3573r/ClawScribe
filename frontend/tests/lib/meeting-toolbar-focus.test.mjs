@@ -153,3 +153,32 @@ test('meeting title strips pasted line breaks without trimming ordinary spaces',
   assert.deepEqual(values, ['  First second third fourth fifth sixth  ']);
   hooks.unmount();
 });
+
+test('the empty summary view offers the one primary Generate action, and the toolbar steps back', () => {
+  const hooks = createHookHarness();
+  const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } }, react: hooks.react });
+  const render = props => hooks.render(() => SummaryPanel({ ...summaryProps, ...props }));
+  const group = tree => nodes(tree).find(node => node.props && 'secondaryGenerate' in node.props);
+  const generate = tree => nodes(tree).find(node => node.type === 'button' && text(node) === 'Generate summary');
+
+  const empty = render({ aiSummary: null, summaryStatus: 'idle' });
+  assert.ok(generate(empty), 'the empty view has the action');
+  assert.equal(group(empty).props.secondaryGenerate, true, 'so the toolbar one is secondary');
+  let started = 0;
+  group(empty).props.generateRef.current = () => { started++; };
+  generate(empty).props.onClick();
+  assert.equal(started, 1, 'it runs the same action as the toolbar');
+  assert.doesNotMatch(text(empty), /toolbar above/);
+
+  const noTranscript = render({ aiSummary: null, summaryStatus: 'idle', transcripts: [] });
+  assert.equal(generate(noTranscript), undefined, 'nothing to generate from');
+  assert.equal(group(noTranscript).props.secondaryGenerate, false);
+
+  const generating = render({ aiSummary: null, summaryStatus: 'processing' });
+  assert.equal(generate(generating), undefined, 'no Generate while one is running');
+  assert.equal(group(generating).props.secondaryGenerate, false);
+
+  const populated = render({});
+  assert.equal(group(populated).props.secondaryGenerate, false, 'with a summary the toolbar action is the only one');
+  hooks.unmount();
+});

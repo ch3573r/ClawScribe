@@ -17,6 +17,8 @@ import Analytics from '@/lib/analytics';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
 import { Button } from '@/components/ui/button';
+import { RecordingLevelMeter } from '@/components/RecordingLevelMeter';
+import { describeStartError } from '@/lib/start-error';
 import { toast } from 'sonner';
 
 interface RecordingControlsProps {
@@ -122,43 +124,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       console.error("Failed to start recording:");
       console.error("Error details:");
 
-      // Parse error message to provide user-friendly feedback
-      const errorMsg = error instanceof Error ? error.message : String(error);
-
-      // Check for device-related errors
-      if (
-        errorMsg.includes('microphone') ||
-        errorMsg.includes('mic') ||
-        errorMsg.includes('input')
-      ) {
-        setDeviceError({
-          title: 'Microphone not available',
-          message:
-            'Unable to access your microphone. Please check that:\n• Your microphone is connected\n• The app has microphone permissions\n• No other app is using the microphone'
-        });
-      } else if (
-        errorMsg.includes('system audio') ||
-        errorMsg.includes('speaker') ||
-        errorMsg.includes('output')
-      ) {
-        setDeviceError({
-          title: 'System audio not available',
-          message:
-            'Unable to capture system audio. Please check that:\n• A virtual audio device (like BlackHole) is installed\n• The app has screen recording permissions (macOS)\n• System audio is properly configured'
-        });
-      } else if (errorMsg.includes('permission')) {
-        setDeviceError({
-          title: 'Permission required',
-          message:
-            'Recording permissions are required. Please:\n• Grant microphone access in System Settings\n• Grant screen recording access for system audio (macOS)\n• Restart the app after granting permissions'
-        });
-      } else {
-        setDeviceError({
-          title: 'Recording failed',
-          message:
-            'Unable to start recording. Please check your audio device settings and try again.'
-        });
-      }
+      setDeviceError(describeStartError(error));
     } finally {
       setIsStarting(false);
     }
@@ -573,27 +539,22 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     </span>
                   )}
 
-                  {/* A recording mark, not a level meter: the core does not report
-                      the level of a running recording, so the bars stay still. */}
-                  <div className={waveformClassName} aria-hidden="true">
-                    {(isDashboard ? [4, 7, 4] : [3, 5, 3]).map((size, index) => (
-                      <div
-                        key={index}
-                        className={`${isDashboard ? 'w-1.5' : 'w-1'} rounded-full ${
-                          isPaused ? 'bg-warning-foreground' : 'bg-brand-gradient-v'
-                        }`}
-                        style={{
-                          height:
-                            isRecording
-                              ? `${size * 4}px`
-                              : isDashboard
-                                ? '8px'
-                                : '4px',
-                          opacity: isPaused ? 0.6 : 1,
-                        }}
-                      />
-                    ))}
-                  </div>
+                  {/* Real levels while recording. Idle, three flat bars. */}
+                  {isRecording ? (
+                    <div className={isDashboard ? 'mx-3' : 'mx-4'}>
+                      <RecordingLevelMeter paused={isPaused} />
+                    </div>
+                  ) : (
+                    <div className={waveformClassName} aria-hidden="true">
+                      {[0, 1, 2].map((index) => (
+                        <div
+                          key={index}
+                          className={`${isDashboard ? 'w-1.5' : 'w-1'} rounded-full bg-brand-gradient-v`}
+                          style={{ height: isDashboard ? '8px' : '4px' }}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
             </>

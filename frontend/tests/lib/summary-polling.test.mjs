@@ -137,3 +137,52 @@ test('a poll the page starts replaces a background poll and becomes the page\'s 
   render().stopSummaryPolling('a', { keepBackground: true });
   assert.equal(timers.size, 0);
 });
+
+test('a listener that joins a running poll adds to it; the starter is still told', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'completed', data: { markdown: 'x' } }));
+  const starter = [], joined = [];
+  render().startSummaryPolling('a', 'a', result => starter.push(result.status), { background: true });
+  render().attachSummaryPolling('a', result => joined.push(result.status));
+  assert.equal(timers.size, 1, 'one poll, not two');
+  await timers.get(1)();
+  assert.deepEqual(starter, ['completed']);
+  assert.deepEqual(joined, ['completed']);
+  assert.equal(timers.size, 0);
+});
+
+test('letting go of a joined background poll leaves it running; its starter finishes it', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'completed', data: { markdown: 'x' } }));
+  const starter = [], joined = [];
+  render().startSummaryPolling('a', 'a', result => starter.push(result.status), { background: true });
+  const letGo = render().attachSummaryPolling('a', result => joined.push(result.status));
+  letGo();
+  assert.equal(timers.size, 1);
+  await timers.get(1)();
+  assert.deepEqual(starter, ['completed']);
+  assert.deepEqual(joined, [], 'a listener that let go hears nothing');
+});
+
+test('attaching with no poll running starts one, and letting go stops it', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'pending' }));
+  const letGo = render().attachSummaryPolling('a', () => {});
+  assert.equal(timers.size, 1);
+  letGo();
+  assert.equal(timers.size, 0);
+});
+
+test('letting go after the poll was replaced does not stop the newer poll', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'pending' }));
+  const letGo = render().attachSummaryPolling('a', () => {});
+  render().startSummaryPolling('a', 'a', () => {});
+  letGo();
+  assert.equal(timers.size, 1);
+});
+
+test('a failing listener does not stop the others from hearing the result', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'completed', data: { markdown: 'x' } }));
+  const heard = [];
+  render().startSummaryPolling('a', 'a', () => { throw new Error('Synthetic handler failure'); });
+  render().attachSummaryPolling('a', result => heard.push(result.status));
+  await timers.get(1)();
+  assert.deepEqual(heard, ['completed']);
+});

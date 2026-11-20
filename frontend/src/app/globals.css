@@ -535,6 +535,19 @@
   color: var(--normal-text);
 }
 
+/* The close button of a default or loading toast keeps sonner's own greys in
+   both themes. The coloured variants set theirs from the variables above. */
+:root [data-sonner-toast][data-styled='true']:not([data-type='success']):not([data-type='info']):not([data-type='warning']):not([data-type='error']) [data-close-button] {
+  background: var(--normal-bg);
+  border-color: var(--normal-border);
+  color: var(--normal-text);
+}
+
+:root [data-sonner-toast][data-styled='true']:not([data-type='success']):not([data-type='info']):not([data-type='warning']):not([data-type='error']):hover [data-close-button]:hover {
+  background: var(--normal-bg-hover);
+  border-color: var(--normal-border-hover);
+}
+
 [data-sonner-toast][data-styled='true'] [data-button]:not([data-cancel]) {
   background: hsl(var(--primary));
   color: hsl(var(--primary-foreground));

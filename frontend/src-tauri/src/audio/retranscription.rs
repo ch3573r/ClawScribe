@@ -22,24 +22,52 @@ static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Global flag to signal cancellation
 static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// True once the transcript save has begun. From then on a cancel cannot take
-/// effect. The lock makes "cancel accepted" and "save begins" mutually
+/// Where the job is, as far as a cancel from a starting recording is
+/// concerned. The lock makes "cancel accepted" and "save begins" mutually
 /// exclusive, so a cancel reported as accepted always stops the save.
-static RETRANSCRIPTION_SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Before the save begins: a cancel takes effect.
+    Open,
+    /// The save has begun and runs to completion.
+    Saving,
+    /// The job is over, successfully or not.
+    Finished,
+}
 
-fn set_retranscription_saving(saving: bool) {
-    *RETRANSCRIPTION_SAVING
+static RETRANSCRIPTION_PHASE: std::sync::Mutex<Phase> = std::sync::Mutex::new(Phase::Finished);
+
+fn set_retranscription_phase(phase: Phase) {
+    *RETRANSCRIPTION_PHASE
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) = saving;
+        .unwrap_or_else(|error| error.into_inner()) = phase;
+}
+
+/// Opens the cancel window for one job and closes it when dropped. Declared
+/// after the job registration, so it is dropped (and cancel starts reporting
+/// false) before the registration is cleared.
+struct PhaseGuard;
+
+impl PhaseGuard {
+    fn open() -> Self {
+        set_retranscription_phase(Phase::Open);
+        PhaseGuard
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        set_retranscription_phase(Phase::Finished);
+    }
 }
 
 /// Cancels for a starting recording. Returns false when the job is already
-/// saving and will finish instead.
+/// saving, or over, and a cancel cannot take effect.
 fn cancel_retranscription_if_possible() -> bool {
-    let saving = RETRANSCRIPTION_SAVING
+    let phase = RETRANSCRIPTION_PHASE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if *saving {
+    if *phase != Phase::Open {
         return false;
     }
     RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
@@ -48,13 +76,13 @@ fn cancel_retranscription_if_possible() -> bool {
 
 /// The last cancel check: after this the save runs to completion.
 fn begin_retranscription_save() -> Result<()> {
-    let mut saving = RETRANSCRIPTION_SAVING
+    let mut phase = RETRANSCRIPTION_PHASE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Retranscription cancelled"));
     }
-    *saving = true;
+    *phase = Phase::Saving;
     Ok(())
 }
 
@@ -71,14 +99,12 @@ impl RetranscriptionGuard {
         {
             return Err("Retranscription already in progress".to_string());
         }
-        set_retranscription_saving(false);
         Ok(RetranscriptionGuard)
     }
 }
 
 impl Drop for RetranscriptionGuard {
     fn drop(&mut self) {
-        set_retranscription_saving(false);
         RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
@@ -144,6 +170,8 @@ pub async fn start_retranscription<R: Runtime>(
     )
     .await
     .map_err(anyhow::Error::msg)?;
+    // Dropped before `_job`, so a cancel is refused once the job is over.
+    let _phase = PhaseGuard::open();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
@@ -1263,11 +1291,6 @@ pub async fn cancel_retranscription_command() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn is_retranscription_in_progress_command() -> bool {
-    is_retranscription_in_progress()
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::common::create_transcript_segments;
@@ -1655,5 +1678,29 @@ mod tests {
         assert_eq!(parsed["transcription_model"], "parakeet-tdt-0.6b-v3-int8");
         assert_eq!(parsed["transcription_source_language"], "en");
         assert!(parsed.get("retranscribed_at").is_some());
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    /// A cancel from a starting recording is accepted only while the retranscription
+    /// can still stop, and reports false once it is saving or over, so no
+    /// "being stopped" notice is sent for a job that has already succeeded.
+    #[test]
+    fn cancel_is_accepted_only_before_the_save_and_never_after_the_job_ends() {
+        set_retranscription_phase(Phase::Finished);
+        assert!(!cancel_retranscription_if_possible(), "no job is running");
+        {
+            let _phase = PhaseGuard::open();
+            assert!(cancel_retranscription_if_possible(), "before the save a cancel takes effect");
+            assert!(cancel_retranscription_if_possible(), "repeats stay accepted");
+            set_retranscription_phase(Phase::Saving);
+            assert!(!cancel_retranscription_if_possible(), "a save in progress cannot be cancelled");
+        }
+        // Dropping the guard (declared after the job registration) ends the
+        // window before the registration is cleared.
+        assert!(!cancel_retranscription_if_possible(), "the finished job refuses a cancel");
     }
 }

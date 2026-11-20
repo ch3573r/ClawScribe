@@ -152,11 +152,11 @@ export function isQuantizedModel(modelName: string): boolean {
 export function getModelPerformanceBadge(quantization: QuantizationType): { label: string; color: string } {
   switch (quantization) {
     case 'FP32':
-      return { label: 'Full Precision', color: 'blue' };
+      return { label: 'Full precision', color: 'blue' };
     case 'FP16':
       return { label: 'FP16', color: 'blue' };
     case 'Int8':
-      return { label: 'Int8 Quantized', color: 'green' };
+      return { label: 'Int8 quantized', color: 'green' };
     default:
       return { label: 'Standard', color: 'gray' };
   }

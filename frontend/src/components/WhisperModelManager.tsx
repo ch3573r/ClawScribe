@@ -11,6 +11,7 @@ import {
   getModelPerformanceBadge,
   isQuantizedModel,
   getModelTagline,
+  speedLabel,
   WhisperAPI
 } from '../lib/whisper';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
@@ -184,7 +185,7 @@ export function ModelManager({
           // Clean up throttle data
           progressThrottleRef.current.delete(modelName);
 
-          toast.success(`${getModelIcon(model?.accuracy || 'Good')} ${displayName} ready!`, {
+          toast.success(`${displayName} ready`, {
             description: 'Model downloaded and ready to use',
             duration: 4000
           });
@@ -597,7 +598,7 @@ function ModelCard({
               </span>
               <span className="flex items-center space-x-1">
                 <span>⚡</span>
-                <span>{model.speed} processing</span>
+                <span>{speedLabel(model.speed)} processing</span>
               </span>
             </div>
           </div>

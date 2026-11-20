@@ -163,21 +163,6 @@ fn save_config_at(
     write_config_atomically(&path, &config)
 }
 
-#[tauri::command]
-pub async fn submit_meeting_folder_to_openclaw<R: Runtime>(
-    app: AppHandle<R>,
-    folder_path: String,
-) -> Result<OpenClawSubmissionResult, String> {
-    submit_folder(&app, PathBuf::from(folder_path), None).await
-}
-
-#[tauri::command]
-pub async fn get_openclaw_submission_status(
-    folder_path: String,
-) -> Result<Option<OpenClawSubmissionStatus>, String> {
-    read_submission_status_from_folder(&PathBuf::from(folder_path))
-}
-
 pub fn submit_completed_recording<R: Runtime>(
     app: AppHandle<R>,
     folder_path: Option<String>,
@@ -263,16 +248,6 @@ pub fn submit_completed_recording<R: Runtime>(
             Err(_e) => error!("OpenClaw handoff failed"),
         }
     });
-}
-
-async fn submit_folder<R: Runtime>(
-    app: &AppHandle<R>,
-    folder: PathBuf,
-    meeting_name: Option<String>,
-) -> Result<OpenClawSubmissionResult, String> {
-    let config = load_config(app)?;
-    let last_status_path = last_status_path(app).ok();
-    submit_folder_with_config(folder, meeting_name, config, last_status_path).await
 }
 
 async fn submit_folder_with_config(

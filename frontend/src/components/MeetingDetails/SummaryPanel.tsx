@@ -16,7 +16,7 @@ import { TextReplaceDialog } from './TextReplaceDialog';
 import { SummarySources, ResolvedSummarySource } from './SummarySources';
 import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
-import { Languages, ChevronDown, ChevronUp, Search, X } from 'lucide-react';
+import { Languages, ChevronDown, ChevronUp, Search, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -124,6 +124,9 @@ export function SummaryPanel({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  // The empty view offers the same generate action as the toolbar.
+  const generateRef = useRef<(() => void) | null>(null);
+  const [checkingModels, setCheckingModels] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [dockTarget, setDockTarget] = useState<HTMLDivElement | null>(null);
   const [chatDocked, setChatDocked] = useState(false);
@@ -390,7 +393,7 @@ export function SummaryPanel({
               {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}
             </span>}
           </div>
-          <SummaryGeneratorButtonGroup compact={compactToolbar} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
+          <SummaryGeneratorButtonGroup compact={compactToolbar} generateRef={generateRef} onCheckingChange={setCheckingModels} secondaryGenerate={!aiSummary && !isSummaryLoading && transcripts.length > 0} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
             onActionsCloseAutoFocus={event => {
               if (retainFindFocusRef.current) event.preventDefault();
               retainFindFocusRef.current = false;
@@ -457,7 +460,12 @@ export function SummaryPanel({
           {isSummaryLoading ? <div role="status" className="flex h-full min-h-48 items-center justify-center gap-3 p-8 text-sm text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />Generating summary…</div>
           : !aiSummary ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
               <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>
-              <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Choose a template and generate meeting notes using the toolbar above.' : 'Transcribe the recording first, then generate a summary.'}</p>
+              <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Notes use the template and AI model chosen in the toolbar.' : 'Transcribe the recording first, then generate a summary.'}</p>
+              {transcripts.length > 0 && (
+                <Button className="mt-2" disabled={checkingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_empty'); generateRef.current?.(); }}>
+                  <Sparkles className="h-4 w-4" />Generate summary
+                </Button>
+              )}
             </div>
           : <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>

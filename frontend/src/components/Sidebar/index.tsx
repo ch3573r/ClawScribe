@@ -94,6 +94,9 @@ const Sidebar: React.FC = () => {
     searchResults,
     isSearching,
     meetings,
+    meetingsError,
+    meetingsLoading,
+    refetchMeetings,
     setMeetings,
   } = useSidebar();
 
@@ -147,10 +150,7 @@ const Sidebar: React.FC = () => {
     async (value: string) => {
       setSearchQuery(value);
 
-      // If search query is empty, just return to normal view
-      if (!value.trim()) return;
-
-      // Search through transcripts
+      // An empty query also cancels a search that is still waiting or running.
       await searchTranscripts(value);
     },
     [searchTranscripts],
@@ -459,13 +459,13 @@ const Sidebar: React.FC = () => {
                   variant="ghost"
                   onClick={() => openImportDialog()}
                   className="whitespace-normal gap-0 p-0 [&_svg]:size-5 flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-sidebar-hover hover:text-sidebar-foreground"
-                  aria-label="Import audio"
+                  aria-label="Import audio or video"
                 >
                   <Upload className="h-5 w-5" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="right">
-                <p>Import audio</p>
+                <p>Import audio or video</p>
               </TooltipContent>
             </Tooltip>
 
@@ -769,7 +769,14 @@ const Sidebar: React.FC = () => {
                   </section>
                 ))}
 
-                {meetingGroups.length === 0 && (
+                {meetingsError && (
+                  <div role="alert" className="rounded-md border border-error-border/30 bg-error px-3 py-3 text-sm text-error-foreground">
+                    <p>{meetings.length === 0 ? meetingsError : "Could not refresh your meetings."}</p>
+                    <Button variant="outline" size="sm" className="mt-2" disabled={meetingsLoading} onClick={() => void refetchMeetings()}>{meetingsLoading ? "Retrying…" : "Retry"}</Button>
+                  </div>
+                )}
+
+                {meetingGroups.length === 0 && !(meetingsError && meetings.length === 0) && (
                   <div className="rounded-md border border-sidebar-border bg-background/60 px-3 py-5 text-center text-sm text-muted-foreground">
                     No meetings found.
                   </div>
@@ -810,7 +817,7 @@ const Sidebar: React.FC = () => {
               </Button>
 
               <div className="grid grid-cols-2 gap-2">
-                <Button variant="outline" onClick={() => openImportDialog()} className="min-w-0">
+                <Button variant="outline" onClick={() => openImportDialog()} className="min-w-0" aria-label="Import audio or video" title="Import audio or video">
                   <Upload className="h-4 w-4 shrink-0" />
                   <span className="truncate">Import</span>
                 </Button>
