@@ -1,8 +1,7 @@
 param(
     [string]$TauriRoot = (Join-Path $PSScriptRoot "..\src-tauri"),
-    # Validation runs reuse an already staged runtime instead of downloading the
-    # pinned package again. The staged files are still checked against the pinned
-    # hashes; anything missing or different is re-staged from the pinned package.
+    # Validation runs can reuse the two pinned executables and version manifest.
+    # A full packaging run stages the complete vendor directory afresh.
     [switch]$SkipIfCurrent
 )
 
@@ -52,7 +51,11 @@ if ($SkipIfCurrent) {
     if ($isStaged) {
         $stagedSidecarSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $sidecarPath).Hash.ToLowerInvariant()
         $stagedRuntimeSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedRuntimeExe).Hash.ToLowerInvariant()
-        $stagedMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+        try {
+            $stagedMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $stagedMetadata = $null
+        }
         if ($stagedSidecarSha -eq $runtimeSha256 -and $stagedRuntimeSha -eq $runtimeSha256 -and
             $stagedMetadata.runtime_version -eq $runtimeVersion) {
             Write-Host "Codex app-server runtime $runtimeVersion is already staged and matches the pinned hash; skipping the download."

@@ -126,14 +126,14 @@ function Resolve-InstallerPath {
 }
 
 function Resolve-SevenZip {
-    $command = Get-Command "7z.exe" -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
     foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
         if ($base) {
             $candidate = Join-Path $base "7-Zip/7z.exe"
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
         }
     }
+    $command = Get-Command "7z.exe" -CommandType Application -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
     Stop-Acceptance "7-Zip is required to unpack the installer without installing it. Install it on the runner; the release workflow already installs it."
 }
 
