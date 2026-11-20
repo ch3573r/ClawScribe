@@ -1,7 +1,7 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useState, useEffect, useCallback, Suspense } from "react";
-import { Transcript, Summary } from "@/types";
+import { Transcript, Summary, type SummaryDataResponse } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
@@ -184,7 +184,7 @@ function MeetingDetailsContent() {
         const summaryData = summary.data || {};
 
         // Parse if it's a JSON string (backend may return double-encoded JSON)
-        let parsedData: Record<string, any> = typeof summaryData === "string" ? {} : summaryData;
+        let parsedData: SummaryDataResponse = typeof summaryData === "string" ? {} : summaryData;
         if (typeof summaryData === 'string') {
           try {
             parsedData = JSON.parse(summaryData);
