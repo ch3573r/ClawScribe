@@ -94,8 +94,11 @@ meeting's attendance checklist starts unchecked and summaries receive only
 calendar names confirmed in that checklist. Recording works without a link if
 calendar data is unavailable. Calendar lookup uses the existing read permission.
 
-Microsoft sign-out clears Microsoft event links and their saved invitation
-metadata. iCalendar sources and their associations remain available. Series
+Microsoft sign-out ends the connection and clears what came from the account
+and was never confirmed: current event choices, an unreviewed selection and
+automatically matched links on saved meetings. A link you reviewed is part of the
+local meeting record and stays, with its attendance, until you unlink it.
+iCalendar sources and their associations are unaffected. Series
 template memory is available for recurring iCalendar events with a stable source
 and series ID. The current Graph integration returns occurrence IDs and uses the
 app's regular summary template settings. See [Calendar sources and attendance](icalendar.md).

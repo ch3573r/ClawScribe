@@ -26,6 +26,24 @@ meeting. Invitees start unchecked. Automatic and manual summaries receive only
 calendar names you confirm by checking. Review during recording to include
 attendance in an automatic summary, or review after saving and regenerate.
 Links and attendance are saved with the meeting and included in library backups.
+
+An event that ClawScribe links automatically is local convenience. It can name
+the meeting and prefill the invitee list, but its title and invitees are not sent
+to a summary or knowledge provider. Saving **Review attendance** is your
+confirmation: from then on summaries and knowledge answers can use the event
+title, and summaries receive the names of checked people. Invitees shown only by
+an email address cannot be named and are never sent. A title you edit
+yourself is your own text and is not withheld.
+
+A meeting without a link, or one you unlinked, shows **Link calendar event**.
+It lists events from the calendars connected now that overlap the recording.
+Imported calendars load only the coming week, so older recordings can be
+relinked from Microsoft 365 only. If a source could not be read, the list names
+it and offers **Check again**; the same action appears while recording when the
+automatic match was partial. A meeting whose saved link cannot be read, for
+example after restoring a damaged archive, appears unlinked and can be linked
+again. An unlinked meeting's title stays out of provider context because it may
+still be the former event's subject.
 Older checked selections require review because earlier versions checked each
 invitation by default.
 

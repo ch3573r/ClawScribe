@@ -454,7 +454,7 @@ impl SummaryService {
         model_provider: String,
         model_name: String,
         custom_prompt: String,
-        summary_title: crate::library::calendar::SummaryTitle,
+        summary_title: crate::library::calendar::ProviderTitle,
         template_id: String,
         summary_language: Option<String>,
         include_speaker_labels: bool,

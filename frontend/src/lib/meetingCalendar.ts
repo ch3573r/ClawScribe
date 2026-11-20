@@ -15,7 +15,14 @@ export interface MeetingCalendarLink {
   eventId: string;
   subject: string | null;
   start?: string | null;
+  /** The person chose this event or saved its attendance. An automatic match stays unreviewed. */
+  reviewed?: boolean;
   attendees: MeetingCalendarAttendee[];
+}
+
+/** Matches the core: any explicit choice is a review, including links saved before the flag existed. */
+export function isReviewedCalendar(link: MeetingCalendarLink): boolean {
+  return link.reviewed === true || link.attendees.some(person => person.attendance !== "unreviewed");
 }
 
 interface Invitation {
@@ -59,6 +66,20 @@ export function sameCalendarEvent(a: MeetingCalendarLink | null, b: MeetingCalen
 export interface OngoingCalendarMatch {
   status: "matched" | "ambiguous" | "unavailable" | "none";
   matches: MeetingCalendarLink[];
+  /** Calendar sources that could not be read, such as "Microsoft 365". */
+  unavailable?: string[];
+}
+
+/** Timed, uncancelled events that overlap a window, such as the time of a saved recording. */
+export function overlappingCalendarLinks(events: Invitation[], from: number, to: number): MeetingCalendarLink[] {
+  const links = new Map<string, MeetingCalendarLink>();
+  for (const event of events) {
+    if (event.allDay || event.isCancelled || !event.start || !event.end) continue;
+    if (!(Date.parse(event.start) < to && Date.parse(event.end) > from)) continue;
+    const link = calendarLinkFromEvent(event);
+    links.set(JSON.stringify([link.source, link.sourceId, link.eventId]), link);
+  }
+  return [...links.values()].sort((a, b) => (a.start ?? "").localeCompare(b.start ?? ""));
 }
 
 export function matchOngoingCalendar(events: Invitation[], now: number, incomplete: boolean): OngoingCalendarMatch {
@@ -99,6 +120,7 @@ export function parseCalendarLink(raw: string | null): MeetingCalendarLink | nul
       eventId: link.eventId,
       subject: link.subject ?? null,
       start: link.start ?? null,
+      ...(link.reviewed === true ? { reviewed: true } : {}),
       attendees: (link.attendees ?? []).map(person => ({
         name: person.name ?? null,
         email: person.email ?? null,
@@ -179,15 +201,22 @@ export function beginRecordingCalendar(active: RecordingCalendar, choice: Return
   if (selectionVersion === choice.version && (choice.link || choice.skip)) clearPendingCalendar();
 }
 
-/** A Microsoft sign-out clears unfinished and unmigrated Microsoft associations. */
+/**
+ * A Microsoft sign-out ends the account connection. It clears what came from the
+ * account and was never confirmed: current candidates, an unreviewed selection
+ * and unmigrated unreviewed copies. A link the person reviewed is their own local
+ * record and stays with the meeting.
+ */
 export function clearMicrosoftCalendarLinks(): void {
   microsoftCalendarRevision++;
-  if (getPendingCalendar()?.source === "microsoft") clearPendingCalendar();
+  const pending = getPendingCalendar();
+  if (pending?.source === "microsoft" && !isReviewedCalendar(pending)) clearPendingCalendar();
   const active = getActiveRecordingCalendar();
   if (active && (active.link?.source === "microsoft" || active.matches.some(link => link.source === "microsoft"))) {
+    const drop = active.link?.source === "microsoft" && !isReviewedCalendar(active.link);
     setActiveRecordingCalendar({
       ...active,
-      link: active.link?.source === "microsoft" ? null : active.link,
+      link: drop ? null : active.link,
       matches: active.matches.filter(link => link.source !== "microsoft"),
     });
   }
@@ -195,9 +224,9 @@ export function clearMicrosoftCalendarLinks(): void {
     const store = window.localStorage;
     const keys = Array.from({ length: store.length }, (_, index) => store.key(index));
     for (const key of keys) {
-      if (key?.startsWith(LEGACY_MEETING_CALENDAR_PREFIX) && parseCalendarLink(store.getItem(key))?.source === "microsoft") {
-        store.removeItem(key);
-      }
+      if (!key?.startsWith(LEGACY_MEETING_CALENDAR_PREFIX)) continue;
+      const legacy = parseCalendarLink(store.getItem(key));
+      if (legacy?.source === "microsoft" && !isReviewedCalendar(legacy)) store.removeItem(key);
     }
   } catch { /* Best-effort cleanup of superseded webview storage. */ }
   window.dispatchEvent(new Event("clawscribe-microsoft-calendar-cleared"));

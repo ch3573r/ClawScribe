@@ -2,6 +2,7 @@
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,8 +31,10 @@ struct Attendee {
 }
 
 impl Attendee {
-    fn label(&self) -> Option<&str> {
-        self.name.as_deref().or(self.email.as_deref())
+    /// Only a confirmed name is ever sent to a provider. An email address is
+    /// never used as a stand-in for a name.
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 }
 
@@ -45,24 +48,53 @@ pub struct CalendarLink {
     event_id: String,
     subject: Option<String>,
     start: Option<String>,
+    /// The person chose this event or saved its attendance. An automatically
+    /// matched invitation stays local until this is set.
+    #[serde(default)]
+    reviewed: bool,
     #[serde(default)]
     attendees: Vec<Attendee>,
 }
 
-pub(crate) enum SummaryTitle {
+/// What a provider may be told about a meeting title. A calendar subject that
+/// became the title automatically is local convenience, never provider context.
+pub(crate) enum ProviderTitle {
     Include,
+    /// The title may still carry a former or unreadable invitation's subject.
     ExcludeUnlinked,
     ExcludeSubject(String),
 }
 
-impl SummaryTitle {
+/// The neutral label shown to a provider when the real title is withheld.
+pub(crate) const WITHHELD_TITLE: &str = "Untitled meeting";
+
+impl ProviderTitle {
+    fn of(link: Option<&CalendarLink>) -> Self {
+        match link {
+            Some(link) if link.reviewed => Self::Include,
+            Some(link) => link
+                .subject
+                .clone()
+                .map_or(Self::Include, Self::ExcludeSubject),
+            None => Self::ExcludeUnlinked,
+        }
+    }
+
     pub(crate) fn for_provider(&self, title: String) -> Option<String> {
+        self.for_clipped(title, false)
+    }
+
+    /// `clipped` means the title was cut for display, so a prefix of the
+    /// subject is treated as the subject.
+    pub(crate) fn for_clipped(&self, title: String, clipped: bool) -> Option<String> {
         match self {
             Self::Include => Some(title),
             Self::ExcludeUnlinked => None,
             Self::ExcludeSubject(subject) => {
-                let from_invitation =
-                    single_line(Some(title.clone()), 1024).as_deref() == Some(subject.as_str());
+                let shown = single_line(Some(title.clone()), 1024);
+                let from_invitation = shown.as_deref().is_some_and(|shown| {
+                    shown == subject.as_str() || (clipped && subject.starts_with(shown))
+                });
                 (!from_invitation).then_some(title)
             }
         }
@@ -128,6 +160,11 @@ impl CalendarLink {
         }
         self.attendees
             .retain(|attendee| attendee.name.is_some() || attendee.email.is_some());
+        // Any explicit checkbox choice is a review, including links saved before the flag existed.
+        self.reviewed |= self
+            .attendees
+            .iter()
+            .any(|attendee| attendee.attendance != Attendance::Unreviewed);
         Ok(self)
     }
 
@@ -140,14 +177,14 @@ impl CalendarLink {
             .attendees
             .iter()
             .filter(|person| person.attendance != Attendance::Present)
-            .filter_map(Attendee::label)
+            .filter_map(Attendee::name)
             .collect();
         let mut labels = Vec::new();
         for attendee in &self.attendees {
             if attendee.attendance != Attendance::Present {
                 continue;
             }
-            if let Some(label) = attendee.label() {
+            if let Some(label) = attendee.name() {
                 if !excluded.contains(label) && !labels.contains(&label) {
                     labels.push(label);
                 }
@@ -183,10 +220,22 @@ pub(crate) fn decode(stored: &str) -> Result<Option<CalendarLink>, String> {
         .transpose()
 }
 
+/// The saved link and title policy for one stored value. An unreadable value is
+/// isolated to its own meeting: it reads as unlinked and its title stays local.
+fn interpret(stored: &str) -> (Option<CalendarLink>, ProviderTitle) {
+    match decode(stored) {
+        Ok(Some(link)) => {
+            let title = ProviderTitle::of(Some(&link));
+            (Some(link), title)
+        }
+        Ok(None) | Err(_) => (None, ProviderTitle::of(None)),
+    }
+}
+
 pub(crate) async fn read_snapshot(
     pool: &SqlitePool,
     meeting_id: &str,
-) -> Result<(Option<CalendarLink>, SummaryTitle), String> {
+) -> Result<(Option<CalendarLink>, ProviderTitle), String> {
     let stored =
         sqlx::query_scalar::<_, Option<String>>("SELECT calendar_link FROM meetings WHERE id = ?")
             .bind(meeting_id)
@@ -194,19 +243,10 @@ pub(crate) async fn read_snapshot(
             .await
             .map_err(|_| "Could not load the calendar link.".to_string())?
             .flatten();
-    let Some(stored) = stored else {
-        return Ok((None, SummaryTitle::Include));
-    };
-    let link = decode(&stored)?;
-    let title = match link.as_ref() {
-        Some(link) => link
-            .subject
-            .clone()
-            .map_or(SummaryTitle::Include, SummaryTitle::ExcludeSubject),
-        // The visible title may still contain the former invitation's subject.
-        None => SummaryTitle::ExcludeUnlinked,
-    };
-    Ok((link, title))
+    Ok(match stored {
+        Some(stored) => interpret(&stored),
+        None => (None, ProviderTitle::Include),
+    })
 }
 
 pub(crate) async fn read(
@@ -214,6 +254,97 @@ pub(crate) async fn read(
     meeting_id: &str,
 ) -> Result<Option<CalendarLink>, String> {
     Ok(read_snapshot(pool, meeting_id).await?.0)
+}
+
+/// The title a knowledge request may show to a provider, or `None` when the
+/// real title must stay on this device. Any failure withholds the title.
+pub(crate) async fn knowledge_title(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    title: &str,
+    clipped: bool,
+) -> Option<String> {
+    let stored =
+        sqlx::query_scalar::<_, Option<String>>("SELECT calendar_link FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await
+            .ok()?;
+    stored_title_policy(stored.flatten().as_deref()).for_clipped(title.to_owned(), clipped)
+}
+
+/// The policy for a meeting's raw `calendar_link` column.
+pub(crate) fn stored_title_policy(stored: Option<&str>) -> ProviderTitle {
+    match stored {
+        Some(stored) => interpret(stored).1,
+        None => ProviderTitle::Include,
+    }
+}
+
+struct WriteFailure {
+    message: String,
+    transient: bool,
+}
+
+/// Only contention and connection trouble can succeed on a second attempt.
+fn transient(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut => true,
+        // SQLITE_BUSY (5) and SQLITE_LOCKED (6), including their extended codes.
+        sqlx::Error::Database(database) => database
+            .code()
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| matches!(code & 0xff, 5 | 6)),
+        _ => false,
+    }
+}
+
+async fn write_once(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    stored: &str,
+    legacy: bool,
+) -> Result<(), WriteFailure> {
+    let query = if legacy {
+        "UPDATE meetings SET calendar_link = ? WHERE id = ? AND calendar_link IS NULL"
+    } else {
+        "UPDATE meetings SET calendar_link = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    };
+    let result = sqlx::query(query)
+        .bind(stored)
+        .bind(meeting_id)
+        .execute(pool)
+        .await
+        .map_err(|error| WriteFailure {
+            message: "Could not save the calendar link.".into(),
+            transient: transient(&error),
+        })?;
+    if result.rows_affected() == 0 && !legacy {
+        return Err(WriteFailure {
+            message: "Meeting not found.".into(),
+            transient: false,
+        });
+    }
+    Ok(())
+}
+
+/// Retries only transient persistence failures, a few times with a short pause.
+async fn persist(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    stored: &str,
+    legacy: bool,
+) -> Result<(), WriteFailure> {
+    let mut retries = 0u64;
+    loop {
+        match write_once(pool, meeting_id, stored, legacy).await {
+            Err(failure) if failure.transient && retries < 3 => {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(40 * retries)).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(crate) async fn write(
@@ -227,28 +358,83 @@ pub(crate) async fn write(
         Some(link) => link.normalized()?.encoded()?,
         None => "null".into(),
     };
-    let query = if legacy {
-        "UPDATE meetings SET calendar_link = ? WHERE id = ? AND calendar_link IS NULL"
-    } else {
-        "UPDATE meetings SET calendar_link = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-    };
-    let result = sqlx::query(query)
-        .bind(stored)
-        .bind(meeting_id)
-        .execute(pool)
+    persist(pool, meeting_id, &stored, legacy)
         .await
-        .map_err(|_| "Could not save the calendar link.".to_string())?;
-    if result.rows_affected() == 0 && !legacy {
-        return Err("Meeting not found.".into());
-    }
-    Ok(())
+        .map_err(|failure| failure.message)
 }
 
+/// A pre-database calendar link from the webview's own storage.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyCalendar {
+    meeting_id: String,
+    link: serde_json::Value,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LegacyOutcome {
+    /// Saved, or the meeting already has its own answer. The old copy can go.
+    Migrated,
+    /// This entry can never be saved. Only this entry is set aside.
+    Invalid,
+    /// A transient failure outlasted the retries. Try again later.
+    Retry,
+    /// Saving failed for a lasting reason. Keep the old copy untouched.
+    Failed,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyResult {
+    meeting_id: String,
+    outcome: LegacyOutcome,
+}
+
+/// Each entry succeeds or fails alone, so one malformed link cannot hide the rest.
+pub(crate) async fn migrate_legacy(
+    pool: &SqlitePool,
+    entries: Vec<LegacyCalendar>,
+) -> Vec<LegacyResult> {
+    let mut results = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let stored = serde_json::from_value::<CalendarLink>(entry.link)
+            .map_err(|_| ())
+            .and_then(|link| link.normalized().map_err(|_| ()))
+            .and_then(|link| link.encoded().map_err(|_| ()));
+        let outcome = match stored {
+            Err(()) => LegacyOutcome::Invalid,
+            Ok(stored) => match persist(pool, &entry.meeting_id, &stored, true).await {
+                Ok(()) => LegacyOutcome::Migrated,
+                Err(failure) if failure.transient => LegacyOutcome::Retry,
+                Err(_) => LegacyOutcome::Failed,
+            },
+        };
+        results.push(LegacyResult {
+            meeting_id: entry.meeting_id,
+            outcome,
+        });
+    }
+    results
+}
+
+/// Signing out removes the account connection, not the local meeting record.
+/// A link the person reviewed is theirs and stays. An invitation that was only
+/// matched automatically came from the account and is cleared; its title then
+/// stays local because it may still be the invitation's subject.
 pub(crate) async fn clear_microsoft(pool: &SqlitePool) -> Result<(), String> {
-    sqlx::query("UPDATE meetings SET calendar_link = 'null' WHERE json_extract(calendar_link, '$.source') = 'microsoft'")
-        .execute(pool)
-        .await
-        .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
+    sqlx::query(
+        "UPDATE meetings SET calendar_link = 'null'
+         WHERE json_extract(calendar_link, '$.source') = 'microsoft'
+           AND COALESCE(json_extract(calendar_link, '$.reviewed'), 0) = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM json_each(calendar_link, '$.attendees')
+               WHERE CASE WHEN type = 'object' THEN json_extract(value, '$.attendance') END
+                     IN ('present', 'absent'))",
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
     Ok(())
 }
 
@@ -283,15 +469,16 @@ pub async fn set_meeting_calendar(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     link: Option<CalendarLink>,
-    only_if_missing: Option<bool>,
 ) -> Result<(), String> {
-    write(
-        state.db_manager.pool(),
-        &meeting_id,
-        link,
-        only_if_missing.unwrap_or(false),
-    )
-    .await
+    write(state.db_manager.pool(), &meeting_id, link, false).await
+}
+
+#[tauri::command]
+pub async fn migrate_legacy_meeting_calendars(
+    state: tauri::State<'_, AppState>,
+    entries: Vec<LegacyCalendar>,
+) -> Result<Vec<LegacyResult>, String> {
+    Ok(migrate_legacy(state.db_manager.pool(), entries).await)
 }
 
 #[tauri::command]
@@ -358,7 +545,7 @@ pub(crate) mod tests {
                 {"name": "Excluded", "email": "excluded@example.com", "attendance": "absent"},
                 {"name": "Invited", "included": true}
             ]
-        })).unwrap()
+        })).unwrap().normalized().unwrap()
     }
 
     #[test]
@@ -378,7 +565,7 @@ pub(crate) mod tests {
 
     #[test]
     fn calendar_subject_is_local_even_when_used_as_the_meeting_title() {
-        let title = SummaryTitle::ExcludeSubject("Planning with an unchecked invitee".into());
+        let title = ProviderTitle::ExcludeSubject("Planning with an unchecked invitee".into());
         assert_eq!(
             title.for_provider("Planning  with an unchecked invitee".into()),
             None
@@ -388,7 +575,7 @@ pub(crate) mod tests {
             Some("My  edited title")
         );
         assert_eq!(
-            SummaryTitle::ExcludeUnlinked.for_provider("Previous calendar title".into()),
+            ProviderTitle::ExcludeUnlinked.for_provider("Previous calendar title".into()),
             None
         );
     }
@@ -414,6 +601,223 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(read(&pool, "review-test").await.unwrap().is_none());
+    }
+
+    fn microsoft(subject: &str, attendance: Attendance, reviewed: bool) -> CalendarLink {
+        serde_json::from_value::<CalendarLink>(serde_json::json!({
+            "source": "microsoft", "eventId": "graph-event", "subject": subject,
+            "reviewed": reviewed,
+            "attendees": [{"name": "Person", "attendance": attendance}]
+        }))
+        .unwrap()
+        .normalized()
+        .unwrap()
+    }
+
+    async fn add_meeting(pool: &SqlitePool, id: &str, title: &str) {
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .bind(id).bind(title).execute(pool).await.unwrap();
+    }
+
+    #[test]
+    fn an_email_address_is_never_used_as_a_name() {
+        let mut link: CalendarLink = serde_json::from_value(serde_json::json!({
+            "source": "microsoft", "eventId": "graph-event", "attendees": [
+                {"email": "nameless@example.com", "attendance": "present"},
+                {"name": "Named", "email": "named@example.com", "attendance": "present"}
+            ]
+        }))
+        .unwrap();
+        let prompt = link.with_attendance(String::new());
+        assert!(prompt.contains("[\"Named\"]"));
+        for forbidden in ["nameless", "example.com"] {
+            assert!(!prompt.contains(forbidden));
+        }
+        link.attendees.remove(1);
+        assert_eq!(link.with_attendance("My notes".into()), "My notes");
+    }
+
+    #[test]
+    fn an_automatic_subject_stays_local_until_the_link_is_reviewed() {
+        let automatic = microsoft("Quarterly planning", Attendance::Unreviewed, false);
+        assert!(!automatic.reviewed);
+        let policy = ProviderTitle::of(Some(&automatic));
+        assert_eq!(policy.for_provider("Quarterly  planning".into()), None);
+        assert_eq!(
+            policy.for_provider("My own title".into()).as_deref(),
+            Some("My own title")
+        );
+        // A title cut for display is still recognised as the subject.
+        assert_eq!(policy.for_clipped("Quarterly".into(), true), None);
+        assert!(policy.for_clipped("Quarterly".into(), false).is_some());
+        // Checking any person is a review and releases the title and the names.
+        let reviewed = microsoft("Quarterly planning", Attendance::Present, false);
+        assert!(reviewed.reviewed);
+        assert_eq!(
+            ProviderTitle::of(Some(&reviewed))
+                .for_provider("Quarterly planning".into())
+                .as_deref(),
+            Some("Quarterly planning")
+        );
+        assert!(reviewed.with_attendance(String::new()).contains("Person"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_requests_follow_the_same_title_rule_as_summaries() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let title = "Synthetic review";
+        // Never linked: the title is the person's own.
+        assert_eq!(
+            knowledge_title(&pool, "review-test", title, false)
+                .await
+                .as_deref(),
+            Some(title)
+        );
+        let mut link = microsoft(title, Attendance::Unreviewed, false);
+        write(&pool, "review-test", Some(link.clone()), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            knowledge_title(&pool, "review-test", title, false).await,
+            None
+        );
+        assert_eq!(
+            knowledge_title(&pool, "review-test", "Renamed by me", false)
+                .await
+                .as_deref(),
+            Some("Renamed by me")
+        );
+        link.reviewed = true;
+        write(&pool, "review-test", Some(link), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            knowledge_title(&pool, "review-test", title, false)
+                .await
+                .as_deref(),
+            Some(title)
+        );
+        // Unlinking keeps the title local: it may still be the old subject.
+        write(&pool, "review-test", None, false).await.unwrap();
+        assert_eq!(
+            knowledge_title(&pool, "review-test", title, false).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_link_affects_only_its_own_meeting() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        add_meeting(&pool, "other", "Other").await;
+        write(&pool, "other", Some(sample()), false).await.unwrap();
+        sqlx::query("UPDATE meetings SET calendar_link = '{\"eventId\": \"two words\"}' WHERE id = 'review-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (link, title) = read_snapshot(&pool, "review-test").await.unwrap();
+        assert!(link.is_none());
+        assert_eq!(title.for_provider("Synthetic review".into()), None);
+        assert!(read(&pool, "review-test").await.unwrap().is_none());
+        assert!(read(&pool, "other").await.unwrap().is_some());
+        // The meeting can be linked again; the new link replaces the unreadable one.
+        write(&pool, "review-test", Some(sample()), false)
+            .await
+            .unwrap();
+        assert!(read(&pool, "review-test").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_sets_aside_only_the_malformed_entry() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        add_meeting(&pool, "bad-id", "Second").await;
+        add_meeting(&pool, "bad-shape", "Third").await;
+        let entry = |meeting: &str, link: serde_json::Value| LegacyCalendar {
+            meeting_id: meeting.into(),
+            link,
+        };
+        let results = migrate_legacy(
+            &pool,
+            vec![
+                entry("bad-id", serde_json::json!({"eventId": "two words"})),
+                entry("bad-shape", serde_json::json!({"eventId": 5})),
+                entry(
+                    "review-test",
+                    serde_json::json!({
+                        "source": "microsoft", "eventId": "legacy-event",
+                        "attendees": [{"name": "Previously checked", "included": true}]
+                    }),
+                ),
+                entry(
+                    "missing-meeting",
+                    serde_json::json!({"eventId": "legacy-event"}),
+                ),
+            ],
+        )
+        .await;
+        let outcomes: Vec<_> = results.iter().map(|result| result.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                LegacyOutcome::Invalid,
+                LegacyOutcome::Invalid,
+                LegacyOutcome::Migrated,
+                LegacyOutcome::Migrated,
+            ]
+        );
+        let migrated = read(&pool, "review-test").await.unwrap().unwrap();
+        // A checkbox that defaulted to checked is not a review.
+        assert!(!migrated.reviewed);
+        assert!(read(&pool, "bad-id").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn only_contention_and_connection_trouble_are_retried() {
+        assert!(transient(&sqlx::Error::PoolTimedOut));
+        assert!(transient(&sqlx::Error::Io(std::io::Error::other("busy"))));
+        assert!(!transient(&sqlx::Error::RowNotFound));
+        assert!(!transient(&sqlx::Error::Protocol("constraint".into())));
+    }
+
+    #[tokio::test]
+    async fn signing_out_keeps_the_reviewed_record_and_clears_account_snapshots() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        add_meeting(&pool, "automatic", "Automatic").await;
+        add_meeting(&pool, "imported", "Imported").await;
+        add_meeting(&pool, "malformed", "Malformed").await;
+        sqlx::query("UPDATE meetings SET calendar_link = ? WHERE id = 'malformed'")
+            .bind(r#"{"source":"microsoft","attendees":["legacy entry"]}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let reviewed = microsoft("Reviewed event", Attendance::Present, false);
+        write(&pool, "review-test", Some(reviewed.clone()), false)
+            .await
+            .unwrap();
+        let unreviewed = microsoft("Automatic event", Attendance::Unreviewed, false);
+        write(&pool, "automatic", Some(unreviewed), false)
+            .await
+            .unwrap();
+        write(&pool, "imported", Some(sample()), false)
+            .await
+            .unwrap();
+        clear_microsoft(&pool).await.unwrap();
+        let cleared: String =
+            sqlx::query_scalar("SELECT calendar_link FROM meetings WHERE id = 'malformed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cleared, "null");
+        assert_eq!(read(&pool, "review-test").await.unwrap(), Some(reviewed));
+        assert!(read(&pool, "automatic").await.unwrap().is_none());
+        assert_eq!(
+            read(&pool, "imported").await.unwrap(),
+            Some(sample().normalized().unwrap())
+        );
+        // The cleared invitation's subject may still be the title, so it stays local.
+        assert_eq!(
+            knowledge_title(&pool, "automatic", "Automatic event", false).await,
+            None
+        );
     }
 
     #[tokio::test]

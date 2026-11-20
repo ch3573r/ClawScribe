@@ -33,7 +33,8 @@ export function LibraryBackup() {
       const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path });
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;
-      const description = `${report.meetings} meetings, ${report.files} recording files.${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}`;
+      const unreadable = report.unreadable_calendar_links ?? 0;
+      const description = `${report.meetings} meetings, ${report.files} recording files.${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${unreadable ? ` ${unreadable} saved calendar links could not be read and were left unlinked.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}`;
       if (incomplete) toast.warning(restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio', { description });
       else toast.success(restore ? 'Restore complete' : 'Backup saved', { description });
       if (restore) {

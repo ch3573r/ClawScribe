@@ -75,6 +75,8 @@ pub struct BackupReport {
     pub meetings: usize,
     pub skipped: usize,
     pub files: usize,
+    /// Meetings restored without a calendar link that could not be read.
+    pub unreadable_calendar_links: usize,
     pub incomplete_meetings: Vec<IncompleteMeeting>,
 }
 
@@ -438,6 +440,7 @@ fn write_archive_impl(
         meetings: manifest.tables["meetings"].len(),
         skipped: 0,
         files,
+        unreadable_calendar_links: 0,
         incomplete_meetings: incomplete_meetings(&manifest, None),
     })
 }
@@ -483,7 +486,7 @@ fn unpack(
         if id.is_empty() || !known.insert(id) {
             return Err("Duplicate meeting identity in archive.".into());
         }
-        validate_meeting_metadata(row)?;
+        validate_reviewed_actions(row)?;
     }
     let documents = archive_documents::validate(&manifest)?;
     if manifest
@@ -566,10 +569,7 @@ fn unpack(
     Ok((manifest, stage))
 }
 
-fn validate_meeting_metadata(row: &Map<String, Value>) -> Result<(), String> {
-    if let Some(link) = row.get("calendar_link").filter(|value| !value.is_null()) {
-        super::calendar::decode(link.as_str().ok_or("Invalid calendar link in archive.")?)?;
-    }
+fn validate_reviewed_actions(row: &Map<String, Value>) -> Result<(), String> {
     if let Some(actions) = row.get("reviewed_actions").filter(|value| !value.is_null()) {
         crate::exports::actions::decode(actions.as_str().ok_or("Invalid saved meeting actions.")?)?;
     }
@@ -1179,6 +1179,7 @@ async fn import_manifest_impl(
     let mut selected = HashSet::new();
     let mut known = HashSet::new();
     let mut skipped = 0;
+    let mut unreadable_calendar_links = 0;
     for row in &manifest.tables["meetings"] {
         let id = row
             .get("id")
@@ -1232,7 +1233,7 @@ async fn import_manifest_impl(
                 return Err("Archive contains unsupported data columns.".into());
             }
             if *table == "meetings" {
-                validate_meeting_metadata(source)?;
+                validate_reviewed_actions(source)?;
             }
             let parent = source
                 .get(if *table == "meetings" {
@@ -1270,6 +1271,17 @@ async fn import_manifest_impl(
                 }
             }
             if *table == "meetings" {
+                // One unreadable link must not block the restore. The meeting is
+                // kept and only its link is cleared; the title then stays local.
+                let readable = match row.get("calendar_link") {
+                    Some(Value::String(link)) => super::calendar::decode(link).is_ok(),
+                    None | Some(Value::Null) => true,
+                    _ => false,
+                };
+                if !readable {
+                    row.insert("calendar_link".into(), Value::String("null".into()));
+                    unreadable_calendar_links += 1;
+                }
                 if manifest.files.contains_key(&index)
                     && !stage.path().join(index.to_string()).is_dir()
                 {
@@ -1453,6 +1465,7 @@ async fn import_manifest_impl(
         meetings: selected.len(),
         skipped,
         files: files + document_files,
+        unreadable_calendar_links,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
     })
 }
@@ -3059,6 +3072,39 @@ mod tests {
                     .unwrap(),
                 (!legacy).then(|| link.clone())
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_calendar_link_does_not_block_a_restore() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for unreadable in ["{not json", "{\"eventId\": \"two words\"}"] {
+            let (mut manifest, folders) = snapshot(&pool).await.unwrap();
+            manifest.tables.get_mut("meetings").unwrap()[0]
+                .insert("calendar_link".into(), Value::String(unreadable.into()));
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("calendar.zip");
+            write_archive(&archive, manifest, folders).unwrap();
+            sqlx::query("DELETE FROM meetings")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+            let report = import_manifest(&pool, manifest, stage).await.unwrap();
+            assert_eq!(report.meetings, 1);
+            assert_eq!(report.unreadable_calendar_links, 1);
+            assert!(super::super::calendar::read(&pool, "review-test")
+                .await
+                .unwrap()
+                .is_none());
+            let transcripts: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM transcripts WHERE meeting_id = 'review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(transcripts > 0);
         }
     }
 

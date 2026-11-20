@@ -387,7 +387,7 @@ pub async fn api_get_summary<R: Runtime>(
 
 pub(super) struct MeetingSummaryContext {
     pub(super) prompt: String,
-    pub(super) title: crate::library::calendar::SummaryTitle,
+    pub(super) title: crate::library::calendar::ProviderTitle,
     pub(super) template: String,
 }
 

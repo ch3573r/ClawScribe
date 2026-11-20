@@ -598,6 +598,52 @@ pub async fn history(
     Ok(messages)
 }
 
+/// Titles of the turn's meetings that must stay on this device.
+async fn withheld_titles(
+    pool: &SqlitePool,
+    sources: &[sqlx::sqlite::SqliteRow],
+) -> Result<Vec<String>, String> {
+    let meetings: std::collections::BTreeSet<String> = sources
+        .iter()
+        .filter_map(|source| source.get::<Option<String>, _>("meeting_id"))
+        .collect();
+    let mut titles = Vec::new();
+    for meeting in meetings {
+        let row: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT substr(title,1,1024),calendar_link FROM meetings WHERE id=?")
+                .bind(&meeting)
+                .fetch_optional(pool)
+                .await
+                .map_err(failure)?;
+        let Some((title, link)) = row else { continue };
+        let shown = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !shown.is_empty()
+            && crate::library::calendar::stored_title_policy(link.as_deref())
+                .for_provider(title)
+                .is_none()
+            && !titles.contains(&shown)
+        {
+            titles.push(shown);
+        }
+    }
+    Ok(titles)
+}
+
+/// Replaces every case-insensitive ASCII match of a withheld title.
+fn redact_title(text: &str, title: &str) -> String {
+    let (haystack, needle) = (text.to_ascii_lowercase(), title.to_ascii_lowercase());
+    let mut redacted = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(&needle) {
+        let start = from + found;
+        redacted.push_str(&text[from..start]);
+        redacted.push_str(crate::library::calendar::WITHHELD_TITLE);
+        from = start + needle.len();
+    }
+    redacted.push_str(&text[from..]);
+    redacted
+}
+
 /// Only verifiable completed turns within the new frozen selection may be sent.
 pub async fn eligible_history(
     pool: &SqlitePool,
@@ -647,7 +693,12 @@ pub async fn eligible_history(
             continue;
         }
         let messages=sqlx::query("SELECT role,content FROM knowledge_messages WHERE request_id=? ORDER BY CASE role WHEN 'user' THEN 0 ELSE 1 END").bind(&id).fetch_all(pool).await.map_err(failure)?;
-        let turn=serde_json::to_string(&messages.iter().map(|message|serde_json::json!({"role":message.get::<String,_>("role"),"content":message.get::<String,_>("content").replace("[K","[previous citation ")})).collect::<Vec<_>>()).map_err(|_|"Invalid saved history")?;
+        // An earlier answer may quote a title that is no longer shared with providers.
+        let withheld = withheld_titles(pool, &sources).await?;
+        let turn=serde_json::to_string(&messages.iter().map(|message|{
+            let content = message.get::<String,_>("content").replace("[K","[previous citation ");
+            serde_json::json!({"role":message.get::<String,_>("role"),"content":withheld.iter().fold(content, |text, title| redact_title(&text, title))})
+        }).collect::<Vec<_>>()).map_err(|_|"Invalid saved history")?;
         if used + turn.len() + 1 > budget {
             continue;
         }
@@ -664,6 +715,20 @@ pub async fn eligible_history(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn earlier_answers_lose_a_title_that_is_no_longer_shared() {
+        assert_eq!(
+            redact_title(
+                "The QUARTERLY planning call decided. Quarterly Planning again.",
+                "Quarterly planning"
+            ),
+            "The Untitled meeting call decided. Untitled meeting again."
+        );
+        assert_eq!(
+            redact_title("Nothing to hide ä", "Quarterly planning"),
+            "Nothing to hide ä"
+        );
+    }
     #[test]
     fn meeting_and_library_request_boundaries_remain_separate() {
         let mut input = request(ConversationOwner::Meeting("fixture".into()));

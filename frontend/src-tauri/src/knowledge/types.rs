@@ -110,7 +110,12 @@ pub struct TextSpan {
 pub struct Passage {
     pub evidence: EvidenceRef,
     pub meeting_id: String,
+    /// The title as the person sees it on this device.
     pub title: String,
+    /// The title a provider may see. `None` withholds a title that came from an
+    /// unreviewed calendar invitation. Never serialized, and absent means withheld.
+    #[serde(default, skip_serializing)]
+    pub provider_title: Option<String>,
     pub date: String,
     pub speaker: Option<String>,
     #[serde(default)]

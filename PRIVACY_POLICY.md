@@ -94,10 +94,13 @@ credential storage. Removing the source stops refreshes and removes the
 local source from the app.
 
 A linked recording saves the event title, invitees and your attendance review
-with the meeting. Library backups can contain those details. Automatic and
-manual summaries send only the calendar names you confirm as present to the
-configured summary provider. Calendar descriptions, attachments and subscription
-URLs are excluded from that context.
+with the meeting. Library backups can contain those details. An event that
+ClawScribe linked automatically stays on your device: its title is not sent to
+a summary or knowledge provider, even when it became the meeting title, and
+nothing is sent about its invitees. When you review the event and save it, the
+title goes to summary and knowledge providers, and summaries receive only the
+names of people you checked as present. Email addresses are never sent. Calendar
+descriptions, attachments and subscription URLs are excluded.
 
 ## Call detection
 

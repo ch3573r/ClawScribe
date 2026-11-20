@@ -312,7 +312,8 @@ export default function PageContent({
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
         disabled={summaryBusy}
         getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
-        attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} disabled={summaryBusy}
+        attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
+          durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
           templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
       {isAudioReady && (
         <SpeakerLaneTimeline

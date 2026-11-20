@@ -1,6 +1,7 @@
 //! Saved-answer orchestration and bounded evidence prompts.
 use super::types::*;
 use super::{conversations, retrieval, store};
+use crate::library::calendar::{stored_title_policy, WITHHELD_TITLE};
 use crate::summary::llm_client::{self, ConfiguredTextReply, ResolvedText, TextEnvironment};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -599,11 +600,15 @@ async fn selection_prompt(
         if passages.iter().any(|row| &row.meeting_id == meeting) {
             continue;
         }
-        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN json_valid(s.result) THEN substr(COALESCE(json_extract(s.result,'$.markdown'),json_extract(s.result,'$.summary'),''),1,?) END FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=? ORDER BY s.updated_at DESC LIMIT 1"
+        let row: Option<(String, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
+            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN json_valid(s.result) THEN substr(COALESCE(json_extract(s.result,'$.markdown'),json_extract(s.result,'$.summary'),''),1,?) END,m.calendar_link,length(m.title)>128 FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=? ORDER BY s.updated_at DESC LIMIT 1"
         ).bind(summary_limit as i64).bind(meeting).fetch_optional(pool).await
             .map_err(|_| "Saved meeting overview unavailable")?;
-        if let Some((title, date, text)) = row {
+        if let Some((title, date, text, link, clipped)) = row {
+            // A title that came from an unreviewed invitation stays on this device.
+            let title = stored_title_policy(link.as_deref())
+                .for_clipped(title, clipped != 0)
+                .unwrap_or_else(|| WITHHELD_TITLE.to_string());
             overviews.push(
                 serde_json::json!({"kind":"saved_summary_overview", "title":title,
                 "date":date, "text":text.filter(|text| !text.trim().is_empty()), "citable":false}),
@@ -662,10 +667,10 @@ fn prompt_row(passage: &Passage, tag: usize) -> serde_json::Value {
     } = &passage.evidence.locator
     {
         return serde_json::json!({"kind":"reference_document","tag":format!("[K{tag}]"),
-            "title":passage.title,"added_at":passage.date,"page":page,"paragraph":paragraph,"spans":spans,
+            "title":passage.provider_title.as_deref().unwrap_or(WITHHELD_TITLE),"added_at":passage.date,"page":page,"paragraph":paragraph,"spans":spans,
             "metadata_incomplete":passage.metadata_truncated,"text":passage.text});
     }
-    serde_json::json!({"tag":format!("[K{tag}]"),"title":passage.title,
+    serde_json::json!({"tag":format!("[K{tag}]"),"title":passage.provider_title.as_deref().unwrap_or(WITHHELD_TITLE),
         "date":passage.date,"speaker":passage.speaker,"metadata_incomplete":passage.metadata_truncated,
         "text":passage.text,"preceding_question_tag":null})
 }
@@ -1883,6 +1888,21 @@ mod tests {
             "Clear must win before the user turn is reserved"
         );
     }
+    #[test]
+    fn a_withheld_title_never_reaches_the_provider_prompt() {
+        let mut automatic = passage("automatic", "2026-09-01", "Public text");
+        automatic.title = "Quarterly planning with an unchecked invitee".into();
+        automatic.provider_title = None;
+        let reviewed = passage("reviewed", "2026-09-02", "More public text");
+        let (prompt, selected) =
+            build_prompt("What was decided?", &[automatic, reviewed], "", 16 * 1024).unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(!prompt.contains("Quarterly planning"));
+        assert!(prompt.contains(WITHHELD_TITLE));
+        // A reviewed or personally chosen title is still shared.
+        assert!(prompt.contains("Public reviewed"));
+    }
+
     fn passage(id: &str, date: &str, text: &str) -> Passage {
         Passage {
             evidence: EvidenceRef {
@@ -1904,6 +1924,7 @@ mod tests {
             },
             meeting_id: id.into(),
             title: format!("Public {id}"),
+            provider_title: Some(format!("Public {id}")),
             date: date.into(),
             speaker: Some("Public speaker".into()),
             metadata_truncated: false,

@@ -773,6 +773,7 @@ pub fn run() {
             library::context::set_meeting_context,
             library::calendar::get_meeting_calendar,
             library::calendar::set_meeting_calendar,
+            library::calendar::migrate_legacy_meeting_calendars,
             library::calendar::get_meeting_series_template,
             library::calendar::set_meeting_series_template,
             library::list_meeting_tags,

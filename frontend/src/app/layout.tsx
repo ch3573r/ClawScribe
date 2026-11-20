@@ -146,7 +146,8 @@ export default function RootLayout({
 
   useEffect(() => {
     void migrateLegacyMeetingContexts().catch(() => toast.error('Could not migrate meeting context. Existing context is retained for retry.'));
-    void migrateLegacyMeetingCalendars().catch(() => toast.error('Could not migrate calendar links. Reopen a meeting to retry.'));
+    // Never rejects: an entry that cannot be saved stays isolated and is retried or set aside.
+    void migrateLegacyMeetingCalendars();
   }, []);
 
   useEffect(() => {

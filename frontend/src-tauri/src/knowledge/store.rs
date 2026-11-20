@@ -564,7 +564,7 @@ pub async fn materialize(
 ) -> Result<Passage, KnowledgeError> {
     let selected = selected.clone();
     let pinned = selected.clone();
-    read_snapshot(pool, pinned, background, move |handle, row, context| {
+    let mut passage = read_snapshot(pool, pinned, background, move |handle, row, context| {
         if span.transcript_id != selected.transcript_id
             || span.end_byte < span.start_byte
             || span.end_byte - span.start_byte > READ_BYTES
@@ -664,6 +664,8 @@ pub async fn materialize(
             },
             meeting_id: selected.meeting_id,
             title,
+            // Decided after the snapshot, from the meeting's calendar link.
+            provider_title: None,
             date,
             speaker,
             metadata_truncated: title_clipped || date_clipped || speaker_clipped,
@@ -671,7 +673,17 @@ pub async fn materialize(
             rank: 0.,
         })
     })
-    .await
+    .await?;
+    if matches!(passage.evidence.locator, EvidenceLocator::Transcript { .. }) {
+        passage.provider_title = crate::library::calendar::knowledge_title(
+            pool,
+            &passage.meeting_id,
+            &passage.title,
+            passage.metadata_truncated,
+        )
+        .await;
+    }
+    Ok(passage)
 }
 
 fn document_passage(
@@ -742,6 +754,7 @@ fn document_passage(
             },
         },
         meeting_id: selected.meeting_id,
+        provider_title: Some(title.clone()),
         title,
         date,
         speaker: None,

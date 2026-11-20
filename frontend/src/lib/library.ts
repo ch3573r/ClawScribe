@@ -5,6 +5,8 @@ export interface LibraryArchiveReport {
   meetings: number;
   skipped: number;
   files: number;
+  /** Restored meetings whose saved calendar link could not be read and was left unlinked. */
+  unreadable_calendar_links?: number;
   incomplete_meetings?: {
     meeting_id: string;
     title: string;

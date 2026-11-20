@@ -259,6 +259,8 @@ includes Microsoft export history from app data, including for meetings without
 a recording folder. Restore preserves task and page duplicate protection and
 saved OneNote sections in the new profile. Existing meetings keep their own
 history. Older archives restore the export history they contain.
+If an archived calendar link cannot be read, restore keeps the meeting and
+reports how many links it left unset.
 Provider settings, credentials, model downloads, UI preferences, and unfinished
 recording recovery spools are excluded. Missing
 recording folders are reported by meeting title without blocking the backup;
