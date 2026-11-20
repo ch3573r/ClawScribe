@@ -117,6 +117,7 @@ try {
         "audio::outcome::tests",
         "audio::retranscription::tests",
         "audio::import::tests",
+        "audio::import::phase_tests",
         "audio::diarization::tests",
         "api::",
         "external_url::tests",

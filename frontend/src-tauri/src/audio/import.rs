@@ -287,6 +287,38 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
     })
 }
 
+/// Compute duration from track codec parameters.
+///
+/// MP4 and Matroska/WebM containers store `n_frames` as timestamp ticks in
+/// `time_base` units, not as PCM sample counts. When `time_base` is available
+/// it is converted via `TimeBase::calc_time`, which uses integer arithmetic to
+/// avoid f64 precision loss at high tick counts. `sample_rate` is the fallback
+/// for containers such as WAV that express `n_frames` as PCM sample counts.
+fn duration_from_params(
+    time_base: Option<symphonia::core::units::TimeBase>,
+    sample_rate: Option<u32>,
+    n_frames: u64,
+) -> Option<f64> {
+    if let Some(tb) = time_base {
+        if tb.denom > 0 {
+            let t = tb.calc_time(n_frames);
+            let secs = t.seconds as f64 + t.frac;
+            if secs.is_finite() && secs > 0.0 {
+                return Some(secs);
+            }
+        }
+    }
+    if let Some(rate) = sample_rate {
+        if rate > 0 {
+            let secs = n_frames as f64 / rate as f64;
+            if secs.is_finite() && secs > 0.0 {
+                return Some(secs);
+            }
+        }
+    }
+    None
+}
+
 /// Extract duration from audio file metadata without full decode
 /// Returns an error when the container does not expose duration metadata.
 pub(super) fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
@@ -321,24 +353,21 @@ pub(super) fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
 
     // Find the first audio track
     use symphonia::core::codecs::CODEC_TYPE_NULL;
-    let (sample_rate, n_frames) = format
+    let duration_seconds = format
         .tracks()
         .iter()
         .filter(|track| track.codec_params.codec != CODEC_TYPE_NULL)
         .find_map(|track| {
-            Some((
-                track.codec_params.sample_rate?,
-                track.codec_params.n_frames?,
-            ))
+            let n_frames = track.codec_params.n_frames?;
+            duration_from_params(
+                track.codec_params.time_base,
+                track.codec_params.sample_rate,
+                n_frames,
+            )
         })
         .ok_or_else(|| anyhow!("Audio duration not available in metadata"))?;
 
-    let duration_seconds = n_frames as f64 / sample_rate as f64;
-
-    debug!(
-        "Extracted metadata: {}Hz, {} frames, {:.2}s",
-        sample_rate, n_frames, duration_seconds
-    );
+    debug!("Extracted metadata duration: {:.2}s", duration_seconds);
 
     super::provenance::measured_duration(Some(duration_seconds))
         .ok_or_else(|| anyhow!("Invalid audio duration"))
@@ -1822,6 +1851,25 @@ mod tests {
         );
     }
 
+    // End-to-end demux probe of a real M4A container. This exercises the
+    // time_base branch of duration_from_params: Symphonia's ISOBMFF reader sets
+    // time_base from the mdhd time-scale box, so n_frames are ticks — not PCM
+    // sample counts.  Using sample_rate alone would give the wrong answer for
+    // HE-AAC whose SBR doubling makes the codec rate differ from the container
+    // time-scale.
+    #[test]
+    fn extract_duration_from_m4a_fixture_uses_time_base_path() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/he_aac_48k_5s.m4a");
+        let duration = extract_duration_from_metadata(&path)
+            .expect("should probe m4a duration without full decode");
+        assert!(
+            (duration - 5.16).abs() < 0.5,
+            "M4A duration {:.2}s outside expected ~5.16s",
+            duration
+        );
+    }
+
     #[test]
     fn test_validate_audio_file_with_metadata() {
         let test_path = std::env::temp_dir().join("clawscribe-test-validation.wav");
@@ -2209,5 +2257,55 @@ mod phase_tests {
         // Dropping the guard (declared after the job registration) ends the
         // window before the registration is cleared.
         assert!(!cancel_import_if_possible(), "the finished job refuses a cancel");
+    }
+
+    // ── duration_from_params via TimeBase::calc_time ───────────────────────
+
+    fn tb(numer: u32, denom: u32) -> symphonia::core::units::TimeBase {
+        symphonia::core::units::TimeBase { numer, denom }
+    }
+
+    // Matroska/WebM: n_frames are nanosecond ticks (time_base = 1/1_000_000_000).
+    // sample_rate = 48_000 would give 5_000_000_000 / 48_000 ≈ 104_167 s — wrong.
+    // calc_time must yield exactly 5 s.
+    #[test]
+    fn duration_matroska_nanosecond_time_base_ignores_sample_rate() {
+        let secs = duration_from_params(Some(tb(1, 1_000_000_000)), Some(48_000), 5_000_000_000);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // Matroska/WebM millisecond time_base (common in WebM containers).
+    // sample_rate = 44_100 would give 5_000 / 44_100 ≈ 0.113 s — wrong.
+    #[test]
+    fn duration_matroska_millisecond_time_base() {
+        let secs = duration_from_params(Some(tb(1, 1_000)), Some(44_100), 5_000);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // MP4: 90 kHz tick clock — common for ISOBMFF video and some audio tracks.
+    // sample_rate = 44_100 would give 450_000 / 44_100 ≈ 10.2 s — wrong.
+    #[test]
+    fn duration_mp4_90khz_time_base_ignores_sample_rate() {
+        let secs = duration_from_params(Some(tb(1, 90_000)), Some(44_100), 450_000);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // WAV has no time_base; sample_rate is the correct fallback.
+    #[test]
+    fn duration_wav_no_time_base_uses_sample_rate() {
+        let secs = duration_from_params(None, Some(44_100), 220_500);
+        assert!((secs.unwrap() - 5.0).abs() < 1e-6, "got {:?}", secs);
+    }
+
+    // No time_base and no sample_rate → None.
+    #[test]
+    fn duration_no_params_returns_none() {
+        assert!(duration_from_params(None, None, 44_100).is_none());
+    }
+
+    // Zero n_frames → None (not a valid duration).
+    #[test]
+    fn duration_zero_frames_returns_none() {
+        assert!(duration_from_params(Some(tb(1, 1_000)), Some(44_100), 0).is_none());
     }
 }

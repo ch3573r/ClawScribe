@@ -72,7 +72,7 @@ export function visibleSelection(selected: ReadonlySet<string>, visible: readonl
 
 export function archiveRecordingFacts(row: Pick<ArchiveRow, 'recording_source' | 'duration_seconds'>): string[] {
   const facts: string[] = [];
-  if (row.recording_source === 'recording') facts.push('Recording');
+  if (row.recording_source === 'recording') facts.push('Recorded');
   if (row.recording_source === 'import') facts.push('Imported audio');
   const duration = row.duration_seconds;
   if (duration != null && Number.isFinite(duration) && duration > 0) {

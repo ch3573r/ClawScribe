@@ -58,14 +58,22 @@ test('audio-only meetings need transcription while an active summary is only a s
 
 test('archive shows measured audio-only duration and omits unknown legacy facts', () => {
   assert.deepEqual(Array.from(archiveRecordingFacts({
-    recording_source: 'recording', duration_seconds: 93, has_transcript: false,
-  })), ['Recording', '1m 33s']);
+    recording_source: 'recording', duration_seconds: 93,
+  })), ['Recorded', '1m 33s']);
   assert.deepEqual(Array.from(archiveRecordingFacts({
     recording_source: 'import', duration_seconds: null,
   })), ['Imported audio']);
   assert.deepEqual(Array.from(archiveRecordingFacts({
     recording_source: null, duration_seconds: null,
   })), []);
+});
+
+test('recorded and imported audio source labels are distinct', () => {
+  const recorded = archiveRecordingFacts({ recording_source: 'recording', duration_seconds: null });
+  const imported = archiveRecordingFacts({ recording_source: 'import', duration_seconds: null });
+  assert.notEqual(recorded[0], imported[0]);
+  assert.equal(recorded[0], 'Recorded');
+  assert.equal(imported[0], 'Imported audio');
 });
 
 test('filtered-out selections cannot enter a bulk operation', () => {

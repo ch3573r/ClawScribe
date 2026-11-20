@@ -211,6 +211,7 @@ export function ArchiveMeetingRows({
         {metadata !== null && (needsAttention.length > 0 || showAttentionOnly) && !selecting && (
           <Button variant={showAttentionOnly ? "secondary" : "ghost"} size="sm"
             aria-pressed={showAttentionOnly}
+            aria-label={`Needs attention (${needsAttention.length})`}
             onClick={() => setShowAttentionOnly(prev => !prev)}>
             {showAttentionOnly ? "All meetings" : `Needs attention (${needsAttention.length})`}
           </Button>
