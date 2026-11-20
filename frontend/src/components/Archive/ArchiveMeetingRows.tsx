@@ -11,7 +11,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { archiveReview, formatArchiveDate, visibleSelection, type ArchiveAction, type ArchiveRow } from "@/lib/archive-review";
+import { archiveRecordingFacts, archiveReview, formatArchiveDate, visibleSelection, type ArchiveAction, type ArchiveRow } from "@/lib/archive-review";
 import { ArchiveAudioRemoval, type ArchiveMeeting } from "./ArchiveAudioRemoval";
 
 const selectionLimit = 100;
@@ -49,6 +49,7 @@ export function ArchiveMeetingRows({
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [removal, setRemoval] = useState<ArchiveMeeting[] | null>(null);
+  const [showAttentionOnly, setShowAttentionOnly] = useState(false);
   const removalOpener = useRef<HTMLElement | null>(null);
   const request = useRef(0);
   const refresh = useCallback(async () => {
@@ -85,7 +86,13 @@ export function ArchiveMeetingRows({
     return () => window.clearInterval(timer);
   }, [active, refresh, summaryRunning]);
 
-  const filteredIds = useMemo(() => meetings.map(meeting => meeting.id), [meetings]);
+  const filteredIds = useMemo(
+    () => (showAttentionOnly
+      ? meetings.filter(meeting => { const row = metadata?.get(meeting.id); return row ? archiveReview(row).needsAttention : false; })
+      : meetings
+    ).map(meeting => meeting.id),
+    [meetings, metadata, showAttentionOnly],
+  );
   const visibleSelected = visibleSelection(selected, filteredIds);
   useEffect(() => {
     setSelected(current => {
@@ -111,7 +118,7 @@ export function ArchiveMeetingRows({
     (row && archiveReview(row).needsAttention ? needsAttention : otherMeetings).push(meeting);
   }
 
-  const stack = [...needsAttention, ...otherMeetings];
+  const stack = showAttentionOnly ? needsAttention : [...needsAttention, ...otherMeetings];
   const bulkCandidates = stack.filter(meeting => visibleSelected.has(meeting.id));
   const handleRemoved = (ids: string[]) => {
     const removed = new Set(ids);
@@ -156,6 +163,7 @@ export function ArchiveMeetingRows({
         </Tooltip>
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span>{formatArchiveDate(meeting.created_at)}</span>
+          {row && archiveRecordingFacts(row).map(fact => <span key={fact}>{fact}</span>)}
           {review && <>
             <span>{review.transcript}</span>
             <span className={review.summary === "Summary needs retry" ? "text-warning-foreground" : undefined}>{review.summary}</span>
@@ -200,20 +208,35 @@ export function ArchiveMeetingRows({
               setRemoval(bulkCandidates);
             }}>Review selected audio</Button>
         </>}
+        {metadata !== null && (needsAttention.length > 0 || showAttentionOnly) && !selecting && (
+          <Button variant={showAttentionOnly ? "secondary" : "ghost"} size="sm"
+            aria-pressed={showAttentionOnly}
+            onClick={() => setShowAttentionOnly(prev => !prev)}>
+            {showAttentionOnly ? "All meetings" : `Needs attention (${needsAttention.length})`}
+          </Button>
+        )}
         <Button variant="ghost" size="sm" onClick={() => {
           setSelecting(!selecting);
           setSelected(new Set());
         }}>{selecting ? "Clear selection" : "Select meetings"}</Button>
       </div>
     </div>
-    {needsAttention.length > 0 && <section aria-labelledby="archive-attention-heading" className="border-b border-border">
-      <h2 id="archive-attention-heading" className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Meetings that need attention</h2>
-      <ul className="divide-y divide-border">{needsAttention.map(meeting => renderRow(meeting, true))}</ul>
-    </section>}
-    {otherMeetings.length > 0 && <>
-      {needsAttention.length > 0 && <h2 className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Other meetings</h2>}
-      <ul className="divide-y divide-border">{otherMeetings.map(meeting => renderRow(meeting, false))}</ul>
-    </>}
+    {showAttentionOnly
+      ? (needsAttention.length > 0
+          ? <ul className="divide-y divide-border">{needsAttention.map(meeting => renderRow(meeting, true))}</ul>
+          : <p role="status" className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">No meetings need attention.</p>
+        )
+      : <>
+          {needsAttention.length > 0 && <section aria-labelledby="archive-attention-heading" className="border-b border-border">
+            <h2 id="archive-attention-heading" className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Meetings that need attention</h2>
+            <ul className="divide-y divide-border">{needsAttention.map(meeting => renderRow(meeting, true))}</ul>
+          </section>}
+          {otherMeetings.length > 0 && <>
+            {needsAttention.length > 0 && <h2 className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Other meetings</h2>}
+            <ul className="divide-y divide-border">{otherMeetings.map(meeting => renderRow(meeting, false))}</ul>
+          </>}
+        </>
+    }
     {removal && <ArchiveAudioRemoval meetings={removal} onClose={closeRemoval} onRemoved={handleRemoved} />}
   </TooltipProvider>;
 }

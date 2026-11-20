@@ -289,7 +289,7 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
 
 /// Extract duration from audio file metadata without full decode
 /// Returns an error when the container does not expose duration metadata.
-fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
+pub(super) fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
@@ -321,22 +321,17 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
 
     // Find the first audio track
     use symphonia::core::codecs::CODEC_TYPE_NULL;
-    let track = format
+    let (sample_rate, n_frames) = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| anyhow!("No audio track found in file"))?;
-
-    // Extract duration from metadata
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| anyhow!("Unknown sample rate"))?;
-
-    let n_frames = track
-        .codec_params
-        .n_frames
-        .ok_or_else(|| anyhow!("Frame count not available in metadata"))?;
+        .filter(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .find_map(|track| {
+            Some((
+                track.codec_params.sample_rate?,
+                track.codec_params.n_frames?,
+            ))
+        })
+        .ok_or_else(|| anyhow!("Audio duration not available in metadata"))?;
 
     let duration_seconds = n_frames as f64 / sample_rate as f64;
 
@@ -345,7 +340,8 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
         sample_rate, n_frames, duration_seconds
     );
 
-    Ok(duration_seconds)
+    super::provenance::measured_duration(Some(duration_seconds))
+        .ok_or_else(|| anyhow!("Invalid audio duration"))
 }
 
 #[derive(Clone, Copy)]
@@ -552,23 +548,20 @@ async fn run_import<R: Runtime>(
             }
             match outcome {
                 Ok(outcome) => {
-                    let mut duration_seconds = extract_duration_from_metadata(&dest_path)
-                        .unwrap_or_else(|_| {
-                            outcome
-                                .segments
-                                .iter()
-                                .map(|segment| segment.end_ms)
-                                .fold(0.0_f64, f64::max)
-                                / 1000.0
-                        });
-                    let cloud_segments = if outcome.requires_local_timing_grid {
-                        let (decoded_duration_seconds, timed_segments) =
+                    let (duration_seconds, cloud_segments) = if outcome.requires_local_timing_grid {
+                        let (decoded_duration, timed_segments) =
                             prepare_cloud_import_timing_grid(&app, &dest_path, &outcome.segments)
                                 .await?;
-                        duration_seconds = decoded_duration_seconds;
-                        timed_segments
+                        (Some(decoded_duration), timed_segments)
                     } else {
-                        outcome.segments
+                        let duration = tokio::task::spawn_blocking({
+                            let path = dest_path.clone();
+                            move || extract_duration_from_metadata(&path).ok()
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        (duration, outcome.segments)
                     };
                     let source_language =
                         super::common::transcription_source_language_hint(language.as_deref());
@@ -912,7 +905,7 @@ async fn run_import<R: Runtime>(
         &mut folder_guard,
         &title,
         &dest_filename,
-        duration_seconds,
+        Some(duration_seconds),
         &all_transcripts,
         used_provider,
         &used_model,
@@ -964,7 +957,7 @@ async fn save_import_transcripts<R: Runtime>(
     folder_guard: &mut ImportFolderGuard,
     title: &str,
     dest_filename: &str,
-    duration_seconds: f64,
+    duration_seconds: Option<f64>,
     all_transcripts: &[TranscribedSegment],
     used_provider: &str,
     used_model: &str,
@@ -994,6 +987,7 @@ async fn save_import_transcripts<R: Runtime>(
         meeting_folder.to_string_lossy().to_string(),
         failed_segments > 0,
         options.date,
+        duration_seconds,
     )
     .await?;
     folder_guard.committed = true;
@@ -1047,7 +1041,7 @@ async fn save_import_transcripts<R: Runtime>(
         meeting_id,
         title: title.to_string(),
         segments_count: segments.len(),
-        duration_seconds,
+        duration_seconds: duration_seconds.unwrap_or_default(),
     })
 }
 
@@ -1071,8 +1065,10 @@ pub(crate) async fn create_meeting_with_transcripts(
     folder_path: String,
     transcription_incomplete: bool,
     date: ImportDate,
+    duration_seconds: Option<f64>,
 ) -> Result<String> {
     let meeting_id = format!("meeting-{}", Uuid::new_v4());
+    let provenance = super::provenance::RecordingProvenance::import(duration_seconds);
 
     // Start transaction
     let mut conn = pool
@@ -1085,14 +1081,17 @@ pub(crate) async fn create_meeting_with_transcripts(
 
     // Insert meeting
     sqlx::query(
-        "INSERT INTO meetings (id, title, created_at, updated_at, folder_path)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO meetings (id, title, created_at, updated_at, folder_path,
+                               recording_source, recording_duration_s)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&meeting_id)
     .bind(title)
     .bind(date.meeting_date())
     .bind(date.imported_at)
     .bind(&folder_path)
+    .bind(provenance.source)
+    .bind(provenance.duration_seconds)
     .execute(&mut *tx)
     .await
     .map_err(|e| anyhow!("Failed to create meeting: {}", e))?;
@@ -1312,7 +1311,7 @@ fn write_import_metadata(
     folder: &Path,
     meeting_id: &str,
     title: &str,
-    duration_seconds: f64,
+    duration_seconds: Option<f64>,
     audio_filename: &str,
     source: &str,
     transcription_provider: &str,
@@ -1332,6 +1331,7 @@ fn write_import_metadata(
         "imported_at": date.imported_at.to_rfc3339(),
         "meeting_date_source": date.provenance(),
         "duration_seconds": duration_seconds,
+        "duration_measured": duration_seconds.is_some(),
         "audio_file": audio_filename,
         "transcript_file": "transcripts.json",
         "status": "completed",
@@ -1680,6 +1680,7 @@ mod tests {
             folder.path().to_string_lossy().into(),
             failed > 0,
             ImportDate::default(),
+            Some(120.5),
         )
         .await
         .unwrap();
@@ -1692,11 +1693,19 @@ mod tests {
         .unwrap();
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
-                .bind(id)
+                .bind(&id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert!(incomplete);
+        let facts: (String, f64) = sqlx::query_as(
+            "SELECT recording_source, recording_duration_s FROM meetings WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(facts, ("import".into(), 120.5));
         assert_eq!(count, 2);
         assert_eq!(failed, 1);
     }
@@ -1726,6 +1735,23 @@ mod tests {
         }
 
         std::fs::write(path, bytes).expect("write test wav");
+    }
+
+    #[test]
+    fn recovery_measures_the_selected_audio_and_ignores_legacy_transcript_duration() {
+        let folder = tempfile::tempdir().unwrap();
+        let marker = serde_json::json!({
+            "recording_mode": "audio_only", "duration_seconds": 12.0,
+        });
+        let measure = |marker: &serde_json::Value| {
+            super::super::interrupted::recovered_provenance(folder.path(), marker, None)
+        };
+        assert_eq!(measure(&marker).source, Some("recording"));
+        assert_eq!(measure(&marker).duration_seconds, None);
+        write_test_wav(&folder.path().join("unrelated.wav"));
+        assert_eq!(measure(&marker).duration_seconds, None);
+        write_test_wav(&folder.path().join("audio-recovered.wav"));
+        assert_eq!(measure(&marker).duration_seconds, Some(0.1));
     }
 
     #[test]
@@ -2004,6 +2030,7 @@ mod tests {
             "C:\\recordings\\speaker-persistence".to_string(),
             false,
             ImportDate::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2027,7 +2054,7 @@ mod tests {
             dir.path(),
             "meeting-123",
             "Test Meeting",
-            1800.0,
+            Some(1800.0),
             "audio.mp4",
             "import",
             "parakeet",

@@ -273,7 +273,7 @@ export default function MeetingsPage() {
                   <SelectItem value="title">Title A-Z</SelectItem>
                 </SelectContent>
               </Select></div>
-              {!hasQuery && !invalidDates && <span className="whitespace-nowrap" aria-live="polite">{hasScope ? `${shownCount} of ${meetings.length} meetings` : `${meetings.length} meetings`}</span>}
+              {!hasQuery && !invalidDates && <span className="whitespace-nowrap" aria-live="polite">{hasScope ? `${shownCount} of ${meetings.length} meeting${meetings.length !== 1 ? 's' : ''}` : `${meetings.length} meeting${meetings.length !== 1 ? 's' : ''}`}</span>}
             </div>
           </div>
         )}

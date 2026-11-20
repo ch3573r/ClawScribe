@@ -9,8 +9,10 @@ use std::{
     fs::{self, File, Metadata},
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tauri::{AppHandle, Manager};
+use tokio::sync::OwnedSemaphorePermit;
 
 #[cfg(windows)]
 mod windows_file;
@@ -30,14 +32,20 @@ const UNAVAILABLE: &str = "The recording folder is unavailable or outside the re
 const RECOVERY_PENDING: &str =
     "Keep the audio while this recording has recovery files or needs review.";
 const CHANGED: &str = "The saved audio changed. Review it again before removing it.";
+const FOLDER_CHANGED: &str = "The recording folder changed during removal. Try again.";
+const FOLDER_CLAIMS_CHANGED: &str =
+    "Recording folder ownership changed. Review the saved audio again.";
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct ArchiveFolder {
     id: String,
     folder_path: String,
     has_transcript: bool,
     needs_recovery: bool,
 }
+
+const FOLDER_CLAIMS_QUERY: &str = "SELECT id, folder_path FROM meetings
+    WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> '' ORDER BY id";
 
 const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path,
     EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id = m.id) AS has_transcript,
@@ -49,7 +57,7 @@ const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path,
     WHERE m.folder_path IS NOT NULL AND TRIM(m.folder_path) <> ''";
 
 async fn folders(pool: &SqlitePool) -> Result<Vec<ArchiveFolder>, String> {
-    sqlx::query_as(FOLDERS_QUERY)
+    sqlx::query_as(&format!("{FOLDERS_QUERY} ORDER BY m.id"))
         .fetch_all(pool)
         .await
         .map_err(|_| "Could not read recording folders".into())
@@ -212,6 +220,42 @@ struct Candidate {
     _directories: Vec<File>,
 }
 
+fn owned_audio_path(folder: &Path, id: &str) -> Result<PathBuf, &'static str> {
+    if recovery_present(folder)?
+        || read_small_json::<RecordingOutcome>(&folder.join("recording-outcome.json"))?
+            .is_some_and(|outcome| outcome.needs_recovery())
+    {
+        return Err(RECOVERY_PENDING);
+    }
+    let marker = read_small_json(&folder.join("metadata.json"))?.ok_or(UNVERIFIED)?;
+    let name = owned_audio_name(&marker, id).ok_or(UNVERIFIED)?;
+    for entry in fs::read_dir(folder).map_err(|_| UNAVAILABLE)? {
+        let entry = entry.map_err(|_| UNAVAILABLE)?;
+        if entry.file_name() != name.as_str() && audio_extension(&entry.path()) {
+            return Err("This folder contains another audio file. Its saved audio was kept.");
+        }
+    }
+    Ok(folder.join(name))
+}
+
+fn audio_revision(file: &File, path: &Path, id: &str) -> Result<(u64, String), &'static str> {
+    let metadata = file.metadata().map_err(|_| UNVERIFIED)?;
+    if !metadata.is_file() || linked(&metadata) || metadata.len() == 0 {
+        return Err(UNVERIFIED);
+    }
+    let identity = platform::file_identity(file).map_err(|_| UNVERIFIED)?;
+    let modified = metadata.modified().map_err(|_| UNVERIFIED)?;
+    let revision = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{id:?}\n{:?}\n{identity:?}\n{modified:?}\n{}",
+            path_key(path),
+            metadata.len()
+        ))
+    );
+    Ok((metadata.len(), revision))
+}
+
 fn inspect_candidate(
     roots: &[PathBuf],
     rows: &[ArchiveFolder],
@@ -245,23 +289,7 @@ fn inspect_candidate(
     } else {
         Vec::new()
     };
-    if recovery_present(&folder)?
-        || read_small_json::<RecordingOutcome>(&folder.join("recording-outcome.json"))?
-            .is_some_and(|outcome| outcome.needs_recovery())
-    {
-        return Err(RECOVERY_PENDING);
-    }
-    let marker = read_small_json(&folder.join("metadata.json"))?.ok_or(UNVERIFIED)?;
-    let name = owned_audio_name(&marker, id).ok_or(UNVERIFIED)?;
-    for entry in fs::read_dir(&folder).map_err(|_| UNAVAILABLE)? {
-        let entry = entry.map_err(|_| UNAVAILABLE)?;
-        // Keep a folder with alternate audio, including recovered copies. Playback
-        // must not silently switch to a different file after removal.
-        if entry.file_name() != name.as_str() && audio_extension(&entry.path()) {
-            return Err("This folder contains another audio file. Its saved audio was kept.");
-        }
-    }
-    let path = folder.join(name);
+    let path = owned_audio_path(&folder, id)?;
     let metadata = fs::symlink_metadata(&path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             "No saved audio was found."
@@ -273,23 +301,10 @@ fn inspect_candidate(
         return Err(UNVERIFIED);
     }
     let file = platform::open_audio(&path, removing).map_err(|_| UNVERIFIED)?;
-    let metadata = file.metadata().map_err(|_| UNVERIFIED)?;
-    if !metadata.is_file() || linked(&metadata) || metadata.len() == 0 {
-        return Err(UNVERIFIED);
-    }
-    let identity = platform::file_identity(&file).map_err(|_| UNVERIFIED)?;
-    let modified = metadata.modified().map_err(|_| UNVERIFIED)?;
-    let revision = format!(
-        "{:x}",
-        Sha256::digest(format!(
-            "{id:?}\n{:?}\n{identity:?}\n{modified:?}\n{}",
-            path_key(&path),
-            metadata.len()
-        ))
-    );
+    let (bytes, revision) = audio_revision(&file, &path, id)?;
     Ok(Candidate {
         path,
-        bytes: metadata.len(),
+        bytes,
         revision,
         file,
         _directories: directories,
@@ -343,14 +358,75 @@ pub(crate) struct AudioRemovalResult {
     reason: Option<&'static str>,
 }
 
-fn remove_reviewed_copy(candidate: Candidate, revision: &str) -> Result<u64, &'static str> {
-    if candidate.revision != revision {
+// Reserve SQLite for one file. Compare the folder ownership snapshot first, so
+// aliases added or reassigned by a concurrent writer invalidate the candidate
+// without resolving every registered directory under the write reservation.
+async fn remove_prepared(
+    pool: &SqlitePool,
+    roots: &[PathBuf],
+    request: &AudioRemovalRequest,
+    rows: &[ArchiveFolder],
+    candidate: Candidate,
+    job: Arc<OwnedSemaphorePermit>,
+) -> Result<u64, &'static str> {
+    if candidate.revision != request.revision {
         return Err(CHANGED);
     }
-    platform::remove_audio(&candidate.path, &candidate.file).map_err(|_| {
-        "Could not remove the saved audio. Close any player using it and try again."
-    })?;
-    Ok(candidate.bytes)
+
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| "Could not lock the library. Try again.")?;
+    let claims: Vec<(String, String)> = sqlx::query_as(FOLDER_CLAIMS_QUERY)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| "Could not re-read recording folders.")?;
+    if !claims
+        .iter()
+        .map(|(id, path)| (id, path))
+        .eq(rows.iter().map(|row| (&row.id, &row.folder_path)))
+    {
+        return Err(FOLDER_CLAIMS_CHANGED);
+    }
+    let current: ArchiveFolder = sqlx::query_as(&format!("{FOLDERS_QUERY} AND m.id = ?"))
+        .bind(&request.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| FOLDER_CHANGED)?;
+    if current.needs_recovery {
+        return Err(RECOVERY_PENDING);
+    }
+    if !current.has_transcript {
+        return Err("Save a transcript before removing this recording's audio.");
+    }
+
+    let roots = roots.to_vec();
+    let result = tokio::task::spawn_blocking(move || {
+        // Keep the reservation and job permit until after the delete handle
+        // closes, including when the invoking task is cancelled.
+        let _job = job;
+        let result = (|| {
+            let folder = safe_folder(Path::new(&current.folder_path), &roots)?;
+            let path = owned_audio_path(&folder, &current.id)?;
+            if path != candidate.path
+                || audio_revision(&candidate.file, &path, &current.id)?.1 != candidate.revision
+            {
+                return Err(CHANGED);
+            }
+            platform::remove_audio(&candidate.path, &candidate.file).map_err(|_| {
+                "Could not remove the saved audio. Close any player using it and try again."
+            })?;
+            Ok(candidate.bytes)
+        })();
+        drop(candidate);
+        (tx, result)
+    })
+    .await
+    .map_err(|_| "Could not finish removing saved audio.")?;
+    let (tx, result) = result;
+    // The transaction reserves the writer and makes no database changes.
+    let _ = tx.rollback().await;
+    result
 }
 
 async fn remove_selected(
@@ -358,36 +434,43 @@ async fn remove_selected(
     roots: Vec<PathBuf>,
     requests: Vec<AudioRemovalRequest>,
 ) -> Result<Vec<AudioRemovalResult>, String> {
-    let job = crate::audio::inference::claim_job()?;
-    // Prevent another save from attaching one of these folders while files are
-    // being removed. There is no database mutation to reconcile with deletion.
-    let mut tx = pool
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|_| "Could not lock the library. Try again.")?;
-    let rows = sqlx::query_as(FOLDERS_QUERY)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| "Could not read recording folders")?;
-    tokio::task::spawn_blocking(move || {
-        let _job = job;
-        let _library = tx;
-        let canonical = canonical_folders(&roots, &rows);
-        requests
-            .into_iter()
-            .map(|request| {
-                let result = inspect_candidate(&roots, &rows, &canonical, &request.id, true)
-                    .and_then(|candidate| remove_reviewed_copy(candidate, &request.revision));
-                AudioRemovalResult {
-                    id: request.id,
-                    removed_bytes: result.ok(),
-                    reason: result.err(),
-                }
+    let job = Arc::new(crate::audio::inference::claim_job()?);
+    let rows = Arc::new(folders(&pool).await?);
+    let canonical = {
+        let roots = roots.clone();
+        let rows = rows.clone();
+        tokio::task::spawn_blocking(move || Arc::new(canonical_folders(&roots, &rows)))
+            .await
+            .map_err(|_| "Could not locate recording folders")?
+    };
+
+    let mut results = Vec::with_capacity(requests.len());
+    for request in requests {
+        let candidate = {
+            let roots = roots.clone();
+            let rows = rows.clone();
+            let canonical = canonical.clone();
+            let id = request.id.clone();
+            tokio::task::spawn_blocking(move || {
+                inspect_candidate(&roots, &rows, &canonical, &id, true)
             })
-            .collect()
-    })
-    .await
-    .map_err(|_| "Could not finish removing saved audio".into())
+            .await
+        };
+        let result = match candidate {
+            Ok(Ok(candidate)) => {
+                remove_prepared(&pool, &roots, &request, &rows, candidate, job.clone()).await
+            }
+            Ok(Err(reason)) => Err(reason),
+            Err(_) => Err(UNAVAILABLE),
+        };
+        results.push(AudioRemovalResult {
+            id: request.id,
+            removed_bytes: result.ok(),
+            reason: result.err(),
+        });
+        tokio::task::yield_now().await;
+    }
+    Ok(results)
 }
 
 fn validate_selection<'a>(ids: impl ExactSizeIterator<Item = &'a str>) -> Result<(), String> {

@@ -3,9 +3,12 @@
 ## Archive review and storage
 
 Open **Meetings → Archive** to see transcript and summary status alongside
-titles, dates, and project tags. **Meetings that need attention** puts saved
+titles, dates, and project tags. The archive shows whether audio was recorded or
+imported and its measured duration when available, including audio-only recordings.
+Older meetings may have no duration or source. **Meetings that need attention** puts saved
 meetings with recording warnings, missing transcripts, or failed or cancelled
-summary jobs before the rest of the archive. The title and project filters
+summary jobs before the rest of the archive. Select **Needs attention** to show
+only those meetings. The title and project filters
 apply to both groups. Use the row action to open transcription, review the
 recording, retry a recording-folder copy, or return to the summary. Starting transcription or generation
 still requires a choice in the existing meeting tools. A missing summary
@@ -29,7 +32,7 @@ changes to the recording-folder copy are pending. Older recordings, including
 older retranscriptions, may lack the information needed to verify ownership.
 
 Removal is permanent and turns off playback and retranscription from that
-copy. The meeting, transcript, summaries, notes, reference originals,
+copy. The meeting, its measured duration and source, transcript, summaries, notes, reference originals,
 recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
 ClawScribe only removes audio after confirmation.

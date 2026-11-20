@@ -331,8 +331,9 @@ endpoint, token, or separate server.
 
 ## Library And Data
 
-**Meetings → Archive** puts meetings that need attention first, with actions
-for incomplete recordings, missing transcripts, and failed summaries. Use
+**Meetings → Archive** shows recording source and measured duration when available.
+Filter to meetings that need attention to find incomplete recordings, missing
+transcripts, and failed summaries. Use
 **Storage** to measure the library or select meetings to review which saved
 audio copies can be removed while keeping their transcripts and notes.
 See [Archive review and storage](docs/local-library.md#archive-review-and-storage).

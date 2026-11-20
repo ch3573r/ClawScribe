@@ -3079,17 +3079,27 @@ mod tests {
         assert!(allowed_file("exports.json"));
     }
     #[tokio::test]
-    async fn calendar_attendance_round_trips_and_older_archives_still_restore() {
+    async fn calendar_and_recording_facts_round_trip_and_older_archives_still_restore() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let link = super::super::calendar::tests::sample();
         super::super::calendar::write(&pool, "review-test", Some(link.clone()), false)
             .await
             .unwrap();
+        sqlx::query(
+            "UPDATE meetings SET recording_source = 'import', recording_duration_s = 93.5
+             WHERE id = 'review-test'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         for legacy in [false, true] {
             let (mut manifest, folders) = snapshot(&pool).await.unwrap();
             if legacy {
-                manifest.tables.get_mut("meetings").unwrap()[0].remove("calendar_link");
+                let row = &mut manifest.tables.get_mut("meetings").unwrap()[0];
+                for column in ["calendar_link", "recording_source", "recording_duration_s"] {
+                    row.remove(column);
+                }
             }
             let root = tempfile::tempdir().unwrap();
             let archive = root.path().join("calendar.zip");
@@ -3105,6 +3115,19 @@ mod tests {
                     .await
                     .unwrap(),
                 (!legacy).then(|| link.clone())
+            );
+            let facts: (Option<String>, Option<f64>) = sqlx::query_as(
+                "SELECT recording_source, recording_duration_s FROM meetings WHERE id = 'review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                facts,
+                (
+                    (!legacy).then(|| "import".into()),
+                    (!legacy).then_some(93.5)
+                )
             );
         }
     }

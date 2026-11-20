@@ -1,7 +1,7 @@
 //! Recording deletion is restricted to unshared, app-owned directories.
 use std::path::{Path, PathBuf};
 
-fn is_link(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
@@ -150,7 +150,10 @@ pub(crate) fn has_invalid_marker_id(marker: &serde_json::Value) -> bool {
     ["meeting_id", "recording_id"].into_iter().any(|field| {
         marker.get(field).is_some_and(|value| !value.is_null())
             && marker_id(marker, field).is_none()
-    })
+    }) || matches!(
+        (recording_id(marker), stamped_meeting_id(marker)),
+        (Some(recording), Some(meeting)) if recording != meeting
+    )
 }
 
 /// Writes the meeting id into the folder's marker so the folder can later be
@@ -295,6 +298,17 @@ pub(crate) fn remove_recording_folder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_conflicting_capture_and_meeting_ids() {
+        let id = "meeting-4f7b980e-b123-4ca9-82e7-927204456483";
+        let mut marker = serde_json::json!({"recording_id": id});
+        assert!(!has_invalid_marker_id(&marker));
+        marker["meeting_id"] = serde_json::json!(id);
+        assert!(!has_invalid_marker_id(&marker));
+        marker["meeting_id"] = serde_json::json!("meeting-3a95bb87-432e-4ec8-8122-92ff46ed794d");
+        assert!(has_invalid_marker_id(&marker));
+    }
 
     fn write_marker(folder: &Path, meeting_id: Option<&str>) {
         let mut marker = serde_json::json!({

@@ -1,4 +1,5 @@
 use crate::api::{TranscriptSearchResult, TranscriptSegment};
+use crate::audio::provenance::RecordingProvenance;
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqlitePool};
 use tracing::{error, info};
@@ -34,6 +35,7 @@ mod recording_save_tests {
                 &[],
                 "synthetic-recording".into(),
                 &outcome,
+                RecordingProvenance::recording(Some(93.5)),
             )
         };
         sqlx::raw_sql("CREATE TRIGGER fail_outcome BEFORE INSERT ON recording_outcomes BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;")
@@ -71,14 +73,15 @@ mod recording_save_tests {
                 "Duplicate",
                 &[],
                 "original-before-restore".into(),
-                &outcome
+                &outcome,
+                RecordingProvenance::recording(Some(500.0)),
             )
             .await
             .unwrap(),
             id
         );
-        let (title, folder, saved_link): (String, String, String) =
-            sqlx::query_as("SELECT title, folder_path, calendar_link FROM meetings WHERE id = ?")
+        let (title, folder, saved_link, source, duration): (String, String, String, String, f64) =
+            sqlx::query_as("SELECT title, folder_path, calendar_link, recording_source, recording_duration_s FROM meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await
@@ -86,6 +89,8 @@ mod recording_save_tests {
         assert_eq!(title, "Synthetic invitation");
         assert_eq!(folder, "synthetic-recording");
         assert_eq!(saved_link, link);
+        assert_eq!(source, "recording");
+        assert_eq!(duration, 93.5);
         let context = crate::library::summary_bookmarks::append_context(&pool, id, String::new())
             .await.unwrap();
         assert!(context.contains("[00:00:42] Check the deployment"));
@@ -126,6 +131,7 @@ mod recording_save_tests {
             .bind(id).execute(&pool).await.unwrap();
         TranscriptsRepository::save_recording_handoff(
             &pool, id, "Recovered meeting", &[], "relocated-folder".into(), &Default::default(),
+            RecordingProvenance::recording(None),
         ).await.unwrap();
         let saved_id: String = sqlx::query_scalar("SELECT meeting_id FROM meeting_bookmarks WHERE id = 'private'")
             .fetch_one(&pool).await.unwrap();
@@ -171,6 +177,7 @@ mod recording_save_tests {
                 &[],
                 id.into(),
                 &Default::default(),
+                RecordingProvenance::recording(None),
             )
             .await
             .unwrap();
@@ -361,16 +368,26 @@ impl TranscriptsRepository {
         folder_path: Option<String>,
         outcome: Option<&crate::audio::outcome::RecordingOutcome>,
     ) -> Result<String, SqlxError> {
-        Self::save_recording(pool, meeting_title, transcripts, folder_path, outcome, None).await
+        Self::save_recording(
+            pool,
+            meeting_title,
+            transcripts,
+            folder_path,
+            outcome,
+            None,
+            RecordingProvenance::default(),
+        )
+        .await
     }
 
-    pub async fn save_recording(
+    pub(crate) async fn save_recording(
         pool: &SqlitePool,
         meeting_title: &str,
         transcripts: &[TranscriptSegment],
         folder_path: Option<String>,
         outcome: Option<&crate::audio::outcome::RecordingOutcome>,
         calendar_link: Option<String>,
+        provenance: RecordingProvenance,
     ) -> Result<String, SqlxError> {
         let meeting_id = format!("meeting-{}", Uuid::new_v4());
         Self::save_with_id(
@@ -382,6 +399,7 @@ impl TranscriptsRepository {
             outcome,
             calendar_link,
             false,
+            provenance,
         )
         .await
     }
@@ -393,6 +411,7 @@ impl TranscriptsRepository {
         transcripts: &[TranscriptSegment],
         folder_path: String,
         outcome: &crate::audio::outcome::RecordingOutcome,
+        provenance: RecordingProvenance,
     ) -> Result<String, SqlxError> {
         Self::save_with_id(
             pool,
@@ -403,6 +422,7 @@ impl TranscriptsRepository {
             Some(outcome),
             None,
             true,
+            provenance,
         )
         .await
     }
@@ -416,6 +436,7 @@ impl TranscriptsRepository {
         outcome: Option<&crate::audio::outcome::RecordingOutcome>,
         calendar_link: Option<String>,
         has_recording_id: bool,
+        provenance: RecordingProvenance,
     ) -> Result<String, SqlxError> {
         let mut conn = pool.acquire().await?;
         // Acquire the write reservation before checking the folder, so concurrent
@@ -476,7 +497,9 @@ impl TranscriptsRepository {
 
         // 1. Create the new meeting
         let result = sqlx::query(
-            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path, calendar_link) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path, calendar_link,
+                                   recording_source, recording_duration_s)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&meeting_id)
         .bind(meeting_title)
@@ -484,6 +507,8 @@ impl TranscriptsRepository {
         .bind(now)
         .bind(&folder_path)
         .bind(draft.or(calendar_link))
+        .bind(provenance.source)
+        .bind(provenance.duration_seconds)
         .execute(&mut *transaction)
         .await;
 

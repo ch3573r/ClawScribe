@@ -44,6 +44,8 @@ pub struct MeetingMetadata {
     pub created_at: String,
     pub completed_at: Option<String>,
     pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub duration_measured: bool,
     pub devices: DeviceInfo,
     pub audio_file: String,
     pub transcript_file: String,
@@ -427,6 +429,7 @@ impl RecordingSaver {
             created_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
             duration_seconds: None,
+            duration_measured: false,
             devices: DeviceInfo {
                 microphone: None, // Could be enhanced to store actual device names
                 system_audio: None,
@@ -518,12 +521,9 @@ impl RecordingSaver {
                     .push("The final transcript snapshot could not be saved.");
             }
             if let Some(metadata) = &mut self.metadata {
-                metadata.duration_seconds = recording_duration.or_else(|| {
-                    self.transcript_segments
-                        .lock()
-                        .ok()
-                        .and_then(|segments| segments.last().map(|segment| segment.audio_end_time))
-                });
+                metadata.duration_seconds =
+                    super::provenance::measured_duration(recording_duration);
+                metadata.duration_measured = metadata.duration_seconds.is_some();
                 metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
                 metadata.status = "error".into();
             }

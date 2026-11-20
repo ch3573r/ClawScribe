@@ -1269,6 +1269,7 @@ async fn import_fixture(
         folder.to_string_lossy().into_owned(),
         false,
         import::ImportDate::default(),
+        None,
     )
     .await
     .map_err(failed("save the imported meeting"))?;

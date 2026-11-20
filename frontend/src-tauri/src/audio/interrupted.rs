@@ -135,6 +135,64 @@ fn regular_file_size(path: &Path) -> Option<u64> {
     (metadata.is_file() && !is_link(&metadata)).then_some(metadata.len())
 }
 
+/// Read duration from the selected recording's saved audio or measured marker.
+/// Legacy markers may contain the last transcript timestamp, so their duration
+/// is only suitable for the interrupted-recording preview.
+pub(crate) fn recovered_provenance(
+    folder: &Path,
+    marker: &Value,
+    recovered_name: Option<&str>,
+) -> RecordingProvenance {
+    use crate::database::meeting_files;
+    let imported = marker["source"].as_str() == Some("import");
+    let recorded = matches!(marker["source"].as_str(), Some("recording"))
+        || matches!(
+            marker["recording_mode"].as_str(),
+            Some("live" | "audio_only")
+        )
+        || meeting_files::recording_id(marker).is_some()
+        || (marker["devices"].is_object() && marker["sample_rate"].is_u64());
+    if !imported && !recorded {
+        return RecordingProvenance::default();
+    }
+    let is_saved_audio = |name: &str| {
+        std::fs::symlink_metadata(folder.join(name)).is_ok_and(|metadata| {
+            metadata.is_file() && !meeting_files::is_link(&metadata) && metadata.len() > 0
+        })
+    };
+    let name = if imported {
+        marker["audio_file"].as_str().filter(|name| {
+            name.strip_prefix("audio.").is_some_and(|ext| {
+                super::constants::AUDIO_EXTENSIONS
+                    .iter()
+                    .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+            }) && is_saved_audio(name)
+        })
+    } else if let Some(name) = recovered_name {
+        FINAL_AUDIO_NAMES
+            .contains(&name)
+            .then_some(name)
+            .filter(|name| is_saved_audio(name))
+    } else {
+        FINAL_AUDIO_NAMES
+            .iter()
+            .copied()
+            .find(|name| is_saved_audio(name))
+    };
+    let duration = name
+        .and_then(|name| super::import::extract_duration_from_metadata(&folder.join(name)).ok())
+        .or_else(|| {
+            (marker["duration_measured"].as_bool() == Some(true))
+                .then(|| marker["duration_seconds"].as_f64())
+                .flatten()
+        });
+    if imported {
+        RecordingProvenance::import(duration)
+    } else {
+        RecordingProvenance::recording(duration)
+    }
+}
+
 /// Files of a capture directory: how many chunk or temporary files, and their bytes.
 fn capture_entries(directory: &Path, accept: impl Fn(&Path) -> bool) -> (u32, u64) {
     let Ok(metadata) = std::fs::symlink_metadata(directory) else { return (0, 0) };
@@ -599,17 +657,18 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     state: tauri::State<'_, crate::state::AppState>,
     folder: String,
 ) -> Result<RepairedRecording, String> {
+    let job = super::inference::claim_job()?;
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
-    let (authorised, meeting_id, transcribes) = tokio::task::spawn_blocking(move || -> Result<(String, String, bool), String> {
+    let (authorised, meeting_id, registered_path, marker) = tokio::task::spawn_blocking(move || {
         let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
         if matches!(active, ActiveFolder::Unknown)
             || matches!(&active, ActiveFolder::Folder(running) if folder_key(running) == folder_key(Path::new(&authorised)))
         {
             return Err("A recording is running. Try again when it has stopped.".into());
         }
-        let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
+        let registered = registered_map(rows.clone(), &roots, REGISTERED_BUDGET);
         let meeting = registered
             .get(&folder_key(Path::new(&authorised)))
             .or_else(|| {
@@ -619,9 +678,10 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
             })
             .cloned()
             .ok_or_else(|| "This recording is not saved in your library".to_string())?;
-        let transcribes = crate::database::meeting_files::read_marker(Path::new(&authorised))
-            .is_some_and(|marker| super::recording_mode::marker_transcribes(&marker));
-        Ok((authorised, meeting, transcribes))
+        let registered_path = rows.into_iter().find_map(|(id, path)| (id == meeting).then_some(path))
+            .ok_or("The recording is no longer saved in your library.")?;
+        let marker = crate::database::meeting_files::read_marker(Path::new(&authorised));
+        Ok::<_, String>((authorised, meeting, registered_path, marker))
     })
     .await
     .map_err(|_| "Could not repair the recording".to_string())??;
@@ -629,22 +689,73 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     let status = super::incremental_saver::recover_audio_in_folder(authorised.clone()).await?;
     let recovered = status.audio_file_path.is_some() && matches!(status.status.as_str(), "success" | "partial");
     if recovered {
-        // The capture has become the audio file: release it, and a complete
-        // recovery also removes legacy checkpoints.
-        let _ = super::incremental_saver::release_registered_capture(state.db_manager.pool(), &authorised).await;
-        if status.status == "success" {
-            let _ = std::fs::remove_dir_all(Path::new(&authorised).join(".checkpoints"));
-        }
+        let transcribes = marker
+            .as_ref()
+            .is_some_and(super::recording_mode::marker_transcribes);
+        let provenance = {
+            let folder = authorised.clone();
+            let recovered_path = status.audio_file_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let name = recovered_path
+                    .as_deref()
+                    .and_then(|path| Path::new(path).file_name())
+                    .and_then(std::ffi::OsStr::to_str);
+                marker
+                    .as_ref()
+                    .zip(name)
+                    .map_or_else(RecordingProvenance::default, |(marker, name)| {
+                        recovered_provenance(Path::new(&folder), marker, Some(name))
+                    })
+            })
+            .await
+            .map_err(|_| "Could not read recovered recording details".to_string())?
+        };
         // The meeting no longer has a failed audio save; a partial recovery says
         // the capture had gaps.
+        let mut tx = state
+            .db_manager
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| "Could not save recovered recording details")?;
+        let meeting = sqlx::query(
+            "UPDATE meetings SET recording_source = COALESCE(recording_source, ?),
+             recording_duration_s = COALESCE(recording_duration_s, ?)
+             WHERE id = ? AND folder_path = ?",
+        )
+        .bind(provenance.source)
+        .bind(provenance.duration_seconds)
+        .bind(&meeting_id)
+        .bind(&registered_path)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Could not save recovered recording details")?;
+        if meeting.rows_affected() != 1 {
+            return Err("The saved recording folder changed during recovery.".into());
+        }
         let updated = sqlx::query(
             "UPDATE recording_outcomes SET audio_save_failed = 0, capture_incomplete = capture_incomplete OR ? WHERE meeting_id = ?",
         )
         .bind(i64::from(status.status == "partial"))
         .bind(&meeting_id)
-        .execute(state.db_manager.pool())
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Could not save recovered recording status")?;
+        tx.commit()
+            .await
+            .map_err(|_| "Could not save recovered recording details")?;
+        // Release capture only once the repaired meeting is committed.
+        let _ = super::incremental_saver::release_registered_capture(
+            state.db_manager.pool(),
+            &authorised,
+        )
         .await;
-        if transcribes && updated.is_ok_and(|result| result.rows_affected() == 1) {
+        if status.status == "success" {
+            let checkpoints = Path::new(&authorised).join(".checkpoints");
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checkpoints)).await;
+        }
+        drop(job);
+        if transcribes && updated.rows_affected() == 1 {
             super::recording_commands::wake_saved_recording_summary(&app, meeting_id.clone());
         }
     }

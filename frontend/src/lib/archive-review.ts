@@ -7,6 +7,10 @@ export interface ArchiveRow extends RecordingOutcome {
   has_summary: boolean;
   summary_status: string | null;
   pending_file_sync: boolean;
+  /** Native capture or file import, when known. */
+  recording_source: 'recording' | 'import' | null;
+  /** Measured duration in seconds, when available. */
+  duration_seconds: number | null;
 }
 
 export type ArchiveAction = 'review' | 'summary' | 'transcribe' | 'files';
@@ -64,6 +68,23 @@ export function archiveReview(row: ArchiveRow): {
 
 export function visibleSelection(selected: ReadonlySet<string>, visible: readonly string[]): Set<string> {
   return new Set(visible.filter(id => selected.has(id)));
+}
+
+export function archiveRecordingFacts(row: Pick<ArchiveRow, 'recording_source' | 'duration_seconds'>): string[] {
+  const facts: string[] = [];
+  if (row.recording_source === 'recording') facts.push('Recording');
+  if (row.recording_source === 'import') facts.push('Imported audio');
+  const duration = row.duration_seconds;
+  if (duration != null && Number.isFinite(duration) && duration > 0) {
+    const seconds = Math.round(duration);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainingSeconds = seconds % 60;
+    facts.push(hours > 0 ? `${hours}h ${minutes}m`
+      : minutes > 0 ? `${minutes}m ${remainingSeconds}s`
+      : `${remainingSeconds}s`);
+  }
+  return facts;
 }
 
 export function formatArchiveBytes(bytes: number): string {

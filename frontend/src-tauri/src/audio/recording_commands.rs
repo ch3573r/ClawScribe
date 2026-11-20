@@ -1731,9 +1731,12 @@ async fn stop_recording_session<R: Runtime>(
             }
         }
 
+        let provenance = super::provenance::RecordingProvenance::recording(
+            manager.get_active_recording_duration(),
+        );
         let handoff = manager
             .recording_id()
-            .map(|id| (id.to_owned(), manager.library_transcripts()));
+            .map(|id| (id.to_owned(), manager.library_transcripts(), provenance));
         (meeting_folder, meeting_name, handoff)
     } else {
         info!("ℹ️ No recording manager available for cleanup");
@@ -1767,13 +1770,13 @@ async fn stop_recording_session<R: Runtime>(
             outcome.recording_files_incomplete = true;
         }
     }
-    let recording_id = handoff.as_ref().map(|(id, _)| id.clone());
+    let recording_id = handoff.as_ref().map(|(id, _, _)| id.clone());
     let (meeting_id, transcript_count) = match (handoff, &folder_path_str, &meeting_name_str) {
-        (Some((recording_id, transcripts)), Some(folder), Some(title)) => {
+        (Some((recording_id, transcripts, provenance)), Some(folder), Some(title)) => {
             let _calendar_edits = crate::library::recording_calendar::EDIT.lock().await;
             let state = app.state::<crate::state::AppState>();
             let saved = crate::database::repositories::transcript::TranscriptsRepository::save_recording_handoff(
-                state.db_manager.pool(), &recording_id, title, &transcripts, folder.clone(), &outcome,
+                state.db_manager.pool(), &recording_id, title, &transcripts, folder.clone(), &outcome, provenance,
             ).await;
             match saved {
                 Ok(id) => {

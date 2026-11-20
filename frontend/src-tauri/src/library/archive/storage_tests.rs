@@ -167,16 +167,26 @@ async fn pending_transcript_copy_blocks_confirmed_audio_removal() {
     let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let fixture = Fixture::new().await;
     let request = fixture.request().await;
+    let rows = folders(&fixture.pool).await.unwrap();
+    let canonical = canonical_folders(&fixture.roots, &rows);
+    let candidate = inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
     sqlx::query("INSERT INTO transcript_file_sync (meeting_id) VALUES ('first')")
         .execute(&fixture.pool)
         .await
         .unwrap();
     assert!(super::super::archive_rows(&fixture.pool).await.unwrap()[0].pending_file_sync);
     assert_eq!(fixture.checks().await[0].reason, Some(RECOVERY_PENDING));
-    let result = remove_selected(fixture.pool.clone(), fixture.roots.clone(), vec![request])
-        .await
-        .unwrap();
-    assert_eq!(result[0].reason, Some(RECOVERY_PENDING));
+    let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+    let result = remove_prepared(
+        &fixture.pool,
+        &fixture.roots,
+        &request,
+        &rows,
+        candidate,
+        job,
+    )
+    .await;
+    assert_eq!(result, Err(RECOVERY_PENDING));
     assert!(fixture.folder.join("audio.mp4").exists());
 }
 
@@ -233,4 +243,79 @@ async fn refuses_audio_hardlinks() {
     fs::hard_link(&original, &audio).unwrap();
     assert!(fixture.checks().await[0].revision.is_none());
     assert!(original.exists());
+}
+
+#[tokio::test]
+async fn refuses_when_folder_claimed_by_new_meeting_at_phase_b() {
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    let request = fixture.request().await;
+    let rows = folders(&fixture.pool).await.unwrap();
+    let canonical = canonical_folders(&fixture.roots, &rows);
+    let candidate = inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
+    add_meeting(&fixture.pool, "second", &fixture.folder.join(".")).await;
+    let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+    let result = remove_prepared(
+        &fixture.pool,
+        &fixture.roots,
+        &request,
+        &rows,
+        candidate,
+        job,
+    )
+    .await;
+    assert_eq!(result, Err(FOLDER_CLAIMS_CHANGED));
+    assert!(fixture.folder.join("audio.mp4").exists());
+}
+
+#[tokio::test]
+async fn unrelated_write_between_phases_does_not_block_removal() {
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    let request = fixture.request().await;
+    let other_folder = fixture.roots[0].join("other");
+    fs::create_dir_all(&other_folder).unwrap();
+    add_meeting(&fixture.pool, "second", &other_folder).await;
+    let rows = folders(&fixture.pool).await.unwrap();
+    let canonical = canonical_folders(&fixture.roots, &rows);
+    let candidate = inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
+    sqlx::query("UPDATE meetings SET title = 'Renamed' WHERE id = 'second'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+    let result = remove_prepared(
+        &fixture.pool,
+        &fixture.roots,
+        &request,
+        &rows,
+        candidate,
+        job,
+    )
+    .await;
+    assert_eq!(result, Ok(11));
+    assert!(!fixture.folder.join("audio.mp4").exists());
+}
+
+#[tokio::test]
+async fn refuses_recovery_directory_created_after_candidate_inspection() {
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    let request = fixture.request().await;
+    let rows = folders(&fixture.pool).await.unwrap();
+    let canonical = canonical_folders(&fixture.roots, &rows);
+    let candidate = inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
+    fs::create_dir(fixture.folder.join(".audio-spool")).unwrap();
+    let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+    let result = remove_prepared(
+        &fixture.pool,
+        &fixture.roots,
+        &request,
+        &rows,
+        candidate,
+        job,
+    )
+    .await;
+    assert_eq!(result, Err(RECOVERY_PENDING));
+    assert!(fixture.folder.join("audio.mp4").exists());
 }

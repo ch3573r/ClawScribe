@@ -3,7 +3,7 @@ import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, flush } from './hook-harness.mjs';
 
-const { archiveReview, visibleSelection } = loadTsModule('src/lib/archive-review.ts');
+const { archiveReview, archiveRecordingFacts, visibleSelection } = loadTsModule('src/lib/archive-review.ts');
 
 const meeting = {
   id: 'meeting',
@@ -54,6 +54,18 @@ test('audio-only meetings need transcription while an active summary is only a s
   const review = archiveReview({ ...meeting, summary_status: 'processing' });
   assert.equal(review.needsAttention, false);
   assert.equal(review.action, 'review');
+});
+
+test('archive shows measured audio-only duration and omits unknown legacy facts', () => {
+  assert.deepEqual(Array.from(archiveRecordingFacts({
+    recording_source: 'recording', duration_seconds: 93, has_transcript: false,
+  })), ['Recording', '1m 33s']);
+  assert.deepEqual(Array.from(archiveRecordingFacts({
+    recording_source: 'import', duration_seconds: null,
+  })), ['Imported audio']);
+  assert.deepEqual(Array.from(archiveRecordingFacts({
+    recording_source: null, duration_seconds: null,
+  })), []);
 });
 
 test('filtered-out selections cannot enter a bulk operation', () => {

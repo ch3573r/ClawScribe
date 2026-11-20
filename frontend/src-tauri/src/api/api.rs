@@ -1474,7 +1474,9 @@ pub async fn api_save_transcript<R: Runtime>(
     // be one the core created for a recording (the session that just ended), or
     // a marked recording inside a recording root being recovered. What is
     // stored and read is the core's own text for it.
-    let (folder_path, recording_id, recovered_live) = match folder_path.filter(|folder| !folder.trim().is_empty()) {
+    let (folder_path, recording_id, recovered_live, marker) = match folder_path
+        .filter(|folder| !folder.trim().is_empty())
+    {
         Some(requested) => {
             let roots = crate::audio::recording_preferences::recording_roots(&app).await;
             // A folder this process created for a recording may be saved again (a
@@ -1483,21 +1485,23 @@ pub async fn api_save_transcript<R: Runtime>(
             // meeting: that one is repaired, not saved a second time.
             let created_here = crate::database::meeting_files::core_folder_text(std::path::Path::new(&requested)).is_some();
             let asked = requested.clone();
-            let (authorised, recording_id, stamped_id, transcribes) = tokio::task::spawn_blocking(move || {
-                use crate::database::meeting_files;
-                let authorised = meeting_files::authorize_new_meeting_folder(&requested, &roots)?;
-                let marker = meeting_files::read_marker(std::path::Path::new(&authorised))
-                    .ok_or("The recording folder is no longer available.")?;
-                if meeting_files::has_invalid_marker_id(&marker) {
-                    return Err("The recording marker has an invalid meeting ID.".into());
-                }
-                let recording_id = meeting_files::recording_id(&marker).map(str::to_owned);
-                let stamped_id = meeting_files::stamped_meeting_id(&marker).map(str::to_owned);
-                let transcribes = crate::audio::recording_mode::marker_transcribes(&marker);
-                Ok::<_, String>((authorised, recording_id, stamped_id, transcribes))
-            })
-            .await
-            .map_err(|_| "Could not check the recording folder".to_string())??;
+            let (authorised, recording_id, stamped_id, transcribes, marker) =
+                tokio::task::spawn_blocking(move || {
+                    use crate::database::meeting_files;
+                    let authorised =
+                        meeting_files::authorize_new_meeting_folder(&requested, &roots)?;
+                    let marker = meeting_files::read_marker(std::path::Path::new(&authorised))
+                        .ok_or("The recording folder is no longer available.")?;
+                    if meeting_files::has_invalid_marker_id(&marker) {
+                        return Err("The recording marker has an invalid meeting ID.".into());
+                    }
+                    let recording_id = meeting_files::recording_id(&marker).map(str::to_owned);
+                    let stamped_id = meeting_files::stamped_meeting_id(&marker).map(str::to_owned);
+                    let transcribes = crate::audio::recording_mode::marker_transcribes(&marker);
+                    Ok::<_, String>((authorised, recording_id, stamped_id, transcribes, marker))
+                })
+                .await
+                .map_err(|_| "Could not check the recording folder".to_string())??;
             use crate::audio::interrupted::{folder_key, ActiveFolder};
             let active = crate::audio::recording_commands::active_recording_folder();
             if matches!(active, ActiveFolder::Unknown)
@@ -1533,9 +1537,14 @@ pub async fn api_save_transcript<R: Runtime>(
             if deleted {
                 return Err("This meeting was deleted from this library.".into());
             }
-            (Some(authorised), recording_id.or(stamped_id), transcribes)
+            (
+                Some(authorised),
+                recording_id.or(stamped_id),
+                transcribes,
+                Some(marker),
+            )
         }
-        None => (None, None, false),
+        None => (None, None, false, None),
     };
 
     let (transcripts_to_save, used_fallback) = if use_saved_recording.unwrap_or(false) {
@@ -1572,12 +1581,25 @@ pub async fn api_save_transcript<R: Runtime>(
         save_warnings.push("The final transcript snapshot was unavailable. Saved the transcript visible in the app; review it for missing lines.");
         log_warn!("Library save used the UI transcript because the final snapshot was unavailable");
     }
-    if let Some(folder) = folder_path.as_ref().map(std::path::PathBuf::from) {
+    let mut measured = crate::audio::provenance::RecordingProvenance::default();
+    if let Some((folder, marker)) = folder_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .zip(marker)
+    {
         let saved = tokio::task::spawn_blocking(move || {
-            crate::audio::outcome::RecordingOutcome::read(&folder)
+            let measured = crate::audio::interrupted::recovered_provenance(&folder, &marker, None);
+            (
+                measured,
+                crate::audio::outcome::RecordingOutcome::read(&folder),
+            )
         })
         .await;
-        match saved {
+        let disk_outcome = saved.map(|(provenance, outcome)| {
+            measured = provenance;
+            outcome
+        });
+        match disk_outcome {
             Ok(Ok(Some(saved))) => {
                 recording_outcome.audio_save_failed |= saved.audio_save_failed;
                 recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
@@ -1603,6 +1625,7 @@ pub async fn api_save_transcript<R: Runtime>(
                 &transcripts_to_save,
                 folder,
                 &recording_outcome,
+                measured,
             )
             .await
         }
@@ -1614,6 +1637,7 @@ pub async fn api_save_transcript<R: Runtime>(
                 folder,
                 Some(&recording_outcome),
                 calendar_link,
+                measured,
             )
             .await
         }

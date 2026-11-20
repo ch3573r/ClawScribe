@@ -18,6 +18,10 @@ pub(crate) struct ArchiveRow {
     recording_files_incomplete: bool,
     recovery_files_elsewhere: bool,
     pending_file_sync: bool,
+    // Source of the saved audio when known.
+    recording_source: Option<String>,
+    // Measured active recording time or duration of imported or recovered media.
+    duration_seconds: Option<f64>,
 }
 
 async fn archive_rows(pool: &SqlitePool) -> Result<Vec<ArchiveRow>, String> {
@@ -31,7 +35,9 @@ async fn archive_rows(pool: &SqlitePool) -> Result<Vec<ArchiveRow>, String> {
                 COALESCE(o.capture_incomplete, 0) AS capture_incomplete,
                 COALESCE(o.recording_files_incomplete, 0) AS recording_files_incomplete,
                 COALESCE(o.recovery_files_elsewhere, 0) AS recovery_files_elsewhere,
-                EXISTS(SELECT 1 FROM transcript_file_sync f WHERE f.meeting_id = m.id) AS pending_file_sync
+                EXISTS(SELECT 1 FROM transcript_file_sync f WHERE f.meeting_id = m.id) AS pending_file_sync,
+                m.recording_source,
+                m.recording_duration_s AS duration_seconds
          FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id = m.id
          LEFT JOIN recording_outcomes o ON o.meeting_id = m.id",
     )

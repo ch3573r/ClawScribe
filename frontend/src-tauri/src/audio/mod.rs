@@ -36,6 +36,7 @@ pub mod pc_test;
 pub mod pipeline;
 pub mod playback_monitor;
 pub mod post_processor;
+pub(crate) mod provenance;
 pub mod recording_commands;
 pub mod recording_levels;
 pub mod recording_manager;
