@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHookHarness, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
-function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, openFolderFails = false, stopRecordingFails = null } = {}) {
+function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, stopRecordingFails = null } = {}) {
   const previousWindow = globalThis.window;
   const hooks = createHookHarness();
   const events = new Map();
@@ -20,7 +20,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     react: hooks.react,
     'react/jsx-runtime': { jsx: () => null, jsxs: () => null, Fragment: 'Fragment' },
     '@tauri-apps/api/event': { listen: async (name, callback) => { subscriptions.push(name); events.set(name, callback); return () => events.delete(name); } },
-    '@tauri-apps/api/core': { invoke: async command => { calls.push(['invoke', command]); if (openFolderFails) throw new Error('Synthetic failure'); } },
+    '@tauri-apps/api/core': { invoke: async command => { calls.push(['invoke', command]); } },
     '@tauri-apps/api/path': { appDataDir: async () => 'synthetic-data' },
     sonner: { toast: {
       error: (title, options) => toasts.push({ title, ...options }),
@@ -41,6 +41,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
       },
     } },
     '@/lib/recording-capture': loadTsModule('src/lib/recording-capture.ts'),
+    '@/lib/storage-dialog-controller': { openStorageDialog: () => calls.push(['openStorageDialog']) },
   });
   t.after(() => { hooks.unmount(); globalThis.window = previousWindow; });
   const render = () => hooks.render(() => RecordingPostProcessingProvider({ children: null }));
@@ -138,26 +139,17 @@ test('low disk space shows a lasting warning with the free space, no path, and o
   assert.equal(toast.duration, Infinity);
   assert.equal(toast.description, '612 MB is free where recordings are saved. The recording continues, but it may be cut short if the disk fills up.');
   assert.doesNotMatch(JSON.stringify(toast.description), /Private|Recordings|\\/, 'the folder path is not shown');
-  assert.equal(toast.action.label, 'Open recordings folder');
+  assert.equal(toast.action.label, 'Review storage');
 });
 
-test('the warning action opens the recordings folder with the existing command', async t => {
+test('the warning action opens the storage dialog', async t => {
   const app = setup(t);
   await flush();
   app.events.get('recording-disk-space-low')({ payload: { freeBytes: 1_234_567_890, folder: 'x' } });
   app.toasts[0].action.onClick();
   await flush();
-  assert.ok(app.calls.some(([name, value]) => name === 'invoke' && value === 'open_recordings_folder'));
+  assert.ok(app.calls.some(([name]) => name === 'openStorageDialog'));
   assert.match(app.toasts[0].description, /^1\.2 GB is free/);
-});
-
-test('a folder that cannot be opened is reported', async t => {
-  const app = setup(t, { openFolderFails: true });
-  await flush();
-  app.events.get('recording-disk-space-low')({ payload: { freeBytes: 500_000_000, folder: 'x' } });
-  app.toasts[0].action.onClick();
-  await flush();
-  assert.equal(app.toasts.at(-1).title, 'Could not open the folder.');
 });
 
 test('the low disk space warning goes away when the recording ends', async t => {

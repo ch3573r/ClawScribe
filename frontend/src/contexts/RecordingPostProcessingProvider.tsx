@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { appDataDir } from '@tauri-apps/api/path';
 import { toast } from 'sonner';
@@ -11,6 +10,7 @@ import { recordingService } from '@/services/recordingService';
 import { captureHalted, recordingErrorMessage } from '@/lib/recording-capture';
 import { STOP_FAILED_TITLE, stopFailureMessage } from '@/lib/stop-error';
 import { diskSpaceLowText, type DiskSpaceLowPayload } from '@/lib/disk-space';
+import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
 const DISK_SPACE_TOAST = 'recording-disk-space-low';
 
@@ -106,10 +106,8 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
         description: diskSpaceLowText(event.payload),
         duration: Infinity,
         action: {
-          label: 'Open recordings folder',
-          onClick: () => {
-            invoke('open_recordings_folder').catch(() => toast.error('Could not open the folder.'));
-          },
+          label: 'Review storage',
+          onClick: openStorageDialog,
         },
       });
     }));

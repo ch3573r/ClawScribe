@@ -16,6 +16,7 @@ import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-prefere
 import {
   isDiskSpaceRefusal, LIVE_MODEL_FAILURE_MESSAGE, liveModelStartFailure, startErrorText, transcriptionSettingsPath,
 } from '@/lib/start-error';
+import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
 type StartSource = 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call' | 'remote_request';
 let startInProgress = false;
@@ -29,7 +30,11 @@ export function reportStartFailure(error: unknown): void {
   const modelFailure = liveModelStartFailure(error);
   if (message === START_REQUEST_EXPIRED || message === START_BUSY) return;
   if (isDiskSpaceRefusal(error)) {
-    toast.error('Not enough disk space', { description: message, duration: 15000 });
+    toast.error('Not enough disk space', {
+      description: message,
+      duration: 15000,
+      action: { label: 'Review storage', onClick: openStorageDialog },
+    });
   } else if (modelFailure) {
     toast.error('Live transcription unavailable', {
       description: LIVE_MODEL_FAILURE_MESSAGE[modelFailure],

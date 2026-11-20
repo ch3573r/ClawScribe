@@ -47,6 +47,7 @@ import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { RecordingRequests } from '@/components/RecordingRequests'
 import { AudioDeviceHotSwapMonitor } from '@/components/AudioDeviceHotSwapMonitor'
+import { ArchiveStorageDialog } from '@/components/Archive/ArchiveStorageDialog'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -376,6 +377,7 @@ export default function RootLayout({
                             <ImportDialogProvider onOpen={handleOpenImportDialog}>
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
+                              <ArchiveStorageDialog />
 
                               <RecordingRequests ready={showOnboarding === false} />
 
