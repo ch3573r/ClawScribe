@@ -2039,37 +2039,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_meeting_with_transcripts_persists_speaker() {
-        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-
-        sqlx::query(
-            "CREATE TABLE meetings (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                folder_path TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE transcripts (
-                id TEXT PRIMARY KEY,
-                meeting_id TEXT NOT NULL,
-                transcript TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                audio_start_time REAL,
-                audio_end_time REAL,
-                duration REAL,
-                speaker TEXT,
-                word_timestamps_json TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(":memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
         let segments = vec![TranscriptSegment {
             id: "t-speaker".to_string(),
@@ -2089,7 +2064,7 @@ mod tests {
             "C:\\recordings\\speaker-persistence".to_string(),
             false,
             ImportDate::default(),
-            None,
+            Some(1.5),
         )
         .await
         .unwrap();
@@ -2103,6 +2078,14 @@ mod tests {
                 .unwrap();
 
         assert_eq!(speaker.as_deref(), Some("Participants"));
+        let provenance: (String, f64) = sqlx::query_as(
+            "SELECT recording_source, recording_duration_s FROM meetings WHERE id = ?",
+        )
+        .bind(&meeting_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(provenance, ("import".into(), 1.5));
     }
 
     #[test]
