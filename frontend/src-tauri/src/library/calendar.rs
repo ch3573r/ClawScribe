@@ -569,7 +569,7 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn sample() -> CalendarLink {
-        serde_json::from_value(serde_json::json!({
+        serde_json::from_value::<CalendarLink>(serde_json::json!({
             "source": "ical", "sourceId": "fixture", "seriesId": "ics:abc", "eventId": "ics:abc:123",
             "subject": "Planning", "attendees": [
                 {"name": "Confirmed", "attendance": "present"},
