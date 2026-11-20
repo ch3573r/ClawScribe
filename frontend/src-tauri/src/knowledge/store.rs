@@ -1,5 +1,5 @@
 //! Durable source generations and canonical transcript snapshots.
-use super::types::*;
+use super::{scheduler::VerificationStatus, types::*};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
 pub const READ_BYTES: usize = 16 * 1024;
@@ -967,9 +967,9 @@ pub async fn invalidate_other_spaces(pool: &SqlitePool, space: &str) -> Result<(
     let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM knowledge_sources WHERE kind IN('meeting','document') AND semantic_space IS NOT NULL AND semantic_space!=?").bind(space).fetch_all(pool).await?;
     requeue_sources(pool, &ids).await
 }
-pub async fn status(
+pub(super) async fn status(
     pool: &SqlitePool,
-    runtime_ready: bool,
+    verification: VerificationStatus,
     space: &str,
 ) -> Result<IndexStatus, KnowledgeError> {
     let enabled =
@@ -999,12 +999,22 @@ pub async fn status(
         failed: failed as usize,
         reason: if !enabled {
             Some("disabled".into())
-        } else if !runtime_ready {
+        } else if matches!(
+            verification,
+            VerificationStatus::Inactive | VerificationStatus::Unavailable
+        ) {
             Some("model_unavailable".into())
         } else if failed > 0 {
             Some("indexing_failed".into())
         } else if paused > 0 {
             Some("paused".into())
+        } else if verification == VerificationStatus::Pending {
+            Some("model_pending".into())
+        } else if matches!(
+            verification,
+            VerificationStatus::Verifying | VerificationStatus::Updating
+        ) {
+            Some("model_verifying".into())
         } else if pending > 0 {
             Some("indexing".into())
         } else {
@@ -1538,14 +1548,18 @@ mod tests {
     async fn enabled_without_model_is_distinct_from_disabled() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
-        let disabled = status(&pool, false, "test-space").await.unwrap();
+        let disabled = status(&pool, VerificationStatus::Inactive, "test-space")
+            .await
+            .unwrap();
         assert!(!disabled.semantic_enabled);
         assert_eq!(disabled.reason.as_deref(), Some("disabled"));
         sqlx::query("UPDATE knowledge_settings SET enabled=1 WHERE singleton=1")
             .execute(&pool)
             .await
             .unwrap();
-        let missing = status(&pool, false, "test-space").await.unwrap();
+        let missing = status(&pool, VerificationStatus::Unavailable, "test-space")
+            .await
+            .unwrap();
         assert!(
             missing.semantic_enabled,
             "saved opt-in must be visible without a ready runtime"

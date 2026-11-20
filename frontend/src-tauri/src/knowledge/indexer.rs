@@ -1,5 +1,11 @@
 //! One durable worker for the installed application pool. Notifications only wake it.
-use super::{model, retrieval, scheduler::Scheduler, store, types::*, KnowledgeState};
+use super::{
+    model, retrieval,
+    scheduler::{Scheduler, VerificationStatus},
+    store,
+    types::*,
+    KnowledgeState,
+};
 use sqlx::SqlitePool;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -34,7 +40,7 @@ impl IndexWorker {
                 if pool.is_closed() {
                     break;
                 }
-                if !runtime.is_enabled()
+                if !runtime.accepts_work()
                     || crate::audio::recording_commands::capture_active()
                     || super::scheduler::foreground_waiting()
                 {
@@ -50,7 +56,11 @@ impl IndexWorker {
                 match store::next_job(&pool).await {
                     Ok(Some(job)) => {
                         if let Err(error) = index_source(&pool, &runtime, &job).await {
-                            let _ = store::record_failure(&pool, &job, &error).await;
+                            // A failed model check blocks the worker globally.
+                            // Leave this source queued for when the files are repaired.
+                            if error != KnowledgeError::ModelUnavailable || runtime.accepts_work() {
+                                let _ = store::record_failure(&pool, &job, &error).await;
+                            }
                         } else {
                             wake.notify_one();
                         }
@@ -73,9 +83,7 @@ pub async fn index_source(
     let mut ordinal = 0;
     let space = model::PINS.space();
     loop {
-        if !runtime.is_enabled() {
-            return Err(KnowledgeError::Disabled);
-        }
+        runtime.check_available()?;
         drop(super::scheduler::claim_snapshot(Arc::new(
             AtomicBool::new(false),
         ))?);
@@ -87,9 +95,7 @@ pub async fn index_source(
             let selected = store::SelectedRow::for_job(job, id.clone());
             let mut base = 0;
             loop {
-                if !runtime.is_enabled() {
-                    return Err(KnowledgeError::Disabled);
-                }
+                runtime.check_available()?;
                 if !store::current(pool, job).await? {
                     return Err(KnowledgeError::Superseded);
                 }
@@ -166,6 +172,7 @@ pub fn start_installed_pool(app: &tauri::AppHandle) {
     let scheduler = knowledge.scheduler.clone();
     let root = model_root(app);
     let configuration = knowledge.configuration.clone();
+    let wake = knowledge.index_worker.wake.clone();
     tauri::async_runtime::spawn(async move {
         let _configuration = configuration.lock().await;
         let enabled = sqlx::query_scalar::<_, i64>(
@@ -177,9 +184,8 @@ pub fn start_installed_pool(app: &tauri::AppHandle) {
             == 1;
         if enabled {
             if let Ok(root) = root {
-                if let Ok(verified) = model::VerifiedModel::verify(&root).await {
-                    let _ = scheduler.enable(verified);
-                }
+                scheduler.enable(root);
+                wake.notify_one();
             }
         }
     });
@@ -202,7 +208,7 @@ pub async fn knowledge_index_status(
 ) -> Result<IndexStatus, String> {
     store::status(
         state.db_manager.pool(),
-        runtime.scheduler.is_enabled(),
+        runtime.scheduler.verification_status(),
         &model::PINS.space().id,
     )
     .await
@@ -247,18 +253,14 @@ pub async fn knowledge_model_enable(
     enabled: bool,
 ) -> Result<(), String> {
     let _configuration = runtime.configuration.lock().await;
+    let root = enabled.then(|| model_root(&app)).transpose()?;
     sqlx::query("UPDATE knowledge_settings SET enabled=? WHERE singleton=1")
         .bind(enabled)
         .execute(state.db_manager.pool())
         .await
         .map_err(|_| "Knowledge storage failed")?;
-    if enabled {
-        if let Ok(verified) = model::VerifiedModel::verify(&model_root(&app)?).await {
-            runtime
-                .scheduler
-                .enable(verified)
-                .map_err(|e| e.to_string())?;
-        }
+    if let Some(root) = root {
+        runtime.scheduler.enable(root);
     } else {
         runtime.scheduler.disable().await;
     }
@@ -271,6 +273,7 @@ pub struct ModelStatus {
     pub ready: bool,
     /// Files exist with pinned sizes; this is not an integrity or inference guarantee.
     pub installed: bool,
+    verification: VerificationStatus,
     pub model: String,
     pub download: model::DownloadStatus,
 }
@@ -286,10 +289,13 @@ pub async fn knowledge_model_status(
             .await
             .map_err(|_| "Knowledge storage failed")?
             == 1;
+    let installed = model::files_present(&model_root(&app)?).await;
+    let verification = runtime.scheduler.verification_status();
     Ok(ModelStatus {
         enabled,
-        ready: runtime.scheduler.is_enabled(),
-        installed: model::files_present(&model_root(&app)?).await,
+        ready: enabled && installed && verification == VerificationStatus::Verified,
+        installed,
+        verification,
         model: model::PINS.model.clone(),
         download: runtime.downloads.snapshot(),
     })
@@ -300,29 +306,29 @@ pub async fn knowledge_model_download(
     state: State<'_, crate::state::AppState>,
     runtime: State<'_, KnowledgeState>,
 ) -> Result<(), String> {
-    let verified = runtime
-        .downloads
-        .download(
-            &model_root(&app)?,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let _configuration = runtime.configuration.lock().await;
+    let root = model_root(&app)?;
+    let _configuration = runtime
+        .configuration
+        .try_lock()
+        .map_err(|_| KnowledgeError::Busy.to_string())?;
     let enabled =
         sqlx::query_scalar::<_, i64>("SELECT enabled FROM knowledge_settings WHERE singleton=1")
             .fetch_one(state.db_manager.pool())
             .await
             .map_err(|_| "Knowledge storage failed")?
             == 1;
-    if enabled {
-        runtime
-            .scheduler
-            .enable(verified)
-            .map_err(|e| e.to_string())?;
-    }
+    let update = runtime.scheduler.begin_model_update(enabled);
+    let result = runtime
+        .downloads
+        .download_after(
+            &root,
+            tokio_util::sync::CancellationToken::new(),
+            update.drain(),
+        )
+        .await;
+    update.finish(&result, root);
     runtime.index_worker.wake();
-    Ok(())
+    result.map(|_| ()).map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn knowledge_model_cancel_download(

@@ -522,9 +522,13 @@ recommend retranscribing unavailable audio. Older archives default this flag to 
 
 ## Local Knowledge Embedding Foundation
 
-The optional knowledge state is disabled on startup and does not load/download
-models implicitly. Its CPU ONNX candidate and SHA-256 manifest live under
-`knowledge/`; explicit downloads use the existing resumable transfer registry.
+Semantic search is off by default. With the saved opt-in enabled, startup and
+repeated enable calls register the local model path without reading the model
+files. The first semantic query or indexing input that needs the model checks
+the pinned sizes and SHA-256 hashes on the blocking worker before loading ONNX
+or the tokenizer. The check yields to foreground work between 64 KiB reads.
+Its CPU ONNX model and SHA-256 manifest live under `knowledge/`; explicit
+downloads use the existing resumable transfer registry.
 The embedding-space identity includes the model revision, both artifact hashes,
 tokenizer version, prefixes, pooling version, and CPU loading policy. The revised
 candidate disables graph optimizations and weight prepacking while keeping the
@@ -545,8 +549,14 @@ returns. Foreground recording/import claims cancel knowledge first and prevent
 new knowledge claims while waiting up to two seconds; local-summary preemption
 retains its existing behavior. Index notifications coalesce by source revision
 in a 32-entry queue; a full queue reports busy so persistent indexing can retry.
-The resident model unloads after 60 seconds idle. Provider/inference errors
-carry categories only, without source text or raw native responses.
+The resident model unloads after 60 seconds idle. A successful integrity check
+stays in memory for that activation, including across idle reloads. Disabling
+semantic search or exiting discards it. This proof assumes the files stay
+unchanged within the activation. Explicit verification or repair suspends model
+use, rehashes installed files even when their sizes match, and replaces the
+in-memory proof on success. A failed check leaves index jobs available for
+retry after repair. Provider/inference errors carry categories only, without
+source text or raw native responses.
 
 The manual knowledge input of the summary regression workflow runs on the
 configured trusted runner, using an exact reviewed commit. Ordinary regression
@@ -677,8 +687,10 @@ Lexical rank transfers to a published semantic chunk only when that chunk
 covers the complete match. Containment deduplication stays within one source
 revision and preserves distinct dated meetings. Missing models or recording
 contention return keyword results with a visible fallback reason.
-The saved semantic opt-in is distinct from runtime readiness: an enabled
-preference with missing model files reports `model_unavailable`, not `disabled`.
+The saved semantic opt-in is distinct from runtime readiness. Settings show
+installation and verification separately. Index status distinguishes a pending
+or active check from a failed check. Once the worker discovers missing or
+invalid files, semantic requests fall back with `model_unavailable`.
 
 The command surface also includes `knowledge_index_status`, `knowledge_reindex`,
 `knowledge_cancel_index`, `knowledge_model_enable`, `knowledge_model_status`,

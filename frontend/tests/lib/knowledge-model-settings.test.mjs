@@ -26,6 +26,30 @@ test('healthy E5 settings offer verification instead of a repair download',async
   assert(nodes(tree).some(node=>node.type==='button'&&/Verify installed files/.test(text(node))),'verification is a footer action');
   assert.match(text(tree),/runs on this PC/);app.unmount();
 });
+test('enabled installed files are shown as pending until first-use verification',async(t)=>{
+  const app=settings(t,{enabled:true,ready:false,installed:true,verification:'pending',model:'intfloat/multilingual-e5-small',download:idle});
+  app.render();await flush();const tree=app.render();
+  assert.match(text(tree),/verified on first use/);
+  assert.doesNotMatch(text(tree),/Enable semantic search|Ready for semantic search/);
+});
+test('a failed first-use check offers recovery even when both files have the expected size',async(t)=>{
+  const app=settings(t,{enabled:true,ready:false,installed:true,verification:'unavailable',model:'intfloat/multilingual-e5-small',download:idle});
+  app.render();await flush();const tree=app.render();
+  assert.match(text(tree),/Could not use the search model/);
+  assert(nodes(tree).some(node=>node.type==='button'&&text(node)==='Verify installed files'));
+});
+test('paused indexing can resume before the installed model is verified',async(t)=>{
+  let resumed=0;
+  const app=settings(t,{enabled:true,ready:false,installed:true,verification:'pending',model:'intfloat/multilingual-e5-small',download:idle},{
+    indexStatus:async()=>({keyword_ready:true,semantic_enabled:true,semantic_ready:0,pending:0,failed:0,reason:'paused'}),
+    reindex:async()=>{resumed++;},
+  });
+  app.render();await flush();
+  const resume=nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Resume');
+  assert.equal(resume?.props.disabled,false);
+  await resume.props.onClick();
+  assert.equal(resumed,1);
+});
 test('revisited settings show native transfer bytes and cancellation independently of local action state',async(t)=>{
   let cancels=0;const app=settings(t,{enabled:true,ready:false,installed:false,model:'intfloat/multilingual-e5-small',download:{...idle,stage:'downloading',downloaded_bytes:243675620,current_file:'onnx/model.onnx'}},{cancelDownload:async(t)=>{cancels++;}});
   app.render();await flush();const tree=app.render();

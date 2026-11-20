@@ -156,7 +156,8 @@ explicitly, or choose all saved meetings, then
 search transcript passages and ask cited questions. Project Any/All/Untagged
 filters and inclusive dates constrain that same selection. Keyword retrieval
 works without downloading a model; optional local semantic retrieval uses the
-embedding model under **Settings → Meeting memory**. Results show the mode
+embedding model under **Settings → Meeting memory**. Installed files are
+verified when first needed after startup or enabling semantic search. Results show the mode
 actually used, and answers show the configured and executed summary provider.
 The first question starts a saved conversation automatically. Model settings
 show download bytes and integrity verification separately from indexing. The

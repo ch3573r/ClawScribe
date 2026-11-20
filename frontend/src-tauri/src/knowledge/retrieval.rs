@@ -579,37 +579,41 @@ pub async fn retrieve_frozen(
         return Err(KnowledgeError::InvalidInput);
     }
     let space = super::model::PINS.space();
-    let mut status = super::store::status(pool, runtime.scheduler.is_enabled(), &space.id).await?;
     let allowed =
         serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
     let documents =
         serde_json::to_string(&scope.document_ids).map_err(|_| KnowledgeError::InvalidInput)?;
     let scoped_ready: bool = sqlx::query_scalar(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)"))
         .bind(allowed).bind(documents).bind(&space.id).fetch_one(pool).await?;
-    let vector = if request.mode == SearchMode::Hybrid && scoped_ready {
-        match runtime
-            .scheduler
-            .embed(request.query.clone(), EmbeddingPurpose::Query)
-            .await
-        {
-            Ok(vector) => Some(vector),
-            Err(error) => {
-                status.reason = Some(
-                    match error {
-                        KnowledgeError::Busy => "busy",
-                        KnowledgeError::Cancelled => "cancelled",
-                        KnowledgeError::Disabled if status.semantic_enabled => "model_unavailable",
-                        KnowledgeError::Disabled => "disabled",
-                        KnowledgeError::InvalidInput => "query_token_limit",
-                        _ => "model_unavailable",
-                    }
-                    .into(),
-                );
-                None
-            }
-        }
+    let embedding = if request.mode == SearchMode::Hybrid && scoped_ready {
+        Some(
+            runtime
+                .scheduler
+                .embed(request.query.clone(), EmbeddingPurpose::Query)
+                .await,
+        )
     } else {
         None
+    };
+    let mut status =
+        super::store::status(pool, runtime.scheduler.verification_status(), &space.id).await?;
+    let vector = match embedding {
+        Some(Ok(vector)) => Some(vector),
+        Some(Err(error)) => {
+            status.reason = Some(
+                match error {
+                    KnowledgeError::Busy => "busy",
+                    KnowledgeError::Cancelled => "cancelled",
+                    KnowledgeError::Disabled if status.semantic_enabled => "model_unavailable",
+                    KnowledgeError::Disabled => "disabled",
+                    KnowledgeError::InvalidInput => "query_token_limit",
+                    _ => "model_unavailable",
+                }
+                .into(),
+            );
+            None
+        }
+        None => None,
     };
     let passages = search_channels(
         pool,
@@ -1209,11 +1213,8 @@ mod tests {
         let root = std::path::PathBuf::from(
             std::env::var_os("CLAWSCRIBE_KNOWLEDGE_MODEL").expect("manual runner model directory"),
         );
-        super::super::model::ModelDownloads::default()
+        let verified = super::super::model::ModelDownloads::default()
             .download(&root, tokio_util::sync::CancellationToken::new())
-            .await
-            .unwrap();
-        let verified = super::super::model::VerifiedModel::verify(&root)
             .await
             .unwrap();
         let runtime = super::super::KnowledgeState::default();
@@ -1236,7 +1237,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        runtime.scheduler.enable(verified).unwrap();
+        let update = runtime.scheduler.begin_model_update(true);
+        update.drain().await;
+        update.finish(&Ok(verified), root);
         let started = Instant::now();
         while let Some(job) = store::next_job(&pool).await.unwrap() {
             super::super::indexer::index_source(&pool, &runtime.scheduler, &job)

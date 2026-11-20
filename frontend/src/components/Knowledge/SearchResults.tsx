@@ -6,6 +6,8 @@ import type { KnowledgeSearchState } from '@/hooks/useKnowledgeSearch';
 const reasonCopy: Record<string, string> = {
   disabled: 'Semantic search is off. Results use keyword search.',
   model_unavailable: 'The search model is unavailable. Results use keyword search.',
+  model_pending: 'The search files will be verified on first use.',
+  model_verifying: 'The search files are being checked. Results use keyword search.',
   indexing_failed: 'Some meetings could not be indexed. Retry in Settings.',
   paused: 'Semantic indexing is paused. Results use keyword search.',
   indexing: 'Semantic search is still preparing your meetings.',

@@ -13,7 +13,8 @@ import type { IndexStatus, ModelStatus } from "@/types/knowledge";
 const all = libraryScope([], true, { tags: [], mode: "any", untagged: false });
 
 const indexReason: Record<string, string> = {
-  disabled: "Semantic search is off", model_unavailable: "Download the search model to prepare the index",
+  disabled: "Semantic search is off", model_unavailable: "The search model is unavailable",
+  model_pending: "Indexing will verify the search files when needed", model_verifying: "Checking the search files",
   indexing_failed: "Some meetings could not be indexed. Retry to finish", paused: "Indexing is paused",
   indexing: "Preparing your meetings for semantic search", busy: "Waiting for recording or other AI work to finish",
 };
@@ -74,7 +75,8 @@ export function KnowledgeSettings() {
   const total = (status?.semantic_ready ?? 0) + (status?.pending ?? 0) + (status?.failed ?? 0);
   const download = model?.download;
   const downloading = !!download && ["checking", "downloading", "verifying", "cancelling"].includes(download.stage);
-  const locked = !!busy || downloading;
+  const locked = !!busy || downloading || model?.verification === "updating";
+  const canUseIndex = !!model?.enabled && model.installed && model.verification !== "unavailable";
   const bytes = (value: number) => `${(value / 1024 / 1024).toFixed(1)} MB`;
   const file = download?.current_file?.includes("tokenizer") ? "language files" : "search model";
   const percent = download ? Math.min(99, Math.floor(download.downloaded_bytes * 100 / Math.max(download.total_bytes, 1))) : 0;
@@ -82,7 +84,9 @@ export function KnowledgeSettings() {
   const downloadLabel = retryModel ? model?.installed ? "Retry verification" : "Retry download" : "Download search model";
   const modelStatus: { tone: StatusTone; text: string } = model?.ready ? { tone: "ok", text: "Ready for semantic search" }
     : model?.installed && !model.enabled ? { tone: "off", text: "Search files are installed. Semantic search is off" }
-    : model?.installed ? { tone: "warning", text: "Search files are installed. Enable semantic search or verify the files" }
+    : model?.verification === "verifying" || model?.verification === "updating" ? { tone: "neutral", text: "Checking search files…" }
+    : model?.installed && model.verification === "unavailable" ? { tone: "warning", text: "Could not use the search model. Verify the installed files to try again" }
+    : model?.installed ? { tone: "neutral", text: "Search files will be verified on first use" }
     : model?.enabled ? { tone: "warning", text: "Download the search model to begin" } : { tone: "neutral", text: "Keyword search is available without a download" };
   const cancellationLabel = download?.stage === "verifying" || busy === "Verifying search files" ? "Cancel verification"
     : download?.stage === "checking" ? "Cancel check" : "Cancel download";
@@ -116,8 +120,8 @@ export function KnowledgeSettings() {
         {busy && !downloading && <span role="status">{busy}…</span>}
       </SettingsFooter>
     </SettingsCard>
-    <SettingsCard title="Index" actions={model?.ready && status?.semantic_enabled && total > 0 ? <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Index actions" disabled={locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
-      <DropdownMenuContent align="end"><DropdownMenuItem disabled={!model?.ready || !status?.semantic_enabled} onSelect={() => void action("Rebuilding index", () => knowledgeService.reindex(all))}>Rebuild index</DropdownMenuItem></DropdownMenuContent>
+    <SettingsCard title="Index" actions={canUseIndex && status?.semantic_enabled && total > 0 ? <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Index actions" disabled={locked}><MoreHorizontal /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end"><DropdownMenuItem disabled={locked} onSelect={() => void action("Rebuilding index", () => knowledgeService.reindex(all))}>Rebuild index</DropdownMenuItem></DropdownMenuContent>
     </DropdownMenu> : null}>
       {!status && !readError && <SettingsRow title="Loading index…" role="status" />}
       {status && <>
@@ -129,9 +133,9 @@ export function KnowledgeSettings() {
               <Meta>{status.semantic_ready} of {total} meetings · {status.pending > 0 ? `${status.pending} pending · ` : ""}{status.failed} failed</Meta>
             </>
             : model?.enabled ? <Meta>{status.semantic_ready} ready · {status.pending} pending · {status.failed} failed</Meta> : <StatusText tone="off">Off</StatusText>}
-          {status.pending > 0 && model?.ready && status.reason !== "paused" && <Button variant="outline" size="sm" disabled={locked} onClick={() => void action("Pausing index", () => knowledgeService.pause(all))}>Pause</Button>}
-          {status.failed > 0 && <Button variant="outline" size="sm" disabled={locked || !model?.ready} onClick={() => void action("Retrying index", () => knowledgeService.reindex(all))}>Retry</Button>}
-          {status.reason === "paused" && <Button variant="outline" size="sm" disabled={locked || !model?.ready} onClick={() => void action("Resuming index", () => knowledgeService.reindex(all))}>Resume</Button>}
+          {status.pending > 0 && canUseIndex && status.reason !== "paused" && <Button variant="outline" size="sm" disabled={locked} onClick={() => void action("Pausing index", () => knowledgeService.pause(all))}>Pause</Button>}
+          {status.failed > 0 && <Button variant="outline" size="sm" disabled={locked || !canUseIndex} onClick={() => void action("Retrying index", () => knowledgeService.reindex(all))}>Retry</Button>}
+          {status.reason === "paused" && <Button variant="outline" size="sm" disabled={locked || !canUseIndex} onClick={() => void action("Resuming index", () => knowledgeService.reindex(all))}>Resume</Button>}
         </SettingsRow>
       </>}
       <SettingsFooter>Recording and other AI work take priority over indexing. Rebuilding keeps saved citations</SettingsFooter>
