@@ -1,7 +1,7 @@
 name: Windows script validation
 on:
   pull_request:
-    paths: ['frontend/scripts/*.ps1', '.github/workflows/*windows*.yml']
+    paths: ['frontend/scripts/*.ps1', 'scripts/vulkan-sdk*.mjs', '.github/actions/**', '.github/workflows/*windows*.yml']
   push:
     branches: ['release/**']
 permissions:
@@ -38,10 +38,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($path in @('frontend/scripts/test-windows-native.ps1', 'frontend/scripts/build-windows-release.ps1', 'frontend/scripts/ensure-windows-vulkan-runtime.ps1', 'frontend/scripts/stage-codex-runtime.ps1', 'frontend/scripts/test-packaged-acceptance.ps1', 'frontend/scripts/limit-native-test-cache.ps1', 'frontend/scripts/ensure-native-toolchain.ps1')) {
+          foreach ($path in @('frontend/scripts/test-windows-native.ps1', 'frontend/scripts/build-windows-release.ps1', 'frontend/scripts/ensure-windows-vulkan-runtime.ps1', 'frontend/scripts/stage-codex-runtime.ps1', 'frontend/scripts/test-packaged-acceptance.ps1', 'frontend/scripts/limit-native-test-cache.ps1', 'frontend/scripts/ensure-native-toolchain.ps1', 'frontend/scripts/vulkan-sdk-common.ps1', 'frontend/scripts/resolve-vulkan-sdk.ps1', 'frontend/scripts/stage-vulkan-sdk.ps1')) {
             $tokens = $null
             $parseErrors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$parseErrors)
             if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
           }
+      - name: Vulkan SDK detection fixtures
+        run: node --test scripts/vulkan-sdk.test.mjs scripts/vulkan-sdk-staging.test.mjs
       - run: node scripts/verify-public-repo-safety.mjs

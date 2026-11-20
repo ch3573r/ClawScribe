@@ -1,0 +1,80 @@
+name: Pinned Vulkan SDK
+description: >-
+  Finds the pinned Vulkan SDK by its content and uses it. If none is provisioned
+  and install-missing is true, stages it in its own per-version folder, never over
+  another SDK. Read-only otherwise. Check out the repository first.
+
+inputs:
+  version:
+    description: Pinned Vulkan SDK version (four parts)
+    default: 1.4.309.0
+  install-missing:
+    description: Stage the SDK when none matches (true) or fail (false)
+    default: 'false'
+
+outputs:
+  found:
+    description: Whether a matching SDK was already provisioned
+    value: ${{ steps.resolve.outputs.found }}
+
+runs:
+  using: composite
+  steps:
+    - name: Find the pinned Vulkan SDK by content
+      id: resolve
+      shell: pwsh
+      env:
+        PINNED_VERSION: ${{ inputs.version }}
+        INSTALL_MISSING: ${{ inputs.install-missing }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:INSTALL_MISSING -eq 'true') {
+          & "${{ github.workspace }}/frontend/scripts/resolve-vulkan-sdk.ps1" -Version $env:PINNED_VERSION -AllowMissing
+        } else {
+          & "${{ github.workspace }}/frontend/scripts/resolve-vulkan-sdk.ps1" -Version $env:PINNED_VERSION
+        }
+
+    # Only reached when nothing matched and installing was requested.
+    - name: Ensure the SDK extractor
+      if: ${{ steps.resolve.outputs.found != 'true' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $present = (Get-Command '7z.exe' -ErrorAction SilentlyContinue) -or (Test-Path -LiteralPath (Join-Path $env:ProgramFiles '7-Zip/7z.exe'))
+        if (-not $present) { choco install 7zip -y --no-progress }
+
+    - name: Prepare an isolated SDK staging folder
+      id: prepare
+      if: ${{ steps.resolve.outputs.found != 'true' }}
+      shell: pwsh
+      env:
+        PINNED_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        & "${{ github.workspace }}/frontend/scripts/stage-vulkan-sdk.ps1" -Phase Prepare -Version $env:PINNED_VERSION
+
+    # The action unpacks into VULKAN_SDK, which the step above pointed at the staging folder.
+    - name: Extract the pinned Vulkan SDK into the staging folder
+      if: ${{ steps.resolve.outputs.found != 'true' && env.CLAWSCRIBE_VULKAN_STAGING != '' }}
+      uses: humbletim/install-vulkan-sdk@v1.2
+      with:
+        version: ${{ inputs.version }}
+        cache: false
+
+    - name: Verify the staged SDK and move it into its per-version folder
+      if: ${{ steps.resolve.outputs.found != 'true' }}
+      shell: pwsh
+      env:
+        PINNED_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        & "${{ github.workspace }}/frontend/scripts/stage-vulkan-sdk.ps1" -Phase Promote -Version $env:PINNED_VERSION
+
+    - name: Remove an unused SDK staging folder
+      if: ${{ always() && steps.prepare.outcome == 'success' }}
+      shell: pwsh
+      env:
+        PINNED_VERSION: ${{ inputs.version }}
+      run: |
+        & "${{ github.workspace }}/frontend/scripts/stage-vulkan-sdk.ps1" -Phase Clean -Version $env:PINNED_VERSION

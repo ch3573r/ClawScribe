@@ -39,17 +39,48 @@ workflow rather than silently changing the native toolchain during a release.
 
 The persistent runner keeps its toolchain. **Native library tests** therefore
 verifies it with `frontend/scripts/ensure-native-toolchain.ps1` (the Rust channel
-from `rust-toolchain.toml` with the MSVC target, LLVM 20.1.8, a Vulkan SDK folder
-named 1.4.309.0 that `VULKAN_SDK` points to, and a loadable `vulkan-1.dll`) and
-fails with what is missing. Pull requests and pushes never install, replace or
-downgrade anything. Provision the runner once (install the SDK system-wide so
-`VULKAN_SDK` is set), or start the workflow manually with `provision-toolchain`,
-which installs only what is missing: Rust with rustup, LLVM with Chocolatey
-(replacing a different version), 7-Zip when the Vulkan SDK must be extracted, and
-the SDK's signed runtime only when the loader cannot be loaded. A manually
-installed SDK lasts only for that run; the system-wide install is what lets
-pull requests pass. Node.js and pnpm come from the runner's tool cache through
-`actions/setup-node` and `pnpm/action-setup`.
+from `rust-toolchain.toml` with the MSVC target, LLVM 20.1.8, the Vulkan SDK 1.4.309.0
+and a loadable `vulkan-1.dll`) and fails with what is missing. The SDK is
+recognised by what it contains, never by its folder's name: the headers
+(`vulkan_core.h`) must be 1.4.309, `Lib/vulkan-1.lib` must exist and, when
+`Bin/vulkaninfoSDK.exe` is present, its file version must be 1.4.309.0. Matching
+content is accepted in any folder, and wrong content is rejected even in a folder
+named 1.4.309.0. The search covers per-version tool folders
+(`CLAWSCRIBE_TOOLCHAIN_ROOT`, the runner tool cache and ProgramData), `VULKAN_SDK`
+(process, machine and user) and the default SDK folder (`C:\VulkanSDK`, or
+`CLAWSCRIBE_VULKAN_SDK_ROOT`); every candidate and its verdict is printed. Pull
+requests and pushes never install, replace or downgrade anything. A runner whose
+inherited `VULKAN_SDK` names a different SDK is fine: that SDK is rejected by its
+content and the search continues.
+
+Every workflow that needs the SDK (release builds and, through them, the
+candidate workflow, plus the knowledge validation and loader diagnostics) uses the
+local `.github/actions/vulkan-sdk` action. It reuses a matching SDK, and otherwise
+stages the pinned SDK in its own per-version folder,
+`<toolchain root>/vulkan-sdk/<version>` (`CLAWSCRIBE_TOOLCHAIN_ROOT`, else the
+runner tool cache, else ProgramData), where later runs find it by content. The
+extraction action unpacks into whatever `VULKAN_SDK` names, so
+`stage-vulkan-sdk.ps1` first points `VULKAN_SDK` (and `VULKAN_SDK_VERSION`, which
+the action prefers over its input) at a fresh `.staging-*` folder, then requires
+that the action really used it, that the content is the pinned SDK and that the
+inherited SDK's identifying files are unchanged before renaming the folder into
+place. An existing per-version folder with other content stops the run and is
+never overwritten or deleted; remove it manually. Only the staging folder is ever
+deleted, after checking its name, its parent and that it holds no link. The
+runner's own SDK is never written.
+
+For the native tests, start the workflow manually with `provision-toolchain` to
+install only what is missing: Rust with rustup, LLVM with Chocolatey (replacing a
+different version), the SDK in its own folder as above, and the SDK's signed
+runtime only when the loader cannot be loaded. Node.js and pnpm come from the
+runner's tool cache through `actions/setup-node` and `pnpm/action-setup`.
+
+To check a runner's toolchain without changing it, start **Windows Vulkan runtime
+validation** manually with `verify-only` (any branch or commit; it needs no pull
+request). It runs on the designated runner with read-only repository access and
+only verifies: `ensure-native-toolchain.ps1`, the SDK search without installing
+(the verdict for every candidate is printed and added to the job summary) and the
+loader probe. It installs, extracts, stages, builds and tests nothing.
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc

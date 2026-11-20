@@ -10,7 +10,8 @@
     Rust       the channel pinned in rust-toolchain.toml with the Windows MSVC target
     LLVM       libclang of the pinned version (bindgen 0.69 mis-parses whisper
                structs with clang 21 and newer)
-    Vulkan SDK the pinned SDK with Bin, Lib and Include
+    Vulkan SDK the pinned SDK, recognised by its headers, library and tools
+               in any folder (see vulkan-sdk-common.ps1)
     Vulkan     a loadable vulkan-1.dll (the SDK supplies build tools, not the
     runtime    Windows runtime)
 
@@ -21,9 +22,9 @@
 
   -Provision is for an explicit, owner-started manual run only. It installs the
   missing Rust toolchain with rustup and a missing or different LLVM with
-  Chocolatey (a different LLVM version is replaced only here, never silently),
-  and it installs 7-Zip when the Vulkan SDK still has to be extracted. A missing
-  Vulkan SDK is then installed by the workflow itself, so -Provision also needs
+  Chocolatey (a different LLVM version is replaced only here, never silently).
+  A missing Vulkan SDK is then staged by the workflow itself (the vulkan-sdk
+  action, into its own per-version folder), so -Provision also needs
   -AllowMissingVulkanSdk, which reports it in the step output instead of failing.
 
 .PARAMETER Provision
@@ -133,35 +134,23 @@ if ($null -eq $llvm) {
 }
 
 # ---- Vulkan SDK ------------------------------------------------------------------
-function Find-VulkanSdk {
-    $candidates = @($env:VULKAN_SDK, [Environment]::GetEnvironmentVariable("VULKAN_SDK", "Machine")) | Where-Object { $_ }
-    foreach ($candidate in $candidates) {
-        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
-        $resolved = (Resolve-Path -LiteralPath $candidate).Path.TrimEnd([char]92, [char]47)
-        if ((Split-Path -Leaf $resolved) -ne $VulkanSdkVersion) { continue }
-        $absent = @("Bin", "Lib", "Include") | Where-Object { -not (Test-Path -LiteralPath (Join-Path $resolved $_) -PathType Container) }
-        if (-not $absent) { return $resolved }
-    }
-    return $null
-}
-
-$sdk = Find-VulkanSdk
-if ($sdk) {
+# Identified by content (headers, library, tools), not by the folder's name; see
+# vulkan-sdk-common.ps1. Staging a missing SDK is the vulkan-sdk composite action's job.
+. (Join-Path $PSScriptRoot "vulkan-sdk-common.ps1")
+$sdkSearch = Find-VulkanSdk -Version $VulkanSdkVersion
+Write-VulkanSdkCandidates -Checked $sdkSearch.Checked
+if ($sdkSearch.Match) {
+    $sdk = $sdkSearch.Match.Path
     Write-Host "Vulkan SDK $VulkanSdkVersion ready"
     $exports["VULKAN_SDK"] = $sdk
-    $exports["Vulkan_LIBRARY"] = Join-Path $sdk "Lib/vulkan-1.lib"
-    $exports["Vulkan_INCLUDE_DIR"] = Join-Path $sdk "Include"
-    $pathAdditions.Add((Join-Path $sdk "Bin"))
+    $exports["Vulkan_LIBRARY"] = ConvertTo-FullVulkanPath (Join-Path $sdk "Lib/vulkan-1.lib")
+    $exports["Vulkan_INCLUDE_DIR"] = ConvertTo-FullVulkanPath (Join-Path $sdk "Include")
+    $pathAdditions.Add((ConvertTo-FullVulkanPath (Join-Path $sdk "Bin")))
 } elseif ($AllowMissingVulkanSdk) {
     $vulkanSdkMissing = $true
-    Write-Host "Vulkan SDK $VulkanSdkVersion is not provisioned; the workflow installs it in a later step."
-    if ($Provision -and -not (Get-Command "7z.exe" -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles "7-Zip/7z.exe"))) {
-        Write-Host "Installing 7-Zip, needed to extract the Vulkan SDK (explicit provisioning)"
-        & choco install 7zip -y --no-progress
-        if ($LASTEXITCODE -ne 0) { throw "Chocolatey could not install 7-Zip." }
-    }
+    Write-Host "Vulkan SDK $VulkanSdkVersion is not provisioned; the workflow stages it in its own folder in a later step."
 } else {
-    Add-Problem "Vulkan SDK $VulkanSdkVersion (install it system-wide so VULKAN_SDK points at a folder named $VulkanSdkVersion, or run the workflow manually with provision-toolchain)"
+    Add-Problem "Vulkan SDK $VulkanSdkVersion (no candidate holds its headers, library and tools; keep it in a per-version tool folder, or run the workflow manually with provision-toolchain)"
 }
 
 # ---- results -------------------------------------------------------------------------

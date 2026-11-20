@@ -285,43 +285,14 @@ jobs:
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PATH=$llvmBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install Vulkan SDK prerequisites
+      # Reuses a matching SDK found by its content. Otherwise stages it in its own
+      # per-version folder; the runner's own SDK is never overwritten.
+      - name: Use the pinned Vulkan SDK
         if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          choco install 7zip -y --no-progress
-
-      - name: Install Vulkan SDK
-        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
-        uses: humbletim/install-vulkan-sdk@v1.2
+        uses: ./.github/actions/vulkan-sdk
         with:
           version: 1.4.309.0
-          cache: false
-
-      - name: Verify and Configure Vulkan SDK
-        if: ${{ inputs.feature == 'windows-gpu' || inputs.feature == 'vulkan' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $vulkanSdk = $env:VULKAN_SDK
-          Write-Host "VULKAN_SDK: $vulkanSdk"
-          if (-not $vulkanSdk -or -not (Test-Path $vulkanSdk)) {
-            throw "VULKAN_SDK not set or path does not exist"
-          }
-          $binDir = Join-Path $vulkanSdk "Bin"
-          $libDir = Join-Path $vulkanSdk "Lib"
-          $includeDir = Join-Path $vulkanSdk "Include"
-          foreach ($path in @($binDir, $libDir, $includeDir)) {
-            if (-not (Test-Path $path)) {
-              throw "Required Vulkan SDK path missing: $path"
-            }
-          }
-          "PATH=$binDir;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Vulkan_LIBRARY=$libDir\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Vulkan_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          install-missing: 'true'
 
       # SDK extraction does not execute Helpers/VulkanRT.exe. Hosted Windows
       # images have no Vulkan loader, so GPU-linked test executables otherwise

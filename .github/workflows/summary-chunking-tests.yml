@@ -201,11 +201,12 @@ jobs:
         with:
           python-version: '3.11'
           cache: ''
-      - uses: humbletim/install-vulkan-sdk@v1.2
+      - name: Use the pinned Vulkan SDK
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && !inputs['answer-acceptance'] }}
+        uses: ./.github/actions/vulkan-sdk
         with:
           version: 1.4.309.0
-          cache: false
+          install-missing: 'true'
       - name: Run knowledge validation
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.knowledge && !inputs['answer-acceptance'] }}
         env:
@@ -248,10 +249,11 @@ jobs:
           ref: ${{ inputs['build-ref'] }}
           clean: false
           persist-credentials: false
-      - uses: humbletim/install-vulkan-sdk@v1.2
+      - name: Use the pinned Vulkan SDK
+        uses: ./.github/actions/vulkan-sdk
         with:
           version: 1.4.309.0
-          cache: false
+          install-missing: 'true'
       - name: Run fixed actual answer evaluation
         env:
           EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}

@@ -125,9 +125,9 @@ test('the native workflow verifies the pinned toolchain instead of installing it
   assert.match(nativeWorkflow, /provision-toolchain:\n\s+description: [^\n]+\n\s+type: boolean\n\s+default: false/);
   assert.equal([...nativeWorkflow.matchAll(/-Provision\b/g)].length, 1);
   // The Vulkan SDK action runs only when the check found none (manual provisioning).
-  for (const name of ['Install the Vulkan SDK', 'Configure the freshly installed Vulkan SDK']) {
-    assert.match(stepBlock(nativeWorkflow, name), /if: \$\{\{ steps\.toolchain\.outputs\.vulkan_sdk == 'missing' \}\}/);
-  }
+  const stage = stepBlock(nativeWorkflow, 'Stage the pinned Vulkan SDK');
+  assert.match(stage, /if: \$\{\{ steps\.toolchain\.outputs\.vulkan_sdk == 'missing' \}\}/);
+  assert.match(stage, /uses: \.\/\.github\/actions\/vulkan-sdk/);
   // The runtime installer is reachable only through the manual branch.
   const loader = stepBlock(nativeWorkflow, 'Verify the Vulkan loader');
   assert.equal([...loader.matchAll(/-InstallFromSdk/g)].length, 1);
@@ -151,7 +151,7 @@ test('the toolchain script installs nothing unless provisioning was requested', 
   const installs = lines
     .map((line, index) => ({ line, index }))
     .filter(({ line }) => /^\s*&\s*(choco|rustup)\s+(toolchain\s+)?install\b/.test(line));
-  assert.equal(installs.length, 3, 'rustup, LLVM and 7-Zip are the only installs');
+  assert.equal(installs.length, 2, 'rustup and LLVM are the only installs');
   for (const { index } of installs) {
     const before = lines.slice(Math.max(0, index - 8), index).join('\n');
     assert.match(before, /if \(\$Provision/, `install at line ${index + 1} must be guarded by -Provision`);
@@ -286,4 +286,84 @@ test('the docs describe the toolchain, frontend and acceptance behaviour accurat
   assert.ok(docs.includes('forged marker'));
   assert.ok(docs.includes('exit code'));
   assert.ok(read('.github/workflows/WORKFLOWS_OVERVIEW.md').includes('provision-toolchain'));
+});
+
+// ---- Vulkan SDK acquisition: one isolated implementation ----------------------------------
+
+const composite = read('.github/actions/vulkan-sdk/action.yml');
+const workflowFiles = ['clawscribe-windows-release', 'native-library-tests', 'summary-chunking-tests', 'windows-native-loader-diagnostics', 'windows-candidate', 'release-readiness']
+  .map(name => [name, read(`.github/workflows/${name}.yml`)]);
+
+test('only the vulkan-sdk action unpacks the SDK, and it stages it in its own folder', () => {
+  for (const [name, source] of workflowFiles) {
+    assert.ok(!source.includes('install-vulkan-sdk'), `${name} must use the isolated vulkan-sdk action`);
+  }
+  assert.equal([...composite.matchAll(/humbletim\/install-vulkan-sdk@v1\.2/g)].length, 1);
+  assert.ok(!/actions\/(cache|upload-artifact)|Swatinem\/rust-cache/.test(composite));
+  // Order: resolve by content, prepare the isolated folder, unpack, verify and promote, clean up.
+  const order = ['resolve-vulkan-sdk.ps1', '-Phase Prepare', 'humbletim/install-vulkan-sdk', '-Phase Promote', '-Phase Clean']
+    .map(marker => composite.indexOf(marker));
+  assert.ok(order.every(index => index > 0) && order.every((index, i) => i === 0 || index > order[i - 1]), order.join());
+  // Everything that writes runs only when no matching SDK was found.
+  for (const name of ['Ensure the SDK extractor', 'Prepare an isolated SDK staging folder', 'Extract the pinned Vulkan SDK into the staging folder', 'Verify the staged SDK and move it into its per-version folder']) {
+    const block = stepBlock(composite.replace(/\n    - name:/g, '\n      - name:').replace(/^    - name:/m, '      - name:'), name);
+    assert.match(block, /steps\.resolve\.outputs\.found != 'true'/, name);
+  }
+  assert.match(composite, /env\.CLAWSCRIBE_VULKAN_STAGING != ''/);
+  assert.match(composite, /if: \$\{\{ always\(\) && steps\.prepare\.outcome == 'success' \}\}/);
+  // Without install-missing a missing SDK fails (read-only use).
+  assert.match(composite, /install-missing:\n\s+description: [^\n]+\n\s+default: 'false'/);
+  assert.match(composite, /if \(\$env:INSTALL_MISSING -eq 'true'\) \{\n\s+& "\$\{\{ github\.workspace \}\}\/frontend\/scripts\/resolve-vulkan-sdk\.ps1" -Version \$env:PINNED_VERSION -AllowMissing\n\s+\} else \{\n\s+& "\$\{\{ github\.workspace \}\}\/frontend\/scripts\/resolve-vulkan-sdk\.ps1" -Version \$env:PINNED_VERSION\n\s+\}/);
+});
+
+test('release builds reuse a matching SDK or stage it in isolation', () => {
+  const step = stepBlock(releaseWorkflow, 'Use the pinned Vulkan SDK');
+  assert.match(step, /if: \$\{\{ inputs\.feature == 'windows-gpu' \|\| inputs\.feature == 'vulkan' \}\}/);
+  assert.match(step, /uses: \.\/\.github\/actions\/vulkan-sdk/);
+  assert.match(step, /version: 1\.4\.309\.0/);
+  assert.match(step, /install-missing: 'true'/);
+  // The old unconditional extraction and configuration steps are gone.
+  assert.ok(!releaseWorkflow.includes('Install Vulkan SDK prerequisites'));
+  assert.ok(!/choco install 7zip/.test(releaseWorkflow));
+  // windows-candidate shares this implementation through the reusable release workflow.
+  assert.match(read('.github/workflows/windows-candidate.yml'), /uses: \.\/\.github\/workflows\/clawscribe-windows-release\.yml/);
+  assert.ok(releaseWorkflow.indexOf('Use the pinned Vulkan SDK') > releaseWorkflow.indexOf('uses: actions/checkout@'));
+});
+
+test('the staging script only ever writes to a fresh folder of its own', () => {
+  const stage = read('frontend/scripts/stage-vulkan-sdk.ps1');
+  assert.match(stage, /\$env:VULKAN_SDK \(or VULKAN_SDK_VERSION\)|VULKAN_SDK_VERSION/);
+  assert.match(stage, /\$stagingPattern = '\^\\.staging-\[0-9a-f\]\{32\}\$'/);
+  // Deletion: only the staging folder, after name, parent and link checks.
+  assert.equal([...stage.matchAll(/Remove-Item/g)].length, 1);
+  assert.match(stage, /Assert-NoLinkInPath \$stagingFull\n\s+if \(Get-ChildItem[^\n]+ReparsePoint[^\n]+\{ throw "contains a link" \}\n\s+Remove-Item -LiteralPath \$stagingFull -Recurse -Force/);
+  // The per-version folder is created by a rename of the verified staging folder.
+  assert.match(stage, /Move-Item -LiteralPath \$stagingFull -Destination \$final/);
+  assert.match(stage, /The SDK installer did not use the isolated staging folder/);
+  assert.match(stage, /The inherited SDK changed while the pinned SDK was staged/);
+  assert.match(stage, /never overwritten or deleted automatically/);
+});
+
+test('the registered loader validation has a bounded read-only verify mode', () => {
+  const loader = read('.github/workflows/windows-native-loader-diagnostics.yml');
+  assert.deepEqual(workflowPolicyErrors('windows-native-loader-diagnostics.yml', loader), []);
+  assert.match(loader, /^permissions:\n  contents: read\n/m);
+  assert.match(loader, /workflow_dispatch:\n    inputs:\n      verify-only:\n        description: [^\n]+\n        type: boolean\n        default: false/);
+  assert.match(loader, /timeout-minutes: 10/);
+  assert.match(loader, /persist-credentials: false/);
+  const readOnly = ['Verify the pinned native toolchain', 'Find the pinned Vulkan SDK without installing it', 'Probe the Vulkan loader without installing it', 'Summarize the read-only verification'];
+  const block = name => stepBlock(loader, name);
+  for (const name of readOnly) assert.match(block(name), /if: \$\{\{ inputs\['verify-only'\]/, name);
+  // The read-only steps never install, provision or stage anything.
+  for (const name of readOnly) {
+    assert.ok(!/-Provision|-InstallFromSdk|install-missing: 'true'|choco|Move-Item|Remove-Item/.test(block(name)), name);
+  }
+  assert.match(block('Find the pinned Vulkan SDK without installing it'), /install-missing: 'false'/);
+  assert.match(block('Verify the pinned native toolchain'), /\.\/frontend\/scripts\/ensure-native-toolchain\.ps1$/);
+  // Everything that installs, extracts or builds is skipped in that mode.
+  for (const name of ['Use the exact release SDK', 'Build a native load-time Vulkan dependency fixture', 'Verify missing-runtime rejection, installation and idempotence']) {
+    assert.match(block(name), /if: \$\{\{ !inputs\['verify-only'\] \}\}/, name);
+  }
+  // The same summary evidence is produced by the SDK search.
+  assert.match(read('frontend/scripts/vulkan-sdk-common.ps1'), /Vulkan SDK candidates/);
 });
