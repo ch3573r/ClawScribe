@@ -57,6 +57,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Require the designated local build machine
+        id: verify_runner
         env:
           EXPECTED_BUILD_RUNNER: ${{ vars.CLAWSCRIBE_BUILD_RUNNER }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -74,6 +75,7 @@ jobs:
           }
 
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs['build-ref'] || github.sha }}
@@ -174,7 +176,7 @@ jobs:
           .\scripts\build-windows-release.ps1 -Feature windows-gpu -CheckOnly -NativeOnly
 
       - name: Trim stale test executables after the run
-        if: ${{ always() }}
+        if: ${{ always() && steps.verify_runner.outcome == 'success' && steps.checkout.outcome == 'success' }}
         run: ./frontend/scripts/limit-native-test-cache.ps1 -NoFailOnLowSpace
 
       - name: Generate native test summary
@@ -182,7 +184,7 @@ jobs:
           @(
             '## Native library tests',
             '',
-            "**Commit:** $env:GITHUB_SHA",
+            "**Commit:** $(git rev-parse HEAD)",
             '',
             '- Designated local runner identity verified',
             '- Locked native check and the required release-profile library test groups passed',

@@ -26,7 +26,9 @@ test('native library tests run for trusted pull requests and main pushes on the 
   assert.match(nativeWorkflow, /build-windows-release\.ps1 -Feature windows-gpu -CheckOnly -NativeOnly/);
   assert.match(nativeWorkflow, /limit-native-test-cache\.ps1\n/);
   assert.match(nativeWorkflow, /limit-native-test-cache\.ps1 -NoFailOnLowSpace/);
-  assert.match(nativeWorkflow, /if: \$\{\{ always\(\) \}\}\n        run: \.\/frontend\/scripts\/limit-native-test-cache\.ps1/);
+  const cleanup = nativeWorkflow.slice(nativeWorkflow.indexOf('- name: Trim stale test executables'), nativeWorkflow.indexOf('- name: Generate native test summary'));
+  assert.match(cleanup, /steps\.verify_runner\.outcome == 'success'/);
+  assert.match(cleanup, /steps\.checkout\.outcome == 'success'/);
   // Dispatch needs an immutable reviewed commit, like the other manual validation.
   assert.match(nativeWorkflow, /\^\[0-9a-f\]\{40\}\$/);
 });
