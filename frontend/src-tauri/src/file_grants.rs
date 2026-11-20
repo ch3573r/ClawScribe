@@ -172,7 +172,7 @@ async fn pick_file<R: Runtime>(app: AppHandle<R>, name: &'static str, extensions
     .map_err(|_| "The file dialog failed".to_string())
 }
 
-async fn pick_save<R: Runtime>(
+pub(crate) async fn pick_save<R: Runtime>(
     app: AppHandle<R>,
     name: &'static str,
     extension: &'static str,

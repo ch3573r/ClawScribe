@@ -507,6 +507,11 @@ Docker component, or manually started whisper-server is needed for local use.
 
 ## Documentation And Support
 
+In **Settings → Diagnostics**, choose **Save report** to save a JSON file for
+troubleshooting. It contains app and platform information, device counts,
+engine status, and failure categories. You choose where to save it and whether
+to share it. See the [diagnostics report contents](docs/architecture.md#diagnostics-report).
+
 - [Documentation index](docs/README.md)
 - [Building from source](docs/BUILDING.md)
 - [Windows release and verification](docs/windows-release.md)

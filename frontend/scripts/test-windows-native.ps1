@@ -92,6 +92,7 @@ try {
         "audio::async_logger::tests",
         "audio::hardware_detector::tests",
         "updates::tests",
+        "diagnostics::report::tests",
         "audio::recording_mode::tests",
         "audio::pc_test::tests",
         "mcp::",

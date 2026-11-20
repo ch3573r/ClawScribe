@@ -608,6 +608,7 @@ pub fn run() {
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(exports::ms_auth_state::MicrosoftAuthState::new())
+        .manage(diagnostics::DiagnosticsReportState::default())
         .manage(ical_sources::CalendarStore::default())
         .manage(summary::edit_exit::SummaryEditsState::default())
         .manage(knowledge::KnowledgeState::default())
@@ -859,6 +860,7 @@ pub fn run() {
             // Playback device detection (Bluetooth warning)
             // OpenClaw handoff commands
             diagnostics::get_diagnostics_snapshot,
+            diagnostics::save_diagnostics_report,
             audio::pc_test::run_transcription_pc_test,
             mcp::settings::get_mcp_access,
             mcp::settings::set_mcp_access,

@@ -93,6 +93,19 @@ window titles are returned only when the settings diagnostics panel requests the
 - OpenClaw handoff is optional and sends completed recording artifacts only to
   the configured operator endpoint.
 
+### Diagnostics report
+
+**Settings → Diagnostics → Save report** uses the last completed Diagnostics
+snapshot. ClawScribe builds a separate, versioned JSON report from allowlisted
+app and platform fields, CPU and memory capacity, audio device counts,
+transcription and speaker separation status, and fixed failure categories.
+When the last recorded OpenClaw handoff failed, the report includes its failure
+category. The file is limited to 4 KiB.
+
+The save command works offline with the report held in memory. The Tauri core
+opens the native save dialog and writes the report atomically to the chosen
+file. The webview receives the outcome of the save.
+
 ## Recording And Inference Lifetimes
 
 On Windows, `audio/com_anchor.rs` initializes CPAL’s device enumerator on a

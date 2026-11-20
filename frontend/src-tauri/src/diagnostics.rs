@@ -22,6 +22,9 @@ use crate::whisper_engine::system_monitor::{SystemMonitor, SystemResources};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime, State};
 
+mod report;
+pub(crate) use report::DiagnosticsReportState;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticSnapshot {
@@ -89,9 +92,10 @@ pub struct IntegrationDiagnostics {
 }
 
 #[tauri::command]
-pub async fn get_diagnostics_snapshot<R: Runtime>(
+pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
+    report_state: State<'_, DiagnosticsReportState>,
 ) -> Result<DiagnosticSnapshot, String> {
     let mut errors = Vec::new();
     let app_data_dir = app.path().app_data_dir().ok();
@@ -163,7 +167,7 @@ pub async fn get_diagnostics_snapshot<R: Runtime>(
         errors.push(format!("recording_folder: {problem}"));
     }
 
-    Ok(DiagnosticSnapshot {
+    let snapshot = DiagnosticSnapshot {
         app: AppDiagnosticInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             os: std::env::consts::OS.to_string(),
@@ -198,7 +202,17 @@ pub async fn get_diagnostics_snapshot<R: Runtime>(
             codex,
         },
         errors,
-    })
+    };
+    report_state.remember(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub(crate) async fn save_diagnostics_report<R: Runtime>(
+    app: AppHandle<R>,
+    report_state: State<'_, DiagnosticsReportState>,
+) -> Result<bool, String> {
+    report::save_report(app, &report_state).await
 }
 
 async fn current_system_resources() -> Result<SystemResources, String> {

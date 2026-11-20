@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Copy, RefreshCw } from "lucide-react";
@@ -486,6 +486,8 @@ export function DiagnosticsSettings() {
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [savingReport, setSavingReport] = useState(false);
+  const saveInProgress = useRef(false);
   const openclaw = useOpenClawStatus();
   const codex = useCodexStatus();
   const calendars = useSyncExternalStore(subscribeToICalendars, getICalendarSnapshot, getICalendarServerSnapshot);
@@ -521,6 +523,24 @@ export function DiagnosticsSettings() {
       toast.error("Failed to copy diagnostics", {
         description: copyError instanceof Error ? copyError.message : String(copyError),
       });
+    }
+  };
+
+  const saveDiagnosticsReport = async () => {
+    if (!snapshot || loading || saveInProgress.current) return;
+    saveInProgress.current = true;
+    setSavingReport(true);
+    try {
+      if (await invoke<boolean>("save_diagnostics_report")) {
+        toast.success("Diagnostics report saved");
+      }
+    } catch {
+      toast.error("Could not save the diagnostics report", {
+        description: "Choose a writable folder and a .json filename, then try again.",
+      });
+    } finally {
+      saveInProgress.current = false;
+      setSavingReport(false);
     }
   };
 
@@ -644,6 +664,15 @@ export function DiagnosticsSettings() {
       {error && <NoteRow tone="error">{error}</NoteRow>}
       {items.map((item) => <HealthRow key={item.id} item={item} />)}
       <DiagnosticsDetails snapshot={snapshot} openclaw={openclaw.status} />
+      <SettingsFooter
+        actions={
+          <Button type="button" variant="outline" size="sm" onClick={saveDiagnosticsReport} disabled={!snapshot || loading || savingReport}>
+            {savingReport ? "Saving…" : "Save report"}
+          </Button>
+        }
+      >
+        Save app and system information, status checks, and failure categories to a JSON file.
+      </SettingsFooter>
     </SettingsCard>
   );
 
