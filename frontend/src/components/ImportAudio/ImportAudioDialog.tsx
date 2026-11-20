@@ -36,6 +36,8 @@ import {
 } from '../ui/select';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { importSummarySelection, useSummaryDestination, type ImportSummaryChoice } from '@/hooks/useSummaryDestination';
+import { providerLabel } from '@/components/settings/provider-data';
 import { useImportAudio, ImportResult, type AudioFileInfo } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
@@ -78,12 +80,15 @@ export function ImportAudioDialog({
 }: ImportAudioDialogProps) {
   const router = useRouter();
   const { refetchMeetings } = useSidebar();
-  const { selectedLanguage, transcriptModelConfig, modelConfig } = useConfig();
+  const { selectedLanguage, transcriptModelConfig, modelConfig, isAutoSummary } = useConfig();
 
   const [title, setTitle] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
   const [useFileDate, setUseFileDate] = useState(false);
-  const [summarize, setSummarize] = useState(false);
+  const { destination, error: destinationError } = useSummaryDestination(open, modelConfig, isAutoSummary);
+  const [summaryChoice, setSummaryChoice] = useState<ImportSummaryChoice>('default');
+  const summarySelection = importSummarySelection(summaryChoice, isAutoSummary, destination);
+  const summarize = summarySelection !== null;
   const [remainingFiles, setRemainingFiles] = useState<AudioFileInfo[]>([]);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -182,7 +187,7 @@ export function ImportAudioDialog({
       setTitle('');
       setMeetingDate('');
       setUseFileDate(false);
-      setSummarize(false);
+      setSummaryChoice('default');
       setRemainingFiles([]);
       setTitleModifiedByUser(false);
       setStats(null);
@@ -207,7 +212,7 @@ export function ImportAudioDialog({
     setRemainingFiles([]);
     setMeetingDate('');
     setUseFileDate(false);
-    setSummarize(false);
+    setSummaryChoice('default');
     setTitleModifiedByUser(false);
     setStats(null);
     validateFile(preselectedFile).then((info) => {
@@ -244,7 +249,7 @@ export function ImportAudioDialog({
     setTitle(first.filename);
     setMeetingDate('');
     setUseFileDate(false);
-    setSummarize(false);
+    setSummaryChoice('default');
     setRemainingFiles(rest);
   };
 
@@ -258,7 +263,7 @@ export function ImportAudioDialog({
 
     importStartedAtRef.current = performance.now();
     importedModelLabelRef.current = selectedModel?.displayName || 'Default model';
-    summaryRequested.current = summarize && modelConfig.provider === 'builtin-ai';
+    summaryRequested.current = summarize;
 
     await startImport(
       fileInfo.path,
@@ -266,7 +271,13 @@ export function ImportAudioDialog({
       isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
       selectedModel?.name || null,
       selectedModel?.provider || null,
-      { meetingAt: date?.toISOString() ?? null, useFileDate, summarize: summaryRequested.current },
+      {
+        meetingAt: date?.toISOString() ?? null,
+        useFileDate,
+        summarize,
+        summaryDestinationFingerprint: summarySelection?.fingerprint ?? null,
+        summaryUseAutomaticPreference: summarySelection?.useAutomaticPreference ?? false,
+      },
     );
   };
 
@@ -297,7 +308,7 @@ export function ImportAudioDialog({
     setTitle(next?.filename ?? '');
     setMeetingDate('');
     setUseFileDate(false);
-    setSummarize(false);
+    setSummaryChoice('default');
     setTitleModifiedByUser(false);
     importStartedAtRef.current = null;
   };
@@ -438,12 +449,20 @@ export function ImportAudioDialog({
                     )}
                   </div>
                   <div className="flex items-start gap-2">
-                    <Checkbox id="import-summarize" checked={summarize && modelConfig.provider === 'builtin-ai'}
-                      disabled={modelConfig.provider !== 'builtin-ai'}
-                      onCheckedChange={value => setSummarize(value === true)} aria-describedby="import-summary-help" />
+                    <Checkbox id="import-summarize" checked={summarize}
+                      disabled={!destination}
+                      onCheckedChange={value => setSummaryChoice(value === true && destination ? { fingerprint: destination.fingerprint } : 'off')}
+                      aria-describedby="import-summary-help" />
                     <div>
                       <label htmlFor="import-summarize" className="text-sm font-medium">Generate a summary after transcription</label>
-                      <p id="import-summary-help" className="text-xs text-muted-foreground">Requires a Built-in AI summary model.</p>
+                      <p id="import-summary-help" className="break-all text-xs text-muted-foreground">
+                        {destination ? destination.external
+                          ? 'Sends this transcript and notes context to ' + providerLabel(destination.provider) + ' (' + destination.endpoint + ') using ' + destination.model + '.'
+                          : 'Generates notes locally with ' + providerLabel(destination.provider) + ' using ' + destination.model + '.'
+                          : destinationError ?? 'Checking the selected summary provider…'}
+                        {destination?.external && destination.unencrypted && ' This connection uses unencrypted HTTP.'}
+                        {summarySelection?.useAutomaticPreference && ' Selected by your automatic notes setting. You can clear it for this file.'}
+                      </p>
                     </div>
                   </div>
                   {remainingFiles.length > 0 && <p className="text-xs text-muted-foreground">
@@ -645,7 +664,7 @@ export function ImportAudioDialog({
                 disabled={!fileInfo || isBusy}
               >
                 <Upload className="h-4 w-4 mr-2" />
-                {summarize && modelConfig.provider === 'builtin-ai' ? 'Import and summarize' : 'Import'}
+                {summarize ? 'Import and summarize' : 'Import'}
               </Button>
             </>
           )}

@@ -20,6 +20,7 @@ const LABELS: Record<string, string> = {
   "builtin-ai": "Built-in AI",
   ollama: "Ollama",
   "custom-openai": "OpenAI or compatible",
+  "openai-compatible": "OpenAI-compatible",
   openai: "OpenAI",
   gemini: "Gemini",
   claude: "Claude",

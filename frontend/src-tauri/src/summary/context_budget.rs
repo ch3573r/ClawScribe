@@ -251,7 +251,13 @@ where
                     }
                     // HTTP providers already retry their recoverable transport
                     // errors and must retain their quota and auth decisions.
-                    Err(_) if !reduction.retry_provider_errors => break,
+                    _ if !reduction.retry_provider_errors => {
+                        reduction.report(index, total, level + 1);
+                        return Err(format!(
+                            "The summary provider failed on excerpt {} of {total}. Check provider settings before retrying.",
+                            index + 1
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -280,6 +286,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_failure_stops_submissions_and_retains_unicode_notes() {
+        let reduction = Reduction::default();
+        let mut submitted = Vec::new();
+        let notes = "ä".repeat(128 * 1024) + "📝";
+        let result = reduce("AAAABBBBCCCC", 8, 4, &reduction, None, |chunk| {
+            let result = if chunk == "AAAA" {
+                Ok(notes.clone())
+            } else {
+                Err("Provider response must stay out of diagnostics".into())
+            };
+            submitted.push(chunk);
+            std::future::ready(result)
+        }).await;
+        let error = result.unwrap_err();
+        assert!(error.contains("excerpt 2 of 3"));
+        assert!(!error.contains("Provider response"));
+        assert_eq!(submitted, ["AAAA", "BBBB"]);
+        assert_eq!(reduction.partial_notes(), "ä".repeat(128 * 1024 - 1));
+        assert_eq!(reduction.progress().completed, 1);
+    }
 
     #[tokio::test]
     async fn keeps_successful_excerpts_and_retries_each_failed_excerpt_once() {

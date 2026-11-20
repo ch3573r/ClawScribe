@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod automatic;
+mod request_config;
 
 /// Custom OpenAI-compatible endpoint configuration
 /// Stored as JSON in the database and used for connecting to any OpenAI-compatible API server

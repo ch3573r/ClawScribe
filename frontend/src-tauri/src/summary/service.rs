@@ -3,7 +3,8 @@ use crate::database::repositories::{
 };
 use crate::ollama::metadata::ModelMetadataCache;
 use crate::summary::codex_provider::{provider_from_app, CodexMeetingProcessRequest};
-use crate::summary::llm_client::LLMProvider;
+use crate::summary::llm_client::{LLMProvider, SummaryDispatch};
+use super::request_config::{AuthorizedRequest, Execution};
 use crate::summary::openai_provider::{
     config_from_custom_openai, config_from_openai_api_key, OpenAICompatibleMeetingProcessRequest,
     OpenAICompatibleProcessingProvider,
@@ -47,6 +48,11 @@ pub(crate) struct SummaryJob {
     token: CancellationToken,
     _install_guard: tokio::sync::RwLockReadGuard<'static, ()>,
     reduction: Arc<super::context_budget::Reduction>,
+}
+
+pub(crate) enum SummaryProviderRequest {
+    Manual { provider: String, model: String },
+    Automatic(AuthorizedRequest),
 }
 
 impl Drop for SummaryJob {
@@ -115,6 +121,8 @@ async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str)
 
 const SUMMARY_SAVE_FAILED: &str =
     "The summary was generated but could not be saved. Generate it again.";
+const TRANSCRIPT_CHANGED: &str =
+    "The transcript changed while notes were generating. Generate notes again for the saved transcript.";
 
 async fn retry_save<S, SF, F, FF, T, E>(mut save: S, fail: F) -> Result<T, String>
 where
@@ -160,9 +168,8 @@ async fn save_completed_with_retry(
     )
     .await?;
     if !committed {
-        let message = "The transcript changed while notes were generating. Generate notes again for the saved transcript.";
-        let _ = SummaryProcessesRepository::update_process_failed(pool, meeting, message).await;
-        return Err(message.into());
+        let _ = SummaryProcessesRepository::update_process_failed(pool, meeting, TRANSCRIPT_CHANGED).await;
+        return Err(TRANSCRIPT_CHANGED.into());
     }
     Ok(())
 }
@@ -198,19 +205,47 @@ async fn finish_generation_error(
     revision: Option<i64>,
     error: &str,
 ) {
-    if !job.token.is_cancelled() {
+    let mut error = error;
+    if let Some(revision) = revision.filter(|_| !job.token.is_cancelled()) {
         let partial_notes = job.reduction.partial_notes();
         if !partial_notes.is_empty() {
-            let raw = serde_json::json!({
-                "partial_notes": partial_notes,
-                "transcript_revision": revision,
-            })
-            .to_string();
-            let _ = sqlx::query("UPDATE summary_processes SET metadata = ? WHERE meeting_id = ? AND (? IS NULL OR EXISTS (SELECT 1 FROM knowledge_sources s WHERE s.meeting_id = summary_processes.meeting_id AND s.kind = 'meeting' AND s.revision = ?))")
-                .bind(raw).bind(meeting).bind(revision).bind(revision).execute(pool).await;
+            match SummaryProcessesRepository::fail_with_partial(pool, meeting, error, revision, &partial_notes).await {
+                Ok(true) => return,
+                Ok(false) => error = TRANSCRIPT_CHANGED,
+                Err(_) => error!("Could not save partial notes"),
+            }
         }
     }
     finish_provider_error(pool, meeting, &job.token, error).await;
+}
+
+fn remote_failure_diagnostic(error: &str) -> String {
+    use super::automatic::{DESTINATION_CHANGED, DISABLED, REVIEW_REQUIRED};
+    if [DESTINATION_CHANGED, DISABLED, REVIEW_REQUIRED].contains(&error) {
+        return error.to_owned();
+    }
+    if let Some(status) = error.strip_prefix("Summary provider HTTP ")
+        .and_then(|rest| rest.split([':', '.', ' ']).next())
+        .and_then(|status| status.parse::<u16>().ok())
+        .filter(|status| (300..=599).contains(status))
+    {
+        return format!("Summary provider HTTP {status}. Check the summary provider settings and try again.");
+    }
+    if let Some(position) = error.strip_prefix("The summary provider failed on excerpt ")
+        .and_then(|rest| rest.strip_suffix(". Check provider settings before retrying."))
+        .and_then(|position| position.split_once(" of "))
+        .and_then(|(index, total)| Some((index.parse::<usize>().ok()?, total.parse::<usize>().ok()?)))
+    {
+        let (index, total) = position;
+        return format!("The summary provider failed on excerpt {index} of {total}. Check provider settings before retrying.");
+    }
+    if error.contains("timed out") {
+        return "The summary provider timed out. Check its settings or increase the request timeout.".into();
+    }
+    if error.contains("context") || error.contains("completion limit") {
+        return "The notes did not fit the model's context or output limit. Choose a larger model or shorten the notes prompt.".into();
+    }
+    "The summary provider could not generate notes. Check its connection and settings, then try again.".into()
 }
 
 const ENGLISH_CACHE_FIELD: &str = "english_cache";
@@ -451,8 +486,7 @@ impl SummaryService {
         pool: SqlitePool,
         meeting_id: String,
         text: String,
-        model_provider: String,
-        model_name: String,
+        request: SummaryProviderRequest,
         custom_prompt: String,
         summary_title: crate::library::calendar::ProviderTitle,
         template_id: String,
@@ -460,6 +494,14 @@ impl SummaryService {
         include_speaker_labels: bool,
         job: &SummaryJob,
     ) {
+        let (model_provider, model_name, automatic) = match request {
+            SummaryProviderRequest::Manual { provider, model } => (provider, model, None),
+            SummaryProviderRequest::Automatic(authorized) => (
+                super::llm_client::canonical_provider(&authorized.request.provider).to_owned(),
+                authorized.request.model.clone(),
+                Some(authorized),
+            ),
+        };
         let start_time = Instant::now();
         info!(
             "Starting background processing for meeting_id: {}",
@@ -508,7 +550,18 @@ impl SummaryService {
         let cancellation_token = &job.token;
 
         // Parse provider
-        let provider = match LLMProvider::from_str(&model_provider) {
+        let execution = automatic.as_ref().map(|job| &job.request.execution);
+        let check = automatic.as_ref().and_then(|job| job.check.as_ref());
+        if let Some(check) = check {
+            if let Err(reason) = check() {
+                Self::update_process_failed(&pool, &meeting_id, &reason).await;
+                return;
+            }
+        }
+        let provider = match automatic.as_ref().map_or_else(
+            || LLMProvider::from_str(&model_provider),
+            |job| Ok(job.request.provider.clone()),
+        ) {
             Ok(p) => p,
             Err(e) => {
                 Self::update_process_failed(&pool, &meeting_id, &e).await;
@@ -527,7 +580,12 @@ impl SummaryService {
 
         // Validate and setup api_key. Local/OpenClaw-managed providers do not use
         // the standard provider API-key database column.
-        let api_key = if matches!(
+        let api_key = if let Some(execution) = execution {
+            match execution {
+                Execution::Standard { api_key, .. } => api_key.clone(),
+                _ => String::new(),
+            }
+        } else if matches!(
             provider,
             LLMProvider::Ollama
                 | LLMProvider::BuiltInAI
@@ -557,7 +615,12 @@ impl SummaryService {
         };
 
         // Get Ollama endpoint if provider is Ollama
-        let ollama_endpoint = if provider == LLMProvider::Ollama {
+        let ollama_endpoint = if let Some(execution) = execution {
+            match execution {
+                Execution::Ollama { base, .. } => Some(base.as_str().trim_end_matches('/').to_owned()),
+                _ => None,
+            }
+        } else if provider == LLMProvider::Ollama {
             match SettingsRepository::get_model_config(&pool).await {
                 Ok(Some(config)) => config.ollama_endpoint,
                 Ok(None) => None,
@@ -578,7 +641,9 @@ impl SummaryService {
             custom_openai_max_tokens,
             custom_openai_temperature,
             custom_openai_top_p,
-        ) = if provider == LLMProvider::CustomOpenAI {
+        ) = if execution.is_some() {
+            (None, None, None, None, None)
+        } else if provider == LLMProvider::CustomOpenAI {
             match SettingsRepository::get_custom_openai_config(&pool).await {
                 Ok(Some(config)) => {
                     allow_unencrypted = config.allow_unencrypted;
@@ -639,7 +704,24 @@ impl SummaryService {
             api_key
         };
 
-        let context_hint = if provider == LLMProvider::Ollama {
+        let context_hint = if let Some(Execution::Ollama { client, .. }) = execution {
+            let probe = async {
+                if let Some(check) = check {
+                    check()?;
+                }
+                let metadata = crate::ollama::metadata::fetch_model_info(
+                    client, &model_name, ollama_endpoint.as_deref(),
+                ).await;
+                Ok(metadata.map(|value| value.context_size).unwrap_or(8192))
+            };
+            match super::llm_client::with_cancellation(Some(cancellation_token), probe).await {
+                Ok(context) => Some(context),
+                Err(reason) => {
+                    finish_provider_error(&pool, &meeting_id, cancellation_token, &reason).await;
+                    return;
+                }
+            }
+        } else if execution.is_none() && provider == LLMProvider::Ollama {
             Some(
                 super::context_budget::ollama_context(&model_name, ollama_endpoint.as_deref())
                     .await,
@@ -704,13 +786,16 @@ impl SummaryService {
                 .await
                 .ok()
                 .flatten();
-            let output_dir = match _app.path().app_data_dir() {
+            let output_dir = if execution.is_some() {
+                Ok(None)
+            } else { match _app.path().app_data_dir() {
                 Ok(data) => {
                     super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
                         .await
+                        .map(Some)
                 }
                 Err(_) => Err("Could not locate meeting output storage".into()),
-            };
+            }};
             let output_dir = match output_dir {
                 Ok(path) => path,
                 Err(error) => {
@@ -721,7 +806,16 @@ impl SummaryService {
             let meeting_title =
                 meeting_metadata.and_then(|meeting| summary_title.for_provider(meeting.title));
 
-            let provider_config = match provider {
+            let openai_provider = if let Some(execution) = execution {
+                match execution {
+                    Execution::Compatible(provider) => Ok(match check {
+                        Some(check) => provider.clone().with_dispatch_check(check.clone()),
+                        None => provider.clone(),
+                    }),
+                    _ => Err("The authorized summary request has an invalid transport".into()),
+                }
+            } else {
+                let provider_config = match provider {
                 LLMProvider::CustomOpenAI => {
                     match SettingsRepository::get_custom_openai_config(&pool).await {
                         Ok(Some(config)) => config_from_custom_openai(config),
@@ -786,9 +880,11 @@ impl SummaryService {
                     top_p: None,
                 }),
                 _ => unreachable!("provider checked above"),
+                };
+                OpenAICompatibleProcessingProvider::new(provider_config)
             };
 
-            let result = match OpenAICompatibleProcessingProvider::new(provider_config) {
+            let result = match openai_provider {
                 Ok(openai_provider) => {
                     openai_provider
                         .process_meeting_with_progress(
@@ -798,7 +894,7 @@ impl SummaryService {
                                 meeting_title,
                                 transcript: text.clone(),
                                 custom_prompt: Some(custom_prompt.clone()),
-                                output_dir: Some(output_dir),
+                                output_dir,
                             },
                             Some(cancellation_token),
                             &job.reduction,
@@ -829,13 +925,15 @@ impl SummaryService {
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&api_result.markdown),
                         "structured_meeting_output": api_result.structured_output,
-                        "openai_compatible": {
+                    });
+                    if execution.is_none() {
+                        result_json["openai_compatible"] = serde_json::json!({
                             "output_json_path": api_result.output_json_path,
                             "notes_markdown_path": api_result.notes_markdown_path,
                             "follow_up_email_path": api_result.follow_up_email_path,
                             "processing_log_path": api_result.processing_log_path,
-                        }
-                    });
+                        });
+                    }
                     super::sources::attach(&mut result_json, &summary_sources);
                     if let Err(e) = save_completed_with_retry(
                         &pool,
@@ -856,7 +954,8 @@ impl SummaryService {
                     }
                 }
                 Err(e) => {
-                    finish_generation_error(&pool, &meeting_id, job, revision, &e).await;
+                    let diagnostic = remote_failure_diagnostic(&e);
+                    finish_generation_error(&pool, &meeting_id, job, revision, &diagnostic).await;
                 }
             }
             return;
@@ -965,7 +1064,8 @@ impl SummaryService {
                     }
                 }
                 Err(e) => {
-                    finish_generation_error(&pool, &meeting_id, job, revision, &e).await;
+                    let diagnostic = remote_failure_diagnostic(&e);
+                    finish_generation_error(&pool, &meeting_id, job, revision, &diagnostic).await;
                 }
             }
             return;
@@ -973,6 +1073,7 @@ impl SummaryService {
 
         let template_fingerprint = template_cache_fingerprint(&template);
 
+        let automatic_fingerprint = automatic.as_ref().map(|job| job.request.review().fingerprint);
         let cache_source = build_summary_cache_source(
             &text,
             &custom_prompt,
@@ -981,7 +1082,7 @@ impl SummaryService {
             token_threshold,
             &model_provider,
             &model_name,
-            ollama_endpoint.as_deref(),
+            automatic_fingerprint.as_deref().or(ollama_endpoint.as_deref()),
             custom_openai_endpoint.as_deref(),
             custom_openai_max_tokens,
             custom_openai_temperature,
@@ -1015,7 +1116,17 @@ impl SummaryService {
             }),
         };
 
-        let client = reqwest::Client::new();
+        let client = match execution {
+            Some(Execution::Ollama { client, .. } | Execution::Standard { client, .. }) => client.clone(),
+            _ => reqwest::Client::new(),
+        };
+        let dispatch = execution.map(|execution| SummaryDispatch {
+            endpoint: match execution {
+                Execution::Standard { endpoint, .. } => Some(endpoint),
+                _ => None,
+            },
+            check,
+        });
         let result = generate_meeting_summary(
             &client,
             &provider,
@@ -1034,6 +1145,7 @@ impl SummaryService {
             custom_openai_top_p,
             app_data_dir.as_ref(),
             Some(cancellation_token),
+            dispatch,
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
@@ -1089,7 +1201,8 @@ impl SummaryService {
             }
             Err(e) => {
                 // Check if error is due to cancellation
-                finish_generation_error(&pool, &meeting_id, job, revision, &e).await;
+                let diagnostic = if provider == LLMProvider::BuiltInAI { e } else { remote_failure_diagnostic(&e) };
+                finish_generation_error(&pool, &meeting_id, job, revision, &diagnostic).await;
             }
         }
     }

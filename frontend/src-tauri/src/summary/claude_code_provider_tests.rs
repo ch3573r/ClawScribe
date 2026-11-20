@@ -630,6 +630,7 @@ async fn generic_summary_dispatch_never_forwards_the_supplied_api_key() {
         None,
         Some(&data),
         Some(&CancellationToken::new()),
+        None,
     )
     .await
     .unwrap();

@@ -782,6 +782,12 @@ pub fn run() {
                 log::warn!("Failed to resolve resource directory for templates");
             }
 
+            if let Some(state) = _app.try_state::<state::AppState>() {
+                let pool = state.db_manager.pool().clone();
+                let app = _app.handle().clone();
+                tauri::async_runtime::spawn(summary::automatic::resume_at_startup(app, pool));
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1007,6 +1013,8 @@ pub fn run() {
             summary::commands::api_process_transcript,
             summary::commands::api_generate_meeting_summary,
             summary::automatic::get_automatic_summary_preference,
+            summary::automatic::migrate_automatic_summary_preference,
+            summary::automatic::get_automatic_summary_destination,
             summary::automatic::set_automatic_summary_preference,
             summary::automatic::start_recording_summary,
             summary::commands::polish_planner_tasks,

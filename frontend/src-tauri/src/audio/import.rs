@@ -379,7 +379,7 @@ impl Default for ImportDate {
 
 struct ImportOptions {
     date: ImportDate,
-    summarize: bool,
+    summary_request: Option<crate::summary::automatic::AuthorizedRequest>,
     summary_language: Option<String>,
 }
 
@@ -432,13 +432,13 @@ async fn start_import<R: Runtime>(
     drop(_phase);
     drop(_job);
     if let Ok(res) = &result {
-        if options.summarize {
+        if let Some(request) = options.summary_request {
             if let Some(state) = app.try_state::<AppState>() {
-                if crate::summary::automatic::start(
+                if crate::summary::automatic::start_import(
                     app.clone(),
                     state.db_manager.pool().clone(),
                     res.meeting_id.clone(),
-                    Ok(true),
+                    request,
                 )
                 .await
                 .is_err()
@@ -1462,6 +1462,8 @@ pub async fn start_import_audio_command<R: Runtime>(
     meeting_at: Option<chrono::DateTime<chrono::Utc>>,
     use_file_date: Option<bool>,
     summarize: Option<bool>,
+    summary_destination_fingerprint: Option<String>,
+    summary_use_automatic_preference: Option<bool>,
     summary_language: Option<String>,
 ) -> Result<ImportStarted, String> {
     let guard = ImportGuard::acquire()?;
@@ -1483,13 +1485,22 @@ pub async fn start_import_audio_command<R: Runtime>(
     } else {
         meeting_at
     };
+    let summary_request = if summarize.unwrap_or(false) {
+        let state = app.try_state::<AppState>().ok_or("Meeting storage is unavailable")?;
+        Some(crate::summary::automatic::prepare_import(
+            &app, state.db_manager.pool(), summary_destination_fingerprint.as_deref(),
+            summary_use_automatic_preference.unwrap_or(false),
+        ).await?)
+    } else {
+        None
+    };
     let options = ImportOptions {
         date: ImportDate {
             meeting_at,
             from_file,
             ..ImportDate::default()
         },
-        summarize: summarize.unwrap_or(false),
+        summary_request,
         summary_language,
     };
     let taken = crate::file_grants::take(crate::file_grants::Purpose::AudioImport, &source_path)?;

@@ -1499,6 +1499,7 @@ impl CodexAppServerProvider {
                     super::context_budget::EXTRACT_FACTS
                 ))
                 .await
+                .and_then(|text| super::processor::require_summary_markdown(&text, "Meeting excerpt"))
             },
         )
         .await?;
@@ -1524,7 +1525,6 @@ impl CodexAppServerProvider {
         let prompt_path = scratch_dir.join("prompt.md");
         let output_path = scratch_dir.join("codex-output.json");
         let final_path = scratch_dir.join("codex-final.md");
-        let events_path = scratch_dir.join("codex-events.jsonl");
 
         fs::write(
             &transcript_path,
@@ -1572,7 +1572,6 @@ impl CodexAppServerProvider {
                     stderr: session.take_stderr().await,
                     message: redact_secrets(&e),
                 };
-                write_safe_events(&events_path, &status)?;
                 write_processing_log(&scratch_dir, &status, started.elapsed(), "failed")?;
                 return Err(redact_secrets(&e));
             }
@@ -1609,7 +1608,6 @@ impl CodexAppServerProvider {
             stderr: session.take_stderr().await,
             message: "Codex app-server meeting processing succeeded.".to_string(),
         };
-        write_safe_events(&events_path, &status)?;
         write_processing_log(&output_dir, &status, started.elapsed(), "completed")?;
         Ok(CodexProcessingResult {
             meeting_id: request.meeting_id,
@@ -3840,22 +3838,6 @@ pub(crate) fn render_follow_up_email(email: &FollowUpEmail) -> String {
     )
 }
 
-fn write_safe_events(path: &Path, output: &CodexCommandStatus) -> Result<(), String> {
-    let mut lines = Vec::new();
-    if !output.stdout.trim().is_empty() {
-        lines.push(serde_json::json!({ "stream": "stdout", "text": output.stdout }));
-    }
-    if !output.stderr.trim().is_empty() {
-        lines.push(serde_json::json!({ "stream": "stderr", "text": output.stderr }));
-    }
-    let body = lines
-        .into_iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(path, body).map_err(|e| format!("Failed to write Codex events: {e}"))
-}
-
 fn write_processing_log(
     scratch_dir: &Path,
     output: &CodexCommandStatus,
@@ -3883,8 +3865,8 @@ fn write_processing_log_at(
         "status": status,
         "exit_code": output.exit_code,
         "duration_seconds": duration.as_secs_f64(),
-        "stdout_excerpt": truncate_for_log(&output.stdout),
-        "stderr_excerpt": truncate_for_log(&output.stderr),
+        "stdout_present": !output.stdout.trim().is_empty(),
+        "stderr_present": !output.stderr.trim().is_empty(),
         "scratch_dir": scratch_dir.map(|p| p.to_string_lossy().to_string()),
     });
     fs::write(
@@ -4291,7 +4273,7 @@ exit 2
     }
 
     #[tokio::test]
-    async fn fake_codex_nonzero_redacts_stderr() {
+    async fn fake_codex_nonzero_does_not_persist_stderr_content() {
         let temp = tempfile::tempdir().unwrap();
         let provider = provider_with_fake_scenario(&temp, "exec-nonzero");
         let err = provider
@@ -4314,7 +4296,8 @@ exit 2
                 .join("processing-log.json"),
         )
         .unwrap();
-        assert!(log.contains("[REDACTED]"));
+        assert!(log.contains("\"stderr_present\": true"));
+        assert!(!log.contains("stderr_excerpt"));
         assert!(!log.contains("secret-token-value"));
     }
 

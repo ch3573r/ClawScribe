@@ -246,10 +246,13 @@ OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advance
 bundled Codex app-server path, plus **Claude Code** using your own installation.
 
 Enable **Summarize automatically** in Summary settings to generate local notes
-with Built-in AI after saving a recording. Reopen the meeting to check progress,
-see why notes were skipped, or retry. Long summaries keep recovered excerpt
-notes available when an attempt fails. Windows notifications can tell you when
-automatic notes are ready.
+with Built-in AI or loopback Ollama after saving a recording. External providers
+with a known destination require a review in Summary settings. A changed provider,
+model, or destination requires fresh approval. For audio imports, you can review
+and use the selected provider for that file. Reopen the meeting to check progress,
+see why notes were skipped, or recover excerpt notes after a failed attempt.
+Windows notifications can tell you when automatic notes are ready. See
+[Automatic notes](docs/automatic-notes.md) for supported providers and recovery.
 
 **Claude Code**: Uses the Claude Code you installed and signed in to. Your Claude
 plan's limits apply. Install it yourself, run `claude auth login` in a terminal,
@@ -278,8 +281,7 @@ previous version after a successful generation.
 
 Saving a title leaves unchanged notes alone. Failed saves retain drafts, and
 edits made during a save remain available to save again. Switching meetings
-discards late loading results from the previous meeting. Automatic summaries
-wait for saved notes to load and use the provider you have configured.
+discards late loading results from the previous meeting.
 
 New summaries request links to supporting transcript passages. Open a source
 link to inspect the text, reveal it in the transcript, or play its saved audio.

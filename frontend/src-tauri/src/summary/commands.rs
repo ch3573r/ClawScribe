@@ -266,8 +266,8 @@ pub async fn api_get_summary<R: Runtime>(
     );
     let pool = state.db_manager.pool();
 
-    match SummaryProcessesRepository::get_summary_data_for_meeting(pool, &meeting_id).await {
-        Ok(Some(process)) => {
+    match SummaryProcessesRepository::get_summary_status_data(pool, &meeting_id).await {
+        Ok(Some((process, partial_notes))) => {
             let mut status = process.status.to_lowercase();
             let mut error = process.error;
 
@@ -312,28 +312,6 @@ pub async fn api_get_summary<R: Runtime>(
                     }
                 };
 
-            let partial = process
-                .metadata
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|value| {
-                    Some((
-                        value.get("partial_notes")?.as_str()?.to_owned(),
-                        value.get("transcript_revision")?.as_i64()?,
-                    ))
-                });
-            let partial_notes = if let Some((notes, revision)) = partial {
-                let still_current: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM knowledge_sources WHERE meeting_id = ? AND kind = 'meeting' AND revision = ?)",
-                )
-                .bind(&meeting_id)
-                .bind(revision)
-                .fetch_one(pool)
-                .await
-                .unwrap_or(false);
-                still_current.then_some(notes)
-            } else {
-                None
-            };
             let response = SummaryResponse {
                 progress: SummaryService::progress(&meeting_id),
                 partial_notes,
@@ -583,8 +561,7 @@ fn spawn_summary<R: Runtime>(
             pool,
             meeting_id_clone.clone(),
             text,
-            model,
-            model_name,
+            super::service::SummaryProviderRequest::Manual { provider: model, model: model_name },
             context.prompt,
             context.title,
             context.template,

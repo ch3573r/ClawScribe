@@ -1762,9 +1762,8 @@ async fn stop_recording_session<R: Runtime>(
 pub(crate) fn wake_saved_recording_summary<R: Runtime>(app: &AppHandle<R>, meeting_id: String) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let enabled = crate::summary::automatic::get_automatic_summary_preference(app.clone()).await;
         let pool = app.state::<crate::state::AppState>().db_manager.pool().clone();
-        if crate::summary::automatic::start(app.clone(), pool, meeting_id, enabled).await.is_err() {
+        if crate::summary::automatic::start(app, pool, meeting_id).await.is_err() {
             warn!("Could not dispatch automatic notes for the saved recording");
         }
     });

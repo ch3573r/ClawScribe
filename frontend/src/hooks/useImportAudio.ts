@@ -39,6 +39,14 @@ export interface UseImportAudioOptions {
   onCancelled?: () => void;
 }
 
+interface ImportOptions {
+  meetingAt: string | null;
+  useFileDate: boolean;
+  summarize: boolean;
+  summaryDestinationFingerprint?: string | null;
+  summaryUseAutomaticPreference?: boolean;
+}
+
 export interface UseImportAudioReturn {
   status: ImportStatus;
   fileInfo: AudioFileInfo | null;
@@ -56,7 +64,7 @@ export interface UseImportAudioReturn {
     language?: string | null,
     model?: string | null,
     provider?: string | null,
-    options?: { meetingAt: string | null; useFileDate: boolean; summarize: boolean }
+    options?: ImportOptions
   ) => Promise<void>;
   cancelImport: () => Promise<void>;
   reset: () => void;
@@ -221,7 +229,7 @@ export function useImportAudio({
       language?: string | null,
       model?: string | null,
       provider?: string | null,
-    options?: { meetingAt: string | null; useFileDate: boolean; summarize: boolean }
+      options?: ImportOptions
     ) => {
       isCancelledRef.current = false;
       setStatus('processing');
@@ -248,6 +256,8 @@ export function useImportAudio({
           meetingAt: options?.meetingAt ?? null,
           useFileDate: options?.useFileDate ?? false,
           summarize: options?.summarize ?? false,
+          summaryDestinationFingerprint: options?.summaryDestinationFingerprint ?? null,
+          summaryUseAutomaticPreference: options?.summaryUseAutomaticPreference ?? false,
           summaryLanguage: readPinnedSummaryLanguageDefault(),
         });
       } catch (err: any) {

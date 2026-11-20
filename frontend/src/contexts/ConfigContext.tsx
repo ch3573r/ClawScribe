@@ -78,7 +78,7 @@ interface ConfigContextType {
   // Summary configuration
   isAutoSummary: boolean;
   automaticSummaryBusy: boolean;
-  toggleIsAutoSummary: (checked: boolean) => void;
+  toggleIsAutoSummary: (checked: boolean, fingerprint?: string) => Promise<boolean>;
 
   // Which providers have a stored API key. The keys themselves stay in the core.
   providerKeyStatus: Record<KeyProvider, SecretStatus>;
@@ -149,7 +149,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [automaticSummaryBusy, setAutomaticSummaryBusy] = useState(true);
   useEffect(() => {
     let active = true;
-    void invoke<boolean>('get_automatic_summary_preference')
+    let legacyEnabled: boolean | null = null;
+    try {
+      const legacy = localStorage.getItem('isAutoSummary');
+      if (legacy === 'true' || legacy === 'false') legacyEnabled = legacy === 'true';
+    } catch { /* The native preference still loads without webview storage. */ }
+    void invoke<boolean>('migrate_automatic_summary_preference', { legacyEnabled })
+      .catch(() => invoke<boolean>('get_automatic_summary_preference'))
       .then(enabled => { if (active) setIsAutoSummary(enabled); })
       .catch(() => { if (active) toast.error('Could not read automatic summary settings'); })
       .finally(() => { if (active) setAutomaticSummaryBusy(false); });
@@ -364,13 +370,15 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     'claude-code': ['sonnet', 'opus', 'haiku'],
   };
 
-  const toggleIsAutoSummary = useCallback(async (enabled: boolean) => {
+  const toggleIsAutoSummary = useCallback(async (enabled: boolean, fingerprint?: string) => {
     setAutomaticSummaryBusy(true);
     try {
-      await invoke('set_automatic_summary_preference', { enabled });
+      await invoke('set_automatic_summary_preference', { enabled, fingerprint });
       setIsAutoSummary(enabled);
-    } catch {
-      toast.error('Could not save the automatic summary setting');
+      return true;
+    } catch (reason) {
+      toast.error(typeof reason === 'string' ? reason : 'Could not save the automatic summary setting');
+      return false;
     } finally {
       setAutomaticSummaryBusy(false);
     }

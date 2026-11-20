@@ -189,7 +189,7 @@ pub(crate) async fn prepare_snapshot(
         .await
         .map_err(|_| "Could not read the saved transcript")?;
     let revision = sqlx::query_scalar::<_, i64>(
-        "SELECT revision FROM knowledge_sources WHERE meeting_id = ? AND kind = 'meeting'",
+        "SELECT summary_content_revision FROM meetings WHERE id = ?",
     )
     .bind(meeting)
     .fetch_optional(&mut *tx)

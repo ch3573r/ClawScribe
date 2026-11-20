@@ -1,6 +1,6 @@
 pub use super::chunking::{chunk_text, rough_token_count};
 
-use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::llm_client::{generate_summary, LLMProvider, SummaryDispatch};
 use crate::summary::templates::Template;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -154,11 +154,8 @@ fn english_markdown_after_normalization_result(
     match normalization_result {
         Ok(normalized) => Ok(normalized),
         Err(e) if e.contains("cancelled") => Err(e),
-        Err(e) => {
-            error!(
-                "English normalization pass failed; returning pass-1 markdown without hard fail: {}",
-                e
-            );
+        Err(_) => {
+            error!("English normalization failed; retaining the first pass");
             Ok(original_markdown.to_string())
         }
     }
@@ -351,6 +348,7 @@ pub(crate) async fn generate_meeting_summary(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
     summary_language: Option<&str>,
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
@@ -424,6 +422,7 @@ pub(crate) async fn generate_meeting_summary(
                         top_p,
                         app_data_dir,
                         cancellation_token,
+                        dispatch,
                     )
                     .await
                     .and_then(|text| require_summary_markdown(&text, "Meeting excerpt"))
@@ -474,6 +473,7 @@ pub(crate) async fn generate_meeting_summary(
                 top_p,
                 app_data_dir,
                 cancellation_token,
+                dispatch,
             )
             .await?;
 
@@ -503,6 +503,7 @@ pub(crate) async fn generate_meeting_summary(
                 top_p,
                 app_data_dir,
                 cancellation_token,
+                dispatch,
             )
             .await
             {
@@ -531,6 +532,7 @@ pub(crate) async fn generate_meeting_summary(
                     top_p,
                     app_data_dir,
                     cancellation_token,
+                    dispatch,
                 )
                 .await,
             )?;
@@ -561,6 +563,7 @@ async fn run_markdown_transform(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -583,6 +586,7 @@ async fn run_markdown_transform(
         top_p,
         app_data_dir,
         cancellation_token,
+        dispatch,
     )
     .await
     .map_err(|e| format!("{failure_label} failed: {e}"))?;
@@ -606,6 +610,7 @@ async fn translate_markdown(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     info!("Translation pass: target language = {}", target_language);
 
@@ -630,6 +635,7 @@ async fn translate_markdown(
         top_p,
         app_data_dir,
         cancellation_token,
+        dispatch,
     )
     .await
 }
@@ -649,6 +655,7 @@ async fn normalize_markdown_to_english(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     info!("English normalization pass: preserving Markdown structure");
 
@@ -672,6 +679,7 @@ async fn normalize_markdown_to_english(
         top_p,
         app_data_dir,
         cancellation_token,
+        dispatch,
     )
     .await
 }
@@ -700,6 +708,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
             None,
             None,

@@ -453,7 +453,7 @@ pub(crate) async fn model_config_view(
 
 #[tauri::command]
 pub async fn api_save_model_config<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
@@ -462,14 +462,22 @@ pub async fn api_save_model_config<R: Runtime>(
     ollama_endpoint: Option<String>,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
-        &provider,
-        &model,
-        &whisper_model,
-        &ollama_endpoint
-    );
     let pool = state.db_manager.pool();
+    use crate::summary::{automatic, llm_client::LLMProvider};
+    let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
+    let new_provider = LLMProvider::from_str(&provider).ok();
+    let saved = SettingsRepository::get_model_config(pool)
+        .await.map_err(|_| "Could not read the saved summary model settings")?;
+    if saved.as_ref().is_some_and(|old| {
+        LLMProvider::from_str(&old.provider).ok() != new_provider
+            || old.model.trim() != model.trim()
+            || (new_provider == Some(LLMProvider::Ollama) && !automatic::same_endpoint(
+                old.ollama_endpoint.as_deref().unwrap_or("http://localhost:11434"),
+                ollama_endpoint.as_deref().unwrap_or("http://localhost:11434"),
+            ))
+    }) {
+        automatic::invalidate_external_review(&app)?;
+    }
 
     if let Err(e) = SettingsRepository::save_model_config(
         pool,
@@ -1772,7 +1780,7 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 /// This configuration is stored as JSON and includes endpoint, apiKey, model, and optional parameters
 #[tauri::command]
 pub async fn api_save_custom_openai_config<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     endpoint: String,
     allow_unencrypted: Option<bool>,
@@ -1840,6 +1848,27 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     };
 
     let pool = state.db_manager.pool();
+
+    use crate::summary::{automatic, llm_client::LLMProvider};
+    let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
+    let selected = SettingsRepository::get_model_config(pool)
+        .await.map_err(|_| "Could not read the saved summary model settings")?;
+    if selected.is_some_and(|setting| matches!(LLMProvider::from_str(&setting.provider),
+        Ok(LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible)))
+    {
+        let old = SettingsRepository::get_custom_openai_config(pool)
+            .await.map_err(|_| "Could not read the saved compatible provider settings")?;
+        let same_route = old.is_some_and(|old| {
+            automatic::same_endpoint(&old.endpoint, &config.endpoint)
+                && old.model.trim() == config.model
+                && old.allow_unencrypted == config.allow_unencrypted
+                && old.organization.as_deref().map(str::trim) == config.organization.as_deref().map(str::trim)
+                && old.project.as_deref().map(str::trim) == config.project.as_deref().map(str::trim)
+        });
+        if !same_route {
+            automatic::invalidate_external_review(&app)?;
+        }
+    }
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {

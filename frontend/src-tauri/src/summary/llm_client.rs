@@ -132,6 +132,22 @@ impl LLMProvider {
     }
 }
 
+pub(super) fn fixed_summary_endpoint(provider: &LLMProvider) -> Option<&'static str> {
+    match provider {
+        LLMProvider::OpenAI => Some("https://api.openai.com/v1/chat/completions"),
+        LLMProvider::Groq => Some("https://api.groq.com/openai/v1/chat/completions"),
+        LLMProvider::OpenRouter => Some("https://openrouter.ai/api/v1/chat/completions"),
+        LLMProvider::Claude => Some("https://api.anthropic.com/v1/messages"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SummaryDispatch<'a> {
+    pub endpoint: Option<&'a url::Url>,
+    pub check: Option<&'a super::request_config::DispatchCheck>,
+}
+
 /// Generates a summary using the specified LLM provider
 ///
 /// # Arguments
@@ -151,7 +167,7 @@ impl LLMProvider {
 ///
 /// # Returns
 /// The generated summary text or an error message
-pub async fn generate_summary(
+pub(crate) async fn generate_summary(
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -166,6 +182,7 @@ pub async fn generate_summary(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch: Option<SummaryDispatch<'_>>,
 ) -> Result<String, String> {
     // Check if cancelled before starting
     if let Some(token) = cancellation_token {
@@ -179,6 +196,9 @@ pub async fn generate_summary(
         let app_data_dir = app_data_dir
             .ok_or_else(|| "app_data_dir is required for BuiltInAI provider".to_string())?;
 
+        if let Some(check) = dispatch.and_then(|route| route.check) {
+            check()?;
+        }
         return crate::summary::summary_engine::generate_with_builtin(
             app_data_dir,
             model_name,
@@ -201,16 +221,8 @@ pub async fn generate_summary(
 
     let (api_url, mut headers) = match provider {
         LLMProvider::ClaudeCode => unreachable!("Claude Code is handled before HTTP setup"),
-        LLMProvider::OpenAI => (
-            "https://api.openai.com/v1/chat/completions".to_string(),
-            header::HeaderMap::new(),
-        ),
-        LLMProvider::Groq => (
-            "https://api.groq.com/openai/v1/chat/completions".to_string(),
-            header::HeaderMap::new(),
-        ),
-        LLMProvider::OpenRouter => (
-            "https://openrouter.ai/api/v1/chat/completions".to_string(),
+        LLMProvider::OpenAI | LLMProvider::Groq | LLMProvider::OpenRouter => (
+            fixed_summary_endpoint(provider).expect("known provider").to_string(),
             header::HeaderMap::new(),
         ),
         LLMProvider::Ollama => {
@@ -261,7 +273,7 @@ pub async fn generate_summary(
                     .map_err(|_| "Invalid anthropic version".to_string())?,
             );
             (
-                "https://api.anthropic.com/v1/messages".to_string(),
+                fixed_summary_endpoint(provider).expect("known provider").to_string(),
                 header_map,
             )
         }
@@ -276,6 +288,8 @@ pub async fn generate_summary(
             );
         }
     };
+
+    let api_url = dispatch.and_then(|route| route.endpoint).map(url::Url::as_str).unwrap_or(&api_url);
 
     // Add authorization header for non-Claude providers
     if provider != &LLMProvider::Claude {
@@ -370,7 +384,7 @@ pub async fn generate_summary(
             ) {
                 checked_client = crate::openai::secret_destination::secret_client(
                     Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
-                    &api_url,
+                    api_url,
                     allow_unencrypted,
                 )
                 .await?;
@@ -378,8 +392,11 @@ pub async fn generate_summary(
             } else {
                 client
             };
+            if let Some(check) = dispatch.and_then(|route| route.check) {
+                check()?;
+            }
             Ok(client
-                .post(&api_url)
+                .post(api_url)
                 .headers(headers.clone())
                 .json(&request_body)
                 .timeout(REQUEST_TIMEOUT_DURATION))
@@ -721,7 +738,7 @@ pub(crate) async fn dispatch_resolved_text(
             TextExecution::Codex(provider)=>provider.run_text_prompt_cancellable(&format!("{system}\n\n{user}"),&token).await?,
             TextExecution::Generic{api_key,ollama_endpoint,endpoint,allow_unencrypted,app_data_dir}=>{
                 let client=Client::new();
-                let operation=generate_summary(&client,&resolved.provider,&resolved.model,&api_key,&system,&user,ollama_endpoint.as_deref(),endpoint.as_deref(),allow_unencrypted,None,None,None,Some(&app_data_dir),Some(&token));
+                let operation=generate_summary(&client,&resolved.provider,&resolved.model,&api_key,&system,&user,ollama_endpoint.as_deref(),endpoint.as_deref(),allow_unencrypted,None,None,None,Some(&app_data_dir),Some(&token),None);
                 if resolved.provider==LLMProvider::BuiltInAI {operation.await?} else {
                     tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=operation=>result?}
                 }
@@ -1131,6 +1148,7 @@ mod response_tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1168,6 +1186,7 @@ mod response_tests {
                 None,
                 None,
                 Some(&token),
+                None,
             )
             .await
         });

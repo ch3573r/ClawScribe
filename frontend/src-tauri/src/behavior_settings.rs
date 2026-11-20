@@ -152,7 +152,7 @@ pub(crate) fn defaults() -> BehaviorSettings {
 }
 
 /// Writes one value and saves; on a failed save the previous value is put back.
-fn persist(backing: &dyn Backing, key: &str, value: Value) -> Result<(), String> {
+pub(crate) fn persist(backing: &dyn Backing, key: &str, value: Value) -> Result<(), String> {
     let previous = backing.read(key);
     backing.write(key, value);
     if let Err(error) = backing.commit() {
