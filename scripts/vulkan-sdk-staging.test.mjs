@@ -3,7 +3,7 @@
 // anything unexpected stops the run. Runs the real PowerShell script on fake SDK
 // folders in a temporary directory; nothing is installed or downloaded.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +64,7 @@ test('staging gives the extraction action a fresh folder and leaves the inherite
     const env = run.carried();
     const parent = path.join(base, 'toolchain', 'vulkan-sdk');
     assert.match(path.basename(env.CLAWSCRIBE_VULKAN_STAGING), /^\.staging-[0-9a-f]{32}$/);
-    assert.equal(path.dirname(env.CLAWSCRIBE_VULKAN_STAGING).toLowerCase(), parent.toLowerCase());
+    assert.equal(realpathSync.native(path.dirname(env.CLAWSCRIBE_VULKAN_STAGING)), realpathSync.native(parent));
     assert.equal(path.normalize(env.VULKAN_SDK).toLowerCase(), path.normalize(env.CLAWSCRIBE_VULKAN_STAGING).toLowerCase(), 'the action is pointed at the staging folder');
     assert.equal(env.VULKAN_SDK_VERSION, PIN, 'the version override the action prefers is pinned');
     assert.equal(env.CLAWSCRIBE_INHERITED_VULKAN_SDK, inherited);
@@ -89,7 +89,7 @@ test('a verified staged SDK is moved into its per-version folder and exported', 
     assert.ok(existsSync(path.join(final, 'Include', 'vulkan', 'vulkan_core.h')));
     assert.deepEqual(stagingFolders(parent), [], 'the staging folder is gone');
     const env = run.carried();
-    assert.equal(path.normalize(env.VULKAN_SDK).toLowerCase(), final.toLowerCase());
+    assert.equal(realpathSync.native(env.VULKAN_SDK), realpathSync.native(final));
     assert.match(env.Vulkan_LIBRARY, /vulkan-1\.lib$/);
     assert.match(readFileSync(run.files.path, 'utf8'), /Bin/);
     assert.equal(snapshot(inherited), before, 'the inherited SDK is byte-for-byte unchanged');

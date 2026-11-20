@@ -3,7 +3,7 @@
 // them: nothing is installed, downloaded or written outside that directory.
 // The scripts are Windows-only, so the suite is skipped elsewhere.
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -112,7 +112,7 @@ test('VULKAN_SDK and the default folder are used when their content matches', op
     const defaultFolder = makeSdk(path.join(base, 'drive', 'VulkanSDK', PIN));
     const viaDefault = find(base, { VULKAN_SDK: path.join(base, 'inherited', '1.4.350.0') });
     assert.ok(viaDefault.Match, 'a matching SDK is found');
-    if (viaDefault.Match.Label === 'default SDK folder') assert.equal(viaDefault.Match.Path.toLowerCase(), defaultFolder.toLowerCase());
+    if (viaDefault.Match.Label === 'default SDK folder') assert.equal(realpathSync.native(viaDefault.Match.Path), realpathSync.native(defaultFolder));
     else assert.match(viaDefault.Match.Label, /machine|user/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
@@ -146,7 +146,9 @@ test('the resolver exports the matching SDK and fails or defers when none matche
     const ok = runResolver(base, '', { VULKAN_SDK: sdk });
     assert.equal(ok.result.status, 0, ok.result.stderr + ok.result.stdout);
     assert.match(ok.output, /found=true/);
-    assert.match(ok.env, new RegExp(`VULKAN_SDK=${sdk.replace(/[\\]/g, '\\\\')}`));
+    const exportedSdk = ok.env.split(/\r?\n/).find(line => line.startsWith('VULKAN_SDK='));
+    assert.ok(exportedSdk, 'the resolver exports VULKAN_SDK');
+    assert.equal(realpathSync.native(exportedSdk.slice('VULKAN_SDK='.length)), realpathSync.native(sdk));
     assert.match(ok.env, /Vulkan_LIBRARY=.*vulkan-1\.lib/);
     assert.match(ok.env, /Vulkan_INCLUDE_DIR=.*Include/);
     assert.match(ok.path, /Bin/);
