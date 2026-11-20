@@ -53,8 +53,6 @@ pub struct CalendarLink {
     #[serde(default)]
     reviewed: bool,
     #[serde(default)]
-    reviewed: bool,
-    #[serde(default)]
     attendees: Vec<Attendee>,
 }
 
