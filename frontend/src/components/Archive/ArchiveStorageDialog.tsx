@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,8 +32,12 @@ export function ArchiveStorageDialog() {
   const [revision, setRevision] = useState(0);
   const [storage, setStorage] = useState<ArchiveStorage | null>(null);
   const [error, setError] = useState(false);
+  const returnFocus = useRef<HTMLElement | null>(null);
 
-  useEffect(() => registerStorageDialogOpener(() => setOpen(true)), []);
+  useEffect(() => registerStorageDialogOpener(() => {
+    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOpen(true);
+  }), []);
 
   useEffect(() => {
     if (!open) return;
@@ -49,7 +53,13 @@ export function ArchiveStorageDialog() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={event => {
+        if (returnFocus.current?.isConnected) {
+          event.preventDefault();
+          returnFocus.current.focus();
+        }
+        returnFocus.current = null;
+      }}>
         <DialogHeader>
           <DialogTitle>Library storage</DialogTitle>
           <DialogDescription>File sizes for this library. Backup ZIPs and model downloads are outside these totals.</DialogDescription>
