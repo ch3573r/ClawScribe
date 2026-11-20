@@ -1488,10 +1488,10 @@ mod export_history_tests {
         )
         .unwrap();
         for planner in [true, false] {
-            let (scope, action_hash) = if planner {
+            let (scope, action_hash): (&str, fn(&ExportActionItem) -> String) = if planner {
                 (
                     "planner:tenant:user:plan:bucket",
-                    super::super::planner::action_hash as fn(&ExportActionItem) -> String,
+                    super::super::planner::action_hash,
                 )
             } else {
                 ("todo:tenant:user:list", super::super::todo::action_hash)
