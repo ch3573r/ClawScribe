@@ -7,10 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.63.0** is a Windows GPU preview. It hardens recording against stuck devices
-and full disks, shows real audio levels, keeps stored keys inside the core and
-finds interrupted recordings on disk. See the
-[0.63.0 preview notes](docs/releases/0.63.0.md) and the
+**0.64.0** is a Windows GPU preview. You can start with audio alone, recover an
+interrupted save, jump to a matching transcript passage, and review attendance
+and follow-up tasks before sharing them. See the
+[0.64.0 preview notes](docs/releases/0.64.0.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -379,6 +379,20 @@ checks. You still choose when to install; checking at launch is a separate optio
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.64.0 preview
+
+- Start recording without downloading a speech model. Stop saves the meeting
+  before reporting success, and interrupted saves can be recovered.
+- Find a passage from the sidebar or Archive, jump to its audio, and bookmark
+  moments for review. Sharing those notes with a summary is optional.
+- Confirm who attended, remember a recurring meeting’s summary template, and
+  edit follow-up tasks before exporting them to Planner or Microsoft To Do.
+- Review meetings that need attention and see how much space saved audio uses
+  before choosing which copies to remove.
+
+See the [0.64.0 preview notes](docs/releases/0.64.0.md) for the updater behavior,
+automated coverage, and pending device tests.
 
 ## What changed in the 0.63.0 preview
 

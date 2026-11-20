@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.64.0
+
+- Start in audio-only mode without a model download. Recording Stop saves the meeting, calendar context, and live notes together. Recovery preserves partial audio and capture-gap warnings.
+- Search titles and transcript passages from the sidebar or Archive, follow playback across transcript pages, and add timestamped notes. Summary use of those notes is opt-in.
+- Review attendance and recurring-series templates. Automatic notes require approval for the selected external destination. Failed jobs can retain completed excerpts.
+- Edit and track follow-up actions offline. Planner, Microsoft To Do, and OneNote exports retain their history across retries and library restores.
+- Review Archive warnings, saved-audio sizes, and removal choices. Retranscription keeps the previous revision. Hosted MAI audio preparation streams from disk.
+- Windows x64 installers and the opt-in preview updater use version 0.64.0. Real-device capture, installer interaction, and the two-hour comparison remain pending. See the [preview notes](docs/releases/0.64.0.md).
+
 ## 0.63.0
 
 - A device reconnect no longer holds the lock that every recording action needs. Stop gives up after 20 seconds with a message when an audio driver does not answer, and a failed Stop is shown. When a reconnect fails for one source, the other keeps recording.
