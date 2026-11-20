@@ -26,6 +26,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_automatic_outcome_replaces_only_the_recoverable_skip() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+
+        // A RECOVERY_NEEDED skip is the recoverable state; subsequent skip reasons
+        // (disabled, review required) replace it so the UI shows the current reason.
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool, meeting, "skipped", RECOVERY_NEEDED, "recording",
+        ).await.unwrap();
+        const DISABLED: &str = "Automatic summaries are off. You can generate notes here.";
+        const REVIEW_REQUIRED: &str =
+            "Review the summary provider in Settings to allow automatic notes at this destination.";
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool, meeting, "skipped", DISABLED, "recording",
+        ).await.unwrap();
+        let row = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await.unwrap().unwrap();
+        assert_eq!(row.error.as_deref(), Some(DISABLED));
+
+        // A second new reason must NOT overwrite the already-updated non-recoverable skip.
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool, meeting, "skipped", REVIEW_REQUIRED, "recording",
+        ).await.unwrap();
+        let row2 = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await.unwrap().unwrap();
+        assert_eq!(row2.error.as_deref(), Some(DISABLED));
+
+        // A completed summary must never be overwritten.
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting).await.unwrap();
+        SummaryProcessesRepository::update_process_completed(
+            &pool, meeting, serde_json::json!({"markdown": "Real notes"}), 1, 0.0,
+        ).await.unwrap();
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool, meeting, "skipped", RECOVERY_NEEDED, "recording",
+        ).await.unwrap();
+        let completed = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await.unwrap().unwrap();
+        assert_eq!(completed.status, "completed");
+    }
+
+    #[tokio::test]
     async fn startup_retries_only_interrupted_background_jobs_once_without_resetting_results() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
@@ -376,8 +417,24 @@ impl SummaryProcessesRepository {
         reason: &str,
         origin: &str,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, end_time, automatic_origin) SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM meetings WHERE id = ? ON CONFLICT(meeting_id) DO NOTHING")
-            .bind(status).bind(reason).bind(origin).bind(meeting).execute(pool).await?;
+        // Atomically replace the recoverable skip (RECOVERY_NEEDED, no results) with
+        // the new reason. Any other existing state — manual, completed, another skip
+        // reason — is preserved by the WHERE guard on the DO UPDATE.
+        sqlx::query(r#"
+            INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, end_time, automatic_origin)
+            SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM meetings WHERE id = ?
+            ON CONFLICT(meeting_id) DO UPDATE SET
+                status = excluded.status, error = excluded.error,
+                updated_at = excluded.updated_at, end_time = excluded.end_time,
+                automatic_origin = excluded.automatic_origin
+            WHERE summary_processes.status = 'skipped'
+                AND summary_processes.error = ?
+                AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
+                AND summary_processes.result IS NULL
+                AND summary_processes.result_backup IS NULL
+                AND summary_processes.metadata IS NULL
+        "#)
+            .bind(status).bind(reason).bind(origin).bind(meeting).bind(RECOVERY_NEEDED).execute(pool).await?;
         Ok(())
     }
 

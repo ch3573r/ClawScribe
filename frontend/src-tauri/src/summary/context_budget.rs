@@ -249,8 +249,16 @@ where
                         output = Some(notes);
                         break;
                     }
-                    // HTTP providers already retry their recoverable transport
-                    // errors and must retain their quota and auth decisions.
+                    Err(reason) if [
+                        super::automatic::DISABLED,
+                        super::automatic::REVIEW_REQUIRED,
+                        super::automatic::DESTINATION_CHANGED,
+                    ].contains(&reason.as_str()) => {
+                        reduction.report(index, total, level + 1);
+                        return Err(reason);
+                    }
+                    // Remote providers already retry transient transport failures. Keep their
+                    // error bodies out of the meeting, including when they contain user input.
                     _ if !reduction.retry_provider_errors => {
                         reduction.report(index, total, level + 1);
                         return Err(format!(
@@ -286,6 +294,43 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn consent_revoke_surfaces_through_excerpt_reduction_and_keeps_partials() {
+        use super::super::automatic::{DESTINATION_CHANGED, DISABLED, REVIEW_REQUIRED};
+        // Partials from the successful first excerpt are retained even when
+        // a consent/revoke error stops reduction mid-pass.
+        for consent_error in [DISABLED, REVIEW_REQUIRED, DESTINATION_CHANGED] {
+            let reduction = Reduction::default();
+            let mut calls = 0usize;
+            // "AAAABBBB" → two excerpts; first succeeds, second returns a consent error.
+            let result = reduce("AAAABBBB", 4, 4, &reduction, None, |chunk| {
+                calls += 1;
+                let result = if chunk == "AAAA" {
+                    Ok("First excerpt notes.".to_string())
+                } else {
+                    Err(consent_error.to_string())
+                };
+                std::future::ready(result)
+            }).await;
+            assert_eq!(result.unwrap_err(), consent_error,
+                "consent error must pass through, not be wrapped");
+            assert_eq!(calls, 2, "no retry on consent error");
+            assert!(reduction.partial_notes().contains("First excerpt notes."),
+                "successful excerpt must be retained as partial notes");
+        }
+    }
+
+    #[tokio::test]
+    async fn non_consent_errors_produce_bounded_excerpt_diagnostic() {
+        let reduction = Reduction::default();
+        let result = reduce("AAAABBBB", 4, 4, &reduction, None, |_| {
+            std::future::ready(Err("arbitrary provider output".to_string()))
+        }).await;
+        let error = result.unwrap_err();
+        assert!(error.contains("excerpt 1 of 2"), "must report excerpt position");
+        assert!(!error.contains("arbitrary provider"), "must not leak provider output");
+    }
 
     #[tokio::test]
     async fn remote_failure_stops_submissions_and_retains_unicode_notes() {

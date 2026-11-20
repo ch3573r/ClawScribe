@@ -1121,6 +1121,7 @@ impl SummaryService {
             _ => reqwest::Client::new(),
         };
         let dispatch = execution.map(|execution| SummaryDispatch {
+            ollama_context_tokens: context_hint,
             endpoint: match execution {
                 Execution::Standard { endpoint, .. } => Some(endpoint),
                 _ => None,

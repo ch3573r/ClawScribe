@@ -144,6 +144,7 @@ pub(super) fn fixed_summary_endpoint(provider: &LLMProvider) -> Option<&'static 
 
 #[derive(Clone, Copy)]
 pub(crate) struct SummaryDispatch<'a> {
+    pub ollama_context_tokens: Option<usize>,
     pub endpoint: Option<&'a url::Url>,
     pub check: Option<&'a super::request_config::DispatchCheck>,
 }
@@ -312,7 +313,16 @@ pub(crate) async fn generate_summary(
         super::context_budget::resolve(provider, model_name, None, max_tokens.map(|v| v as usize))
             .output_tokens as u32;
     let request_body = if provider == &LLMProvider::Ollama {
-        let context = super::context_budget::ollama_context(model_name, ollama_endpoint).await;
+        let context = match dispatch {
+            Some(route) => {
+                if let Some(check) = route.check {
+                    check()?;
+                }
+                // Automatic jobs probed the approved endpoint through their frozen client.
+                route.ollama_context_tokens.ok_or("The approved Ollama context is unavailable.")?
+            }
+            None => super::context_budget::ollama_context(model_name, ollama_endpoint).await,
+        };
         let budget = super::context_budget::input_budget(
             context,
             output_tokens as usize,
@@ -1129,6 +1139,34 @@ mod response_tests {
             })
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn automatic_ollama_excerpts_reuse_the_approved_context_without_another_probe() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let client = Client::builder().no_proxy().build().unwrap();
+        let revoked: crate::summary::request_config::DispatchCheck =
+            std::sync::Arc::new(|| Err(crate::summary::automatic::REVIEW_REQUIRED.into()));
+        for check in [None, Some(&revoked)] {
+            let dispatch = SummaryDispatch { endpoint: None, ollama_context_tokens: Some(128), check };
+            // The tiny frozen context rejects the request locally. A second model
+            // probe would connect to the listener and wait for an HTTP response.
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                generate_summary(
+                    &client, &LLMProvider::Ollama, "synthetic", "", "prompt", "question",
+                    Some(&endpoint), None, false, None, None, None, None, None, Some(dispatch),
+                ),
+            ).await.unwrap().unwrap_err();
+            if check.is_some() {
+                assert_eq!(result, crate::summary::automatic::REVIEW_REQUIRED);
+            } else {
+                assert!(result.contains("context is too small"), "{result}");
+            }
+            assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        }
     }
 
     #[tokio::test]

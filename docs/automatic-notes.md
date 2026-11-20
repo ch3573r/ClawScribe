@@ -19,8 +19,9 @@ the file or select it even when automatic notes are off. ClawScribe captures
 the selected provider and destination when you begin the import.
 
 Open the saved meeting to check progress or see why automatic notes were skipped.
-If a recording needed repair, automatic notes can start after the repair saves
-a usable transcript. ClawScribe can retry an interrupted background job once on
+If repair clears the last recording warning, automatic notes can start from
+the saved transcript. When gaps or other warnings remain, review the transcript
+and choose whether to generate notes. ClawScribe can retry an interrupted background job once on
 startup when automatic notes are still enabled and the same destination is
 approved. You can also generate notes yourself from the saved meeting.
 
