@@ -1021,60 +1021,72 @@ mod tests {
         );
         assert!(state.history(&id).unwrap().is_empty());
     }
-    fn queued_update(id: &str, sequence: u64, text: &str, partial: bool) -> TranscriptUpdate {
+    fn producer_update(id: &str, sequence: u64, text: &str, partial: bool) -> TranscriptUpdate {
         let mut row = update(sequence, sequence as f64 + 1., text, partial);
         row.session_id = Some(id.into());
         row
     }
-    #[tokio::test]
-    async fn stale_pending_producer_cannot_enter_restored_recording() {
-        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    #[test]
+    fn stale_producer_cannot_write_to_a_replacement_recording() {
         let state = Arc::new(LiveState::default());
         let old_id = state.start(true).unwrap();
+        let mut old_manager = crate::audio::RecordingManager::new();
+        let old_sink = old_manager.bind_live_session(
+            state.clone(),
+            old_id.clone(),
+            state.snapshot(&old_id).unwrap().recording_generation,
+        );
+        old_manager.close_transcript_input();
         let id = state.start(true).unwrap();
         let mut manager = crate::audio::RecordingManager::new();
-        manager.bind_live_session(crate::audio::recording_manager::LiveTranscriptSink::new(
+        let sink = manager.bind_live_session(
             state.clone(),
             id.clone(),
             state.snapshot(&id).unwrap().recording_generation,
-        ));
-        let _ = state.stop(); // Stop clears live memory before restoring the saver.
-        let rows = crate::audio::recording_commands::test_queue_and_restore(
-            manager,
-            vec![
-                queued_update(&old_id, 1, "Old producer must be excluded", false),
-                queued_update(&id, 2, "Current finalized words", false),
-            ],
         );
+        let stale = producer_update(&old_id, 1, "Old producer must be excluded", false);
+        assert!(!old_sink.ingest(&stale));
+        assert!(!sink.ingest(&stale));
+        assert!(!old_sink.ingest(&producer_update(&id, 2, "Foreign session", false)));
+        let mut unowned = producer_update(&id, 2, "Missing session", false);
+        unowned.session_id = None;
+        assert!(!sink.ingest(&unowned));
+        assert!(sink.ingest(&producer_update(&id, 2, "Current finalized words", false)));
+        let rows = manager.library_transcripts();
         assert_eq!(
             rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
             vec!["Current finalized words"]
         );
+        assert!(old_manager.library_transcripts().is_empty());
     }
-    #[tokio::test]
-    async fn same_session_pending_partial_and_final_survive_stop_restore() {
-        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
-        let (state, id) = ready();
+    #[test]
+    fn same_session_partial_and_final_survive_the_stop_drain() {
+        let state = Arc::new(LiveState::default());
+        let id = state.start(true).unwrap();
         let mut manager = crate::audio::RecordingManager::new();
-        manager.bind_live_session(crate::audio::recording_manager::LiveTranscriptSink::new(
+        let sink = manager.bind_live_session(
             state.clone(),
             id.clone(),
             state.snapshot(&id).unwrap().recording_generation,
-        ));
-        let _ = state.stop();
-        let rows = crate::audio::recording_commands::test_queue_and_restore(
-            manager,
-            vec![
-                queued_update(&id, 1, "Draft", true),
-                queued_update(&id, 2, "Another partial", true),
-                queued_update(&id, 1, "Ja", false),
-            ],
         );
+        assert!(sink.ingest(&producer_update(&id, 1, "Draft", true)));
+        assert!(state.snapshot(&id).unwrap().segments.is_empty());
+        let _ = state.stop();
+        // Stop owns the manager locally while it flushes streams. Live
+        // assistance is already gone, but the worker must still save text.
+        assert!(state.snapshot(&id).is_err());
+        assert!(sink.ingest(&producer_update(&id, 2, "Another partial", true)));
+        assert!(sink.ingest(&producer_update(&id, 1, "Ja", false)));
+        assert!(sink.ingest(&producer_update(&id, 3, "Last final segment", false)));
+        manager.close_transcript_input();
+        assert!(!sink.ingest(&producer_update(&id, 4, "Past the drain deadline", false)));
+        let rows = manager.get_transcript_segments();
+        assert_eq!(rows.last().unwrap().speaker.as_deref(), Some("Me"));
         assert_eq!(
             rows.iter()
                 .map(|row| (row.sequence_id, row.text.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(1, "Ja"), (2, "Another partial")]
+            vec![(1, "Ja"), (2, "Another partial"), (3, "Last final segment")]
         );
     }
     #[tokio::test]

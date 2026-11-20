@@ -113,6 +113,7 @@ try {
         "audio::transcription::queue::tests",
         "audio::transcription::source_language::tests",
         "audio::transcription::worker::metrics_lifecycle_tests",
+        "audio::transcription::worker::transcript_delivery_tests",
         "audio::outcome::tests",
         "audio::retranscription::tests",
         "audio::import::tests",

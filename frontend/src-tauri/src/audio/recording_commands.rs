@@ -391,53 +391,6 @@ pub(crate) fn bookmark_position(session_id: &str) -> Result<(String, String, f64
     ))
 }
 static TRANSCRIPTION_TASK: Mutex<Option<transcription::TranscriptionTask>> = Mutex::new(None);
-static PENDING_TRANSCRIPT_SEGMENTS: Mutex<
-    Vec<(
-        Option<String>,
-        crate::audio::recording_saver::TranscriptSegment,
-    )>,
-> = Mutex::new(Vec::new());
-
-// Listener ID for proper cleanup - prevents microphone from staying active after recording stops
-static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
-
-fn transcript_segment_from_update(
-    update: TranscriptUpdate,
-) -> crate::audio::recording_saver::TranscriptSegment {
-    crate::audio::recording_saver::TranscriptSegment {
-        id: format!("seg_{}", update.sequence_id),
-        text: update.text,
-        speaker: match update.source.as_str() {
-            "Me" | "Participants" => Some(update.source),
-            _ => None,
-        },
-        audio_start_time: update.audio_start_time,
-        audio_end_time: update.audio_end_time,
-        duration: update.duration,
-        display_time: update.timestamp,
-        confidence: update.confidence,
-        sequence_id: update.sequence_id,
-        word_timestamps: update.word_timestamps,
-    }
-}
-
-fn persist_transcript_update(update: TranscriptUpdate) {
-    let session_id = update.session_id.clone();
-    let segment = transcript_segment_from_update(update);
-    if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-        if let Some(manager) = manager_guard.as_ref() {
-            if session_id
-                .as_deref()
-                .is_some_and(|id| Some(id) != manager.live_session_id())
-            {
-                return;
-            }
-            manager.add_transcript_segment(segment);
-        } else if let Ok(mut pending) = PENDING_TRANSCRIPT_SEGMENTS.lock() {
-            pending.push((session_id, segment));
-        }
-    }
-}
 type ModelValidation = tokio::task::JoinHandle<Result<(), LiveModelFailure>>;
 
 /// How long a start waits for the model check before it opens the streams. A
@@ -532,12 +485,11 @@ fn prepare_live_recording(
     String,
 > {
     let startup = runtime.live.prepare(transcribes)?;
-    let sink = super::recording_manager::LiveTranscriptSink::new(
+    let sink = manager.bind_live_session(
         runtime.live.clone(),
         startup.session_id.clone(),
         startup.recording_generation,
     );
-    manager.bind_live_session(sink.clone());
     Ok((startup, sink))
 }
 pub(crate) fn live_snapshot() -> Result<crate::knowledge::live::LiveSnapshot, String> {
@@ -574,40 +526,22 @@ fn store_recording_manager(manager: RecordingManager) {
             manager.mark_detected_call(&session);
         }
     }
-
-    // Keep the manager lock while draining so a listener cannot observe None,
-    // then enqueue a segment after this flush has already completed.
-    if let (Some(manager), Ok(mut pending)) =
-        (manager_guard.as_ref(), PENDING_TRANSCRIPT_SEGMENTS.lock())
-    {
-        for (session_id, segment) in pending.drain(..) {
-            if session_id
-                .as_deref()
-                .is_some_and(|id| Some(id) != manager.live_session_id())
-            {
-                continue;
-            }
-            manager.add_transcript_segment(segment);
-        }
-    }
 }
 
-/// Test utility for the actual manager-absent ingestion and Stop restore path.
-#[cfg(test)]
-pub(crate) fn test_queue_and_restore(
-    manager: RecordingManager,
-    updates: Vec<TranscriptUpdate>,
-) -> Vec<crate::audio::recording_saver::TranscriptSegment> {
-    *RECORDING_MANAGER.lock().unwrap() = None;
-    PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
-    for update in updates {
-        persist_transcript_update(update);
-    }
-    store_recording_manager(manager);
-    let manager = RECORDING_MANAGER.lock().unwrap().take().unwrap();
-    let rows = manager.get_transcript_segments();
-    PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
-    rows
+/// Publish the active state and worker together so Stop cannot miss the task.
+fn activate_recording<R: Runtime>(
+    app: &AppHandle<R>,
+    transcribes: bool,
+    receiver: transcription::queue::TranscriptionQueueReceiver,
+    sink: super::recording_manager::LiveTranscriptSink,
+) {
+    LIVE_TRANSCRIPTION.store(transcribes, Ordering::SeqCst);
+    reset_speech_detected_flag();
+    let mut task = TRANSCRIPTION_TASK.lock().unwrap();
+    RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
+    IS_RECORDING.store(true, Ordering::SeqCst);
+    *task =
+        transcribes.then(|| transcription::start_transcription_task(app.clone(), receiver, sink));
 }
 
 // ============================================================================
@@ -893,47 +827,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         manager_timer.elapsed()
     );
 
-    // Store the manager globally to keep it alive
-    {
-        PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
-        store_recording_manager(manager);
-    }
-
-    // Set recording flag and reset speech detection flag
-    info!("🔍 Setting IS_RECORDING to true and resetting SPEECH_DETECTED_EMITTED");
-    LIVE_TRANSCRIPTION.store(mode.transcribes(), Ordering::SeqCst);
-    RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
-    IS_RECORDING.store(true, Ordering::SeqCst);
+    store_recording_manager(manager);
     *RECORDING_JOB.lock().unwrap() = Some(job);
     drop(engine_lifecycle_guard);
-    reset_speech_detected_flag(); // Reset for new recording session
-
-    // Start optimized parallel transcription task and store handle
-    if mode.transcribes() {
-        // CRITICAL: Listen for transcript-update events and save to recording manager
-        // This enables transcript history persistence for page reload sync
-        // Store listener ID for cleanup during stop_recording to ensure microphone is released
-        // The listener is registered before the worker starts: speech captured
-        // while the model loaded is already queued and is transcribed at once.
-        {
-            use tauri::Listener;
-            let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-                if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                    persist_transcript_update(update);
-                }
-            });
-            let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-            *global_listener = Some(listener_id);
-            info!("✅ Transcript-update event listener registered for history persistence");
-        }
-
-        let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
-        {
-            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-            *global_task = Some(task_handle);
-        }
-    } // Audio-only sessions have no worker or transcript listener.
+    activate_recording(&app, mode.transcribes(), transcription_receiver, live_sink);
 
     // Emit success event
     app.emit(
@@ -1237,47 +1134,10 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         manager_timer.elapsed()
     );
 
-    // Store the manager globally to keep it alive
-    {
-        PENDING_TRANSCRIPT_SEGMENTS.lock().unwrap().clear();
-        store_recording_manager(manager);
-    }
-
-    // Set recording flag and reset speech detection flag
-    info!("🔍 Setting IS_RECORDING to true and resetting SPEECH_DETECTED_EMITTED");
-    LIVE_TRANSCRIPTION.store(mode.transcribes(), Ordering::SeqCst);
-    RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
-    IS_RECORDING.store(true, Ordering::SeqCst);
+    store_recording_manager(manager);
     *RECORDING_JOB.lock().unwrap() = Some(job);
     drop(engine_lifecycle_guard);
-    reset_speech_detected_flag(); // Reset for new recording session
-
-    // Start optimized parallel transcription task and store handle
-    if mode.transcribes() {
-        // CRITICAL: Listen for transcript-update events and save to recording manager
-        // This enables transcript history persistence for page reload sync
-        // Store listener ID for cleanup during stop_recording to ensure microphone is released
-        // The listener is registered before the worker starts: speech captured
-        // while the model loaded is already queued and is transcribed at once.
-        {
-            use tauri::Listener;
-            let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-                if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                    persist_transcript_update(update);
-                }
-            });
-            let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-            *global_listener = Some(listener_id);
-            info!("✅ Transcript-update event listener registered for history persistence");
-        }
-
-        let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver, live_sink);
-        {
-            let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-            *global_task = Some(task_handle);
-        }
-    } // Audio-only sessions have no worker or transcript listener.
+    activate_recording(&app, mode.transcribes(), transcription_receiver, live_sink);
 
     // Emit success event
     app.emit(
@@ -1453,9 +1313,8 @@ async fn stop_recording_session<R: Runtime>(
         }
     }
 
-    // Put the stopped manager back while queued transcript updates drain. The
-    // listener persists into this manager, so taking it out here used to discard
-    // every segment produced during post-meeting catch-up.
+    // Keep transcript history available to the UI during the drain. The worker
+    // saves into its own recording even while Stop has the manager out.
     if let Some(manager) = manager_for_cleanup.take() {
         store_recording_manager(manager);
     }
@@ -1573,17 +1432,12 @@ async fn stop_recording_session<R: Runtime>(
         }
     }
 
-    // Remove the listener only after the worker has exited so every emitted
-    // catch-up segment has reached the recording saver.
-    {
-        use tauri::Listener;
-        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
-            app.unlisten(listener_id);
-            info!("✅ Transcript-update listener removed after transcription drain");
-        }
-    }
-
     let manager_for_cleanup = RECORDING_MANAGER.lock().unwrap().take();
+    if let Some(manager) = &manager_for_cleanup {
+        // If the dispatcher was aborted, a child worker may still be exiting.
+        // Serialize closing with ingestion before taking the final snapshots.
+        manager.close_transcript_input();
+    }
 
     if transcribes {
         // Step 3: Now safely unload Whisper model after ALL chunks are processed
@@ -2333,9 +2187,9 @@ async fn wait_for_reconnect(
 /// of the global lock, and always puts the manager back: after success, after
 /// an error value, after a panic, and after a call that outlives `limit`.
 ///
-/// While the manager is out, the other recording commands see "no manager" (as
-/// during Stop) and transcript updates are buffered, then replayed by
-/// `store_recording_manager`. Stop, Pause and Resume wait on `RECONNECT_OWNER`.
+/// While the manager is out, other recording commands see "no manager" (as
+/// during Stop). The transcription producer continues writing to its own saver.
+/// Stop, Pause and Resume wait on `RECONNECT_OWNER`.
 /// If `work` has not finished after `limit`, this returns an error and leaves
 /// it running; the thread keeps `RECONNECT_OWNER`, and releases it only after
 /// the manager is back.

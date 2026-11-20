@@ -12,6 +12,7 @@ use super::source_language::{
     parakeet_multilingual, LanguageEvidence, SourceLanguageSnapshot, SourceLanguages,
 };
 use crate::api::TranscriptWord;
+use crate::audio::recording_manager::LiveTranscriptSink;
 use crate::audio::AudioChunk;
 use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
@@ -171,14 +172,21 @@ pub struct TranscriptUpdate {
     pub word_timestamps: Option<Vec<TranscriptWord>>,
 }
 
-// NOTE: get_transcript_history and get_recording_meeting_name functions
-// have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
+fn publish_transcript_update(
+    sink: &LiveTranscriptSink,
+    update: &TranscriptUpdate,
+    notify_frontend: impl FnOnce(&TranscriptUpdate),
+) {
+    if sink.ingest(update) {
+        notify_frontend(update);
+    }
+}
 
 /// Start the serial, memory-bounded transcription task.
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: TranscriptionQueueReceiver,
-    live_sink: crate::audio::recording_manager::LiveTranscriptSink,
+    live_sink: LiveTranscriptSink,
 ) -> TranscriptionTask {
     let metrics = transcription_receiver.metrics();
     metrics.set_worker_active(true);
@@ -433,15 +441,6 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time, audio_end_time,
                                         );
 
-                                        // Save structured transcript segment to recording manager (only final results)
-                                        // Save ALL segments (partial and final) to ensure complete JSON
-                                        // Create structured segment with full timestamp data
-                                        // NOTE: This is now handled via the transcript-update event emission below
-                                        // The recording_commands module listens to these events and saves them
-                                        // This decouples the transcription worker from direct RECORDING_MANAGER access
-
-                                        // Emit transcript update with NEW recording-relative timestamps
-
                                         let update = TranscriptUpdate {
                                             session_id: Some(live_sink.session_id.clone()),
                                             text: transcript,
@@ -458,12 +457,11 @@ pub fn start_transcription_task<R: Runtime>(
                                             word_timestamps,
                                         };
 
-                                        // Ingest before UI emission, retaining the producer's session identity and partial flag.
-                                        live_sink.ingest(&update);
-                                        if let Err(_e) = app_clone.emit("transcript-update", &update)
-                                        {
-                                            error!("Failed to emit transcript update");
-                                        }
+                                        publish_transcript_update(&live_sink, &update, |update| {
+                                            if app_clone.emit("transcript-update", update).is_err() {
+                                                error!("Failed to emit transcript update");
+                                            }
+                                        });
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     } else if !transcript.trim().is_empty() && should_log_this_chunk
                                     {
@@ -908,6 +906,69 @@ fn format_recording_time(seconds: f64) -> String {
     let secs = total_seconds % 60;
 
     format!("[{:02}:{:02}]", minutes, secs)
+}
+
+#[cfg(test)]
+mod transcript_delivery_tests {
+    use super::*;
+    use crate::audio::RecordingManager;
+    use crate::knowledge::live::LiveState;
+
+    #[test]
+    fn complete_update_is_saved_before_frontend_notification() {
+        let live = Arc::new(LiveState::default());
+        let startup = live.prepare(true).unwrap();
+        let mut manager = RecordingManager::new();
+        let sink = manager.bind_live_session(
+            live,
+            startup.session_id.clone(),
+            startup.recording_generation,
+        );
+        let update = TranscriptUpdate {
+            session_id: Some(startup.commit()),
+            text: "Ja".into(),
+            timestamp: "12:02:03".into(),
+            source: "Participants".into(),
+            sequence_id: 0,
+            chunk_start_time: 3.0,
+            is_partial: false,
+            confidence: Some(0.1),
+            audio_start_time: 3.0,
+            audio_end_time: 4.0,
+            duration: 1.0,
+            word_timestamps: Some(vec![TranscriptWord {
+                text: "Ja".into(),
+                start: 3.1,
+                end: 3.4,
+                confidence: Some(0.1),
+                speaker: Some("Participants".into()),
+                timestamp_source: Some(crate::api::TranscriptWordTimestampSource::Estimated),
+            }]),
+        };
+
+        let mut notifications = 0;
+        publish_transcript_update(&sink, &update, |event| {
+            notifications += 1;
+            assert_eq!(event.session_id, update.session_id);
+            let rows = manager.get_transcript_segments();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].confidence, Some(0.1));
+            assert_eq!(rows[0].display_time, "12:02:03");
+        });
+        assert_eq!(notifications, 1);
+        let rows = manager.library_transcripts();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "seg_0");
+        assert_eq!(rows[0].text, "Ja");
+        assert_eq!(rows[0].speaker.as_deref(), Some("Participants"));
+        assert_eq!(rows[0].audio_start_time, Some(3.0));
+        assert_eq!(rows[0].audio_end_time, Some(4.0));
+        assert_eq!(rows[0].duration, Some(1.0));
+        assert_eq!(rows[0].word_timestamps, update.word_timestamps);
+
+        publish_transcript_update(&sink, &update, |_| {});
+        assert_eq!(manager.library_transcripts().len(), 1);
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 #[cfg(not(target_os = "macos"))]
 use super::devices::{default_input_device, default_output_device};
 use super::pipeline::AudioPipelineManager;
-use super::recording_saver::RecordingSaver;
+use super::recording_saver::{RecordingSaver, RecordingTranscripts};
 use super::recording_state::{DeviceType as RecordingDeviceType, RecordingState};
 use super::stream::AudioStreamManager;
 use super::transcription::queue::{transcription_queue, TranscriptionQueueReceiver};
@@ -28,21 +28,17 @@ pub struct LiveTranscriptSink {
     pub session_id: String,
     pub recording_generation: crate::knowledge::live::RecordingGeneration,
     state: Arc<crate::knowledge::live::LiveState>,
+    transcripts: Arc<RecordingTranscripts>,
 }
 impl LiveTranscriptSink {
-    pub(crate) fn new(
-        state: Arc<crate::knowledge::live::LiveState>,
-        session_id: String,
-        recording_generation: crate::knowledge::live::RecordingGeneration,
-    ) -> Self {
-        Self {
-            state,
-            session_id,
-            recording_generation,
+    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) -> bool {
+        // A finished decode can be marked partial when some text was unreadable.
+        // Keep the readable portion in the recording; live assistance filters it.
+        if !self.transcripts.record_update(&self.session_id, update) {
+            return false;
         }
-    }
-    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) {
         self.state.ingest(&self.session_id, update);
+        true
     }
     fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
         self.state.snapshot(&self.session_id)
@@ -95,8 +91,24 @@ impl RecordingManager {
     pub(crate) fn set_summary_language(&mut self, language: Option<&str>) {
         self.recording_saver.set_summary_language(language);
     }
-    pub(crate) fn bind_live_session(&mut self, sink: LiveTranscriptSink) {
-        self.live = Some(sink);
+    pub(crate) fn bind_live_session(
+        &mut self,
+        state: Arc<crate::knowledge::live::LiveState>,
+        session_id: String,
+        recording_generation: crate::knowledge::live::RecordingGeneration,
+    ) -> LiveTranscriptSink {
+        let sink = LiveTranscriptSink {
+            transcripts: self.recording_saver.bind_transcript_session(&session_id),
+            session_id,
+            recording_generation,
+            state,
+        };
+        self.live = Some(sink.clone());
+        sink
+    }
+
+    pub(crate) fn close_transcript_input(&self) {
+        self.recording_saver.close_transcript_input();
     }
     pub(crate) fn live_session_id(&self) -> Option<&str> {
         self.live.as_ref().map(|sink| sink.session_id.as_str())

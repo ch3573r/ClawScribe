@@ -1,10 +1,10 @@
 use crate::api::TranscriptWord;
 use anyhow::Result;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::Mutex as AsyncMutex;
@@ -12,6 +12,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
 use super::outcome::RecordingOutcome;
+use super::transcription::TranscriptUpdate;
 
 /// Structured transcript segment for JSON export
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +77,86 @@ pub struct RecordingSaveReport {
     warnings: Vec<&'static str>,
 }
 
-type TranscriptSegments = Arc<Mutex<Vec<Arc<TranscriptSegment>>>>;
+#[derive(Default)]
+struct TranscriptState {
+    session_id: Option<String>,
+    segments: Vec<Arc<TranscriptSegment>>,
+}
+
+/// Shared with the transcription producer. Disk writers take a shallow copy
+/// of the rows and do their work after releasing the state lock.
+#[derive(Default)]
+pub(super) struct RecordingTranscripts {
+    state: Mutex<TranscriptState>,
+    snapshot_notify: tokio::sync::Notify,
+    updates_since_flush: AtomicUsize,
+    snapshot_written: AtomicBool,
+}
+
+impl RecordingTranscripts {
+    fn lock(&self) -> MutexGuard<'_, TranscriptState> {
+        // Retain the poison flag so failed-start cleanup cannot infer emptiness.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn snapshot(&self) -> Vec<Arc<TranscriptSegment>> {
+        self.lock().segments.clone()
+    }
+
+    pub(super) fn record_update(&self, session_id: &str, update: &TranscriptUpdate) -> bool {
+        if update.session_id.as_deref() != Some(session_id) || update.text.trim().is_empty() {
+            return false;
+        }
+        let segment = TranscriptSegment {
+            id: format!("seg_{}", update.sequence_id),
+            text: update.text.clone(),
+            speaker: match update.source.as_str() {
+                "Me" | "Participants" => Some(update.source.clone()),
+                _ => None,
+            },
+            audio_start_time: update.audio_start_time,
+            audio_end_time: update.audio_end_time,
+            duration: update.duration,
+            display_time: update.timestamp.clone(),
+            confidence: update.confidence,
+            sequence_id: update.sequence_id,
+            word_timestamps: update.word_timestamps.clone(),
+        };
+        let mut state = self.lock();
+        if state.session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        Self::upsert(&mut state.segments, segment);
+        drop(state);
+        self.notify_snapshot_worker();
+        true
+    }
+
+    fn add_segment(&self, segment: TranscriptSegment) {
+        Self::upsert(&mut self.lock().segments, segment);
+        self.notify_snapshot_worker();
+    }
+
+    fn upsert(segments: &mut Vec<Arc<TranscriptSegment>>, segment: TranscriptSegment) {
+        if let Some(existing) = segments
+            .iter_mut()
+            .find(|s| s.sequence_id == segment.sequence_id)
+        {
+            *existing = Arc::new(segment);
+        } else {
+            segments.push(Arc::new(segment));
+        }
+    }
+
+    fn notify_snapshot_worker(&self) {
+        let pending = self.updates_since_flush.fetch_add(1, Ordering::AcqRel) + 1;
+        if (pending == 1 && !self.snapshot_written.load(Ordering::Acquire))
+            || pending == TRANSCRIPT_SNAPSHOT_MAX_UPDATES
+        {
+            self.snapshot_notify.notify_one();
+        }
+    }
+}
 
 /// New recording saver using incremental saving strategy
 pub struct RecordingSaver {
@@ -86,12 +166,9 @@ pub struct RecordingSaver {
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
     metadata: Option<MeetingMetadata>,
-    transcript_segments: TranscriptSegments,
-    snapshot_notify: Arc<tokio::sync::Notify>,
+    transcripts: Arc<RecordingTranscripts>,
     snapshot_write_lock: Arc<Mutex<()>>,
     snapshot_task: Option<tokio::task::JoinHandle<()>>,
-    transcript_updates_since_flush: Arc<AtomicUsize>,
-    transcript_snapshot_written: Arc<AtomicBool>,
     transcription_provider: Option<String>,
     transcription_model: Option<String>,
     transcription_source_language: Option<String>,
@@ -107,12 +184,9 @@ impl RecordingSaver {
             meeting_folder: None,
             meeting_name: None,
             metadata: None,
-            transcript_segments: Arc::new(Mutex::new(Vec::new())),
-            snapshot_notify: Arc::new(tokio::sync::Notify::new()),
+            transcripts: Arc::default(),
             snapshot_write_lock: Arc::new(Mutex::new(())),
             snapshot_task: None,
-            transcript_updates_since_flush: Arc::new(AtomicUsize::new(0)),
-            transcript_snapshot_written: Arc::new(AtomicBool::new(false)),
             transcription_provider: None,
             transcription_model: None,
             transcription_source_language: None,
@@ -185,35 +259,18 @@ impl RecordingSaver {
         }
     }
 
-    /// Add or update a structured transcript segment (upserts based on sequence_id)
-    /// Also saves incrementally to disk
-    pub fn add_transcript_segment(&self, segment: TranscriptSegment) {
-        if let Ok(mut segments) = self.transcript_segments.lock() {
-            // Check if segment with same sequence_id exists (update it)
-            if let Some(existing) = segments
-                .iter_mut()
-                .find(|s| s.sequence_id == segment.sequence_id)
-            {
-                *existing = Arc::new(segment);
-                debug!("Updated existing transcript segment");
-            } else {
-                // New segment, add it
-                segments.push(Arc::new(segment));
-                debug!("Added transcript segment");
-            }
-        } else {
-            error!("Failed to lock transcript segments for adding segment");
-        }
+    pub(super) fn bind_transcript_session(&self, session_id: &str) -> Arc<RecordingTranscripts> {
+        self.transcripts.lock().session_id = Some(session_id.to_owned());
+        self.transcripts.clone()
+    }
 
-        let pending_updates = self
-            .transcript_updates_since_flush
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-        if (pending_updates == 1 && !self.transcript_snapshot_written.load(Ordering::Acquire))
-            || pending_updates == TRANSCRIPT_SNAPSHOT_MAX_UPDATES
-        {
-            self.snapshot_notify.notify_one();
-        }
+    pub(super) fn close_transcript_input(&self) {
+        self.transcripts.lock().session_id = None;
+    }
+
+    /// Add or update a transcript segment and schedule a recovery snapshot.
+    pub fn add_transcript_segment(&self, segment: TranscriptSegment) {
+        self.transcripts.add_segment(segment);
     }
 
     /// Legacy method for backward compatibility - converts text to basic segment
@@ -273,10 +330,7 @@ impl RecordingSaver {
         let Some(folder) = self.meeting_folder.clone() else {
             return;
         };
-        let segments = self.transcript_segments.clone();
-        let notify = self.snapshot_notify.clone();
-        let pending = self.transcript_updates_since_flush.clone();
-        let written = self.transcript_snapshot_written.clone();
+        let transcripts = self.transcripts.clone();
         let write_lock = self.snapshot_write_lock.clone();
         self.snapshot_task = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
@@ -287,7 +341,7 @@ impl RecordingSaver {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {},
-                    _ = notify.notified() => {},
+                    _ = transcripts.snapshot_notify.notified() => {},
                     _ = async {
                         match &disk_state {
                             Some(state) => state.wait_for_capture_gap().await,
@@ -311,18 +365,20 @@ impl RecordingSaver {
                         }
                     }
                 }
-                let count = pending.swap(0, Ordering::AcqRel);
+                let count = transcripts.updates_since_flush.swap(0, Ordering::AcqRel);
                 if count == 0 {
                     continue;
                 }
-                if save_snapshot(folder.clone(), segments.clone(), write_lock.clone())
+                if save_snapshot(folder.clone(), transcripts.clone(), write_lock.clone())
                     .await
                     .is_ok()
                 {
-                    written.store(true, Ordering::Release);
+                    transcripts.snapshot_written.store(true, Ordering::Release);
                 } else {
                     // Keep the snapshot dirty even if speech stops before the next tick.
-                    pending.fetch_add(1, Ordering::AcqRel);
+                    transcripts
+                        .updates_since_flush
+                        .fetch_add(1, Ordering::AcqRel);
                     warn!("Transcript recovery snapshot could not be saved; retrying");
                 }
             }
@@ -330,6 +386,7 @@ impl RecordingSaver {
     }
 
     pub async fn failed_start(&mut self, capture_drained: bool) {
+        self.close_transcript_input();
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
             let _ = task.await;
@@ -349,7 +406,12 @@ impl RecordingSaver {
             return;
         }
 
-        if capture_drained && self.transcript_segments.lock().unwrap().is_empty() {
+        let definitely_empty = self
+            .transcripts
+            .state
+            .lock()
+            .is_ok_and(|state| state.segments.is_empty());
+        if capture_drained && definitely_empty {
             const CAPTURE_DIRS: [&str; 2] = [".audio-spool", ".checkpoints"];
             let only_start_files = std::fs::read_dir(folder).is_ok_and(|mut entries| {
                 entries.all(|entry| {
@@ -455,7 +517,7 @@ impl RecordingSaver {
     async fn write_transcripts_json(&self, folder: &Path) -> Result<()> {
         save_snapshot(
             folder.to_path_buf(),
-            self.transcript_segments.clone(),
+            self.transcripts.clone(),
             self.snapshot_write_lock.clone(),
         )
         .await
@@ -493,6 +555,7 @@ impl RecordingSaver {
         outcome: RecordingOutcome,
     ) -> Result<RecordingSaveReport, String> {
         info!("Stopping recording saver");
+        self.close_transcript_input();
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
             let _ = task.await;
@@ -619,12 +682,11 @@ impl RecordingSaver {
 
     /// Get accumulated transcript segments (for reload sync)
     pub fn get_transcript_segments(&self) -> Vec<TranscriptSegment> {
-        let segments = self
-            .transcript_segments
-            .lock()
-            .map(|segments| segments.clone())
-            .unwrap_or_default();
-        segments.iter().map(|segment| (**segment).clone()).collect()
+        self.transcripts
+            .snapshot()
+            .iter()
+            .map(|segment| (**segment).clone())
+            .collect()
     }
 
     /// Get meeting name (for reload sync)
@@ -679,6 +741,7 @@ fn write_transcript_snapshot(folder: &Path, segments: &[Arc<TranscriptSegment>])
 
 impl Drop for RecordingSaver {
     fn drop(&mut self) {
+        self.close_transcript_input();
         if let Some(task) = self.snapshot_task.take() {
             task.abort();
         }
@@ -710,12 +773,13 @@ async fn save_metadata(
 
 async fn save_snapshot(
     folder: PathBuf,
-    segments: TranscriptSegments,
+    transcripts: Arc<RecordingTranscripts>,
     write_lock: Arc<Mutex<()>>,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
-        let _writer = write_lock.lock().unwrap();
-        let snapshot = segments.lock().unwrap().clone();
+        // A failed writer only owned an unpublished temporary file.
+        let _writer = write_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let snapshot = transcripts.snapshot();
         write_transcript_snapshot(&folder, &snapshot)
     })
     .await?
@@ -724,6 +788,63 @@ async fn save_snapshot(
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    fn poison<T>(lock: &Mutex<T>) {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("Synthetic lock poison");
+        }));
+        assert!(panic.is_err());
+        assert!(lock.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn poisoned_transcript_locks_preserve_rows_for_history_and_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        saver.add_transcript_chunk("Before poison".into());
+        poison(&saver.transcripts.state);
+        poison(&saver.snapshot_write_lock);
+        saver.add_transcript_segment(TranscriptSegment {
+            id: "seg_1".into(),
+            text: "After poison".into(),
+            sequence_id: 1,
+            ..saver.get_transcript_segments()[0].clone()
+        });
+        let rows = saver.get_transcript_segments();
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["Before poison", "After poison"]
+        );
+        saver.write_transcripts_json(&folder).await.unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(folder.join("transcripts.json")).unwrap())
+                .unwrap();
+        assert_eq!(snapshot["total_segments"], 2);
+        assert_eq!(snapshot["segments"][0]["text"], "Before poison");
+        assert_eq!(snapshot["segments"][1]["text"], "After poison");
+    }
+
+    #[tokio::test]
+    async fn failed_start_keeps_its_folder_when_transcript_emptiness_is_uncertain() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver
+            .initialize_meeting_folder("Synthetic meeting", false)
+            .unwrap();
+        let folder = saver.meeting_folder.clone().unwrap();
+        poison(&saver.transcripts.state);
+        saver.failed_start(true).await;
+        assert_eq!(saver.get_meeting_folder(), Some(&folder));
+        let marker = crate::database::meeting_files::read_marker(&folder).unwrap();
+        assert_eq!(marker["status"], "error");
+    }
 
     #[tokio::test]
     async fn startup_fallback_keeps_the_original_capture_and_audio_only_metadata() {
