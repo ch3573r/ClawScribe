@@ -15,9 +15,11 @@ test('local assistant configuration appears only after a successful opt-in and d
   let grant = false;
   const save = deferred();
   const calls = [];
+  const command = String.raw`C:\Audio tools\Übung\ClawScribe.exe`;
   const { LocalMcpSettings } = loadTsModule('src/components/LocalMcpSettings.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/label': { Label: 'Label' },
+    '@/components/ui/select': { Select: 'Select', SelectTrigger: 'SelectTrigger', SelectValue: 'SelectValue', SelectContent: 'SelectContent', SelectItem: 'SelectItem' },
     '@/components/ui/page-section': { PageSection: 'PageSection' }, '@/components/ui/switch': { Switch: 'Switch' },
     '@/components/ui/textarea': { Textarea: 'Textarea' }, '@/components/ui/input': { Input: 'Input' }, 'lucide-react': {},
     '@tauri-apps/api/core': { invoke: async (name, args) => {
@@ -26,7 +28,7 @@ test('local assistant configuration appears only after a successful opt-in and d
         if (args.enabled) await save.promise;
         grant = args.enabled;
       }
-      return { enabled: grant, command: 'ClawScribe.exe' };
+      return { enabled: grant, command };
     } },
   });
   const find = kind => nodes(hooks.render(LocalMcpSettings)).find(node => node.type === kind);
@@ -42,7 +44,11 @@ test('local assistant configuration appears only after a successful opt-in and d
   save.resolve();
   await flush();
   const config = JSON.parse(find('Textarea').props.value);
-  assert.deepEqual(config.mcpServers.clawscribe, { command: 'ClawScribe.exe', args: ['--mcp-stdio'] });
+  assert.deepEqual(config.mcpServers.clawscribe, { command, args: ['--mcp-stdio'] });
+  find('Select').props.onValueChange('codex');
+  const toml = find('Textarea').props.value.split('\n');
+  assert.deepEqual(toml, ['[mcp_servers.clawscribe]', 'command = ' + JSON.stringify(command), 'args = ["--mcp-stdio"]']);
+  assert.equal(calls.filter(name => name === 'set_mcp_access').length, 1);
   find('Switch').props.onCheckedChange(false);
   await flush();
   assert.equal(find('Switch').props.checked, false);

@@ -40,11 +40,14 @@ ClawScribe only removes audio after confirmation.
 ## Local assistant access
 
 Open **Settings → Assistant access** and enable **Allow
-read-only access**. Copy the displayed configuration into your MCP client's
-server settings and reconnect it. For clients with separate fields, use the
+read-only access**. Choose your client format. For Claude Desktop, add the
+`clawscribe` entry to `mcpServers` in its JSON configuration. For Codex,
+add the displayed table to `config.toml`. Keep other server entries and
+reconnect your client. For clients with separate fields, use the
 ClawScribe executable as the command and `--mcp-stdio` as the sole argument.
 The client starts its own local process, including when the desktop window
-is closed.
+is closed. See the [Claude Desktop setup guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
+and [Codex MCP configuration](https://developers.openai.com/codex/mcp).
 
 | Tool | Result |
 | --- | --- |

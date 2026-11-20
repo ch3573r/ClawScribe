@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SettingsCard, SettingsRow } from "@/components/ui/settings-layout";
 import { NoteRow } from "@/components/settings/settings-parts";
 import { Switch } from "@/components/ui/switch";
@@ -20,6 +21,7 @@ export function LocalMcpSettings() {
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [client, setClient] = useState("json");
   const request = useRef(0);
   const pending = useRef(false);
 
@@ -53,9 +55,13 @@ export function LocalMcpSettings() {
     return () => { request.current++; pending.current = false; };
   }, []);
 
-  const config = access?.enabled
-    ? JSON.stringify({ mcpServers: { clawscribe: { command: access.command, args: ["--mcp-stdio"] } } }, null, 2)
-    : "";
+  let config = "";
+  if (access?.enabled) {
+    const server = { command: access.command, args: ["--mcp-stdio"] };
+    config = client === "codex"
+      ? `[mcp_servers.clawscribe]\ncommand = ${JSON.stringify(server.command).replace(/\u007f/g, "\\u007f")}\nargs = ${JSON.stringify(server.args)}`
+      : JSON.stringify({ mcpServers: { clawscribe: server } }, null, 2);
+  }
 
   async function copy() {
     setError("");
@@ -81,6 +87,14 @@ export function LocalMcpSettings() {
             onCheckedChange={value => void refresh(value)} />
         </SettingsRow>
         {config && <div className="grid gap-2 px-5 py-4">
+          <Label htmlFor="mcp-client">Client format</Label>
+          <Select value={client} onValueChange={value => { setClient(value); setCopied(false); }}>
+            <SelectTrigger id="mcp-client"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="json">Claude Desktop and compatible clients (JSON)</SelectItem>
+              <SelectItem value="codex">Codex (TOML)</SelectItem>
+            </SelectContent>
+          </Select>
           <Label htmlFor="mcp-client-config">Assistant configuration</Label>
           <Textarea id="mcp-client-config" value={config} readOnly rows={7} className="font-mono text-xs"
             onFocus={event => event.target.select()} />
