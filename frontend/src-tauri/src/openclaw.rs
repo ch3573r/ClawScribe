@@ -202,6 +202,7 @@ fn save_config_at(
     let mut config = normalize_config(config);
     validate_endpoints(&config)?;
     let old_reference = stored_bearer_reference(path)?;
+    let mut new_reference: Option<String> = None;
     if config.bearer_token.is_empty() {
         // Untouched: the stored token stays exactly as it is, and only for the
         // addresses it was saved with. A changed address needs the token again.
@@ -215,8 +216,16 @@ fn save_config_at(
         }
         // Replaced: the new token is written first, the old entry removed after.
         config.bearer_token = protect(&config.bearer_token)?;
+        new_reference = Some(config.bearer_token.clone());
     }
-    write_config_atomically(&path, &config)?;
+    if let Err(error) = write_config_atomically(&path, &config) {
+        // The file still names the old token: the entry just written is not
+        // referenced by anything and is removed again.
+        if let Some(new_reference) = &new_reference {
+            forget_old(new_reference);
+        }
+        return Err(error);
+    }
     if let Some(old) = old_reference {
         if old != config.bearer_token && crate::credentials::is_protected(&old) {
             forget_old(&old);
@@ -1347,6 +1356,24 @@ mod secret_tests {
         .unwrap();
         assert_eq!(stored_token(&path), OLD_REFERENCE);
         assert!(forgotten.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_file_write_removes_the_token_entry_that_was_just_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-folder").join("openclaw.json");
+        let forgotten = RefCell::new(Vec::new());
+        let config = OpenClawConfig { bearer_token: "fake-new-token-0000".into(), ..untouched() };
+        let error = save_config_at(
+            &path,
+            config,
+            |_| Ok(NEW_REFERENCE.to_string()),
+            |reference| forgotten.borrow_mut().push(reference.to_string()),
+        )
+        .unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(*forgotten.borrow(), vec![NEW_REFERENCE.to_string()], "the new entry is removed, nothing else");
+        assert!(!path.exists());
     }
 
     #[test]

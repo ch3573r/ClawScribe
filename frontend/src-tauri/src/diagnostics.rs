@@ -156,6 +156,13 @@ pub async fn get_diagnostics_snapshot<R: Runtime>(
         }
     };
 
+    // Stored recordings folders that no longer pass the rules (a system, profile
+    // or network folder) are not used as places recordings are opened, recovered
+    // or deleted from; say so here.
+    for problem in crate::audio::recording_preferences::recording_folder_problems(&app).await {
+        errors.push(format!("recording_folder: {problem}"));
+    }
+
     Ok(DiagnosticSnapshot {
         app: AppDiagnosticInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),

@@ -2002,7 +2002,7 @@ export function ModelSettingsModal({
       );
       advanced.push(
         <CommitInputRow key="codex-home" id="codex-home-path" title="Isolated CODEX_HOME" placeholder="%APPDATA%\ClawScribe\codex"
-          description="ClawScribe never uses your normal ~/.codex profile or the standalone Codex CLI sign-in" value={codexConfig.codexHomePath || ''}
+          description="A folder on a local drive. ClawScribe never uses your normal ~/.codex profile or the standalone Codex CLI sign-in" value={codexConfig.codexHomePath || ''}
           onCommit={async (value) => { await saveCodexSafe({ ...codexConfig, codexHomePath: value, codexHomeMode: 'clawscribe-isolated', useExistingUserCodexSession: false, codexBinaryPath: null }); }} />,
         <CommitInputRow key="codex-timeout" id="codex-timeout" title="Timeout" description="Seconds, 30 or more" inputMode="numeric" value={String(codexConfig.timeoutSeconds)}
           validate={numberProblem(30, 86400, true, true)} onCommit={async (value) => { await saveCodexSafe({ ...codexConfig, timeoutSeconds: parseInt(value, 10) }); }} />,

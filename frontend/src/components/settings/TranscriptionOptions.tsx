@@ -51,6 +51,9 @@ export function TranscriptionOptions() {
   const [dmlPending, setDmlPending] = useState(false);
   const [workerPending, setWorkerPending] = useState(false);
   const [workerError, setWorkerError] = useState<string | null>(null);
+  const [dmlError, setDmlError] = useState<string | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [cloudError, setCloudError] = useState<string | null>(null);
   const mounted = useRef(false);
   const refreshSequence = useRef(0);
   const refreshParakeetSettings = useCallback(async () => {
@@ -82,8 +85,13 @@ export function TranscriptionOptions() {
 
   const onToggleParakeetDml = async (checked: boolean) => {
     setDmlPending(true);
+    setDmlError(null);
     try {
       await setParakeetDirectml(checked);
+    } catch {
+      if (mounted.current) {
+        setDmlError("Could not change this setting. Stop any recording or transcription and try again.");
+      }
     } finally {
       await refreshParakeetSettings();
       if (mounted.current) setDmlPending(false);
@@ -109,7 +117,7 @@ export function TranscriptionOptions() {
     parakeetSettings && parakeetSettings.worker !== getParakeetWorker() ? UNAPPLIED_MESSAGE : workerError
   );
   const dmlStatus = parakeetReadError ?? (
-    parakeetSettings && parakeetSettings.directml !== getParakeetDirectml() ? UNAPPLIED_MESSAGE : null
+    parakeetSettings && parakeetSettings.directml !== getParakeetDirectml() ? UNAPPLIED_MESSAGE : dmlError
   );
 
   // Source attribution (Me / Participants), default off. It depends on saved audio.
@@ -136,27 +144,42 @@ export function TranscriptionOptions() {
   }, []);
 
   const onToggleSourceAttribution = async (checked: boolean) => {
-    const enabled = await setSourceAttribution(checked);
-    setAudioSavingEnabled(await getRecordingAudioSavingEnabled());
-    if (checked && !enabled) {
-      setAudioSavingEnabled(false);
+    setSourceError(null);
+    try {
+      const enabled = await setSourceAttribution(checked);
+      setAudioSavingEnabled(await getRecordingAudioSavingEnabled());
+      if (checked && !enabled) {
+        setAudioSavingEnabled(false);
+      }
+    } catch {
+      // The switch shows the core's stored value again.
+      setSourceError("Could not save this setting. Try again.");
     }
   };
 
   // Cloud transcription needs consent before it turns on. Turning it on adds
   // the cloud engines to the engine list above.
-  const { enabled: cloudTranscription, loaded: cloudTranscriptionLoaded } = useCloudTranscription();
+  const { enabled: cloudTranscription, loaded: cloudTranscriptionLoaded, failed: cloudTranscriptionFailed } = useCloudTranscription();
   const [cloudConsentOpen, setCloudConsentOpen] = useState(false);
+  const saveCloudTranscription = async (enabled: boolean) => {
+    setCloudError(null);
+    try {
+      await setCloudTranscription(enabled);
+    } catch {
+      // The switch shows the core's stored value again.
+      setCloudError("Could not save this setting. Try again.");
+    }
+  };
   const onToggleCloudTranscription = (checked: boolean) => {
     if (checked) {
       setCloudConsentOpen(true);
       return;
     }
-    void setCloudTranscription(false);
+    void saveCloudTranscription(false);
   };
   const confirmCloudTranscription = () => {
     setCloudConsentOpen(false);
-    void setCloudTranscription(true);
+    void saveCloudTranscription(true);
   };
 
   return (
@@ -205,6 +228,7 @@ export function TranscriptionOptions() {
         description={<>
           Based on which source was louder. Still mislabels often
           {!audioSavingEnabled && <Note>Turn on Save audio recordings in Recording first. This depends on saved audio and stays off without it.</Note>}
+          {sourceError && <Note>{sourceError}</Note>}
         </>}
       >
         <Switch
@@ -219,7 +243,11 @@ export function TranscriptionOptions() {
         icon={<Cloud aria-hidden="true" />}
         htmlFor="cloud-transcription"
         title={<BetaTitle>Cloud transcription</BetaTitle>}
-        description="Uploads meeting audio to a service you choose. Off keeps audio on this PC"
+        description={<>
+          Uploads meeting audio to a service you choose. Off keeps audio on this PC
+          {cloudTranscriptionFailed && <Note>Could not read this setting. It stays off.</Note>}
+          {cloudError && <Note>{cloudError}</Note>}
+        </>}
       >
         <Switch
           id="cloud-transcription"

@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -261,16 +260,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
         setIsTestingProvider(true);
         try {
-            const selected = await open({
-                multiple: false,
-                filters: [
-                    {
-                        name: 'Audio',
-                        extensions: ['aac', 'flac', 'm4a', 'mp3', 'mp4', 'ogg', 'opus', 'wav', 'webm', 'wma'],
-                    },
-                ],
-            });
-            const audioPath = Array.isArray(selected) ? selected[0] : selected;
+            // The core opens the dialog and only accepts the file it chose here.
+            const audioPath = await invoke<string | null>('pick_transcription_test_audio');
             if (!audioPath) {
                 return;
             }

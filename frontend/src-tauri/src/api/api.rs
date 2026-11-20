@@ -692,7 +692,7 @@ pub async fn api_clear_transcript_api_key<R: Runtime>(
 
 #[tauri::command]
 pub async fn api_test_transcript_provider<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     provider: String,
     model: String,
@@ -709,7 +709,61 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         "api_test_transcript_provider called (native) for provider '{}'",
         &provider
     );
-    let audio_path = Path::new(&audio_path);
+    // The audio is a file the user chose in the dialog the core opened
+    // (`pick_transcription_test_audio`), once, or one of the user's own recordings.
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    let (audio_path, grant) = {
+        crate::local_path::check_local(&audio_path)?;
+        match crate::file_grants::take(crate::file_grants::Purpose::TestAudio, &audio_path) {
+            Ok(granted) => (granted.clone(), Some(granted)),
+            Err(_) if crate::file_grants::inside_roots(Path::new(&audio_path), &roots) => {
+                (std::path::PathBuf::from(&audio_path), None)
+            }
+            Err(message) => return Err(message),
+        }
+    };
+    let result = test_transcript_provider_with(
+        &state,
+        provider,
+        model,
+        allow_unencrypted,
+        api_key,
+        base_url,
+        endpoint,
+        &audio_path,
+        language,
+    )
+    .await;
+    if result.is_err() {
+        if let Some(granted) = &grant {
+            crate::file_grants::give_back(crate::file_grants::Purpose::TestAudio, granted);
+        }
+    }
+    result
+}
+
+/// Whether a provider test may use plain HTTP. A request from the webview can
+/// switch it off, but never on over a saved "no"; without a request the saved
+/// setting applies, and only to the saved destination.
+fn test_http_opt_in(requested: Option<bool>, saved: Option<bool>, destination_is_saved: bool) -> bool {
+    match (requested, saved) {
+        (Some(true), Some(false)) => false,
+        (Some(requested), _) => requested,
+        (None, saved) => destination_is_saved && saved == Some(true),
+    }
+}
+
+async fn test_transcript_provider_with(
+    state: &tauri::State<'_, AppState>,
+    provider: String,
+    model: String,
+    allow_unencrypted: Option<bool>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    endpoint: Option<String>,
+    audio_path: &Path,
+    language: Option<String>,
+) -> Result<TranscriptProviderTestResult, String> {
     let audio_size_bytes =
         crate::audio::transcription::cloud::validate_test_audio_path(audio_path).await?;
     let pool = state.db_manager.pool();
@@ -742,17 +796,21 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         requested,
         clean_optional(api_key.as_deref()).is_some(),
     )?;
-    let allow_unencrypted = allow_unencrypted.unwrap_or_else(|| {
+    let saved_opt_in = saved_config
+        .as_ref()
+        .map(|config| config.cloud_http_opt_in(&provider));
+    // A request from the webview can switch plain HTTP off, never on over a
+    // saved "no": the saved setting decides, and an unsaved one is honoured.
+    let allow_unencrypted = test_http_opt_in(
+        allow_unencrypted,
+        saved_opt_in,
         crate::audio::transcription::cloud::test_destination(
             saved_endpoint,
             Some(&destination),
             false,
         )
-        .is_ok()
-            && saved_config
-                .as_ref()
-                .is_some_and(|config| config.cloud_http_opt_in(&provider))
-    });
+        .is_ok(),
+    );
     crate::openai::secret_destination::validate_secret_destination(
         &destination,
         allow_unencrypted,
@@ -1557,10 +1615,7 @@ pub async fn open_meeting_folder<R: Runtime>(
 
                 #[cfg(target_os = "windows")]
                 {
-                    std::process::Command::new("explorer")
-                        .arg(&folder)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
+                    crate::local_path::open_in_explorer(&folder)?;
                 }
 
                 #[cfg(target_os = "linux")]
@@ -2009,6 +2064,24 @@ mod secret_tests {
                     assert_eq!(hint, "nC1d");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_request_cannot_switch_plain_http_on_over_a_saved_no() {
+        // (requested, saved, destination is the saved one) -> allowed
+        for (requested, saved, same, expected) in [
+            (Some(true), Some(false), true, false),
+            (Some(true), Some(false), false, false),
+            (Some(true), Some(true), true, true),
+            (Some(true), None, false, true),
+            (Some(false), Some(true), true, false),
+            (None, Some(true), true, true),
+            (None, Some(true), false, false),
+            (None, Some(false), true, false),
+            (None, None, true, false),
+        ] {
+            assert_eq!(test_http_opt_in(requested, saved, same), expected, "{requested:?} {saved:?} {same}");
         }
     }
 

@@ -28,6 +28,7 @@ pub mod disk_space;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
 pub mod hardware_detector;
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
+pub mod interrupted;
 pub(crate) mod inference;
 pub mod level_monitor;
 pub mod outcome;

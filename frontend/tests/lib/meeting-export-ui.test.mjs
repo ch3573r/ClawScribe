@@ -32,13 +32,17 @@ async function setup({ connected = true, rest = false, restFailure = false, save
     './PlannerExportPreview': names('PlannerExportPreview'),
     './ToDoExportPreview': names('ToDoExportPreview'),
     '@tauri-apps/api/core': { invoke: async (command, args) => {
+      if (command === 'pick_word_save_path') {
+        // The core opens the dialog: this is the one place the user picks the file.
+        calls.push({ kind: 'save', args });
+        return save();
+      }
       calls.push({ kind: command, args });
       if (command === 'api_get_meeting') {
         if (readFailure) throw new Error('Synthetic read failure');
         return { transcripts: [{ id: 'saved', timestamp: '09:10:11', speaker: 'Speaker A', text: 'Saved words.' }] };
       }
     } },
-    '@tauri-apps/plugin-dialog': { save: async args => { calls.push({ kind: 'save', args }); return save(); } },
     sonner: { toast: { success() {}, info() {}, warning() {}, error: (...args) => errors.push(args) } },
     '@/lib/exportDestinations': {
       getExportDestinations: () => ({ notebookId: 'notebook', notebookName: 'Saved notebook', confluenceMode: rest ? 'rest' : 'draft', confluenceBaseUrl: 'https://confluence.example.com', confluenceSpaceKey: 'TEST' }),

@@ -567,10 +567,7 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+        crate::local_path::open_in_explorer(std::path::Path::new(&folder_path))?;
     }
 
     #[cfg(target_os = "macos")]
@@ -597,8 +594,17 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
 /// execution provider. Unloads any loaded model so the change applies on the
 /// next load. No effect unless the build includes the `directml` feature.
 #[command]
-pub async fn set_parakeet_use_directml(enabled: bool) -> Result<(), String> {
+pub async fn set_parakeet_use_directml<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     let _job = crate::audio::inference::claim_job()?;
+    // Stored first: when the save fails the running value is unchanged.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::behavior_settings::save_parakeet_directml(&app, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())??;
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 
@@ -611,6 +617,22 @@ pub async fn set_parakeet_use_directml(enabled: bool) -> Result<(), String> {
     }
     log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
     Ok(())
+}
+
+/// Unloads a loaded Parakeet model so the next load uses changed settings, when
+/// no other job holds the slot. Otherwise the change applies at the next load.
+pub(crate) async fn unload_for_new_settings() {
+    let Ok(_job) = crate::audio::inference::claim_job() else {
+        log::warn!("Parakeet settings changed while a job was running; they apply at the next model load");
+        return;
+    };
+    let engine = {
+        let guard = PARAKEET_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    if let Some(engine) = engine {
+        engine.unload_model().await;
+    }
 }
 
 #[command]
@@ -628,9 +650,18 @@ pub async fn get_parakeet_directml_session_disabled() -> Result<bool, String> {
 
 /// Beta opt-in: isolate Parakeet in a supervised process on the next load.
 #[command]
-pub async fn set_parakeet_use_worker(enabled: bool) -> Result<(), String> {
+pub async fn set_parakeet_use_worker<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     let _job = crate::audio::inference::claim_job()
         .map_err(|error| format!("PARAKEET_WORKER_BUSY: {error}"))?;
+    // Stored first: when the save fails the running value is unchanged.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::behavior_settings::save_parakeet_worker(&app, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())??;
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_WORKER
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 

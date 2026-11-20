@@ -1271,10 +1271,12 @@ impl CodexProviderConfig {
 
     pub fn effective_codex_home(&self) -> Option<PathBuf> {
         match self.effective_home_mode() {
+            // A saved value that does not pass the checks (an older save, or a
+            // file edited by hand) is not used: the default folder is.
             CodexHomeMode::ClawscribeIsolated => self
                 .codex_home_path
                 .as_ref()
-                .map(expand_windows_style_appdata)
+                .and_then(|value| validate_codex_home(value).ok())
                 .or_else(|| Some(default_isolated_codex_home())),
             CodexHomeMode::ExistingUserCodexSession => None,
         }
@@ -1671,6 +1673,12 @@ pub async fn codex_save_config<R: Runtime>(
     app: AppHandle<R>,
     config: CodexProviderConfig,
 ) -> Result<ClawScribeProcessingConfig, String> {
+    // The isolated profile folder is the one setting that names a place on disk:
+    // it is created, and a `config.toml` is written in it. It must be a local
+    // folder that is neither the user's own Codex profile nor a system folder.
+    if let Some(value) = config.codex_home_path.as_deref().filter(|value| !value.trim().is_empty()) {
+        validate_codex_home(value)?;
+    }
     let mut full = load_processing_config(&app).unwrap_or_default();
     full.processing.codex = normalize_codex_config(config);
     save_processing_config(&app, &full)?;
@@ -1953,6 +1961,74 @@ fn processing_config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Str
         .app_config_dir()
         .map_err(|e| format!("Failed to resolve app config directory: {e}"))?;
     Ok(dir.join("processing-config.json"))
+}
+
+const CODEX_HOME_REFUSED: &str =
+    "Choose a folder on a local drive for ClawScribe's own Codex profile, not your Codex profile or a system folder";
+
+fn codex_path_key(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    let text = text.to_ascii_lowercase();
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') { text } else { trimmed.to_string() }
+}
+
+/// The path with links resolved as far as it exists (the rest is kept as given).
+fn codex_resolved_key(path: &Path) -> String {
+    let mut existing = path.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match (existing.file_name().map(ToOwned::to_owned), existing.parent().map(Path::to_path_buf)) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => break,
+        }
+    }
+    let mut resolved = crate::database::meeting_files::plain_path(&existing.canonicalize().unwrap_or(existing));
+    for name in rest.into_iter().rev() {
+        resolved.push(name);
+    }
+    codex_path_key(&resolved)
+}
+
+/// The `CODEX_HOME` the user may choose for ClawScribe's own profile: a local
+/// absolute path (checked as text before any filesystem call, after `%APPDATA%`
+/// is expanded), not the user's own Codex profile (`~/.codex`, or `CODEX_HOME`
+/// of the environment) nor a folder containing or inside it, and not a profile,
+/// application-data or system folder itself.
+fn validate_codex_home(value: &str) -> Result<PathBuf, String> {
+    let expanded = expand_windows_style_appdata(&value.trim().to_string());
+    if !crate::local_path::is_local_path_text(&expanded.to_string_lossy()) {
+        return Err(CODEX_HOME_REFUSED.into());
+    }
+    let resolved_key = codex_resolved_key(&expanded);
+    let own_profiles: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| home.join(".codex"))
+        .into_iter()
+        .chain(std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .collect();
+    for profile in own_profiles {
+        let profile_key = codex_resolved_key(&profile);
+        let inside = resolved_key == profile_key
+            || resolved_key.starts_with(&format!("{profile_key}/"))
+            || profile_key.starts_with(&format!("{resolved_key}/"));
+        if inside {
+            return Err(CODEX_HOME_REFUSED.into());
+        }
+    }
+    let protected = crate::audio::recording_preferences::protected_folders(None);
+    let is_protected = protected.exact.iter().any(|folder| codex_resolved_key(folder) == resolved_key)
+        || protected.trees.iter().any(|folder| {
+            let key = codex_resolved_key(folder);
+            resolved_key == key || resolved_key.starts_with(&format!("{key}/"))
+        });
+    if is_protected {
+        return Err(CODEX_HOME_REFUSED.into());
+    }
+    Ok(expanded)
 }
 
 fn default_isolated_codex_home() -> PathBuf {
@@ -4133,5 +4209,50 @@ mod unicode_log_tests {
         let diagnostic = format!("{}😀", "a".repeat(3999));
         let truncated = super::truncate_for_log(&diagnostic);
         assert_eq!(truncated, format!("{}…", "a".repeat(3999)));
+    }
+}
+
+#[cfg(test)]
+mod codex_home_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_folder_and_a_subfolder_of_the_profile_are_accepted() {
+        assert!(validate_codex_home(&default_isolated_codex_home().to_string_lossy()).is_ok());
+        let temp = tempfile::tempdir().unwrap();
+        assert!(validate_codex_home(&temp.path().join("codex-home").to_string_lossy()).is_ok());
+        if let Some(home) = dirs::home_dir() {
+            assert!(validate_codex_home(&home.join("ClawScribeCodex").to_string_lossy()).is_ok());
+        }
+    }
+
+    #[test]
+    fn network_device_relative_and_drive_relative_paths_are_refused() {
+        for refused in [
+            r"\\h\s\codex", r"\/h/s/codex", r"/\h\s\codex", r"\??\UNC\h\s\codex",
+            r"\\?\C:\codex", "codex", r"C:codex", "", "../codex",
+        ] {
+            assert_eq!(validate_codex_home(refused).unwrap_err(), CODEX_HOME_REFUSED, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn the_users_own_codex_profile_and_system_folders_are_refused() {
+        if let Some(home) = dirs::home_dir() {
+            let own = home.join(".codex");
+            for refused in [own.clone(), own.join("sub"), home.clone()] {
+                assert!(validate_codex_home(&refused.to_string_lossy()).is_err(), "{}", refused.display());
+            }
+        }
+        #[cfg(windows)]
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            assert!(validate_codex_home(&PathBuf::from(&root).join("codex").to_string_lossy()).is_err());
+        }
+        // A saved value that does not pass is not used: the default folder is.
+        let mut config = CodexProviderConfig::default();
+        config.codex_home_path = dirs::home_dir().map(|home| home.join(".codex").to_string_lossy().into_owned());
+        if config.codex_home_path.is_some() {
+            assert_eq!(config.effective_codex_home(), Some(default_isolated_codex_home()));
+        }
     }
 }

@@ -9,6 +9,8 @@ import {
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import { NO_SECRET, withRefreshedKeyStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
+import { loadBehaviorSettings, mirrorLegacyBehavior, refreshBehaviorSettings } from '@/lib/behaviorSettings';
+import { toast } from 'sonner';
 
 export interface OllamaModel {
   name: string;
@@ -125,13 +127,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   });
 
   // Language preference state
-  const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('primaryLanguage');
-      return saved || 'auto';
-    }
-    return 'auto';
-  });
+  // The core owns the language: it applies it at start-up and the value shown
+  // here is read back from it (`loadBehaviorSettings`), never from localStorage.
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('auto');
 
   // Summary configs
   const [isAutoSummary, setisAutoSummary] = useState<boolean>(() => {
@@ -197,18 +195,15 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadTranscriptConfig();
   }, []);
 
-  // Sync language preference to Rust on mount (fixes startup desync bug)
+  // Read the language from the core. The first time, the old webview value is
+  // handed to the core (which keeps its own if it has one).
   useEffect(() => {
-    if (selectedLanguage) {
-      invoke('set_language_preference', { language: selectedLanguage })
-        .then(() => {
-          console.log('[ConfigContext] Synced language preference to Rust on startup:', selectedLanguage);
-        })
-        .catch(err => {
-          console.error('[ConfigContext] Failed to sync language preference to Rust on startup:', err);
-        });
-    }
-  }, []); 
+    let active = true;
+    loadBehaviorSettings()
+      .then(settings => { if (active) setSelectedLanguage(settings.language); })
+      .catch(err => console.error('[ConfigContext] Failed to read the language from the core:', err));
+    return () => { active = false; };
+  }, []);
 
   // Load model configuration on mount
   useEffect(() => {
@@ -440,16 +435,20 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Wrapper for setSelectedLanguage that persists to localStorage and syncs to Rust
+  // The core stores the language first. A failed save leaves the language as
+  // it was and says so; nothing is shown as changed that the core did not accept.
   const handleSetSelectedLanguage = useCallback((lang: string) => {
-    setSelectedLanguage(lang);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('primaryLanguage', lang);
-    }
-    // Sync with Rust in-memory state for live recording
-    invoke('set_language_preference', { language: lang }).catch(err =>
-      console.error('Failed to sync language preference to Rust:', err)
-    );
+    invoke('set_language_preference', { language: lang })
+      .then(async () => {
+        // LEGACY mirror, so a downgrade to 0.62.0 sees the current value.
+        mirrorLegacyBehavior('language', lang);
+        const settings = await refreshBehaviorSettings();
+        setSelectedLanguage(settings.language);
+      })
+      .catch(err => {
+        console.error('Failed to save the language in the core:', err);
+        toast.error('Could not save the language');
+      });
   }, []);
 
   const value: ConfigContextType = useMemo(() => ({

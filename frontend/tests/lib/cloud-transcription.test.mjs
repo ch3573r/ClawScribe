@@ -1,88 +1,209 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { createHookHarness, flush } from "./hook-harness.mjs";
 import { loadTsModule } from "./load-ts-module.mjs";
 
-const modulePath = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "src",
-  "lib",
-  "cloudTranscription.ts",
-);
+// The core owns the behaviour settings. These tests use a fake core behind
+// `invoke`, with the same rules as the real one: values live in the core, the
+// old webview values are handed over once and only where the core has none.
 
-function createWindow() {
-  const listeners = new Map();
-  const storage = new Map();
-
-  return {
-    localStorage: {
-      getItem(key) {
-        return storage.has(key) ? storage.get(key) : null;
-      },
-      setItem(key, value) {
-        storage.set(key, String(value));
-      },
-    },
-    addEventListener(type, listener) {
-      const list = listeners.get(type) ?? [];
-      list.push(listener);
-      listeners.set(type, list);
-    },
-    removeEventListener(type, listener) {
-      listeners.set(
-        type,
-        (listeners.get(type) ?? []).filter((item) => item !== listener),
-      );
-    },
-    dispatchEvent(event) {
-      for (const listener of listeners.get(event.type) ?? []) {
-        listener(event);
+function fakeCore(initial = {}) {
+  const core = {
+    values: { parakeetDirectml: null, parakeetWorker: null, cloudTranscription: null, sourceAttribution: null, language: null, ...initial },
+    migrated: initial.legacyMigrated === true,
+    calls: [],
+    failSave: false,
+    failRead: false,
+  };
+  const view = () => ({
+    parakeetDirectml: core.values.parakeetDirectml === true,
+    parakeetWorker: core.values.parakeetWorker === true,
+    cloudTranscription: core.values.cloudTranscription === true,
+    sourceAttribution: core.values.sourceAttribution === true,
+    language: core.values.language ?? "auto",
+    legacyMigrated: core.migrated,
+  });
+  core.invoke = async (command, args) => {
+    core.calls.push({ command, args });
+    if (command === "get_behavior_settings") {
+      if (core.failRead) throw new Error("unreadable");
+      return view();
+    }
+    if (command === "migrate_legacy_behavior_settings") {
+      if (!core.migrated) {
+        for (const key of Object.keys(args.legacy)) {
+          if (core.values[key] === null && args.legacy[key] !== null) core.values[key] = args.legacy[key];
+        }
+        core.migrated = true;
       }
-      return true;
+      return view();
+    }
+    const setters = {
+      set_cloud_transcription_enabled: "cloudTranscription",
+      set_source_attribution_enabled: "sourceAttribution",
+      set_parakeet_use_directml: "parakeetDirectml",
+      set_parakeet_use_worker: "parakeetWorker",
+    };
+    if (setters[command]) {
+      if (core.failSave) throw new Error("not saved");
+      core.values[setters[command]] = args.enabled;
+      return undefined;
+    }
+    if (command === "get_recording_preferences") return { auto_save: true };
+    throw new Error(`unexpected ${command}`);
+  };
+  return core;
+}
+
+function load(core, storage = new Map()) {
+  const window = {
+    localStorage: {
+      getItem: key => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => { storage.set(key, String(value)); },
     },
+  };
+  const previous = globalThis.window;
+  globalThis.window = window;
+  const mocks = { "@tauri-apps/api/core": { invoke: core.invoke } };
+  const behavior = loadTsModule("src/lib/behaviorSettings.ts", mocks);
+  const shared = { ...mocks, "@/lib/behaviorSettings": behavior };
+  return {
+    behavior,
+    storage,
+    cloud: loadTsModule("src/lib/cloudTranscription.ts", shared),
+    attribution: loadTsModule("src/lib/sourceAttribution.ts", shared),
+    parakeet: loadTsModule("src/lib/parakeetAccel.ts", shared),
+    restore: () => { globalThis.window = previous; },
   };
 }
 
-test("cloud transcription preference is default-off and syncs to backend", async () => {
-  const previousWindow = globalThis.window;
-  const calls = [];
-  globalThis.window = createWindow();
-  globalThis.CustomEvent = class CustomEvent extends Event {
-    constructor(type, options = {}) {
-      super(type);
-      this.detail = options.detail;
-    }
-  };
+test("every setting reads as off before the core has answered and cloud transcription stays off", async (t) => {
+  const core = fakeCore({ cloudTranscription: true, sourceAttribution: true });
+  const m = load(core);
+  t.after(m.restore);
+  assert.equal(m.cloud.getCloudTranscription(), false);
+  assert.equal(m.attribution.getSourceAttribution(), false);
+  assert.equal(m.parakeet.getParakeetDirectml(), false);
+  assert.equal(m.behavior.behaviorSettingsLoaded(), false);
+  await m.behavior.loadBehaviorSettings();
+  assert.equal(m.cloud.getCloudTranscription(), true, "now it is the core's value");
+  assert.equal(m.attribution.getSourceAttribution(), true);
+});
 
-  try {
-    const cloud = loadTsModule(modulePath, {
-      "@tauri-apps/api/core": {
-        invoke: async (command, args) => {
-          calls.push({ command, args });
-        },
-      },
-    });
+test("a core that cannot be read leaves the defaults and the opt-in off, and a later read can succeed", async (t) => {
+  const core = fakeCore({ cloudTranscription: true });
+  core.failRead = true;
+  const m = load(core);
+  t.after(m.restore);
+  await assert.rejects(m.behavior.loadBehaviorSettings());
+  assert.equal(m.cloud.getCloudTranscription(), false);
+  assert.equal(m.behavior.behaviorSettingsLoaded(), false);
+  core.failRead = false;
+  await m.behavior.loadBehaviorSettings();
+  assert.equal(m.cloud.getCloudTranscription(), true);
+});
 
-    const seen = [];
-    const unsubscribe = cloud.subscribeCloudTranscription((enabled) => {
-      seen.push(enabled);
-    });
-
-    assert.equal(cloud.getCloudTranscription(), false);
-
-    await cloud.setCloudTranscription(true);
-
-    assert.equal(cloud.getCloudTranscription(), true);
-    assert.deepEqual(seen, [true]);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].command, "set_cloud_transcription_enabled");
-    assert.equal(calls[0].args.enabled, true);
-
-    unsubscribe();
-  } finally {
-    globalThis.window = previousWindow;
+test("an unexpected value from the core never switches a setting on", () => {
+  const behavior = loadTsModule("src/lib/behaviorSettings.ts", { "@tauri-apps/api/core": { invoke: async () => null } });
+  for (const odd of ["true", 1, "yes", null, undefined, {}, [true]]) {
+    assert.equal(behavior.readBehaviorSettings({ cloudTranscription: odd, parakeetWorker: odd }).cloudTranscription, false, String(odd));
   }
+  assert.equal(behavior.readBehaviorSettings(null).language, "auto");
+  assert.equal(behavior.readBehaviorSettings({ language: "de" }).language, "de");
+});
+
+test("the first run hands the old webview values to the core, which keeps its own where it has one", async (t) => {
+  const core = fakeCore({ parakeetWorker: false, language: "de" });
+  const storage = new Map([
+    ["clawscribe.parakeetDirectml", "true"],
+    ["clawscribe.parakeetWorker", "true"],
+    ["clawscribe.cloudTranscription", "true"],
+    ["primaryLanguage", "fr"],
+    ["clawscribe.sourceAttribution", "not a boolean"],
+  ]);
+  const m = load(core, storage);
+  t.after(m.restore);
+  const settings = await m.behavior.loadBehaviorSettings();
+  const migrate = core.calls.find(call => call.command === "migrate_legacy_behavior_settings");
+  assert.deepEqual(JSON.parse(JSON.stringify(migrate.args.legacy)), {
+    parakeetDirectml: true, parakeetWorker: true, cloudTranscription: true, sourceAttribution: null, language: "fr",
+  });
+  assert.equal(settings.parakeetDirectml, true, "the core had none: the webview value is taken");
+  assert.equal(settings.parakeetWorker, false, "the core had a value: it keeps its own");
+  assert.equal(settings.cloudTranscription, true);
+  assert.equal(settings.language, "de");
+  assert.equal(settings.sourceAttribution, false, "an unusable old value is ignored");
+  assert.equal(storage.get("clawscribe.parakeetDirectml"), "true", "the old keys are not deleted");
+});
+
+test("after the hand-over the webview values are not sent again and are no longer read", async (t) => {
+  const core = fakeCore({ legacyMigrated: true, cloudTranscription: false });
+  const m = load(core, new Map([["clawscribe.cloudTranscription", "true"]]));
+  t.after(m.restore);
+  const settings = await m.behavior.loadBehaviorSettings();
+  assert.equal(core.calls.some(call => call.command === "migrate_legacy_behavior_settings"), false);
+  assert.equal(settings.cloudTranscription, false, "a stale webview value cannot switch it on");
+});
+
+test("a change goes to the core and is read back from it; the old key mirrors it for a downgrade", async (t) => {
+  const core = fakeCore({ legacyMigrated: true });
+  const m = load(core);
+  t.after(m.restore);
+  await m.behavior.loadBehaviorSettings();
+  const seen = [];
+  m.cloud.subscribeCloudTranscription(enabled => seen.push(enabled));
+  assert.equal(await m.cloud.setCloudTranscription(true), true);
+  assert.equal(core.values.cloudTranscription, true);
+  assert.equal(m.cloud.getCloudTranscription(), true);
+  assert.deepEqual(seen, [true]);
+  assert.equal(m.storage.get("clawscribe.cloudTranscription"), "true");
+  await m.parakeet.setParakeetWorker(true);
+  assert.equal(m.parakeet.getParakeetWorker(), true);
+  assert.equal(await m.attribution.setSourceAttribution(true), true);
+  assert.equal(m.attribution.getSourceAttribution(), true);
+});
+
+test("a failed save throws, leaves the stored value and does not touch the old key", async (t) => {
+  const core = fakeCore({ legacyMigrated: true, cloudTranscription: false });
+  const m = load(core);
+  t.after(m.restore);
+  await m.behavior.loadBehaviorSettings();
+  core.failSave = true;
+  await assert.rejects(m.cloud.setCloudTranscription(true));
+  await assert.rejects(m.parakeet.setParakeetDirectml(true));
+  await assert.rejects(m.attribution.setSourceAttribution(true));
+  assert.equal(m.cloud.getCloudTranscription(), false);
+  assert.equal(m.storage.has("clawscribe.cloudTranscription"), false);
+  assert.equal(m.parakeet.getParakeetDirectml(), false);
+});
+
+test("the settings screen hook reads the core's value and fails closed", async (t) => {
+  const core = fakeCore({ legacyMigrated: true, cloudTranscription: true });
+  const m = load(core);
+  t.after(m.restore);
+  const hooks = createHookHarness();
+  const { useCloudTranscription } = loadTsModule("src/hooks/useCloudTranscription.ts", {
+    react: hooks.react,
+    "@/lib/behaviorSettings": m.behavior,
+    "@/lib/cloudTranscription": m.cloud,
+  });
+  const read = () => hooks.render(() => useCloudTranscription());
+  assert.deepEqual(JSON.parse(JSON.stringify(read())), { enabled: false, loaded: false, failed: false });
+  await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(read())), { enabled: true, loaded: true, failed: false });
+  hooks.unmount();
+
+  const broken = fakeCore({ cloudTranscription: true });
+  broken.failRead = true;
+  const b = load(broken);
+  const hooks2 = createHookHarness();
+  const mod = loadTsModule("src/hooks/useCloudTranscription.ts", {
+    react: hooks2.react,
+    "@/lib/behaviorSettings": b.behavior,
+    "@/lib/cloudTranscription": b.cloud,
+  });
+  hooks2.render(() => mod.useCloudTranscription());
+  await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(hooks2.render(() => mod.useCloudTranscription()))), { enabled: false, loaded: false, failed: true });
+  hooks2.unmount();
 });

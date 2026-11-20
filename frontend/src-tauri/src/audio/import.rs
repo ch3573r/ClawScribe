@@ -219,6 +219,8 @@ pub fn cancel_import() {
 /// Validate an audio file and return its info using metadata-only approach
 /// Missing duration is shown as unknown and measured during bounded batch preparation.
 pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
+    // A network or device path is refused before the first filesystem call.
+    crate::local_path::check_local(&path.to_string_lossy()).map_err(|message| anyhow!(message))?;
     // Check file exists
     if !path.exists() {
         return Err(anyhow!("File does not exist: {}", path.display()));
@@ -1348,6 +1350,7 @@ pub async fn start_import_audio_command<R: Runtime>(
     if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
         return Err("Import already in progress".to_string());
     }
+    crate::local_path::check_local(&source_path)?;
 
     // Spawn import in background
     tauri::async_runtime::spawn(async move {
@@ -1635,9 +1638,15 @@ mod tests {
 
     #[test]
     fn test_validate_audio_file_nonexistent() {
-        let result = validate_audio_file(Path::new("/nonexistent/file.mp4"));
+        let missing = std::env::temp_dir().join("clawscribe-missing-folder").join("file.mp4");
+        let result = validate_audio_file(&missing);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
+        // A network or relative path is refused before the filesystem is asked.
+        for refused in ["//host/share/file.mp4", "relative/file.mp4"] {
+            let error = validate_audio_file(Path::new(refused)).unwrap_err().to_string();
+            assert!(error.contains("local drive"), "{refused}: {error}");
+        }
     }
 
     #[test]

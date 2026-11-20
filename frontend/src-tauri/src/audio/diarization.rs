@@ -2149,13 +2149,22 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
 ) -> Result<SpeakerDiarizationComplete> {
     check_diarization_cancelled(&meeting_id)?;
     let run_started = Instant::now();
-    let folder_path = PathBuf::from(&meeting_folder_path);
-    if !folder_path.is_dir() {
-        return Err(anyhow!(
-            "Meeting folder is not available: {}",
-            folder_path.display()
-        ));
-    }
+    // The folder is the one the core saved for this meeting; the path the
+    // webview sends is not trusted. Custom model files from the webview are not
+    // used either: the models are the ones the app downloads.
+    let _ = (&meeting_folder_path, &segmentation_model_path, &embedding_model_path);
+    let (segmentation_model_path, embedding_model_path): (Option<String>, Option<String>) = (None, None);
+    let folder_path = {
+        let pool = app
+            .try_state::<AppState>()
+            .ok_or_else(|| anyhow!("Application database is not initialized"))?
+            .db_manager
+            .pool()
+            .clone();
+        crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id)
+            .await
+            .map_err(|message| anyhow!(message))?
+    };
 
     emit_progress(
         &app,

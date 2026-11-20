@@ -45,9 +45,10 @@ pub async fn check_default_legacy_database(app: AppHandle) -> Result<Option<Stri
 /// This is specifically for detecting old Python backend installations
 #[tauri::command]
 pub async fn check_homebrew_database(path: String) -> Result<Option<DatabaseCheckResult>, String> {
+    crate::local_path::check_local(&path)?;
     let db_path = PathBuf::from(&path);
 
-    info!("Checking for Homebrew database at: {}", path);
+    info!("Checking for Homebrew database");
 
     // Check if file exists and is a regular file
     if db_path.exists() && db_path.is_file() {
@@ -82,10 +83,8 @@ pub async fn import_and_initialize_database(
     app: AppHandle,
     legacy_db_path: String,
 ) -> Result<(), String> {
-    info!(
-        "Starting import of legacy database from: {}",
-        legacy_db_path
-    );
+    crate::local_path::check_local(&legacy_db_path)?;
+    info!("Starting import of legacy database");
 
     // Import and get initialized manager
     let db_manager = DatabaseManager::import_legacy_database(&app, &legacy_db_path)
@@ -197,10 +196,7 @@ pub async fn open_database_folder(app: AppHandle) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+        crate::local_path::open_in_explorer(std::path::Path::new(&folder_path))?;
     }
 
     #[cfg(target_os = "macos")]

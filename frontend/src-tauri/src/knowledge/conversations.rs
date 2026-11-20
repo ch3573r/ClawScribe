@@ -714,6 +714,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn preceding_question_context_persists_without_rewriting_literal_citations() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, request, frozen, passages) = question_pair_fixture("Nein.").await;
         prepare(
             &pool,
@@ -761,6 +762,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn question_context_uses_complete_selected_rows_and_utf8_reply_limit() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for (reply, selected_question, expected) in [
             ("ä".repeat(32), true, Some(1)),
             ("ä".repeat(33), true, None),
@@ -788,6 +790,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn saved_context_rejects_forged_map_links() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for tag in [0, 2, 999] {
             let (pool, request, frozen, passages) = question_pair_fixture("Ja.").await;
             prepare(
@@ -824,6 +827,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn title_and_date_edits_invalidate_prompt_metadata_snapshot() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let before: i64 =
             sqlx::query_scalar("SELECT revision FROM knowledge_sources WHERE meeting_id='fixture'")
@@ -862,6 +866,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn durable_library_history_has_authoritative_tables_without_cache_foreign_keys() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         for table in [
             "knowledge_owners",
@@ -905,6 +910,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn deleted_source_redacts_dependent_request_before_associations_disappear() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         pending_request(&pool).await;
         sqlx::query("DELETE FROM meetings WHERE id='fixture'")
@@ -935,6 +941,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn cancelled_request_cannot_commit() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         pending_request(&pool).await;
         sqlx::query("UPDATE knowledge_requests SET status='cancelled' WHERE id='00000000-0000-4000-8000-000000000001'").execute(&pool).await.unwrap();
@@ -985,6 +992,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn meeting_and_expanded_library_histories_remain_independently_readable() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let library = create_library(&pool).await.unwrap();
         let meeting = ConversationOwner::Meeting("fixture".into());
@@ -1034,6 +1042,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn duplicate_request_returns_same_reply() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (mut request, frozen) = active(&pool).await;
         let first = finish(
@@ -1061,6 +1070,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn history_keeps_user_before_assistant_when_timestamps_tie() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         finish(
@@ -1079,6 +1089,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn deleted_source_aborts_queued_dispatch() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         sqlx::query("DELETE FROM meetings WHERE id='fixture'")
@@ -1092,6 +1103,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn deletion_invalidates_a_preparing_request_before_retrieval_finishes() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let request = request(create_library(&pool).await.unwrap());
         reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
@@ -1107,6 +1119,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn deleted_source_discards_completed_answer() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         sqlx::query("DELETE FROM meetings WHERE id='fixture'")
@@ -1130,6 +1143,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn metadata_change_during_generation_rejects_late_answer() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for statement in [
             "UPDATE meetings SET title='Edited title' WHERE id='fixture'",
             "UPDATE meetings SET created_at='2026-09-05' WHERE id='fixture'",
@@ -1153,6 +1167,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn clear_removes_legacy_and_new_and_prevents_late_commit() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let mut request = request(ConversationOwner::Meeting("fixture".into()));
         request.search.scope = KnowledgeScope::Meeting {
@@ -1189,6 +1204,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn filter_change_omits_prior_turn_without_erasing_readable_history() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (request, frozen) = active(&pool).await;
         finish(
@@ -1228,6 +1244,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn inherited_dependencies_redact_a_later_uncited_answer() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let (prior, frozen) = active(&pool).await;
         finish(

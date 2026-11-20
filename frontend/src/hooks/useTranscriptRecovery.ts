@@ -2,14 +2,22 @@
  * useTranscriptRecovery Hook
  *
  * Orchestrates transcript recovery operations for interrupted meetings.
- * Provides functionality to detect, preview, and recover meetings from IndexedDB.
+ * Provides functionality to detect, preview, and recover meetings from two
+ * sources: the webview's IndexedDB and the core's scan of the recording folders.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { indexedDBService, MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
 import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
+import {
+  EMPTY_DISK_SCAN,
+  mergeRecoveryCandidates,
+  readDiskScan,
+  type DiskScan,
+  type RecoveryCandidate,
+} from '@/lib/interruptedRecordings';
 import { toast } from 'sonner';
 
 interface AudioRecoveryStatus {
@@ -20,80 +28,130 @@ interface AudioRecoveryStatus {
   message: string;
 }
 
+/**
+ * Every interrupted recording known right now: the browser's unsaved meetings
+ * (with their audio checked) merged with what the core finds on disk, one entry
+ * per folder. A failed disk scan leaves the browser list as it was.
+ */
+export async function fetchRecoveryCandidates(): Promise<{ candidates: RecoveryCandidate[]; scan: DiskScan; scanFailed: boolean }> {
+  const meetings = await indexedDBService.getAllMeetings().catch((error) => {
+    console.error('Failed to read the browser recovery data:', error);
+    return [] as MeetingMetadata[];
+  });
+
+  // Filter out meetings older than 7 days and newer than 15 seconds
+  // The 15 seconds threshold prevents showing meetings from the current session(jus in case)
+  // where recording just stopped but hasn't been fully saved yet
+  const cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
+  const secondsAgo = Date.now() - (2 * 1000);
+
+  const recentMeetings = meetings.filter(m => {
+    const isWithinRetention = m.lastUpdated > cutoffTime; // Not older than 7 days
+    const isOldEnough = m.lastUpdated < secondsAgo; // Older than 15 seconds
+    return isWithinRetention && isOldEnough;
+  });
+
+  // Verify audio checkpoint availability for each meeting
+  const meetingsWithAudioStatus = await Promise.all(
+    recentMeetings.map(async (meeting) => {
+      if (meeting.folderPath) {
+        try {
+          const hasAudio = await invoke<boolean>('has_audio_checkpoints', {
+            meetingFolder: meeting.folderPath
+          });
+
+          // If no audio files, clear folderPath to show "No audio" in UI.
+          // The folder stays known for matching it with the disk scan.
+          return {
+            ...meeting,
+            recordingFolder: meeting.folderPath,
+            folderPath: hasAudio ? meeting.folderPath : undefined
+          };
+        } catch (error) {
+          console.warn('Failed to check audio for meeting:', error);
+          // On error, assume no audio to be safe
+          return { ...meeting, recordingFolder: meeting.folderPath, folderPath: undefined };
+        }
+      }
+      return meeting;
+    })
+  );
+
+  let scan = EMPTY_DISK_SCAN;
+  let scanFailed = false;
+  try {
+    scan = readDiskScan(await invoke<unknown>('find_interrupted_recordings'));
+  } catch (error) {
+    console.warn('Could not look for interrupted recordings on disk:', error);
+    scanFailed = true;
+  }
+  return { candidates: mergeRecoveryCandidates(meetingsWithAudioStatus, scan.recordings), scan, scanFailed };
+}
+
 export interface UseTranscriptRecoveryReturn {
-  recoverableMeetings: MeetingMetadata[];
+  recoverableMeetings: RecoveryCandidate[];
   isLoading: boolean;
   isRecovering: boolean;
-  checkForRecoverableTranscripts: () => Promise<void>;
+  /** The recordings found on disk could be incomplete: the scan stopped at a bound. */
+  diskScanTruncated: boolean;
+  checkForRecoverableTranscripts: () => Promise<RecoveryCandidate[]>;
   recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
   loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
 
 export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
-  const [recoverableMeetings, setRecoverableMeetings] = useState<MeetingMetadata[]>([]);
+  const [recoverableMeetings, setRecoverableMeetings] = useState<RecoveryCandidate[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
+  const [diskScanTruncated, setDiskScanTruncated] = useState(false);
+  const candidatesRef = useRef<RecoveryCandidate[]>([]);
+
+  const setCandidates = useCallback((next: RecoveryCandidate[] | ((prev: RecoveryCandidate[]) => RecoveryCandidate[])) => {
+    candidatesRef.current = typeof next === 'function' ? next(candidatesRef.current) : next;
+    setRecoverableMeetings(candidatesRef.current);
+  }, []);
 
   /**
-   * Check for recoverable meetings in IndexedDB
+   * Check for recoverable meetings: unsaved meetings in IndexedDB and
+   * interrupted recordings found in the recording folders.
    */
-  const checkForRecoverableTranscripts = useCallback(async () => {
+  const checkForRecoverableTranscripts = useCallback(async (): Promise<RecoveryCandidate[]> => {
     setIsLoading(true);
     try {
-      const meetings = await indexedDBService.getAllMeetings();
-
-      // Filter out meetings older than 7 days and newer than 15 seconds
-      // The 15 seconds threshold prevents showing meetings from the current session(jus in case)
-      // where recording just stopped but hasn't been fully saved yet
-      const cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
-      const secondsAgo = Date.now() - (2 * 1000);
-
-      const recentMeetings = meetings.filter(m => {
-        const isWithinRetention = m.lastUpdated > cutoffTime; // Not older than 7 days
-        const isOldEnough = m.lastUpdated < secondsAgo; // Older than 15 seconds
-        return isWithinRetention && isOldEnough;
-      });
-
-      // Verify audio checkpoint availability for each meeting
-      const meetingsWithAudioStatus = await Promise.all(
-        recentMeetings.map(async (meeting) => {
-          if (meeting.folderPath) {
-            try {
-              const hasAudio = await invoke<boolean>('has_audio_checkpoints', {
-                meetingFolder: meeting.folderPath
-              });
-
-              // If no audio files, clear folderPath to show "No audio" in UI
-              return {
-                ...meeting,
-                folderPath: hasAudio ? meeting.folderPath : undefined
-              };
-            } catch (error) {
-              console.warn('Failed to check audio for meeting:', error);
-              // On error, assume no audio to be safe
-              return { ...meeting, folderPath: undefined };
-            }
-          }
-          return meeting;
-        })
-      );
-
-
-      setRecoverableMeetings(meetingsWithAudioStatus);
+      const { candidates, scan } = await fetchRecoveryCandidates();
+      setCandidates(candidates);
+      setDiskScanTruncated(scan.truncated);
+      return candidates;
     } catch (error) {
       console.error('Failed to check for recoverable transcripts:', error);
-      setRecoverableMeetings([]);
+      setCandidates([]);
+      return [];
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [setCandidates]);
 
   /**
    * Load transcripts for preview
    */
   const loadMeetingTranscripts = useCallback(async (meetingId: string): Promise<StoredTranscript[]> => {
     try {
+      const candidate = candidatesRef.current.find(c => c.meetingId === meetingId);
+      if (candidate?.source === 'disk' && candidate.disk) {
+        // Only on disk: the core reads the first lines of the transcript snapshot.
+        const lines = await invoke<Array<{ text: string; timestamp: string; audioStartTime: number }>>(
+          'preview_interrupted_recording',
+          { folder: candidate.disk.folder, limit: 10 },
+        );
+        return lines.map((line, index) => ({
+          meetingId,
+          text: line.text,
+          timestamp: line.timestamp,
+          audio_start_time: line.audioStartTime,
+          sequenceId: index,
+        } as StoredTranscript));
+      }
       const transcripts = await indexedDBService.getTranscripts(meetingId);
       // Sort by sequence ID
       transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
@@ -105,11 +163,103 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   }, []);
 
   /**
+   * The steps after a recovered meeting is saved: language, originals and the list.
+   */
+  const finishRecovery = useCallback(async (
+    entryId: string,
+    folderPath: string | undefined,
+    audioRecoveryStatus: AudioRecoveryStatus | null,
+    savedMeetingId: string,
+  ) => {
+    const audioRecovered = Boolean(audioRecoveryStatus?.audio_file_path) &&
+      (audioRecoveryStatus?.status === 'success' || audioRecoveryStatus?.status === 'partial');
+    try {
+      await applyPinnedSummaryLanguageToMeeting(savedMeetingId);
+    } catch (error) {
+      console.warn('Failed to apply pinned summary language to recovered meeting:', error);
+      toast.warning('Could not apply default summary language', {
+        description: 'The recovered meeting was saved, but the default summary language was not applied.',
+      });
+    }
+    return { audioRecovered, entryId, folderPath };
+  }, []);
+
+  /**
+   * Recover a recording that exists only on disk. Audio goes through the same
+   * recovery as before; the transcript comes from the snapshot the core wrote
+   * next to it, and the meeting is saved through the normal save path, which
+   * registers it and marks its folder.
+   */
+  const recoverDiskMeeting = useCallback(async (candidate: RecoveryCandidate) => {
+    const recording = candidate.disk!;
+    let audioRecoveryStatus: AudioRecoveryStatus | null = null;
+    if (recording.hasAudio) {
+      try {
+        audioRecoveryStatus = await invoke<AudioRecoveryStatus>('recover_audio_from_checkpoints', { meetingFolder: recording.folder });
+      } catch (error) {
+        console.error('Audio recovery failed:', error);
+        audioRecoveryStatus = {
+          status: 'failed',
+          chunk_count: 0,
+          estimated_duration_seconds: 0,
+          message: error instanceof Error ? error.message : 'Unknown error',
+        };
+      }
+    } else {
+      audioRecoveryStatus = { status: 'none', chunk_count: 0, estimated_duration_seconds: 0, message: 'No audio on disk' };
+    }
+    const audioRecovered = Boolean(audioRecoveryStatus?.audio_file_path) &&
+      (audioRecoveryStatus?.status === 'success' || audioRecoveryStatus?.status === 'partial');
+    if (!recording.hasTranscript && !audioRecovered) {
+      throw new Error('No audio could be recovered yet. Keep the recording folder and retry recovery; a transcript is not required.');
+    }
+    const saveResponse = await storageService.saveMeeting(
+      candidate.title,
+      [],
+      recording.folder,
+      {
+        audio_save_failed: audioRecoveryStatus?.status === 'failed',
+        transcription_incomplete: recording.hasTranscript,
+        capture_incomplete: audioRecoveryStatus?.status === 'partial',
+      },
+      // The core reads the transcript snapshot from the folder.
+      recording.hasTranscript,
+    );
+    const savedMeetingId = saveResponse.meeting_id;
+    const { audioRecovered: recovered } = await finishRecovery(candidate.meetingId, recording.folder, audioRecoveryStatus, savedMeetingId);
+    if (recovered) {
+      try {
+        await invoke('release_recovered_capture', { meetingFolder: recording.folder });
+      } catch {
+        console.warn('Meeting saved; recovery originals retained because cleanup could not finish');
+      }
+      if (audioRecoveryStatus?.status === 'success') {
+        try {
+          await invoke('cleanup_checkpoints', { meetingFolder: recording.folder });
+        } catch (error) {
+          console.warn('Checkpoint cleanup failed (non-fatal):', error);
+        }
+      }
+    }
+    setCandidates(prev => prev.filter(m => m.meetingId !== candidate.meetingId));
+    return {
+      success: true,
+      audioRecoveryStatus,
+      meetingId: savedMeetingId,
+      transcriptCount: recording.transcriptLines,
+    };
+  }, [finishRecovery, setCandidates]);
+
+  /**
    * Recover a meeting from IndexedDB
    */
   const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }> => {
     setIsRecovering(true);
     try {
+      const diskOnly = candidatesRef.current.find(c => c.meetingId === meetingId && c.source === 'disk');
+      if (diskOnly?.disk) {
+        return await recoverDiskMeeting(diskOnly);
+      }
       // 1. Load meeting metadata
       const metadata = await indexedDBService.getMeetingMetadata(meetingId);
       if (!metadata) {
@@ -231,7 +381,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }
 
       // 9. Remove from recoverable list
-      setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
+      setCandidates(prev => prev.filter(m => m.meetingId !== meetingId));
 
       return {
         success: true,
@@ -245,25 +395,36 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     } finally {
       setIsRecovering(false);
     }
-  }, []);
+  }, [recoverDiskMeeting, setCandidates]);
 
   /**
-   * Delete a recoverable meeting
+   * Delete a recoverable meeting. A recording that exists only on disk is
+   * deleted by the core (validated, only an unsaved interrupted folder), and
+   * only because the user asked; nothing is ever deleted automatically.
    */
   const deleteRecoverableMeeting = useCallback(async (meetingId: string): Promise<void> => {
     try {
-      await indexedDBService.deleteMeeting(meetingId);
-      setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
+      const candidate = candidatesRef.current.find(c => c.meetingId === meetingId);
+      if (candidate?.source === 'disk' && candidate.disk) {
+        if (candidate.disk.registeredMeetingId) {
+          throw new Error('This recording is saved in your library and cannot be deleted from here.');
+        }
+        await invoke('discard_interrupted_recording', { folder: candidate.disk.folder });
+      } else {
+        await indexedDBService.deleteMeeting(meetingId);
+      }
+      setCandidates(prev => prev.filter(m => m.meetingId !== meetingId));
     } catch (error) {
       console.error('Failed to delete meeting:', error);
       throw error;
     }
-  }, []);
+  }, [setCandidates]);
 
   return {
     recoverableMeetings,
     isLoading,
     isRecovering,
+    diskScanTruncated,
     checkForRecoverableTranscripts,
     recoverMeeting,
     loadMeetingTranscripts,

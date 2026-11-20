@@ -416,6 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn question_context_rejects_partial_nonadjacent_changed_and_unselected_rows() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::conversations::tests::question_pair_fixture;
         for scenario in [
             "partial_question",
@@ -486,6 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_metadata_rejects_cross_source_revision_chains_and_partial_spans() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (_, _, _, passages) =
             crate::knowledge::conversations::tests::question_pair_fixture("Ja.").await;
         let refs = passages
@@ -619,6 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tag_has_no_link() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (_, passage) = fixture().await;
         let refs = tagged_references(
             "Fact [K1]. Invented [K999]. Repeated [K1]. [S2]",
@@ -630,6 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn current_navigation_uses_canonical_page_position_and_never_stale_position() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, _) = fixture().await;
         for number in 0..205 {
             sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES (?, 'fixture','Public earlier row','00:01',1)")
@@ -685,6 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_passage_resolves_stale() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, passage) = fixture().await;
         assert_eq!(
             resolve(&pool, &passage.evidence).await.unwrap().status,
@@ -709,6 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn forged_time_span_and_cache_id_never_navigate() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, passage) = fixture().await;
         let mut forged = passage.evidence.clone();
         if let EvidenceLocator::Transcript { start_seconds, .. } = &mut forged.locator {
@@ -728,6 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn restored_reference_stays_stale_with_matching_source_counter() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, mut passage) = fixture().await;
         passage.evidence.historical = true;
         let restored = resolve(&pool, &passage.evidence).await.unwrap();

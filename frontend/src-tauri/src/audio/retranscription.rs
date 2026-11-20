@@ -233,7 +233,18 @@ async fn run_retranscription<R: Runtime>(
     mut model: Option<String>,
     mut provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
-    let folder_path = PathBuf::from(&meeting_folder_path);
+    // The folder is the one the core saved for this meeting; the path the
+    // webview sends is not trusted.
+    let _ = &meeting_folder_path;
+    let pool = app
+        .try_state::<crate::state::AppState>()
+        .ok_or_else(|| anyhow!("Application database is not initialized"))?
+        .db_manager
+        .pool()
+        .clone();
+    let folder_path = crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id)
+        .await
+        .map_err(|message| anyhow!(message))?;
     let (audio_path, capture_gaps) =
         crate::audio::incremental_saver::find_or_recover_audio_file_with_status(&folder_path)
             .await?;

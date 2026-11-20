@@ -1,6 +1,5 @@
 'use client';
 import { useRef, useState } from 'react';
-import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -22,8 +21,10 @@ export function LibraryBackup() {
     if (pending.current) return;
     pending.current = true; setBusy(restore ? 'Restoring…' : 'Backing up…');
     try {
-      const filters = [{ name: 'ClawScribe meeting archive', extensions: ['zip'] }];
-      const path = restore ? await open({ filters, multiple: false, directory: false }) : await save({ filters, defaultPath: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
+      // The core opens the dialog and only accepts the path it chose here.
+      const path = restore
+        ? await invoke<string | null>('pick_backup_restore_path')
+        : await invoke<string | null>('pick_backup_save_path', { suggestedName: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
       if (!path) return;
       setResult(null);
       if (!restore) await flushMeetingContexts();

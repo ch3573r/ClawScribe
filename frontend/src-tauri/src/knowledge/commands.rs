@@ -18,6 +18,7 @@ pub async fn knowledge_import_document(
     meeting_id: String,
     path: String,
 ) -> Result<super::documents::DocumentAttachment, String> {
+    crate::local_path::check_local(&path)?;
     let lease = runtime
         .documents
         .begin(&request_id)

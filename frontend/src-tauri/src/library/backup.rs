@@ -1404,12 +1404,24 @@ mod document_tests;
 
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
-    if !Path::new(&path)
+    // Only a path the user chose in the save dialog the core opened
+    // (`pick_backup_save_path`), once.
+    let granted = crate::file_grants::take(crate::file_grants::Purpose::BackupSave, &path)?;
+    let result = backup_library_to(app, granted.clone()).await;
+    if result.is_err() {
+        crate::file_grants::give_back(crate::file_grants::Purpose::BackupSave, &granted);
+    }
+    result
+}
+
+async fn backup_library_to(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
+    if !path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
     {
         return Err("Choose a .zip backup file.".into());
     }
+    crate::file_grants::save_target_is_local(&path)?;
     let _guard = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
@@ -1422,7 +1434,7 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
     let (manifest, folders) =
         snapshot_with_documents(app.state::<AppState>().db_manager.pool()).await?;
     tokio::task::spawn_blocking(move || {
-        write_archive_with_documents(Path::new(&path), manifest, folders, &reference_root)
+        write_archive_with_documents(&path, manifest, folders, &reference_root)
     })
     .await
     .map_err(failure)?
@@ -1430,6 +1442,18 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
 
 #[tauri::command]
 pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
+    // Only an archive the user chose in the file dialog the core opened
+    // (`pick_backup_restore_path`), once.
+    let granted = crate::file_grants::take(crate::file_grants::Purpose::BackupOpen, &path)?;
+    let result = restore_library_from(app, granted.clone()).await;
+    if result.is_err() {
+        crate::file_grants::give_back(crate::file_grants::Purpose::BackupOpen, &granted);
+    }
+    result
+}
+
+async fn restore_library_from(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
+    crate::local_path::resolve_local(&path.to_string_lossy())?;
     let _guard = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
@@ -1451,7 +1475,7 @@ pub async fn restore_library(app: AppHandle, path: String) -> Result<BackupRepor
         .into_iter()
         .collect();
     let (manifest, stage) =
-        tokio::task::spawn_blocking(move || unpack(Path::new(&path), &root, &existing_ids))
+        tokio::task::spawn_blocking(move || unpack(&path, &root, &existing_ids))
             .await
             .map_err(failure)??;
     let report = import_manifest_with_documents(
@@ -1574,6 +1598,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_question_context_round_trips_and_rejects_invalid_links() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, types::SearchMode};
         let (source, request, frozen, passages) =
             conversations::tests::question_pair_fixture("Nein.").await;
@@ -1660,6 +1685,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_evidence_upgrade_preserves_populated_schema_and_old_backup() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, store, types::*};
         async fn counts(pool: &SqlitePool) -> Vec<(String, i64)> {
             let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'knowledge_%' ORDER BY name").fetch_all(pool).await.unwrap();
@@ -1844,6 +1870,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_round_trip_keeps_seven_hundred_evidence_entries() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, store, types::*};
         let (source, mut request) = conversation_fixture().await;
         let text = "Launch plan remains approved.";
@@ -1915,6 +1942,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_round_trip_preserves_stale_refs_when_revision_counters_match() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, evidence};
         let (source, request) = conversation_fixture().await;
         let original = conversations::history(&source, &request.owner)
@@ -1974,6 +2002,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_keeps_library_owner_and_interrupts_pending_work() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::conversations;
         let (source, mut request) = conversation_fixture().await;
         let empty_owner = conversations::create_library(&source).await.unwrap();
@@ -2007,6 +2036,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_skips_colliding_owner_without_overwriting_history() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::conversations;
         let (pool, request) = conversation_fixture().await;
         let (manifest, _) = snapshot(&pool).await.unwrap();
@@ -2020,6 +2050,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_restore_redacts_changed_skipped_source_but_keeps_identical_source() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, types::SearchMode};
         for changed in [false, true] {
             let (source, request) = conversation_fixture().await;
@@ -2091,6 +2122,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_library_only_answer_round_trips_without_meetings() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::knowledge::{conversations, retrieval, types::*};
         let source = empty_conversation_destination().await;
         let request = AskRequest {
@@ -2152,6 +2184,7 @@ mod tests {
     #[tokio::test]
     async fn conversation_restore_rejects_changed_input_atomically_and_accepts_prefeature_archive()
     {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (source, _) = conversation_fixture().await;
         let (mut malformed, _) = snapshot(&source).await.unwrap();
         malformed.tables.get_mut("knowledge_requests").unwrap()[0]
@@ -2183,6 +2216,7 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_restore_keeps_only_new_meetings_audio() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('new', 'New meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
             .execute(&pool).await.unwrap();
@@ -2250,6 +2284,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_folder_does_not_block_other_audio_and_restores_without_a_folder() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join("missing");
@@ -2309,6 +2344,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreadable_folder_names_meeting_and_preserves_previous_backup() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
         let not_a_folder = root.path().join("not-a-folder");
@@ -2326,6 +2362,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_a_meeting_during_restore_requires_retry_instead_of_importing_without_audio() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("audio.wav"), b"synthetic audio").unwrap();
@@ -2359,6 +2396,7 @@ mod tests {
 
     #[tokio::test]
     async fn v1_omission_metadata_is_optional_and_references_are_validated() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (manifest, _) = snapshot(&pool).await.unwrap();
         let mut json = serde_json::to_value(&manifest).unwrap();
@@ -2396,6 +2434,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_recovery_releases_registered_spool_and_clears_backup_exclusion() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use crate::audio::incremental_saver::{
             recover_audio_in_folder, release_registered_capture,
         };
@@ -2462,6 +2501,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_originals_are_reported_without_blocking_backup_or_being_deleted() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES ('review-test', 1, 0)").execute(&pool).await.unwrap();
         for directory in [".checkpoints", ".audio-spool"] {
@@ -2545,6 +2585,7 @@ mod tests {
 
     #[tokio::test]
     async fn older_v1_tables_are_optional_but_unknown_tables_and_missing_meetings_are_rejected() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let root = tempfile::tempdir().unwrap();
         let archive = root.path().join("backup.zip");
@@ -2597,6 +2638,7 @@ mod tests {
 
     #[tokio::test]
     async fn skipped_folder_cleanup_failure_rolls_back_import() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (mut manifest, _) = snapshot(&pool).await.unwrap();
         let mut new_meeting = manifest.tables["meetings"][0].clone();
@@ -2640,6 +2682,7 @@ mod tests {
     }
     #[tokio::test]
     async fn context_round_trip_accepts_older_archives_and_is_deleted_with_the_meeting() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for legacy in [false, true] {
             let pool = crate::database::transcript_edits::tests::fixture().await;
             super::super::context::write(&pool, "review-test", "Synthetic summary context", false)
@@ -2685,6 +2728,7 @@ mod tests {
 
     #[tokio::test]
     async fn restored_recovery_location_preserves_flags_and_accepts_legacy_archives() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         // Metadata can be absent in old archives, explicitly false, or true.
         for excluded in [None, Some(false), Some(true)] {
             for archived_outcome in [false, true] {
@@ -2746,6 +2790,7 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_is_additive_and_excludes_credentials() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let folder = tempfile::tempdir().unwrap();
         std::fs::write(folder.path().join("audio.wav"), b"synthetic audio").unwrap();
@@ -2800,6 +2845,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_rows_roll_back_the_whole_import_and_remove_staged_files() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (mut manifest, _) = snapshot(&pool).await.unwrap();
         sqlx::query("DELETE FROM meetings")
@@ -2830,6 +2876,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_traversal_is_rejected_before_extraction() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let (mut manifest, _) = snapshot(&pool).await.unwrap();
         manifest.files.insert(0, vec!["../escape.wav".into()]);

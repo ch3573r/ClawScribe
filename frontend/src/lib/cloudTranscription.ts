@@ -1,70 +1,35 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
+import {
+  getBehaviorSettings,
+  mirrorLegacyBehavior,
+  refreshBehaviorSettings,
+  subscribeBehaviorSettings,
+} from "@/lib/behaviorSettings";
 
-const KEY = "clawscribe.cloudTranscription";
-const CHANGE_EVENT = "clawscribe:cloud-transcription-change";
+// Beta (opt-in, default off): hosted whole-file transcription for import and
+// retranscription. The core owns this setting; it reads as off until the core
+// has answered, and a failed or unreadable value never switches it on.
 
-function persistCloudTranscription(enabled: boolean): void {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.localStorage.setItem(KEY, String(enabled));
-  } catch {
-    // best-effort
-  }
-
-  window.dispatchEvent(new CustomEvent(CHANGE_EVENT, { detail: { enabled } }));
-}
-
+/** The core's value; off until it has been read. */
 export function getCloudTranscription(): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    return window.localStorage.getItem(KEY) === "true";
-  } catch {
-    return false;
-  }
+  return getBehaviorSettings().cloudTranscription === true;
 }
 
+/**
+ * Stores the opt-in in the core. Throws when the core could not save it; the
+ * value then stays what the core holds.
+ */
 export async function setCloudTranscription(enabled: boolean): Promise<boolean> {
-  persistCloudTranscription(enabled);
-
-  try {
-    await invoke("set_cloud_transcription_enabled", { enabled });
-  } catch {
-    // Backend may not expose it in older builds; keep local preference.
-  }
-
-  return enabled;
+  await invoke("set_cloud_transcription_enabled", { enabled });
+  // LEGACY mirror, so a downgrade to 0.62.0 sees the current value.
+  mirrorLegacyBehavior("cloudTranscription", enabled);
+  return (await refreshBehaviorSettings()).cloudTranscription === true;
 }
 
 export function subscribeCloudTranscription(
   listener: (enabled: boolean) => void,
 ): () => void {
-  if (typeof window === "undefined") return () => undefined;
-
-  const handleChange = (event: Event) => {
-    const detail = (event as CustomEvent<{ enabled?: boolean }>).detail;
-    listener(
-      typeof detail?.enabled === "boolean"
-        ? detail.enabled
-        : getCloudTranscription(),
-    );
-  };
-
-  const handleStorage = (event: StorageEvent) => {
-    if (event.key === KEY || event.key === null) listener(getCloudTranscription());
-  };
-
-  window.addEventListener(CHANGE_EVENT, handleChange);
-  window.addEventListener("storage", handleStorage);
-
-  return () => {
-    window.removeEventListener(CHANGE_EVENT, handleChange);
-    window.removeEventListener("storage", handleStorage);
-  };
-}
-
-export async function applyCloudTranscription(): Promise<void> {
-  await setCloudTranscription(getCloudTranscription());
+  return subscribeBehaviorSettings(() => listener(getCloudTranscription()));
 }

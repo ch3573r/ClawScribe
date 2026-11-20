@@ -206,6 +206,37 @@ pub async fn export_local_word(
     include_timestamps: bool,
     path: String,
 ) -> Result<(), String> {
+    // Only a path the user chose in the save dialog the core opened
+    // (`pick_word_save_path`), once.
+    let granted = crate::file_grants::take(crate::file_grants::Purpose::WordSave, &path)?;
+    let result = export_local_word_to(
+        app,
+        meeting_id,
+        title,
+        markdown,
+        include_transcript,
+        include_speakers,
+        include_timestamps,
+        granted.to_string_lossy().into_owned(),
+    )
+    .await;
+    if result.is_err() {
+        crate::file_grants::give_back(crate::file_grants::Purpose::WordSave, &granted);
+    }
+    result
+}
+
+async fn export_local_word_to(
+    app: AppHandle,
+    meeting_id: String,
+    title: String,
+    markdown: String,
+    include_transcript: bool,
+    include_speakers: bool,
+    include_timestamps: bool,
+    path: String,
+) -> Result<(), String> {
+    crate::file_grants::save_target_is_local(Path::new(&path))?;
     if !Path::new(&path)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"))

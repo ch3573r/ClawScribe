@@ -161,22 +161,13 @@ export default function RootLayout({
   }, [])
 
   useEffect(() => {
-    // Push stored Parakeet preferences to the backend on startup so
-    // they apply even if Beta settings isn't opened. Busy worker changes retry
-    // briefly without blocking startup or interrupting a running task.
-    void import('@/lib/parakeetAccel').then((m) => m.applyParakeetPreferences())
-  }, [])
-
-  useEffect(() => {
-    // Push the stored source-attribution (Me/Participants) preference to the
-    // backend on startup. Default off until the heuristic is production-quality.
-    void import('@/lib/sourceAttribution').then((m) => m.applySourceAttribution())
-  }, [])
-
-  useEffect(() => {
-    // Push the stored cloud-transcription Beta preference to the backend on
-    // startup. Default off until the user has consented to uploading audio.
-    void import('@/lib/cloudTranscription').then((m) => m.applyCloudTranscription())
+    // The core owns the behaviour settings (engine options, cloud opt-in,
+    // source attribution, language) and has applied them before this window
+    // existed. Read them here; the first time, the old webview values are
+    // handed to the core, which keeps its own wherever it already has one.
+    void import('@/lib/behaviorSettings')
+      .then((m) => m.loadBehaviorSettings())
+      .catch((error) => console.error('[Layout] Could not read the behaviour settings:', error))
   }, [])
 
   useEffect(() => {

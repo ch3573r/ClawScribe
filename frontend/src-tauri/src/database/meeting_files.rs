@@ -17,8 +17,12 @@ pub(crate) fn resolve_recording_folder(
     if folder.as_os_str().is_empty() {
         return Err(REFUSED.into());
     }
+    // Local text first: canonicalising a network path already contacts it.
+    if is_network_or_device_path(&folder.to_string_lossy()) {
+        return Err(REFUSED.into());
+    }
     let canonical = folder.canonicalize().map_err(|_| REFUSED.to_string())?;
-    if !canonical.is_dir() {
+    if !canonical.is_dir() || !crate::local_path::is_local_canonical(&canonical) {
         return Err(REFUSED.into());
     }
     let inside = roots
@@ -37,12 +41,12 @@ const REFUSED: &str = "This folder is not one of your recordings.";
 const MAX_MARKER_BYTES: u64 = 1024 * 1024;
 const MAX_CORE_FOLDERS: usize = 64;
 
-/// A UNC, device or extended-length path (`\\server\share`, `\\?\C:\x`,
-/// `\\.\pipe`, `//host/x`). Such input is refused before any filesystem call,
-/// because even asking whether it exists can reach a remote machine.
+/// Anything that is not a plain local absolute path: UNC, device and verbatim
+/// paths in any slash mix, drive-relative and relative text (see `local_path`).
+/// Such input is refused before any filesystem call, because even asking
+/// whether it exists can reach a remote machine.
 pub(crate) fn is_network_or_device_path(path: &str) -> bool {
-    let path = path.trim_start();
-    path.starts_with("\\\\") || path.starts_with("//")
+    !crate::local_path::is_local_path_text(path)
 }
 
 fn folder_key(path: &Path) -> String {
@@ -176,6 +180,28 @@ pub(crate) fn authorize_folder_to_open(
         return Err(REFUSED.into());
     }
     resolve_recording_folder(path, roots).map(|canonical| plain_path(&canonical))
+}
+
+/// The recording folder the core saved for a meeting. Commands that work on a
+/// meeting's files use this instead of a folder the webview names.
+pub(crate) async fn registered_meeting_folder(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<PathBuf, String> {
+    let folder: Option<String> = sqlx::query_scalar(
+        "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| "Could not read the meeting".to_string())?;
+    let folder = folder.ok_or_else(|| "This meeting has no recording folder".to_string())?;
+    let resolved = crate::local_path::resolve_local(&folder)?;
+    if resolved.is_dir() {
+        Ok(plain_path(&resolved))
+    } else {
+        Err("The recording folder is not available".into())
+    }
 }
 
 /// Removes the recording folder the core registered for `meeting_id`: an
@@ -433,7 +459,10 @@ mod tests {
                 .contains("not a local"));
         }
         assert!(!is_network_or_device_path(r"C:\Users\x"));
+        #[cfg(not(windows))]
         assert!(!is_network_or_device_path("/home/x"));
+        #[cfg(windows)]
+        assert!(is_network_or_device_path("/home/x"), "not a drive path");
     }
 
     #[test]
@@ -524,6 +553,43 @@ mod tests {
             assert_eq!(authorize_new_meeting_folder(&refused, &roots).unwrap_err(), REFUSED);
         }
         assert!(authorize_new_meeting_folder(&recovered.to_string_lossy(), &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_meetings_folder_is_the_one_the_core_saved_for_it() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let folder = base.path().join("meeting");
+        std::fs::create_dir_all(&folder).unwrap();
+        for (id, path) in [
+            ("saved", folder.to_string_lossy().into_owned()),
+            ("network", r"\\h\s\meeting".to_string()),
+            ("relative", "meeting".to_string()),
+            ("gone", base.path().join("gone").to_string_lossy().into_owned()),
+        ] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+                .bind(id)
+                .bind(path)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('no-folder', 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            registered_meeting_folder(&pool, "saved").await.unwrap(),
+            plain_path(&folder.canonicalize().unwrap())
+        );
+        for refused in ["network", "relative", "gone", "no-folder", "unknown-meeting"] {
+            assert!(registered_meeting_folder(&pool, refused).await.is_err(), "{refused}");
+        }
     }
 
     #[test]

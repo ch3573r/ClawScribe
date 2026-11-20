@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHookHarness } from './hook-harness.mjs';
+import { createHookHarness, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
 const names = value => Object.fromEntries(value.split(' ').map(name => [name, name]));
@@ -28,8 +28,8 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
       '@/components/settings/SecretKeyControl': names('SecretKeyRow SecretKeyControl'),
       '@/services/configService': { configService: { getTranscriptApiKeyStatus: async () => ({ stored: true, hint: null }), clearTranscriptApiKey: async () => {} } },
       '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: true, loaded: true }) },
-      '@tauri-apps/plugin-dialog': { open: async () => 'test.wav' },
       '@tauri-apps/api/core': { invoke: async (command, args) => {
+        if (command === 'pick_transcription_test_audio') return 'test.wav';
         calls.push({ command, args });
         return { segmentCount: 1, wordTimestampCount: 0, previewText: 'Synthetic text' };
       } },
@@ -54,6 +54,7 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
     await button('Test').props.onClick();
     assert.equal(calls.at(-1).command, 'api_test_transcript_provider');
     assert.equal(calls.at(-1).args.apiKey, null, 'no key is sent unless one was typed; the core binds the stored key to its endpoint');
+    assert.equal(calls.at(-1).args.audioPath, 'test.wav', 'the file is the one the core chose in its own dialog');
     assert.equal(calls.at(-1).args.allowUnencrypted, true);
     keyRow().props.onDraftChange('test-token');
     await button('Test').props.onClick();
@@ -75,7 +76,7 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
 }
 
 for (const enabled of [true, false]) {
-  test(`saved MAI survives preference loading (${enabled}) and explains live transcription`, t => {
+  test(`saved MAI survives preference loading (${enabled}) and explains live transcription`, async t => {
     const hooks = createHookHarness(), saves = [], routes = [];
     const previousWindow = globalThis.window, previousEvent = globalThis.CustomEvent;
     const events = [];
@@ -85,6 +86,7 @@ for (const enabled of [true, false]) {
     let preferenceChanged;
     const { useCloudTranscription } = loadTsModule('src/hooks/useCloudTranscription.ts', {
       react: hooks.react,
+      '@/lib/behaviorSettings': { behaviorSettingsLoaded: () => false, loadBehaviorSettings: async () => ({}) },
       '@/lib/cloudTranscription': {
         getCloudTranscription: () => enabled,
         subscribeCloudTranscription: callback => { preferenceChanged = callback; return () => {}; },
@@ -113,7 +115,8 @@ for (const enabled of [true, false]) {
     }));
     const first = render();
     assert.equal(nodes(first).find(node => node.type === 'Select').props.value, 'mai-transcribe');
-    assert.doesNotMatch(text(first), /Cloud transcription is off/);
+    assert.doesNotMatch(text(first), /Cloud transcription is off/, 'nothing is claimed until the core has answered');
+    await flush();
     for (let i = 0; i < 3; i++) {
       const tree = render();
       assert.equal(nodes(tree).find(node => node.type === 'Select').props.value, 'mai-transcribe');

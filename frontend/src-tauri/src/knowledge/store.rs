@@ -1018,6 +1018,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn canonical_row_pagination_does_not_require_an_active_index_job() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for state in ["ready", "paused", "failed"] {
             let pool = database().await;
             meeting(&pool, "one").await;
@@ -1314,6 +1315,7 @@ mod tests {
     }
     #[tokio::test]
     async fn aborted_blob_reader_keeps_lease_owned_and_releases_for_recreation_and_close() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         use std::sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -1414,6 +1416,7 @@ mod tests {
     }
     #[tokio::test]
     async fn fts_row_identity_survives_gaps_moves_and_recreated_rows() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         meeting(&pool, "two").await;
@@ -1486,6 +1489,7 @@ mod tests {
     }
     #[tokio::test]
     async fn deletion_removes_populated_vectors_with_both_repository_and_fk_order() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         for transcripts_first in [false, true] {
             let pool = database().await;
             meeting(&pool, "one").await;
@@ -1532,6 +1536,7 @@ mod tests {
     }
     #[tokio::test]
     async fn enabled_without_model_is_distinct_from_disabled() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let disabled = status(&pool, false, "test-space").await.unwrap();
         assert!(!disabled.semantic_enabled);
@@ -1549,6 +1554,7 @@ mod tests {
     }
     #[tokio::test]
     async fn canonical_document_source_enters_shared_index_worker() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (pool, document) = super::super::document_context::tests::fixture().await;
         let source = format!("document:{document}");
         sqlx::query("DELETE FROM knowledge_index_jobs WHERE source_id<>?")
@@ -1563,6 +1569,7 @@ mod tests {
     }
     #[tokio::test]
     async fn reserved_document_source_does_not_enter_meeting_worker() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         let insert=sqlx::query("INSERT INTO knowledge_sources(id,kind,meeting_id) VALUES('document:reserved','document',NULL)").execute(&pool).await;
         assert!(insert.is_ok(),"source ownership must support future document migration without rebuilding evidence foreign keys");
@@ -1576,6 +1583,7 @@ mod tests {
     }
     #[tokio::test]
     async fn model_space_change_requires_reindex_and_supersedes_same_revision_worker() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1601,6 +1609,7 @@ mod tests {
     }
     #[tokio::test]
     async fn evidence_identity_survives_cache_rebuild_and_tracks_speaker_timing() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1652,6 +1661,7 @@ mod tests {
     }
     #[tokio::test]
     async fn clean_database_seeds_empty_meetings() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         let available = count(
@@ -1671,6 +1681,7 @@ mod tests {
     }
     #[tokio::test]
     async fn edited_source_cannot_publish_old_generation() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1724,6 +1735,7 @@ mod tests {
     }
     #[tokio::test]
     async fn transcript_move_invalidates_both_owners() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         meeting(&pool, "two").await;
@@ -1749,6 +1761,7 @@ mod tests {
     }
     #[tokio::test]
     async fn delete_cascades_index() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1781,6 +1794,7 @@ mod tests {
     }
     #[tokio::test]
     async fn restore_requeues_index() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         assert_eq!(
@@ -1819,6 +1833,7 @@ mod tests {
 
     #[tokio::test]
     async fn old_worker_cannot_publish_or_delete_newer_job() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         transcript(&pool).await;
@@ -1865,6 +1880,7 @@ mod tests {
     }
     #[tokio::test]
     async fn pauses_do_not_consume_three_failure_attempts() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = database().await;
         meeting(&pool, "one").await;
         let job = next_job(&pool).await.unwrap().unwrap();
@@ -1895,6 +1911,7 @@ mod tests {
     }
     #[tokio::test]
     async fn upgrade_seeds_existing_library_and_fts() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

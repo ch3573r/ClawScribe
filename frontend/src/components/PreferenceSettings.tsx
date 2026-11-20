@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
+import { useRouter } from "next/navigation";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { Meta, SettingsCard, SettingsRow, SettingsStack } from "./ui/settings-layout";
@@ -12,6 +13,9 @@ import { UpdateChannelSettings } from "./UpdateChannelSettings";
 import Analytics from "@/lib/analytics";
 import { useConfig, type NotificationSettings } from "@/contexts/ConfigContext";
 import { getAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
+import { useRecordingState } from "@/contexts/RecordingStateContext";
+import { useInterruptedRecordings } from "@/hooks/useInterruptedRecordings";
+import { RECOVERY_OPEN_REQUEST } from "@/lib/interruptedRecordings";
 
 type FolderKind = "database" | "models" | "recordings";
 
@@ -49,6 +53,16 @@ export function PreferenceSettings() {
     loadPreferences,
     updateNotificationSettings,
   } = useConfig();
+
+  const router = useRouter();
+  const recordingState = useRecordingState();
+  // Interrupted recordings (found in the browser data and on disk) are shown
+  // only when there are some, and never while a recording is running.
+  const interrupted = useInterruptedRecordings(!recordingState.isRecording);
+  const reviewInterrupted = () => {
+    try { sessionStorage.setItem(RECOVERY_OPEN_REQUEST, "true"); } catch { /* the home page still offers them on start */ }
+    router.push("/");
+  };
 
   const [loaded, setLoaded] = useState(false);
   const [autoUpdateChecksEnabled, setAutoUpdateChecksEnabled] = useState(true);
@@ -199,6 +213,16 @@ export function PreferenceSettings() {
           </SettingsRow>
         ))}
         {locationsUnavailable && <NoteRow tone="muted">The database and model locations could not be read.</NoteRow>}
+        {interrupted.count > 0 && (
+          <SettingsRow
+            title="Interrupted recordings"
+            description={`${interrupted.count} ${interrupted.count === 1 ? "recording was" : "recordings were"} interrupted. Review them to recover or delete them`}
+          >
+            <Button type="button" variant="outline" size="sm" onClick={reviewInterrupted}>
+              Review ({interrupted.count})
+            </Button>
+          </SettingsRow>
+        )}
       </SettingsCard>
     </SettingsStack>
   );

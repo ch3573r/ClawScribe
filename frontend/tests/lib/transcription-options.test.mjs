@@ -31,7 +31,7 @@ function setup(t, options = {}) {
       getParakeetBackendSettings: async () => ({ ...state.backend }),
       getParakeetDirectml: () => state.storedDirectml,
       getParakeetWorker: () => state.storedWorker,
-      setParakeetDirectml: async enabled => { calls.push(['directml', enabled]); state.backend.directml = enabled; state.storedDirectml = enabled; },
+      setParakeetDirectml: async enabled => { calls.push(['directml', enabled]); if (state.directmlFails) throw new Error('not saved'); state.backend.directml = enabled; state.storedDirectml = enabled; },
       setParakeetWorker: async enabled => {
         calls.push(['worker', enabled]);
         if (state.workerBusy) throw new Error('busy');
@@ -41,10 +41,10 @@ function setup(t, options = {}) {
     '@/lib/sourceAttribution': {
       getRecordingAudioSavingEnabled: async () => state.audioSaving,
       refreshSourceAttributionAvailability: async () => { calls.push(['refresh-attribution']); },
-      setSourceAttribution: async enabled => { calls.push(['attribution', enabled]); return enabled && state.audioSaving; },
+      setSourceAttribution: async enabled => { calls.push(['attribution', enabled]); if (state.attributionFails) throw new Error('not saved'); return enabled && state.audioSaving; },
     },
-    '@/lib/cloudTranscription': { setCloudTranscription: async enabled => { calls.push(['cloud', enabled]); } },
-    '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: state.cloud, loaded: true }) },
+    '@/lib/cloudTranscription': { setCloudTranscription: async enabled => { calls.push(['cloud', enabled]); if (state.cloudFails) throw new Error('not saved'); } },
+    '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: state.cloud, loaded: !state.cloudUnread, failed: !!state.cloudUnread }) },
     '@/hooks/useSourceAttribution': { useSourceAttribution: () => state.attribution },
     '@/components/settings/transcriptionAnchors': { TRANSCRIPTION_OPTIONS_ID: 'transcription-options' },
   });
@@ -147,4 +147,30 @@ test('cloud transcription asks for consent before turning on and turns off witho
   await flush();
   assert.deepEqual(ui.calls.at(-1), ['cloud', false]);
   assert.equal(ui.find('Dialog').props.open, false);
+});
+
+test('a failed save shows an error and every control returns to the stored value', async t => {
+  const ui = setup(t, { cloudFails: true, attributionFails: true, directmlFails: true });
+  ui.render();
+  await flush();
+  await ui.control('parakeet-directml').props.onCheckedChange(true);
+  assert.match(text(ui.row('parakeet-directml')), /Could not change this setting/);
+  assert.equal(ui.control('parakeet-directml').props.checked, false, 'the core still holds off');
+  await ui.control('source-attribution').props.onCheckedChange(true);
+  assert.match(text(ui.row('source-attribution')), /Could not save this setting/);
+  assert.equal(ui.control('source-attribution').props.checked, false);
+  ui.control('cloud-transcription').props.onCheckedChange(true);
+  ui.find('Button', node => text(node) === 'Enable').props.onClick();
+  await flush();
+  assert.match(text(ui.row('cloud-transcription')), /Could not save this setting/);
+  assert.equal(ui.control('cloud-transcription').props.checked, false, 'the opt-in stays off');
+});
+
+test('an unreadable cloud setting stays off, disabled, and says so', async t => {
+  const ui = setup(t, { cloudUnread: true });
+  ui.render();
+  await flush();
+  assert.equal(ui.control('cloud-transcription').props.checked, false);
+  assert.equal(ui.control('cloud-transcription').props.disabled, true);
+  assert.match(text(ui.row('cloud-transcription')), /Could not read this setting\. It stays off/);
 });

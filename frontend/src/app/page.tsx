@@ -19,6 +19,7 @@ import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
+import { RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecordings';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -91,6 +92,22 @@ export default function Home() {
 
     performStartupChecks();
   }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
+
+  // Settings > General can ask for the dialog again ("Interrupted recordings").
+  // It opens only when there is something to recover and nothing is running.
+  useEffect(() => {
+    let requested = false;
+    try {
+      requested = sessionStorage.getItem(RECOVERY_OPEN_REQUEST) === 'true';
+      sessionStorage.removeItem(RECOVERY_OPEN_REQUEST);
+    } catch {
+      return;
+    }
+    if (!requested) return;
+    void checkForRecoverableTranscripts().then(found => {
+      if (found.length > 0) setShowRecoveryDialog(true);
+    });
+  }, [checkForRecoverableTranscripts]);
 
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {

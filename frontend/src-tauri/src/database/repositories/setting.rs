@@ -331,6 +331,9 @@ impl SettingsRepository {
             (Some(saved), Some(requested)) if !keeps_destination(saved, requested) => {
                 Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into()))
             }
+            // A key with no address it was saved for is bound to none: a new
+            // address needs the key entered again, as for OpenClaw.
+            (None, Some(_)) => Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into())),
             _ => Ok(()),
         }
     }
@@ -1427,6 +1430,29 @@ mod secret_tests {
             column(&pool, "transcript_settings", "maiTranscribeEndpoint").await.as_deref(),
             a
         );
+    }
+
+    #[tokio::test]
+    async fn a_stored_key_with_no_saved_address_needs_the_key_again_for_a_new_address() {
+        let pool = pool().await;
+        let (_memory, store) = fixture();
+        SettingsRepository::save_transcript_api_key_with(&store, &pool, "mai-transcribe", KEY_ONE)
+            .await
+            .unwrap();
+        let address = Some("https://mai.example.com/transcribe");
+        let error = SettingsRepository::save_transcript_provider_config(
+            &pool, "mai-transcribe", None, address, Some("west"), false, false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Enter the key again"));
+        assert_eq!(column(&pool, "transcript_settings", "maiTranscribeEndpoint").await, None);
+        // With the key entered again for the new address it is accepted.
+        SettingsRepository::save_transcript_provider_config(
+            &pool, "mai-transcribe", None, address, Some("west"), false, true,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

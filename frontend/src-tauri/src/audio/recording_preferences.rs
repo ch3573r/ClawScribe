@@ -149,21 +149,110 @@ fn read_previous_save_folders<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// Why a folder may not be a root recordings are opened, recovered or deleted
+/// from, or None. Checked as text first (a network or device path is never
+/// asked about), then against the same protected folders a new recordings
+/// folder must avoid. A folder that does not exist yet is judged by its path.
+pub(crate) fn root_problem(folder: &std::path::Path, protected: &ProtectedFolders) -> Option<&'static str> {
+    if !crate::local_path::is_local_path_text(&folder.to_string_lossy()) {
+        return Some("is not a path on a local drive");
+    }
+    let resolved = |path: &std::path::Path| {
+        // Links resolved as far as the folder exists; the rest as written.
+        let mut existing = path.to_path_buf();
+        let mut rest = Vec::new();
+        while !existing.exists() {
+            match (existing.file_name().map(ToOwned::to_owned), existing.parent().map(std::path::Path::to_path_buf)) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name);
+                    existing = parent;
+                }
+                _ => break,
+            }
+        }
+        let mut base = existing
+            .canonicalize()
+            .map(|canonical| crate::database::meeting_files::plain_path(&canonical))
+            .unwrap_or(existing);
+        for name in rest.into_iter().rev() {
+            base.push(name);
+        }
+        base
+    };
+    let folder = resolved(folder);
+    let inside = |root: &PathBuf| {
+        let root = resolved(root);
+        let (a, b) = (comparable(&folder), comparable(&root));
+        a == b || a.starts_with(&format!("{}/", b.trim_end_matches('/')))
+    };
+    let is_exact = protected.exact.iter().any(|root| comparable(&folder) == comparable(&resolved(root)));
+    if is_system_top_level(&folder)
+        || folder.parent().is_none()
+        || is_exact
+        || protected.trees.iter().any(inside)
+    {
+        return Some("is a system, profile or application-data folder");
+    }
+    None
+}
+
 /// The roots from their parts: the current and previous defaults, the
-/// configured folder, folders configured before, and restored backups.
+/// configured folder, folders configured before, and restored backups. The
+/// configured and the previous folders are checked again here with the rules a
+/// new recordings folder must pass; one that fails is not a root (recording to
+/// the configured folder carries on, but nothing is opened, recovered or
+/// deleted from it). `rejected_roots` says which.
 pub(crate) fn roots_from(
     configured: Option<PathBuf>,
     previous: Vec<PathBuf>,
     app_data_dir: Option<PathBuf>,
 ) -> Vec<PathBuf> {
+    let protected = protected_folders(app_data_dir.clone());
     let mut roots = vec![
         get_default_recordings_folder(),
         get_legacy_default_recordings_folder(),
     ];
-    roots.extend(configured);
-    roots.extend(previous);
+    roots.extend(configured.filter(|folder| root_problem(folder, &protected).is_none()));
+    roots.extend(previous.into_iter().filter(|folder| root_problem(folder, &protected).is_none()));
     roots.extend(app_data_dir.map(|data| data.join("restored-recordings")));
     roots
+}
+
+/// The configured and previous folders that are not accepted as roots, each with
+/// a sentence that names the kind of folder and never its path.
+pub(crate) fn rejected_roots(
+    configured: Option<&PathBuf>,
+    previous: &[PathBuf],
+    app_data_dir: Option<PathBuf>,
+) -> Vec<String> {
+    let protected = protected_folders(app_data_dir);
+    let mut problems = Vec::new();
+    if let Some(reason) = configured.and_then(|folder| root_problem(folder, &protected)) {
+        problems.push(format!(
+            "The recordings folder in use {reason}. Recording continues there, but its recordings are not opened, recovered or deleted from the app until you choose another folder."
+        ));
+    }
+    for (index, folder) in previous.iter().enumerate() {
+        if let Some(reason) = root_problem(folder, &protected) {
+            problems.push(format!("Earlier recordings folder {} {reason} and is ignored.", index + 1));
+        }
+    }
+    problems
+}
+
+/// The problems with the stored recordings folders, for Diagnostics.
+pub(crate) async fn recording_folder_problems<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    let configured = load_recording_preferences(app).await.ok().map(|preferences| preferences.save_folder);
+    let problems = rejected_roots(
+        configured.as_ref(),
+        &read_previous_save_folders(app),
+        tauri::Manager::path(app).app_data_dir().ok(),
+    );
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !problems.is_empty() && !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!("A stored recordings folder is not accepted as a root; see Diagnostics");
+    }
+    problems
 }
 
 /// Every folder a meeting's recording files may live in. Deleting or
@@ -367,6 +456,16 @@ pub(crate) fn protected_folders(app_data_dir: Option<PathBuf>) -> ProtectedFolde
     protected.exact.extend(dirs::data_local_dir());
     protected.exact.extend(dirs::config_dir());
     protected.exact.extend(app_data_dir);
+    // The folders people keep things in are not a recordings folder themselves
+    // (a subfolder of them is fine), nor is the folder that holds every profile
+    // or the profile's application-data folder.
+    protected.exact.extend(dirs::document_dir());
+    protected.exact.extend(dirs::desktop_dir());
+    protected.exact.extend(dirs::download_dir());
+    if let Some(home) = dirs::home_dir() {
+        protected.exact.push(home.join("AppData"));
+        protected.exact.extend(home.parent().map(std::path::Path::to_path_buf));
+    }
     for variable in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
         protected.trees.extend(std::env::var_os(variable).map(PathBuf::from));
     }
@@ -376,6 +475,36 @@ pub(crate) fn protected_folders(app_data_dir: Option<PathBuf>) -> ProtectedFolde
             .map(PathBuf::from),
     );
     protected
+}
+
+/// Top-level folders of any drive that belong to the system: the folder and
+/// everything below it for most, and `Users` itself (a profile below it is fine).
+/// `X:\Windows`, `X:\Program Files`, `X:\ProgramData`, `X:\Recovery` and so on,
+/// whichever drive letter they are on.
+pub(crate) fn is_system_top_level(path: &std::path::Path) -> bool {
+    const TREES: &[&str] = &[
+        "windows", "program files", "program files (x86)", "programdata", "recovery", "boot",
+        "system volume information", "$recycle.bin", "windows.old", "perflogs",
+    ];
+    let mut parts = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str().map(str::to_ascii_lowercase),
+            _ => None,
+        });
+    #[cfg(windows)]
+    {
+        let Some(top) = parts.next() else { return false };
+        if TREES.contains(&top.as_str()) {
+            return true;
+        }
+        top == "users" && parts.next().is_none()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (&mut parts, TREES);
+        false
+    }
 }
 
 /// The recordings folder a caller asked for, if it may be one: an existing
@@ -389,15 +518,14 @@ pub(crate) fn validate_save_folder(
 ) -> Result<PathBuf, String> {
     let text = requested.to_string_lossy();
     if text.trim().is_empty()
-        || crate::database::meeting_files::is_network_or_device_path(&text)
-        || !requested.is_absolute()
+        || !crate::local_path::is_local_path_text(&text)
     {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     let canonical = requested
         .canonicalize()
         .map_err(|_| SAVE_FOLDER_REFUSED.to_string())?;
-    if !canonical.is_dir() {
+    if !canonical.is_dir() || !crate::local_path::is_local_canonical(&canonical) {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     let resolved = crate::database::meeting_files::plain_path(&canonical);
@@ -413,7 +541,8 @@ pub(crate) fn validate_save_folder(
             .ok()
             .map(|folder| crate::database::meeting_files::plain_path(&folder))
     };
-    if protected
+    if is_system_top_level(&resolved)
+        || protected
         .exact
         .iter()
         .filter_map(known)
@@ -479,10 +608,7 @@ pub async fn open_recordings_folder<R: Runtime>(app: AppHandle<R>) -> Result<(),
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+        crate::local_path::open_in_explorer(std::path::Path::new(&folder_path))?;
     }
 
     #[cfg(target_os = "macos")]
@@ -724,18 +850,25 @@ mod previous_folder_tests {
 
     #[test]
     fn the_roots_include_previous_folders_defaults_and_restored_backups() {
+        let base = tempfile::tempdir().unwrap();
+        let (current, before, long_ago, data) = (
+            base.path().join("current"),
+            base.path().join("before"),
+            base.path().join("long-ago"),
+            base.path().join("data"),
+        );
         let roots = roots_from(
-            Some(p("/current")),
-            vec![p("/before"), p("/long-ago")],
-            Some(p("/data")),
+            Some(current.clone()),
+            vec![before.clone(), long_ago.clone()],
+            Some(data.clone()),
         );
         for expected in [
             get_default_recordings_folder(),
             get_legacy_default_recordings_folder(),
-            p("/current"),
-            p("/before"),
-            p("/long-ago"),
-            p("/data").join("restored-recordings"),
+            current,
+            before,
+            long_ago,
+            data.join("restored-recordings"),
         ] {
             assert!(roots.contains(&expected), "{expected:?} missing");
         }
@@ -826,6 +959,84 @@ mod save_folder_tests {
                 validate_save_folder(std::path::Path::new(&root), &protected).unwrap_err(),
                 SAVE_FOLDER_REFUSED
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    #[test]
+    fn stored_folders_that_fail_the_rules_are_not_roots_and_are_reported_without_their_path() {
+        let base = tempfile::tempdir().unwrap();
+        let good = base.path().join("recordings");
+        let home = dirs::home_dir().expect("a profile folder");
+        let documents = dirs::document_dir();
+        let mut bad: Vec<PathBuf> = vec![home.clone(), PathBuf::from(r"\\h\s\recordings")];
+        bad.extend(documents.clone());
+        #[cfg(windows)]
+        {
+            bad.push(PathBuf::from(r"D:\Windows"));
+            bad.push(PathBuf::from(r"C:\Program Files\Rec"));
+            bad.push(PathBuf::from(r"E:\Users"));
+            bad.push(PathBuf::from("C:/"));
+        }
+        let roots = roots_from(Some(good.clone()), bad.clone(), None);
+        assert!(roots.contains(&good));
+        for folder in &bad {
+            assert!(!roots.contains(folder), "{} is not a root", folder.display());
+        }
+        // The configured one that fails is dropped as a root too, and reported.
+        let roots = roots_from(Some(home.clone()), vec![good.clone()], None);
+        assert!(!roots.contains(&home) && roots.contains(&good));
+        let problems = rejected_roots(Some(&home), &[good.clone(), bad[1].clone()], None);
+        assert_eq!(problems.len(), 2);
+        assert!(problems[0].contains("recordings folder in use") && problems[1].contains("Earlier recordings folder 2"));
+        let all = problems.join(" ");
+        assert!(!all.contains(&home.to_string_lossy().to_string()), "the report never names the path");
+        assert!(rejected_roots(Some(&good), &[good.clone()], None).is_empty());
+    }
+
+    #[test]
+    fn a_folder_that_does_not_exist_yet_is_judged_by_its_path() {
+        let protected = protected_folders(None);
+        let base = tempfile::tempdir().unwrap();
+        assert!(root_problem(&base.path().join("not-yet").join("deep"), &protected).is_none());
+        if let Some(home) = dirs::home_dir() {
+            assert!(root_problem(&home, &protected).is_some());
+            assert!(root_problem(&home.join("AppData"), &protected).is_some());
+            assert!(root_problem(&home.join("NotCreatedYet"), &protected).is_none(), "a subfolder is fine");
+        }
+    }
+
+    #[test]
+    fn the_known_user_folders_themselves_are_refused_as_a_new_recordings_folder_and_subfolders_are_not() {
+        let protected = protected_folders(None);
+        for known in [dirs::document_dir(), dirs::desktop_dir(), dirs::download_dir()].into_iter().flatten() {
+            if known.is_dir() {
+                assert_eq!(validate_save_folder(&known, &protected).unwrap_err(), SAVE_FOLDER_REFUSED, "{}", known.display());
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            if let Some(users) = home.parent() {
+                assert!(validate_save_folder(users, &protected).is_err(), "the folder holding every profile");
+            }
+            let appdata = home.join("AppData");
+            if appdata.is_dir() {
+                assert!(validate_save_folder(&appdata, &protected).is_err());
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_top_level_folders_are_recognised_on_any_drive() {
+        for refused in [r"C:\Windows", r"D:\windows\System32", r"E:\Program Files", r"F:\Program Files (x86)\x", r"G:\ProgramData", r"H:\Recovery", r"C:\Users", r"X:\System Volume Information", r"C:\$Recycle.Bin\S-1"] {
+            assert!(is_system_top_level(std::path::Path::new(refused)), "{refused}");
+        }
+        for fine in [r"D:\Recordings", r"E:\Data\Windows", r"C:\"] {
+            assert!(!is_system_top_level(std::path::Path::new(fine)), "{fine}");
         }
     }
 }

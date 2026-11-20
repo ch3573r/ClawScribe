@@ -43,7 +43,10 @@ pub mod api;
 pub mod audio;
 pub mod cli_control;
 pub mod config;
+pub mod behavior_settings;
 pub(crate) mod credentials;
+pub(crate) mod file_grants;
+pub(crate) mod local_path;
 pub mod database;
 pub mod diagnostics;
 pub mod exit_guard;
@@ -261,13 +264,20 @@ async fn resolve_meeting_audio_file(
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
     let path = path.as_ref();
+    // A network or device path is never looked at: even asking whether it is a
+    // folder would contact the remote machine.
+    if !local_path::is_local_path_text(&path.to_string_lossy()) {
+        return Ok(None);
+    }
     if !path.is_dir() {
         return Ok(None);
     }
 
-    path.canonicalize()
-        .map(Some)
-        .map_err(|e| format!("Failed to resolve meeting folder {}: {}", path.display(), e))
+    let resolved = path
+        .canonicalize()
+        .map_err(|_| "Failed to resolve the meeting folder".to_string())?;
+    // A mapped network drive resolves to a UNC path.
+    Ok(local_path::is_local_canonical(&resolved).then_some(resolved))
 }
 
 fn canonical_folder_is_registered<'a>(
@@ -467,17 +477,32 @@ async fn start_named_session<R: Runtime>(
     }
 }
 
+/// Sets the language the running core uses, without persisting it. Used when
+/// the stored settings are applied at start-up, before any window exists.
+pub(crate) fn set_language_runtime(language: &str) {
+    if let Ok(mut lang_pref) = LANGUAGE_PREFERENCE.lock() {
+        *lang_pref = language.to_string();
+    }
+}
+
+/// The language is owned by the core: a change is stored first, then applied.
 #[tauri::command]
 async fn set_language_preference(app: AppHandle, language: String) -> Result<(), String> {
-    let mut lang_pref = LANGUAGE_PREFERENCE
-        .lock()
-        .map_err(|e| format!("Failed to set language preference: {}", e))?;
-    if *lang_pref == language {
-        return Ok(());
+    {
+        let lang_pref = LANGUAGE_PREFERENCE
+            .lock()
+            .map_err(|e| format!("Failed to set language preference: {}", e))?;
+        if *lang_pref == language {
+            return Ok(());
+        }
     }
+    let stored = app.clone();
+    let stored_language = language.clone();
+    tauri::async_runtime::spawn_blocking(move || behavior_settings::save_language(&stored, &stored_language))
+        .await
+        .map_err(|_| "Could not save the language".to_string())??;
     log_info!("Setting language preference to: {}", language);
-    *lang_pref = language;
-    drop(lang_pref);
+    set_language_runtime(&language);
     audio::transcription::worker::reset_live_source_languages(&app);
     Ok(())
 }
@@ -574,6 +599,9 @@ pub fn run() {
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
+            // Settings that change how the core behaves come from the core's own
+            // storage, before anything can start a recording or an import.
+            behavior_settings::load_and_apply(_app.handle());
             audio::com_anchor::ensure_device_enumerator();
             audio::transcription::queue::cleanup_abandoned_transcription_spools();
 
@@ -806,6 +834,13 @@ pub fn run() {
             audio::incremental_saver::cleanup_checkpoints,
             audio::incremental_saver::release_recovered_capture,
             audio::incremental_saver::has_audio_checkpoints,
+            file_grants::pick_transcription_test_audio,
+            file_grants::pick_backup_save_path,
+            file_grants::pick_backup_restore_path,
+            file_grants::pick_word_save_path,
+            audio::interrupted::find_interrupted_recordings,
+            audio::interrupted::preview_interrupted_recording,
+            audio::interrupted::discard_interrupted_recording,
             ollama::get_ollama_models,
             ollama::pull_ollama_model,
             ollama::delete_ollama_model,
@@ -914,6 +949,8 @@ pub fn run() {
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
             set_language_preference,
+            behavior_settings::get_behavior_settings,
+            behavior_settings::migrate_legacy_behavior_settings,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,

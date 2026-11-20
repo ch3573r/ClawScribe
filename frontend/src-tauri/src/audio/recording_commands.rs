@@ -1711,6 +1711,23 @@ pub async fn is_recording() -> bool {
     IS_RECORDING.load(Ordering::SeqCst)
 }
 
+/// The folder a running (or stopping) recording writes to. `Unknown` while a
+/// recording is running but its manager is out for a reconnection or a stop, so
+/// callers err on the side of leaving every folder alone.
+pub(crate) fn active_recording_folder() -> super::interrupted::ActiveFolder {
+    use super::interrupted::ActiveFolder;
+    if !IS_RECORDING.load(Ordering::SeqCst) && !IS_STOPPING.load(Ordering::SeqCst) {
+        return ActiveFolder::None;
+    }
+    match RECORDING_MANAGER.try_lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .and_then(|manager| manager.get_meeting_folder())
+            .map_or(ActiveFolder::Unknown, ActiveFolder::Folder),
+        Err(_) => ActiveFolder::Unknown,
+    }
+}
+
 /// Get recording statistics
 pub async fn get_transcription_status() -> TranscriptionStatus {
     if !LIVE_TRANSCRIPTION.load(Ordering::SeqCst) {
@@ -2194,7 +2211,16 @@ async fn resolve_transcription_info<R: Runtime>(
 /// Beta (opt-in, default off): toggle energy-based "Me"/"Participants" source
 /// attribution. Applies to segments transcribed after the change.
 #[tauri::command]
-pub async fn set_source_attribution_enabled(enabled: bool) -> Result<(), String> {
+pub async fn set_source_attribution_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    // Stored first: a failed save leaves the running value as it is.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::behavior_settings::save_source_attribution(&app, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())??;
     crate::audio::transcription::worker::SOURCE_ATTRIBUTION_ENABLED
         .store(enabled, Ordering::Relaxed);
     info!("Source attribution set to {enabled}");
@@ -2206,10 +2232,24 @@ static CLOUD_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Beta (opt-in, default off): allow hosted whole-file transcription providers
 /// for import and retranscription. Live recording remains local-only.
 #[tauri::command]
-pub async fn set_cloud_transcription_enabled(enabled: bool) -> Result<(), String> {
+pub async fn set_cloud_transcription_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    // Stored first: a failed save leaves the running value as it is.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::behavior_settings::save_cloud_transcription(&app, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())??;
     CLOUD_TRANSCRIPTION_ENABLED.store(enabled, Ordering::Relaxed);
     info!("Cloud transcription set to {enabled}");
     Ok(())
+}
+
+/// Applies the stored value at start-up (no persistence).
+pub(crate) fn set_cloud_transcription_runtime(enabled: bool) {
+    CLOUD_TRANSCRIPTION_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 pub(crate) fn cloud_transcription_enabled() -> bool {

@@ -3,7 +3,6 @@
 import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { Loader2, Upload, ChevronDown } from "lucide-react";
 import {
@@ -497,7 +496,8 @@ export function MeetingExportButtons({
     setBusy("word");
     try {
       const markdown = await readExportSummary(getMarkdown, exportOptions);
-      const path = await save({ defaultPath: safeDocumentName(meetingTitle), filters: [{ name: "Word document", extensions: ["docx"] }] });
+      // The core opens the save dialog and only accepts the path it chose here.
+      const path = await invoke<string | null>("pick_word_save_path", { suggestedName: safeDocumentName(meetingTitle) });
       if (!path) return;
       await invoke("export_local_word", {
         meetingId, title: meetingTitle, markdown, path,
