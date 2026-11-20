@@ -565,7 +565,7 @@ fn show_view<R: Runtime>(app: &AppHandle<R>, view: &TrayView, state_changed: boo
     }
 }
 
-fn icon_for<R: Runtime>(app: &AppHandle<R>, state: RecordingState) -> Option<Image<'static>> {
+fn icon_for<R: Runtime>(app: &AppHandle<R>, state: RecordingState) -> Option<Image<'_>> {
     let base = app.default_window_icon()?;
     let badge = match state {
         RecordingState::Recording | RecordingState::Pausing | RecordingState::Resuming => {
