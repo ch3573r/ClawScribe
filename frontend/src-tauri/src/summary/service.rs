@@ -47,6 +47,7 @@ struct ActiveSummaryJob {
 pub(crate) struct SummaryJob {
     meeting_id: String,
     token: CancellationToken,
+    _install_guard: tokio::sync::RwLockReadGuard<'static, ()>,
 }
 
 impl Drop for SummaryJob {
@@ -324,6 +325,7 @@ pub struct SummaryService;
 
 impl SummaryService {
     pub(crate) fn register_job(meeting_id: &str, provider: &str) -> Result<SummaryJob, String> {
+        let install_guard = crate::updates::admit_summary()?;
         let mut registry = CANCELLATION_REGISTRY
             .lock()
             .map_err(|_| "Could not lock summary jobs")?;
@@ -342,6 +344,7 @@ impl SummaryService {
         Ok(SummaryJob {
             meeting_id: meeting_id.to_string(),
             token,
+            _install_guard: install_guard,
         })
     }
 

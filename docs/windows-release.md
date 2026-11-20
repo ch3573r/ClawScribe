@@ -349,8 +349,10 @@ and installer location, then returns a Tauri updater resource to the shared UI
 service. The dialog installs that exact checked release without a second stable
 check. Both channels use the existing pinned updater public key and Tauri's
 signature verification. Changing channels invalidates cached and in-flight
-results; leaving previews never downgrades an installed build. Finish recording
-and saving a meeting before installation. Device security policy still applies
+results; leaving previews never downgrades an installed build. An update can
+install once recording, transcription, speaker detection, indexing and summaries finish.
+A job can start during the download. If it does, try the update again after
+the job finishes. Device security policy still applies
 to the installer; selecting a channel does not bypass Windows security blocks.
 
 To distribute a preview, stage a draft, verify its assets, then publish it as a

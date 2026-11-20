@@ -11,7 +11,7 @@ function deferred() {
 
 function fixture(channel = 'stable') {
   const calls = { checks: 0, downloads: [], installs: [], closed: [], relaunches: 0 };
-  const control = { channel, check: null, saveError: null, download: null, recording: false };
+  const control = { channel, check: null, saveError: null, download: null, recording: false, backgroundJob: false, reserved: false, installError: null };
   const result = (rid = 1, selected = control.channel) => ({
     channel: selected,
     update: { rid, currentVersion: '0.5.36', version: '0.5.37', prerelease: selected === 'preview', rawJson: {} },
@@ -25,10 +25,16 @@ function fixture(channel = 'stable') {
       progress({ event: 'Progress', data: { chunkLength: 200 } });
       if (control.download) await control.download();
     }
-    async install() { calls.installs.push(this.rid); }
+    async install() {
+      assert.equal(control.reserved, true, 'installation requires native job exclusion');
+      if (control.installError) throw control.installError;
+      calls.installs.push(this.rid);
+    }
   }
   const { UpdateService } = loadTsModule('src/services/updateService.ts', {
-    '@tauri-apps/api/core': { invoke: async (command, args) => {
+    '@tauri-apps/api/core': { Resource: class {
+      async close() { assert.equal(control.reserved, true); control.reserved = false; }
+    }, invoke: async (command, args) => {
       if (command === 'get_update_channel') return control.channel;
       if (command === 'set_update_channel') {
         if (control.saveError) throw control.saveError;
@@ -36,6 +42,13 @@ function fixture(channel = 'stable') {
         return;
       }
       if (command === 'is_recording') return control.recording;
+      if (command === 'reserve_update_install' || command === 'check_update_install_ready') {
+        if (control.backgroundJob) throw new Error('Finish the active job before installing.');
+        assert.equal(control.reserved, false);
+        if (command === 'check_update_install_ready') return;
+        control.reserved = true;
+        return 700;
+      }
       if (command === 'check_app_update') {
         ++calls.checks;
         return control.check ? control.check() : result();
@@ -44,7 +57,7 @@ function fixture(channel = 'stable') {
     } },
     '@tauri-apps/api/app': { getVersion: async () => '0.5.36' },
     '@tauri-apps/plugin-updater': { Update: FakeUpdate },
-    '@tauri-apps/plugin-process': { relaunch: async () => { ++calls.relaunches; } },
+    '@tauri-apps/plugin-process': { relaunch: async () => { assert.equal(control.reserved, true); ++calls.relaunches; } },
   });
   return { service: new UpdateService(), control, calls, result };
 }
@@ -189,4 +202,35 @@ test('active capture and recording started during download both prevent installa
     assert.equal(f.calls.installs.length, 0);
     assert.equal(f.calls.relaunches, 0);
   }
+});
+
+test('an active background job before or during download preserves work and permits a later update', async () => {
+  for (const timing of ['before', 'during']) {
+    const f = fixture();
+    f.control.backgroundJob = timing === 'before';
+    f.control.download = () => {
+      assert.equal(f.control.reserved, false, 'work may start during the download');
+      f.control.backgroundJob = true;
+    };
+    const info = await f.service.checkForUpdates();
+    await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => true), /active job/);
+    assert.equal(f.calls.downloads.length, timing === 'before' ? 0 : 1);
+    assert.deepEqual(f.calls.installs, []);
+    assert.equal(f.calls.relaunches, 0);
+    assert.equal(f.control.reserved, false);
+    f.control.backgroundJob = false;
+    f.control.download = null;
+    const retry = await f.service.checkForUpdates(true);
+    await f.service.downloadAndInstall(retry, () => {}, () => true);
+    assert.equal(f.calls.relaunches, 1);
+  }
+});
+
+test('installer failure releases native job exclusion without relaunching', async () => {
+  const f = fixture();
+  const info = await f.service.checkForUpdates();
+  f.control.installError = new Error('Installer failed');
+  await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => true), /Installer failed/);
+  assert.equal(f.control.reserved, false);
+  assert.equal(f.calls.relaunches, 0);
 });

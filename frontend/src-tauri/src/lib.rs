@@ -779,6 +779,8 @@ pub fn run() {
             library::backup::backup_library,
             library::backup::restore_library,
             updates::get_update_channel,
+            updates::check_update_install_ready,
+            updates::reserve_update_install,
             updates::set_update_channel,
             updates::check_app_update,
             start_recording,

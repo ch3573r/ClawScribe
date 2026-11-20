@@ -12,6 +12,49 @@ const DOWNLOAD_ROOT: &str = "https://github.com/ch3573r/ClawScribe/releases/down
 const MAX_RELEASE_BYTES: usize = 4 * 1024 * 1024;
 static PREFERENCE_LOCK: Mutex<()> = Mutex::new(());
 
+// Summaries from remote providers can run alongside each other and audio work.
+// Installation needs both their shared gate and the existing native job slot.
+static SUMMARY_INSTALL_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+pub(crate) fn admit_summary() -> Result<tokio::sync::RwLockReadGuard<'static, ()>, String> {
+    SUMMARY_INSTALL_GATE
+        .try_read()
+        .map_err(|_| "ClawScribe is installing an update. Try again after it restarts.".into())
+}
+
+struct UpdateInstallPermit {
+    _summaries: tokio::sync::RwLockWriteGuard<'static, ()>,
+    _native: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl tauri::Resource for UpdateInstallPermit {}
+
+impl UpdateInstallPermit {
+    fn acquire() -> Result<Self, String> {
+        let summaries = SUMMARY_INSTALL_GATE
+            .try_write()
+            .map_err(|_| "Wait for the current summary or update to finish before installing.")?;
+        let native = crate::audio::inference::claim_job().map_err(|_| {
+            "Wait for recording, transcription, or other library work to finish before installing."
+        })?;
+        Ok(Self {
+            _summaries: summaries,
+            _native: native,
+        })
+    }
+}
+
+#[tauri::command]
+pub fn check_update_install_ready() -> Result<(), String> {
+    UpdateInstallPermit::acquire().map(drop)
+}
+
+#[tauri::command]
+pub fn reserve_update_install<R: Runtime>(webview: Webview<R>) -> Result<ResourceId, String> {
+    let permit = UpdateInstallPermit::acquire()?;
+    Ok(webview.resources_table().add(permit))
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
@@ -298,6 +341,30 @@ pub async fn check_app_update<R: Runtime>(webview: Webview<R>) -> Result<UpdateC
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn install_excludes_summary_and_native_jobs_until_released() {
+        use crate::audio::inference::{claim_job, GLOBAL_JOB_TEST_LOCK};
+        use crate::summary::SummaryService;
+
+        let _serial = GLOBAL_JOB_TEST_LOCK.lock().await;
+        let meeting = "update-admission";
+        let summary = SummaryService::register_job(meeting, "openai").unwrap();
+        assert!(UpdateInstallPermit::acquire().is_err());
+        drop(summary);
+
+        let recording = claim_job().unwrap();
+        assert!(UpdateInstallPermit::acquire().is_err());
+        assert!(SummaryService::register_job(meeting, "openai").is_ok());
+        drop(recording);
+
+        let update = UpdateInstallPermit::acquire().unwrap();
+        assert!(SummaryService::register_job(meeting, "openai").is_err());
+        assert!(claim_job().is_err());
+        drop(update);
+        assert!(claim_job().is_ok());
+        assert!(SummaryService::register_job(meeting, "openai").is_ok());
+    }
 
     fn release(tag: &str, prerelease: bool) -> GithubRelease {
         let version = runtime_version(tag).unwrap();

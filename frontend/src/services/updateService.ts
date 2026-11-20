@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Resource } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
@@ -178,13 +178,16 @@ export class UpdateService {
     }
     const candidate = this.candidate;
     this.publish({ isInstalling: true, error: null });
+    let permit: Resource | undefined;
     try {
-      const assertIdle = async () => {
+      const assertRecordingIdle = async () => {
         if (!canInstall() || await invoke<boolean>('is_recording')) {
           throw new Error('Finish recording and saving your meeting before installing an update.');
         }
       };
-      await assertIdle();
+      // Keep capture and background work available throughout a slow download.
+      await assertRecordingIdle();
+      await invoke('check_update_install_ready');
       let downloaded = 0;
       let total = 0;
       await candidate.download((event: DownloadEvent) => {
@@ -192,7 +195,9 @@ export class UpdateService {
         if (event.event === 'Progress') downloaded += event.data.chunkLength;
         onProgress({ downloaded, total, percentage: total > 0 ? Math.min(100, Math.round(downloaded / total * 100)) : 0, phase: 'downloading' });
       }, { timeout: 300_000 });
-      await assertIdle();
+      await assertRecordingIdle();
+      permit = new Resource(await invoke<number>('reserve_update_install'));
+      if (!canInstall()) throw new Error('Finish recording and saving your meeting before installing an update.');
       onProgress({ downloaded, total, percentage: 100, phase: 'installing' });
       await candidate.install();
       await relaunch();
@@ -201,7 +206,10 @@ export class UpdateService {
       this.lastSuccess = 0;
       this.publish({ updateInfo: null, error: updateErrorMessage(error) });
       throw error;
-    } finally { this.publish({ isInstalling: false }); }
+    } finally {
+      try { await permit?.close(); }
+      finally { this.publish({ isInstalling: false }); }
+    }
   }
 }
 
