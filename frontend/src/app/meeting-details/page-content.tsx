@@ -283,6 +283,11 @@ export default function PageContent({
     void audioPlayer.seek(seconds);
   }, [audioPlayer.seek]);
 
+  const playPassage = useCallback((seconds: number) => {
+    void audioPlayer.seek(seconds);
+    void audioPlayer.play();
+  }, [audioPlayer.seek, audioPlayer.play]);
+
   const handleTimelinePlayPause = useCallback(() => {
     if (audioPlayer.isPlaying) {
       audioPlayer.pause();
@@ -383,7 +388,7 @@ export default function PageContent({
           audioStatus={audioStatus}
           showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
-          onSeekToTime={isAudioReady ? handleTimelineSeek : undefined}
+          onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}

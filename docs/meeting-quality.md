@@ -207,7 +207,8 @@ Permanent capture gaps remain visible after retranscribing the available audio.
 
 ## Reviewing a saved meeting
 
-The playback bar above a saved meeting plays the recording and has these controls:
+Select a transcript timestamp to hear that passage. Dragging the playback bar
+changes the position and keeps the current play or pause state.
 
 - **Speed** (0.5× to 2×, pitch preserved). The chosen speed is remembered in this
   app's browser storage and applies to the next recording you open.

@@ -521,7 +521,7 @@ async function meetingPage({ audioReady = true } = {}) {
   const calls = [];
   let shortcuts;
   const audio = { currentTime: 20, duration: audioReady ? 600 : 0, error: null, isPlaying: false, rate: 1.25,
-    play: async () => { calls.push('play'); }, pause: () => calls.push('pause'), seek: async () => {},
+    play: async () => { calls.push('play'); }, pause: () => calls.push('pause'), seek: async seconds => { calls.push(['seek', seconds]); },
     seekBy: async seconds => { calls.push(['seekBy', seconds]); }, setRate: rate => { calls.push(['rate', rate]); } };
   const { default: PageContent } = loadTsModule('src/app/meeting-details/page-content.tsx', {
     react: hooks.react,
@@ -579,6 +579,16 @@ test('page shortcuts drive the player, follow, bookmarks and find, and only offe
     assert.equal(timeline.rate, 1.25); assert.equal(timeline.onRateChange, ui.audio.setRate);
     ui.render().find(node => node.type === 'TranscriptPanel').props.onBookmarksChange([{ id: 'a', seconds: 9, label: 'Note' }]);
     assert.deepEqual(JSON.parse(JSON.stringify(ui.render().find(node => node.type === 'SpeakerLaneTimeline').props.bookmarks)), [{ id: 'a', seconds: 9, label: 'Note' }]);
+  } finally { ui.restore(); }
+});
+
+test('a transcript timestamp plays the passage while scrubbing the timeline stays paused', async () => {
+  const ui = await meetingPage();
+  try {
+    ui.render().find(node => node.type === 'SpeakerLaneTimeline').props.onSeek(8);
+    ui.render().find(node => node.type === 'TranscriptPanel').props.onSeekToTime(205);
+    await flush();
+    assert.deepEqual(ui.calls, [['seek', 8], ['seek', 205], 'play']);
   } finally { ui.restore(); }
 });
 
