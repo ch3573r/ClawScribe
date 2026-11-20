@@ -14,7 +14,8 @@ use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
-const EVENT_SELECT: &str = "id,subject,isOnlineMeeting,onlineMeeting,start,end,organizer,attendees";
+const EVENT_SELECT: &str =
+    "id,subject,isOnlineMeeting,onlineMeeting,start,end,organizer,attendees,isAllDay,isCancelled";
 
 /// A person invited to a calendar event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +38,8 @@ pub struct CalendarEvent {
     pub join_url: Option<String>,
     pub organizer: Option<CalendarAttendee>,
     pub attendees: Vec<CalendarAttendee>,
+    pub all_day: bool,
+    pub is_cancelled: bool,
 }
 
 // ── Graph-shaped deserialization (mapped to the flat types above) ──────────
@@ -73,16 +76,21 @@ struct GraphEvent {
     is_online_meeting: Option<bool>,
     #[serde(rename = "onlineMeeting")]
     online_meeting: Option<GraphOnlineMeeting>,
+    #[serde(rename = "isAllDay")]
+    all_day: Option<bool>,
+    #[serde(rename = "isCancelled")]
+    is_cancelled: Option<bool>,
     start: Option<GraphDateTime>,
     end: Option<GraphDateTime>,
     organizer: Option<GraphRecipient>,
-    #[serde(default)]
-    attendees: Vec<GraphRecipient>,
+    attendees: Option<Vec<GraphRecipient>>,
 }
 
 #[derive(Deserialize)]
 struct GraphListResponse {
     value: Vec<GraphEvent>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
 }
 
 fn to_attendee(r: GraphRecipient) -> Option<CalendarAttendee> {
@@ -114,7 +122,14 @@ fn map_event(e: GraphEvent) -> CalendarEvent {
         is_online_meeting: e.is_online_meeting.unwrap_or(false),
         join_url: e.online_meeting.and_then(|m| m.join_url),
         organizer: e.organizer.and_then(to_attendee),
-        attendees: e.attendees.into_iter().filter_map(to_attendee).collect(),
+        attendees: e
+            .attendees
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(to_attendee)
+            .collect(),
+        all_day: e.all_day.unwrap_or(false),
+        is_cancelled: e.is_cancelled.unwrap_or(false),
     }
 }
 
@@ -130,12 +145,23 @@ fn calendar_request(url: String) -> GraphRequest {
     }
 }
 
-fn parse_events(outcome: GraphOutcome) -> Result<Vec<CalendarEvent>, String> {
+fn parse_events(
+    outcome: GraphOutcome,
+    require_complete: bool,
+) -> Result<Vec<CalendarEvent>, String> {
     match outcome {
         GraphOutcome::Success(resp) => {
             let list: GraphListResponse = serde_json::from_str(&resp.body)
                 .map_err(|e| format!("Failed to parse calendar response: {e}"))?;
-            Ok(list.value.into_iter().map(map_event).collect())
+            if require_complete && list.next_link.is_some() {
+                return Err("The calendar returned an incomplete list of events.".into());
+            }
+            Ok(list
+                .value
+                .into_iter()
+                .map(map_event)
+                .filter(|event| !event.is_cancelled)
+                .collect())
         }
         GraphOutcome::Failed(kind, detail) => Err(match detail {
             Some(d) => format!("Graph error ({}): {d}", kind.code()),
@@ -152,12 +178,13 @@ pub async fn list_calendar_events<T: GraphTransport, S: Sleeper>(
     token: &str,
     start_iso: &str,
     end_iso: &str,
+    require_complete: bool,
 ) -> Result<Vec<CalendarEvent>, String> {
     let request = calendar_request(format!(
         "{GRAPH_BASE}/me/calendarView?startDateTime={start_iso}&endDateTime={end_iso}\
          &$select={EVENT_SELECT}&$orderby=start/dateTime&$top=50"
     ));
-    parse_events(client.execute(&request, token).await)
+    parse_events(client.execute(&request, token).await, require_complete)
 }
 
 /// The meeting happening now, else the next one starting within ~12h. Returns
@@ -173,7 +200,7 @@ pub async fn current_or_next_meeting<T: GraphTransport, S: Sleeper>(
     let end_iso = (now + chrono::Duration::hours(12))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let events = list_calendar_events(client, token, &start_iso, &end_iso).await?;
+    let events = list_calendar_events(client, token, &start_iso, &end_iso, false).await?;
 
     let parse = |s: &Option<String>| {
         s.as_deref()

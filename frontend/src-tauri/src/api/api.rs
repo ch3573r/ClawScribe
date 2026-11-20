@@ -1448,6 +1448,7 @@ pub async fn api_save_transcript<R: Runtime>(
     auth_token: Option<String>,
     recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
     use_saved_recording: Option<bool>,
+    calendar_link: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Saving meeting transcript");
@@ -1501,6 +1502,21 @@ pub async fn api_save_transcript<R: Runtime>(
     };
 
     let mut save_warnings = Vec::new();
+    // Invalid optional calendar metadata must not prevent the recording from being saved.
+    let calendar_link = calendar_link.and_then(|value| {
+        match serde_json::from_value::<crate::library::calendar::CalendarLink>(value)
+            .map_err(|_| "Invalid calendar link.".to_string())
+            .and_then(crate::library::calendar::CalendarLink::normalized)
+            .and_then(|link| link.encoded())
+        {
+            Ok(link) => Some(link),
+            Err(_) => {
+                save_warnings
+                    .push("The calendar event could not be linked. The recording was saved.");
+                None
+            }
+        }
+    });
     let mut recording_outcome = recording_outcome.unwrap_or_default();
     if used_fallback {
         recording_outcome.transcription_incomplete = true;
@@ -1530,12 +1546,13 @@ pub async fn api_save_transcript<R: Runtime>(
     let stamp_target = folder_path.clone();
 
     // Now, call the repository with the correctly typed data.
-    match TranscriptsRepository::save_transcript_with_outcome(
+    match TranscriptsRepository::save_recording(
         pool,
         &meeting_title,
         &transcripts_to_save,
         folder_path,
         Some(&recording_outcome),
+        calendar_link,
     )
     .await
     {

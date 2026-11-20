@@ -1,18 +1,19 @@
 'use client';
 
 import { MoreHorizontal } from 'lucide-react';
-import { useRef } from 'react';
+import { useRef, type ReactNode } from 'react';
 import { EditableTitle } from '@/components/EditableTitle';
 import { ActionIcon } from './ActionIcon';
 import { ProjectTags } from './ProjectTags';
 import { MeetingExportButtons } from './MeetingExportButtons';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
-export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFinishEditing, onChange, duration, segmentCount, disabled, getMarkdown, onOpenFolder }: {
+export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFinishEditing, onChange, duration, segmentCount, disabled, getMarkdown, onOpenFolder, attendance }: {
   meeting: { id: string; created_at: string; folder_path?: string | null };
   title: string; isEditing: boolean; onStartEditing: () => void; onFinishEditing: () => void;
   onChange: (title: string) => void; duration?: number; segmentCount: number; disabled: boolean;
   getMarkdown: () => Promise<string>; onOpenFolder: () => Promise<void>;
+  attendance?: ReactNode;
 }) {
   const retainTitleFocusRef = useRef(false);
   const date = new Date(meeting.created_at);
@@ -30,6 +31,7 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
         <span aria-hidden>·</span><ProjectTags key={meeting.id} meetingId={meeting.id} compact />
       </div>
     </div>
+    {attendance}
     <MeetingExportButtons key={meeting.id} meetingId={meeting.id} meetingTitle={title} meetingCreatedAt={meeting.created_at} disabled={disabled} getMarkdown={getMarkdown} />
     <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon label="More meeting actions" className="h-9 w-9 shrink-0"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
       <DropdownMenuContent align="end" onCloseAutoFocus={event => {

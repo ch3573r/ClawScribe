@@ -11,7 +11,6 @@ import Analytics from '@/lib/analytics';
 import { isOllamaNotInstalledError } from '@/lib/utils';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
 import { getMeetingContext } from '@/lib/meetingContext';
-import { getMeetingCalendar, attendeeChecklist } from '@/lib/meetingCalendar';
 import { formatTranscriptLine } from '@/lib/transcriptFormatting';
 import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 import {
@@ -451,35 +450,12 @@ export function useSummaryGeneration({
     };
   }, [includeSpeakerLabels]);
 
-  // Prepend the bound calendar event's invited attendees to the summary context.
-  // The binding is created at record-save (useRecordingStop), keyed by the real
-  // meeting id, so this only reads — it never consumes a global pending value
-  // (which could otherwise attach the wrong recording's attendees).
-  const withCalendarContext = useCallback((base: string): string => {
-    const link = getMeetingCalendar(meeting.id);
-    if (link) {
-      const checklist = attendeeChecklist(link);
-      if (checklist.length > 0) {
-        const prefix = [
-          'Put this section at the top of the meeting summary:',
-          '',
-          '## Invited attendees',
-          ...checklist,
-          '',
-          'Checked people attended. Unchecked people were invited but did not attend.',
-        ].join('\n');
-        return base.trim() ? `${prefix}\n\n${base.trim()}` : prefix;
-      }
-    }
-    return base;
-  }, [meeting.id]);
-
   // Public API: Generate summary from transcripts
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
     // Fall back to the meeting's persisted "Add context" if no context was
     // passed, so every entry point uses it consistently.
     try {
-      customPrompt = withCalendarContext(customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id));
+      customPrompt = customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id);
     } catch {
       toast.error('Could not load meeting context. Try generating again.');
       return;
@@ -652,7 +628,7 @@ export function useSummaryGeneration({
     // Same fallback as generation: use the persisted per-meeting context when a
     // caller (e.g. a regenerate button) doesn't pass one.
     try {
-      customPrompt = withCalendarContext(customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id));
+      customPrompt = customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id);
     } catch {
       toast.error('Could not load meeting context. Try generating again.');
       return;

@@ -1,6 +1,7 @@
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { LiveSourceLanguages } from '@/components/LiveSourceLanguages';
+import { RecordingCalendarReview } from '@/components/MeetingAttendance';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy } from 'lucide-react';
@@ -31,7 +32,7 @@ export function TranscriptPanel({
   assistance,
 }: TranscriptPanelProps) {
   // Contexts
-  const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
+  const { transcripts, transcriptContainerRef, copyTranscript, setMeetingTitle } = useTranscripts();
   const { selectedLanguage } = useConfig();
   const { isRecording, isPaused, status, sessionMode, sessionId } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
@@ -74,6 +75,7 @@ export function TranscriptPanel({
                 )}
               </ButtonGroup>
             </div>
+            {isRecording && <RecordingCalendarReview disabled={isStopping || isProcessingStop} onTitleChange={setMeetingTitle} />}
             {isRecording && sessionMode === 'live' && sessionId && selectedLanguage === 'auto' && (
                 <LiveSourceLanguages key={sessionId} sessionId={sessionId} />
             )}

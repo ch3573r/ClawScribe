@@ -14,9 +14,26 @@ credential storage.
 
 **Upcoming meetings** on Home shows the next five meetings across your
 configured calendars for the coming week. The Calendars page lists more
-occurrences and lets you review invitees. Choose **Use for next recording**
-to use the event title and attendee selection. An invitation records who was
-invited. You can edit the attendee checklist before generating a summary.
+occurrences. **Use for next recording** takes priority over automatic matching.
+Without a selection, ClawScribe links a single timed event in progress across
+enabled Microsoft 365 and iCalendar sources. Recording can start without a
+link if events overlap or a source is unavailable. Choose an available event
+during recording, unlink a wrong match, or use **Skip calendar for next
+recording** on Home.
+
+Open **Review attendance** while recording or **Attendance** in the saved
+meeting. Invitees start unchecked. Automatic and manual summaries receive only
+calendar names you confirm by checking. Review during recording to include
+attendance in an automatic summary, or review after saving and regenerate.
+Links and attendance are saved with the meeting and included in library backups.
+Older checked selections require review because earlier versions checked each
+invitation by default.
+
+For a linked recurring iCalendar event, **Template for this series** sets the
+default summary template for other linked occurrences from the same calendar.
+It uses the source and its recurring event ID. Single events and detached imports
+without a recurring master use the regular summary template settings. Series
+template preferences are local app settings.
 
 ClawScribe checks for calendar updates while Home or the Calendars page is
 open. **Refresh** requests an immediate update. Use the calendar's menu

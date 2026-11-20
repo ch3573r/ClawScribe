@@ -7,7 +7,8 @@ import { recordingService } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import { offerSpeakerDetectionCancellation } from '@/lib/speakerDetectionCancellation';
-import { getPendingCalendar, beginRecordingCalendar } from '@/lib/meetingCalendar';
+import { getNextCalendarChoice, beginRecordingCalendar, microsoftCalendarRevision, type RecordingCalendar } from '@/lib/meetingCalendar';
+import { findOngoingRecordingCalendar } from '@/services/recordingCalendarService';
 import { toast } from 'sonner';
 import { isDiskSpaceRefusal, startErrorText } from '@/lib/start-error';
 
@@ -69,32 +70,29 @@ export function useStartRecordingSession(setIsRecording: (value: boolean) => voi
     return `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
   }, []);
 
-  // Title every recording (home button, sidebar auto/direct) from the calendar
-  // event chosen for the next recording, if any; else the generated title.
-  // Read the pending calendar selection ONCE before starting, and derive the
-  // title from that same object — so the title and the attendee binding can't
-  // diverge if "Use for next recording" changes during the async startup. The
-  // returned `calendar` is frozen via beginRecordingCalendar(calendar) on success.
-  const snapshotPendingForStart = useCallback(() => {
-    const calendar = getPendingCalendar();
-    const title = calendar?.subject?.trim() || generateMeetingTitle();
-    return { title, calendar };
-  }, [generateMeetingTitle]);
-
   const startBackendRecording = useCallback(
     async (source: 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call'): Promise<{ title: string; sessionId?: string }> => {
-      const { title, calendar: pendingCal } = snapshotPendingForStart();
-      setMeetingTitle(title);
       setStatus(RecordingStatus.STARTING, 'Initializing recording...');
+      const now = Date.now();
+      const choice = getNextCalendarChoice();
+      const microsoftRevision = microsoftCalendarRevision;
+      const fallbackTitle = generateMeetingTitle();
+      const match = choice.link || choice.skip ? { status: "none" as const, matches: [] }
+        : await findOngoingRecordingCalendar(now).catch(() => ({ status: "unavailable" as const, matches: [] }));
+      const active: RecordingCalendar = {
+        ...match, fallbackTitle,
+        link: choice.link ?? (match.status === "matched" ? match.matches[0] : null),
+      };
+      const nativeTitle = choice.link?.subject?.trim() || fallbackTitle;
 
       let sessionId: string | undefined;
       const mic = selectedDevices?.micDevice || null;
       const system = selectedDevices?.systemDevice || null;
       try {
         if (source === 'detected_call') {
-          sessionId = await recordingService.startDetectedCall(mic, system, title);
+          sessionId = await recordingService.startDetectedCall(mic, system, nativeTitle);
         } else {
-          await recordingService.startRecordingWithDevices(mic, system, title);
+          await recordingService.startRecordingWithDevices(mic, system, nativeTitle);
         }
       } catch (error) {
         // A delayed retry of a detected start needs fresh meeting evidence.
@@ -102,7 +100,13 @@ export function useStartRecordingSession(setIsRecording: (value: boolean) => voi
         throw error;
       }
 
-      beginRecordingCalendar(pendingCal);
+      if (microsoftCalendarRevision !== microsoftRevision) {
+        if (active.link?.source === "microsoft") active.link = null;
+        active.matches = active.matches.filter(link => link.source !== "microsoft");
+      }
+      const title = active.link?.subject?.trim() || fallbackTitle;
+      beginRecordingCalendar(active, choice);
+      setMeetingTitle(title);
       setIsRecording(true);
       clearTranscripts();
       setIsMeetingActive(true);
@@ -117,7 +121,7 @@ export function useStartRecordingSession(setIsRecording: (value: boolean) => voi
       setIsRecording,
       setMeetingTitle,
       setStatus,
-      snapshotPendingForStart,
+      generateMeetingTitle,
     ],
   );
   return startBackendRecording;
@@ -135,9 +139,8 @@ export function useRecordingStart(
   const handleRecordingStart = useCallback(async () => {
     try {
       console.log('handleRecordingStart called - starting backend recording');
-      const { title } = await startBackendRecording('home_page');
+      await startBackendRecording('home_page');
       console.log('Backend recording started successfully');
-      console.log('Recording title:', title);
     } catch (error) {
       console.error('Failed to start recording:', error);
       setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording');
@@ -162,8 +165,7 @@ export function useRecordingStart(
 
           // Start the actual backend recording
           try {
-            const { title } = await startBackendRecording('sidebar_auto');
-            console.log('Auto-start backend recording completed:', title);
+            await startBackendRecording('sidebar_auto');
           } catch (error) {
             console.error('Failed to auto-start recording:', error);
             setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to auto-start recording');
@@ -196,8 +198,7 @@ export function useRecordingStart(
       setIsAutoStarting(true);
 
       try {
-        const { title } = await startBackendRecording('sidebar_direct');
-        console.log('Backend recording completed:', title);
+        await startBackendRecording('sidebar_direct');
       } catch (error) {
         console.error('Failed to start recording from sidebar:', error);
         setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording from sidebar');

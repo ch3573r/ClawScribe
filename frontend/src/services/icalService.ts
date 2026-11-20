@@ -74,7 +74,9 @@ async function load(version: number, force: boolean) {
     const sourceIds = new Set(sources.map(s => s.id));
     publish({ ...current, sources, events: current.events.filter(ev => sourceIds.has(ev.sourceId)),
       issues: Object.fromEntries(Object.entries(current.issues).filter(([id]) => sourceIds.has(id))) });
-    const now = new Date();
+    // Include a brief overlap so a lookup started during a refresh can still
+    // evaluate appointments against its original recording-start time.
+    const now = new Date(Date.now() - 60_000);
     const until = weekFrom(now);
     // A slow subscription should never delay an imported meeting.
     const queue = [...sources.filter(s => s.kind === "file"), ...sources.filter(s => s.kind === "subscription")];

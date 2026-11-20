@@ -99,6 +99,8 @@ export interface CalendarEvent {
   joinUrl: string | null;
   organizer: CalendarAttendee | null;
   attendees: CalendarAttendee[];
+  allDay?: boolean;
+  isCancelled?: boolean;
 }
 
 export interface PlannerTaskPreview {
@@ -304,8 +306,9 @@ export const microsoftExportService = {
   async listCalendarEvents(
     startIso: string,
     endIso: string,
+    requireComplete = false,
   ): Promise<CalendarEvent[]> {
-    return invoke<CalendarEvent[]>("list_calendar_events", { startIso, endIso });
+    return invoke<CalendarEvent[]>("list_calendar_events", { startIso, endIso, requireComplete });
   },
 
   async currentOrNextMeeting(): Promise<CalendarEvent | null> {

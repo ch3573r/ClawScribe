@@ -383,10 +383,24 @@ pub async fn api_process_transcript<R: Runtime>(
     );
 
     let pool = state.db_manager.pool().clone();
-    let final_prompt = custom_prompt.unwrap_or_else(|| "".to_string());
+    let (calendar, summary_title) = crate::library::calendar::read_snapshot(&pool, &m_id).await?;
+    let base_prompt = custom_prompt.unwrap_or_default();
+    let final_prompt = match calendar.as_ref() {
+        Some(link) => link.with_attendance(base_prompt),
+        None => base_prompt,
+    };
     let final_template_id = match template_id.filter(|id| !id.is_empty()) {
         Some(id) => id,
-        None => super::template_commands::default_template(&app)?,
+        None => {
+            let remembered = match calendar.as_ref() {
+                Some(link) => crate::library::calendar::series_template(&pool, link).await?,
+                None => None,
+            };
+            match remembered {
+                Some(id) => id,
+                None => super::template_commands::default_template(&app)?,
+            }
+        }
     };
 
     // Normalise empty / whitespace-only to None so "" and null behave identically
@@ -437,6 +451,7 @@ pub async fn api_process_transcript<R: Runtime>(
             model,
             model_name,
             final_prompt,
+            summary_title,
             final_template_id,
             summary_language,
             job,

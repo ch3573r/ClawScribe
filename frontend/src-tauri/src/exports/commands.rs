@@ -244,12 +244,16 @@ pub async fn microsoft_cancel_sign_in<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn microsoft_sign_out(state: tauri::State<'_, MicrosoftAuthState>) -> Result<(), String> {
+pub async fn microsoft_sign_out(
+    state: tauri::State<'_, MicrosoftAuthState>,
+    app_state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
     state
         .inner
         .write()
         .await
-        .end_session(token_store::delete_token)
+        .end_session(token_store::delete_token)?;
+    crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await
 }
 
 #[tauri::command]
@@ -1008,11 +1012,19 @@ pub async fn list_calendar_events(
     state: tauri::State<'_, MicrosoftAuthState>,
     start_iso: String,
     end_iso: String,
+    require_complete: Option<bool>,
 ) -> Result<Vec<calendar::CalendarEvent>, String> {
     let (token, _, _) = get_token_and_context(&state, "Calendars.Read").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    calendar::list_calendar_events(&client, &token, &start_iso, &end_iso).await
+    calendar::list_calendar_events(
+        &client,
+        &token,
+        &start_iso,
+        &end_iso,
+        require_complete.unwrap_or(false),
+    )
+    .await
 }
 
 /// The meeting happening now, else the next one within ~12h (with invited attendees).

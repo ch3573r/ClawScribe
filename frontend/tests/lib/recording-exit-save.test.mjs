@@ -55,7 +55,7 @@ function setup(t, { folder, saveFails = false, slowSave = null, exitFails = fals
     } },
     '@/services/transcriptService': { transcriptService: { getTranscriptionStatus: async () => ({ is_processing: false, chunks_in_queue: 0 }) } },
     '@/lib/analytics': { __esModule: true, default: new Proxy({}, { get: () => asyncNoop }) },
-    '@/lib/meetingCalendar': { takeActiveRecordingCalendar: () => null, setMeetingCalendar: noop },
+    '@/lib/meetingCalendar': { getActiveRecordingCalendar: () => null, setActiveRecordingCalendar: noop },
     '@/lib/summary-language-preferences': { applyPinnedSummaryLanguageToMeeting: async () => true, detectAndCacheSummaryLanguage: asyncNoop },
     '@tauri-apps/plugin-store': { Store: { load: async () => ({ get: async () => 0 }) } },
   });

@@ -460,6 +460,7 @@ impl SummaryService {
         model_provider: String,
         model_name: String,
         custom_prompt: String,
+        summary_title: crate::library::calendar::SummaryTitle,
         template_id: String,
         summary_language: Option<String>,
         job: SummaryJob,
@@ -705,7 +706,8 @@ impl SummaryService {
                     return;
                 }
             };
-            let meeting_title = meeting_metadata.map(|m| m.title);
+            let meeting_title =
+                meeting_metadata.and_then(|meeting| summary_title.for_provider(meeting.title));
 
             let provider_config = match provider {
                 LLMProvider::CustomOpenAI => {
@@ -861,7 +863,8 @@ impl SummaryService {
                     return;
                 }
             };
-            let meeting_title = meeting_metadata.map(|m| m.title);
+            let meeting_title =
+                meeting_metadata.and_then(|meeting| summary_title.for_provider(meeting.title));
 
             let result = match provider_from_app(&_app) {
                 Ok(codex_provider) => {

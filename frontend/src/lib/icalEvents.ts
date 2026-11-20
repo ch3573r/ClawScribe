@@ -5,6 +5,7 @@ export interface ICalendarEvent extends CalendarEvent {
   start: string;
   end: string;
   allDay: boolean;
+  seriesId?: string;
 }
 
 const errors = {
@@ -198,11 +199,15 @@ function expand(calendar: Calendar, sourceId: string, from: number, until: numbe
     const master = group.get("master");
     if (master && cancelled(master)) continue;
     const prefix = seriesKey(sourceId, uid);
+    const recurring = Boolean(master && (master.hasProperty("rrule") || master.hasProperty("rdate")));
     const add = (key: string, date: ICAL.Time, end: number, metadata: MeetingFields) => {
       const start = date.toJSDate();
       if (+start >= until || (end > +start ? end <= from : +start < from)) return;
       const id = prefix + ":" + key;
-      meetings.set(id, { ...metadata, id, allDay: date.isDate, start: start.toISOString(), end: new Date(end).toISOString() });
+      meetings.set(id, {
+        ...metadata, id, ...(recurring ? { seriesId: prefix } : {}),
+        allDay: date.isDate, start: start.toISOString(), end: new Date(end).toISOString(),
+      });
       if (meetings.size > 2000) throw new ICalendarParseError("complexity");
     };
     // Materialize detached instances independently. A moved event may enter
@@ -221,7 +226,6 @@ function expand(calendar: Calendar, sourceId: string, from: number, until: numbe
       property.getValues().forEach((value, i) => excluded.add(instanceKey(checkedDate(value, property.toJSON()[3 + i]))));
     }
     const extra = additionalDates(master);
-    const recurring = master.hasProperty("rrule") || master.hasProperty("rdate");
     const include = (date: ICAL.Time) => {
       const key = instanceKey(date);
       if (!group.has(key) && !excluded.has(key)) {

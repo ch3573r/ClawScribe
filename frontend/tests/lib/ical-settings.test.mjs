@@ -42,7 +42,7 @@ function baseMocks(hooks, service, store) {
     'lucide-react': {}, sonner: { toast: { error() {} } },
     ...uiMocks,
     '@/components/IntegrationIcons': { OutlookCalendarIcon: 'OutlookCalendarIcon' },
-    '@/lib/meetingCalendar': store.mock,
+    '@/lib/meetingCalendar': { ...loadTsModule('src/lib/meetingCalendar.ts'), ...store.mock },
     [servicePath]: service,
   };
 }
@@ -121,25 +121,23 @@ test('a failed file import resets the picker and never echoes an unexpected reje
   assert.doesNotMatch(text(render()), /private\.ics/);
 });
 
-test('an all-day meeting binds the reviewed invitee choices to its own calendar', t => {
+test('an all-day event can be chosen explicitly and its invitees still need review', t => {
   const item = {
     key: 'ical:work:meeting', source: 'ical', sourceId: 'work', sourceName: 'Team calendar', id: 'meeting',
     subject: 'Planning', start: new Date(2031, 4, 14).toISOString(), allDay: true,
     attendees: [{ name: 'First', email: null }, { name: 'Second', email: null }],
   };
   const app = useButton(t, item);
-  assert.match(text(find(app.render(), 'DialogDescription')), /All day/);
-  nodes(app.render()).filter(n => n.type === 'Checkbox')[1].props.onCheckedChange(false);
-  const confirm = () => find(app.render(), 'Button', n => /for next recording/.test(text(n)) && n.props['aria-label'] === undefined);
+  const confirm = () => find(app.render(), 'Button');
   app.store.pending.writable = false;
   confirm().props.onClick();
-  assert.match(text(app.render()), /Could not save the meeting selection/);
+  assert.equal(app.store.pending.link, null);
   assert.equal(confirm().props.disabled, false);
   app.store.pending.writable = true;
   confirm().props.onClick();
   assert.deepEqual(JSON.parse(JSON.stringify(app.store.pending.link)), {
-    source: 'ical', sourceId: 'work', eventId: 'meeting', subject: 'Planning',
-    attendees: [{ name: 'First', email: null, included: true }, { name: 'Second', email: null, included: false }],
+    source: 'ical', sourceId: 'work', eventId: 'meeting', subject: 'Planning', start: item.start,
+    attendees: [{ name: 'First', email: null, attendance: 'unreviewed' }, { name: 'Second', email: null, attendance: 'unreviewed' }],
   });
   assert.equal(confirm().props.disabled, true);
   app.store.pending.link = { ...app.store.pending.link, source: 'microsoft' };
@@ -152,7 +150,7 @@ test('a meeting without invitees is set directly and a Microsoft meeting stays a
   const use = () => find(app.render(), 'Button');
   assert.equal(text(use()), 'Use');
   use().props.onClick();
-  assert.deepEqual(JSON.parse(JSON.stringify(app.store.pending.link)), { eventId: 'm1', subject: 'Standup', attendees: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(app.store.pending.link)), { source: 'microsoft', eventId: 'm1', subject: 'Standup', start: null, attendees: [] });
   assert.equal(text(use()), 'Selected');
   assert.equal(use().props.disabled, true);
 });

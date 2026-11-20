@@ -4,6 +4,9 @@ import { openExternal } from '@/lib/openExternal';
 import { Button } from "@/components/ui/button";
 import { useUpcomingEvents } from "@/hooks/useUpcomingEvents";
 import { CalendarClock, Video } from "lucide-react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+import { getNextCalendarChoice, PENDING_CALENDAR_CHANGED, setPendingCalendar } from "@/lib/meetingCalendar";
 
 function formatWhen(iso: string | null, allDay: boolean): string {
   if (!iso) return "";
@@ -18,9 +21,32 @@ function formatWhen(iso: string | null, allDay: boolean): string {
   return `${d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · ${time}`;
 }
 
+function NextRecordingCalendar({ hasCalendars }: { hasCalendars: boolean }) {
+  const [choice, setChoice] = useState(getNextCalendarChoice);
+  useEffect(() => {
+    const sync = () => setChoice(getNextCalendarChoice());
+    window.addEventListener(PENDING_CALENDAR_CHANGED, sync);
+    sync();
+    return () => window.removeEventListener(PENDING_CALENDAR_CHANGED, sync);
+  }, []);
+  if (!hasCalendars && !choice.link && !choice.skip) return null;
+  const label = choice.link ? `Next recording · ${choice.link.subject || "Untitled event"}`
+    : choice.skip ? "Next recording will start without a calendar event" : "";
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-2">
+      {label && <span role="status" className="min-w-0 break-words text-sm text-muted-foreground">{label}</span>}
+      <Button size="sm" variant="ghost" onClick={() => {
+        if (!setPendingCalendar(null, !choice.skip)) toast.error("Could not change the calendar selection.");
+      }}>
+        {choice.skip ? "Allow calendar matching" : "Skip calendar for next recording"}
+      </Button>
+    </div>
+  );
+}
+
 export function UpcomingMeetings() {
-  const { entries: events, isSelected, select } = useUpcomingEvents(5);
-  if (!events.length) return null;
+  const { entries: events, isSelected, select, hasCalendars } = useUpcomingEvents(5);
+  if (!events.length && !hasCalendars) return null;
 
   return (
     <section className="rounded-lg border border-border bg-card shadow-sm">
@@ -29,7 +55,7 @@ export function UpcomingMeetings() {
           <CalendarClock className="h-4 w-4 text-primary" />
           <h2 className="text-lg font-semibold text-foreground">Upcoming meetings</h2>
         </div>
-        <span className="text-xs text-muted-foreground">Next 7 days · from your calendar</span>
+        <span className="text-xs text-muted-foreground">Next 7 days</span>
       </div>
       <div className="divide-y divide-border">
         {events.map((entry) => {
@@ -60,6 +86,7 @@ export function UpcomingMeetings() {
           );
         })}
       </div>
+      <NextRecordingCalendar hasCalendars={hasCalendars} />
     </section>
   );
 }

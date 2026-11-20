@@ -43,7 +43,7 @@ export function NextUpCard() {
           {next.event.subject || "(No subject)"}
         </div>
         <div className="text-xs text-muted-foreground">
-          {duration ? `${duration} · ` : ""}Title and invitees are filled in for you
+          {duration ? `${duration} · ` : ""}Review attendance during or after recording
         </div>
         <Button type="button" size="sm" variant="outline" className="mt-1.5 w-full" disabled={selected} onClick={() => select(next)}>
           {selected ? "Selected for next recording" : "Use for next recording"}

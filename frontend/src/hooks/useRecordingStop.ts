@@ -14,7 +14,7 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
-import { takeActiveRecordingCalendar, setMeetingCalendar } from '@/lib/meetingCalendar';
+import { getActiveRecordingCalendar, setActiveRecordingCalendar } from '@/lib/meetingCalendar';
 import { errorText } from '@/lib/errorText';
 import {
   applyPinnedSummaryLanguageToMeeting,
@@ -283,15 +283,20 @@ export function useRecordingStop(
         // Get folder_path and meeting_name from recording-stopped event
         const folderPath = sessionStorage.getItem('last_recording_folder_path');
         const savedMeetingName = sessionStorage.getItem('last_recording_meeting_name');
+        const calendar = getActiveRecordingCalendar();
+        const title = calendar
+          ? calendar.link?.subject?.trim() || calendar.fallbackTitle
+          : savedMeetingName || meetingTitle || NEW_MEETING_TITLE;
 
 
         try {
           const responseData = await storageService.saveMeeting(
-            savedMeetingName || meetingTitle || NEW_MEETING_TITLE,  // PREFER savedMeetingName (backend source)
+            title,
             freshTranscripts,
             folderPath,
             recordingOutcome(JSON.parse(sessionStorage.getItem('last_recording_outcome') || '{}')),
             true,
+            calendar?.link ?? undefined,
           );
 
           const meetingId = responseData.meeting_id;
@@ -307,18 +312,7 @@ export function useRecordingStop(
             toast.warning('Meeting saved with a warning', { description: responseData.warning });
           }
 
-          // Bind the calendar event that was frozen at THIS recording's start
-          // (consumed here) to the saved meeting id. Using the active snapshot —
-          // not the live pending value — means a "Use for next recording" change
-          // made mid-recording can't rebind this meeting.
-          try {
-            const activeCal = takeActiveRecordingCalendar();
-            if (activeCal) {
-              setMeetingCalendar(meetingId, activeCal);
-            }
-          } catch (error) {
-            console.warn("Failed to bind calendar selection to meeting:");
-          }
+          setActiveRecordingCalendar(null);
 
           let shouldDetectSummaryLanguage = false;
           try {
@@ -367,7 +361,7 @@ export function useRecordingStop(
             }
           } catch (error) {
             console.warn("Could not fetch meeting details, using ID only:");
-            setCurrentMeeting({ id: meetingId, title: savedMeetingName || meetingTitle || NEW_MEETING_TITLE });
+            setCurrentMeeting({ id: meetingId, title });
           }
 
           // Mark as completed

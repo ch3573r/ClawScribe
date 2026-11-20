@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { flushMeetingContexts } from '@/lib/meetingContext';
+import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore';
 import type { LibraryArchiveReport } from '@/lib/library';
 
 export function LibraryBackup() {
@@ -27,6 +28,7 @@ export function LibraryBackup() {
         : await invoke<string | null>('pick_backup_save_path', { suggestedName: `ClawScribe-backup-${new Date().toISOString().slice(0, 10)}.zip` });
       if (!path) return;
       setResult(null);
+      await migrateLegacyMeetingCalendars();
       if (!restore) await flushMeetingContexts();
       const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path });
       setResult({ report, restore });

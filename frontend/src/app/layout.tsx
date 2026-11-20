@@ -18,6 +18,7 @@ import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
 import { cleanupTranscriptRecoveryOnce } from '@/services/indexedDBService'
 import { migrateLegacyMeetingContexts } from '@/lib/meetingContext'
+import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore'
 import { flushMeetingDrafts, flushSummaryEditsBeforeExit } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
@@ -145,6 +146,7 @@ export default function RootLayout({
 
   useEffect(() => {
     void migrateLegacyMeetingContexts().catch(() => toast.error('Could not migrate meeting context. Existing context is retained for retry.'));
+    void migrateLegacyMeetingCalendars().catch(() => toast.error('Could not migrate calendar links. Reopen a meeting to retry.'));
   }, []);
 
   useEffect(() => {

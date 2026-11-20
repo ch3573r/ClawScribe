@@ -88,12 +88,17 @@ the next event list, including:
 - organizer
 - invited attendees
 
-The app uses the selected event to seed the next recording title and to prepend
-invited attendees to the generated summary as a checklist. The event body is not
-read for summary context. Invited attendees are not proof of actual attendance.
+The app uses a selected event for the next recording or links a single timed
+event in progress across enabled sources. The event body is excluded. The
+meeting's attendance checklist starts unchecked and summaries receive only
+calendar names confirmed in that checklist. Recording works without a link if
+calendar data is unavailable. Calendar lookup uses the existing read permission.
 
-ClawScribe also supports [local iCalendar files and read-only subscriptions](icalendar.md).
-Those sources and their recording associations remain available after Microsoft sign-out.
+Microsoft sign-out clears Microsoft event links and their saved invitation
+metadata. iCalendar sources and their associations remain available. Series
+template memory is available for recurring iCalendar events with a stable source
+and series ID. The current Graph integration returns occurrence IDs and uses the
+app's regular summary template settings. See [Calendar sources and attendance](icalendar.md).
 
 ## OneNote
 

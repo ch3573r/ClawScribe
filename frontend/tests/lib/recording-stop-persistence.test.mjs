@@ -56,7 +56,11 @@ for (const failure of ['status', 'subscription', 'duplicate', 'fallback']) {
           return { is_processing: false, chunks_in_queue: 0 };
         } } },
         '@/lib/analytics': { __esModule: true, default: new Proxy({}, { get: () => asyncNoop }) },
-        '@/lib/meetingCalendar': { takeActiveRecordingCalendar: () => null, setMeetingCalendar: noop },
+        '@/lib/meetingCalendar': {
+          getActiveRecordingCalendar: () => ({ link: { eventId: 'corrected', subject: 'Corrected calendar title',
+            attendees: [{ name: 'Reviewed speaker', attendance: 'present' }] } }),
+          setActiveRecordingCalendar: noop,
+        },
         '@/lib/summary-language-preferences': { applyPinnedSummaryLanguageToMeeting: async () => true, detectAndCacheSummaryLanguage: asyncNoop },
         '@tauri-apps/plugin-store': { Store: { load: async () => ({ get: async () => 0 }) } },
       });
@@ -72,6 +76,8 @@ for (const failure of ['status', 'subscription', 'duplicate', 'fallback']) {
       assert.equal(saves.length, 1);
       assert.equal(saves[0][2], 'synthetic-meeting');
       assert.equal(saves[0][4], true, 'request backend transcript snapshot even if UI has no lines');
+      assert.equal(saves[0][0], 'Corrected calendar title');
+      assert.equal(saves[0][5].attendees[0].attendance, 'present');
       assert.ok(statuses.includes('COMPLETED'));
       assert.ok(!statuses.includes('ERROR'));
       assert.ok(!notices.some(notice => notice.kind === 'error'));

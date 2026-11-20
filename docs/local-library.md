@@ -197,8 +197,9 @@ prevents these operations from overlapping an archive operation. Keep the app op
 until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
-summaries, per-meeting summary context, meeting chat, project tags, bookmarks,
-attached reference originals and extracted blocks, and supported recording files.
+summaries, per-meeting summary context, linked calendar events and attendance,
+meeting chat, project tags, bookmarks, attached reference originals and
+extracted blocks, and supported recording files.
 Microsoft export history (`exports.json`) is retained with the recording folder.
 Provider settings, credentials, model downloads, UI preferences, and unfinished
 recording recovery spools are excluded. Missing

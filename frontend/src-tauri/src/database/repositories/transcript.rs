@@ -175,6 +175,17 @@ impl TranscriptsRepository {
         folder_path: Option<String>,
         outcome: Option<&crate::audio::outcome::RecordingOutcome>,
     ) -> Result<String, SqlxError> {
+        Self::save_recording(pool, meeting_title, transcripts, folder_path, outcome, None).await
+    }
+
+    pub async fn save_recording(
+        pool: &SqlitePool,
+        meeting_title: &str,
+        transcripts: &[TranscriptSegment],
+        folder_path: Option<String>,
+        outcome: Option<&crate::audio::outcome::RecordingOutcome>,
+        calendar_link: Option<String>,
+    ) -> Result<String, SqlxError> {
         let meeting_id = format!("meeting-{}", Uuid::new_v4());
 
         let mut conn = pool.acquire().await?;
@@ -198,13 +209,14 @@ impl TranscriptsRepository {
 
         // 1. Create the new meeting
         let result = sqlx::query(
-            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path, calendar_link) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&meeting_id)
         .bind(meeting_title)
         .bind(now)
         .bind(now)
         .bind(&folder_path)
+        .bind(calendar_link)
         .execute(&mut *transaction)
         .await;
 

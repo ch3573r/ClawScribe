@@ -25,14 +25,14 @@ test('Microsoft sign-out preserves imported appointments and clears legacy Micro
   let changes = 0;
   win.addEventListener('clawscribe-pending-calendar-changed', () => changes++);
   links.setPendingCalendar(ical);
-  links.beginRecordingCalendar(ical);
+  links.beginRecordingCalendar({ link: ical, matches: [], status: 'none', fallbackTitle: 'Recording' }, links.getNextCalendarChoice());
   links.setPendingCalendar(ical);
-  links.setMeetingCalendar('new', ical);
-  links.setMeetingCalendar('old', legacy);
+  win.localStorage.setItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'new', JSON.stringify(ical));
+  win.localStorage.setItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'old', JSON.stringify(legacy));
   links.clearMicrosoftCalendarLinks();
-  assert.equal(links.getMeetingCalendar('old'), null);
-  assert.equal(links.getMeetingCalendar('new').sourceId, 'a');
-  assert.equal(links.takeActiveRecordingCalendar().source, 'ical');
+  assert.equal(win.localStorage.getItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'old'), null);
+  assert.equal(links.parseCalendarLink(win.localStorage.getItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'new')).sourceId, 'a');
+  assert.equal(links.getActiveRecordingCalendar().link.source, 'ical');
   assert.equal(links.getPendingCalendar().sourceId, 'a');
   assert.ok(changes >= 3);
 });
@@ -144,7 +144,7 @@ test('Home offers an imported event for the next recording with Microsoft discon
     '@/components/ui/button': { Button: 'button' }, '@/lib/openExternal': {},
     '@/hooks/useICalendar': { useICalendar: () => ({ events: [event], sources: [calendar] }) },
     '@/hooks/usePendingCalendar': { usePendingCalendar: () => null },
-    '@/lib/meetingCalendar': { setPendingCalendar: link => selected.push(link) },
+    '@/lib/meetingCalendar': { ...loadTsModule('src/lib/meetingCalendar.ts'), setPendingCalendar: link => selected.push(link) },
     '@/services/microsoftExportService': { microsoftExportService: { connectionStatus: async () => ({ state: 'not_connected' }) } },
   });
   hooks.render(UpcomingMeetings);
@@ -154,5 +154,5 @@ test('Home offers an imported event for the next recording with Microsoft discon
   buttons[0].props.onClick();
   assert.equal(selected[0].sourceId, calendar.id);
   assert.equal(selected[0].subject, 'Design review');
-  assert.equal(selected[0].attendees[0].included, true);
+  assert.equal(selected[0].attendees[0].attendance, 'unreviewed');
 });

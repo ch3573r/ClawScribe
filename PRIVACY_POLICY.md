@@ -93,10 +93,11 @@ data from its provider over HTTPS. The subscription URL uses protected
 credential storage. Removing the source stops refreshes and removes the
 local source from the app.
 
-Choosing an event for a recording saves its title and reviewed invitees
-with the meeting's calendar association. The summary provider receives the
-attendee context when you generate a summary using it. Calendar descriptions,
-attachments and subscription URLs are excluded from that context.
+A linked recording saves the event title, invitees and your attendance review
+with the meeting. Library backups can contain those details. Automatic and
+manual summaries send only the calendar names you confirm as present to the
+configured summary provider. Calendar descriptions, attachments and subscription
+URLs are excluded from that context.
 
 ## Call detection
 

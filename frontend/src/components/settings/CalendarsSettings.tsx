@@ -73,16 +73,18 @@ export function CalendarsSettings() {
       for (const event of microsoft) {
         items.push({
           key: `microsoft:${event.id}`, source: "microsoft", sourceName: "Microsoft 365", id: event.id,
-          subject: event.subject, start: event.start, allDay: false,
-          attendees: event.attendees.map(a => ({ name: a.name, email: a.email })),
+          subject: event.subject, start: event.start, allDay: Boolean(event.allDay),
+          organizer: event.organizer, attendees: event.attendees,
         });
       }
     }
     for (const event of events) {
+      if (Date.parse(event.end) < Date.now()) continue;
       items.push({
         key: `ical:${event.sourceId}:${event.id}`, source: "ical", sourceId: event.sourceId,
+        seriesId: event.seriesId,
         sourceName: names.get(event.sourceId) ?? "Calendar", id: event.id, subject: event.subject,
-        start: event.start, allDay: event.allDay, attendees: event.attendees.map(a => ({ name: a.name, email: a.email })),
+        start: event.start, allDay: event.allDay, organizer: event.organizer, attendees: event.attendees,
       });
     }
     return items.sort((a, b) => sortKey(a) - sortKey(b) || a.key.localeCompare(b.key));

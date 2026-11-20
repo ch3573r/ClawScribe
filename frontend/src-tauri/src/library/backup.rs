@@ -1184,6 +1184,15 @@ async fn import_manifest_impl(
             if source.keys().any(|key| !columns.contains(key)) {
                 return Err("Archive contains unsupported data columns.".into());
             }
+            if *table == "meetings" {
+                match source.get("calendar_link") {
+                    Some(Value::String(link)) => {
+                        super::calendar::decode(link)?;
+                    }
+                    None | Some(Value::Null) => {}
+                    _ => return Err("Invalid calendar link in archive.".into()),
+                }
+            }
             let parent = source
                 .get(if *table == "meetings" {
                     "id"
@@ -2679,6 +2688,37 @@ mod tests {
         assert!(allowed_file("audio.mp4"));
         assert!(allowed_file("exports.json"));
     }
+    #[tokio::test]
+    async fn calendar_attendance_round_trips_and_older_archives_still_restore() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let link = super::super::calendar::tests::sample();
+        super::super::calendar::write(&pool, "review-test", Some(link.clone()), false)
+            .await
+            .unwrap();
+        for legacy in [false, true] {
+            let (mut manifest, folders) = snapshot(&pool).await.unwrap();
+            if legacy {
+                manifest.tables.get_mut("meetings").unwrap()[0].remove("calendar_link");
+            }
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("calendar.zip");
+            write_archive(&archive, manifest, folders).unwrap();
+            sqlx::query("DELETE FROM meetings")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+            import_manifest(&pool, manifest, stage).await.unwrap();
+            assert_eq!(
+                super::super::calendar::read(&pool, "review-test")
+                    .await
+                    .unwrap(),
+                (!legacy).then(|| link.clone())
+            );
+        }
+    }
+
     #[tokio::test]
     async fn context_round_trip_accepts_older_archives_and_is_deleted_with_the_meeting() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;

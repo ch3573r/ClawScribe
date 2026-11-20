@@ -5,7 +5,6 @@ import { recordingBlocksAutoSummary, type RecordingOutcome } from '@/lib/recordi
 import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 import { formatTranscriptLine } from '@/lib/transcriptFormatting';
 import { getMeetingContext } from '@/lib/meetingContext';
-import { getMeetingCalendar, attendeeChecklist } from '@/lib/meetingCalendar';
 import { getSourceAttribution } from '@/lib/sourceAttribution';
 import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
 import {
@@ -57,21 +56,6 @@ async function summaryLanguageFor(meetingId: string, texts: string[]): Promise<s
   }
 }
 
-function withInvitedAttendees(meetingId: string, base: string): string {
-  const link = getMeetingCalendar(meetingId);
-  const checklist = link ? attendeeChecklist(link) : [];
-  if (checklist.length === 0) return base;
-  const prefix = [
-    'Put this section at the top of the meeting summary:',
-    '',
-    '## Invited attendees',
-    ...checklist,
-    '',
-    'Checked people attended. Unchecked people were invited but did not attend.',
-  ].join('\n');
-  return base.trim() ? `${prefix}\n\n${base.trim()}` : prefix;
-}
-
 export async function startAutomaticSummary(request: AutoSummaryRequest): Promise<boolean> {
   const { meetingId, modelConfig } = request;
   try {
@@ -86,8 +70,7 @@ export async function startAutomaticSummary(request: AutoSummaryRequest): Promis
     const includeSpeaker = shouldShowSpeakerAttribution(
       getSourceAttribution(), Boolean(request.folderPath), transcripts,
     );
-    const templateId = await invoke<string>('api_get_default_template').catch(() => null);
-    const customPrompt = withInvitedAttendees(meetingId, await getMeetingContext(meetingId));
+    const customPrompt = await getMeetingContext(meetingId);
     const summaryLanguage = await summaryLanguageFor(meetingId, transcripts.map(t => t.text));
 
     toast.info('Generating summary…', {
@@ -102,7 +85,7 @@ export async function startAutomaticSummary(request: AutoSummaryRequest): Promis
       chunkSize: 40000,
       overlap: 1000,
       customPrompt,
-      templateId: templateId || null,
+      templateId: null,
       summaryLanguage,
     });
 

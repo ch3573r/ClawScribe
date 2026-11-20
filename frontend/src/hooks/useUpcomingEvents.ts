@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useICalendar } from "@/hooks/useICalendar";
 import { usePendingCalendar } from "@/hooks/usePendingCalendar";
-import { setPendingCalendar } from "@/lib/meetingCalendar";
+import { calendarLinkFromEvent, sameCalendarEvent, setPendingCalendar } from "@/lib/meetingCalendar";
 import { toast } from "sonner";
 import {
   microsoftExportService,
@@ -27,6 +27,7 @@ export interface UpcomingEntry {
  */
 export function useUpcomingEvents(limit = 5, timedOnly = false) {
   const [microsoftEvents, setMicrosoftEvents] = useState<CalendarEvent[]>([]);
+  const [microsoftAvailable, setMicrosoftAvailable] = useState(false);
   const ical = useICalendar();
   const pending = usePendingCalendar();
   const readVersion = useRef(0);
@@ -38,9 +39,11 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
       const connection = await microsoftExportService.connectionStatus();
       if (expired()) return;
       if (connection.state !== "connected" || connection.unavailableExports?.includes("Calendar lookup")) {
+        setMicrosoftAvailable(false);
         setMicrosoftEvents([]);
         return;
       }
+      setMicrosoftAvailable(true);
       const now = new Date();
       const end = new Date(now);
       end.setDate(now.getDate() + 7);
@@ -79,25 +82,22 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
   // All-day entries are dropped before the cut when only timed events are wanted,
   // or a run of holidays could hide the next real meeting.
   const entries: UpcomingEntry[] = [
-    ...microsoftEvents.filter(upcoming).slice(0, limit).map(event => ({ event, sourceId: null, label: "Microsoft 365", allDay: false })),
+    ...microsoftEvents.filter(event => upcoming(event) && !(timedOnly && event.allDay))
+      .slice(0, limit).map(event => ({ event, sourceId: null, label: "Microsoft 365", allDay: Boolean(event.allDay) })),
     ...ical.events.filter(event => upcoming(event) && !(timedOnly && event.allDay)).slice(0, limit).map(event => ({ event, sourceId: event.sourceId, allDay: event.allDay,
       label: ical.sources.find(source => source.id === event.sourceId)?.name ?? "iCalendar" })),
   ].sort((a, b) => Date.parse(a.event.start!) - Date.parse(b.event.start!))
     .slice(0, limit);
 
   const isSelected = (entry: UpcomingEntry) =>
-    pending?.eventId === entry.event.id && (pending.source === "ical") === Boolean(entry.sourceId);
+    sameCalendarEvent(pending, calendarLinkFromEvent({ ...entry.event, sourceId: entry.sourceId }));
 
   /** Use this event's title and invitees for the next recording. */
   const select = (entry: UpcomingEntry) => {
     const { event, sourceId } = entry;
-    const saved = setPendingCalendar({
-      eventId: event.id, subject: event.subject,
-      ...(sourceId ? { source: "ical" as const, sourceId } : {}),
-      attendees: event.attendees.map(person => ({ ...person, included: true })),
-    });
+    const saved = setPendingCalendar(calendarLinkFromEvent({ ...event, sourceId }));
     if (!saved) toast.error("Could not save the calendar selection on this device.");
   };
 
-  return { entries, isSelected, select };
+  return { entries, isSelected, select, hasCalendars: microsoftAvailable || ical.sources.length > 0 };
 }

@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
+import { SavedMeetingAttendance } from '@/components/MeetingAttendance';
 import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
 import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
 import { ModelConfig } from '@/components/ModelSettingsModal';
@@ -141,7 +142,7 @@ export default function PageContent({
     sourceAttributionEnabled, hasRecordingFolder, timelineSegments, segments, meetingData.transcripts,
   );
   const showSpeakerAttribution = useSpeakerLabelVisibility(meeting.id, hasSpeakerAttribution);
-  const templates = useTemplates();
+  const templates = useTemplates(meeting.id);
 
   // Callback to register the modal open function
   const handleRegisterModalOpen = (openFn: () => void) => {
@@ -189,13 +190,14 @@ export default function PageContent({
     transcripts: meetingData.transcripts,
     modelConfig: modelConfig,
     isModelConfigLoading: false, // ConfigContext loads on mount
-    selectedTemplate: templates.selectedTemplate,
+    selectedTemplate: templates.requestedTemplate,
     includeSpeakerLabels: showSpeakerAttribution,
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
     onOpenModelSettings: handleOpenModelSettings,
   });
+  const summaryBusy = ['processing', 'summarizing', 'regenerating'].includes(summaryGeneration.summaryStatus);
 
   // A summary is already running for this meeting: show it as generating and
   // take its result, instead of offering Generate.
@@ -314,8 +316,10 @@ export default function PageContent({
       <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
-        disabled={['processing', 'summarizing', 'regenerating'].includes(summaryGeneration.summaryStatus)}
-        getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder} />
+        disabled={summaryBusy}
+        getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
+        attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} disabled={summaryBusy}
+          templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           key={meeting.id}

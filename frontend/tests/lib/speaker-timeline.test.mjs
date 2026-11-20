@@ -201,6 +201,7 @@ async function page(attribution, segments, updatedSegments) {
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
     '@/components/MeetingDetails/MeetingHeader': { MeetingHeader: 'MeetingHeader' },
+    '@/components/MeetingAttendance': { SavedMeetingAttendance: 'SavedMeetingAttendance' },
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
   });

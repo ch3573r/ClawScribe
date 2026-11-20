@@ -257,19 +257,18 @@ Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
 **Settings → Calendars** lets you import an `.ics` file or add a read-only
-subscription from a calendar provider. Upcoming meetings appears on Home, and
-the sidebar shows the next one. Choose **Use for next recording** to use an
-event title and invitees. You can review individual invitees on the Calendars
-page. iCalendar works without a Microsoft account. See [iCalendar files and subscriptions](docs/integrations/icalendar.md).
+subscription from a calendar provider. Upcoming meetings appear on Home, and
+the sidebar shows the next one. Choose **Use for next recording** or let
+ClawScribe link a single timed event in progress. Review attendance while
+recording or from the saved meeting. Summaries receive only calendar names you
+confirm. iCalendar works without a Microsoft account. See [Calendar sources and attendance](docs/integrations/icalendar.md).
 
 Microsoft sign-in supports calendar context and exports. Windows call detection
 can prompt or start recording for the Teams, Zoom, Webex and Google Meet
 providers you enable. Optional automatic stop applies to the recording started
 for that call after the detector observes its end. Existing Teams preferences
 remain Teams-only until you select other providers.
-See [call detection](docs/teams-detection.md). Invited attendees
-can be included as a reviewable attendance checklist; an invitation does not
-prove attendance.
+See [call detection](docs/teams-detection.md).
 
 - **OneNote:** choose or create a notebook and export notes/transcripts into a
   fresh dated section, avoiding large-library section-listing problems.

@@ -25,6 +25,7 @@ test("reads only meeting metadata, including folded names and mailto invitees", 
   assert.doesNotMatch(JSON.stringify(meeting), /private-|https:/);
   assert.equal(parse(text, "file-a", from, until)[0].id, meeting.id);
   assert.notEqual(parse(text, "file-b", from, until)[0].id, meeting.id);
+  assert.equal(meeting.seriesId, undefined);
 });
 
 test("includes overlaps and point events while treating the upper boundary as exclusive", () => {
@@ -57,6 +58,9 @@ test("expands IANA recurrences through DST and merges UTC exclusions, additions 
     ["Moved", "2026-04-03T12:30:00.000Z"],
   ]);
   assert.equal(new Set(meetings.map(m => m.id)).size, 3);
+  assert.equal(new Set(meetings.map(m => m.seriesId)).size, 1);
+  assert.match(meetings[0].seriesId, /^ics:/);
+  assert.notEqual(parse(text, "b", from, until)[0].seriesId, meetings[0].seriesId);
   const [original] = parse(calendar(event("UID:series", "DTSTART;TZID=Europe/Berlin:20260403T090000",
     "RRULE:FREQ=DAILY;COUNT=1")), "a", from, until);
   assert.equal(original.id, meetings[2].id);

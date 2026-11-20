@@ -3,10 +3,9 @@
 import { useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
-import { setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
+import { calendarLinkFromEvent, sameCalendarEvent, setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
 import { addICalendarSubscription, importICalendarFile } from "@/services/icalService";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
@@ -18,6 +17,8 @@ export interface UpcomingEvent {
   key: string;
   source: "microsoft" | "ical";
   sourceId?: string;
+  seriesId?: string;
+  organizer?: { name: string | null; email: string | null } | null;
   sourceName: string;
   id: string;
   subject: string | null;
@@ -131,89 +132,17 @@ export function formatWhen(start: string | null, allDay = false, now = new Date(
   return `${day} ${allDay ? "All day" : timeFormat.format(date)}`;
 }
 
-function attendeeKey(attendee: { name: string | null; email: string | null }) {
-  return JSON.stringify([attendee.name, attendee.email]);
-}
-
-function isSavedFor(event: UpcomingEvent, pending: MeetingCalendarLink | null): pending is MeetingCalendarLink {
-  if (!pending || pending.eventId !== event.id) return false;
-  return event.source === "ical"
-    ? pending.source === "ical" && pending.sourceId === event.sourceId
-    : pending.source !== "ical";
-}
-
-/**
- * "Use" for one upcoming meeting. A meeting with invitees opens a short review
- * so each invitee can be left out of the summary; a meeting without invitees is
- * set directly.
- */
 export function UseEventButton({ event, pending }: { event: UpcomingEvent; pending: MeetingCalendarLink | null }) {
-  const [open, setOpen] = useState(false);
-  const [edits, setEdits] = useState<Record<string, boolean>>({});
-  const [saveFailed, setSaveFailed] = useState(false);
-  const saved = isSavedFor(event, pending) ? pending : null;
-  const savedChoices = new Map(saved?.attendees.map(a => [attendeeKey(a), a.included]));
-  const attendees = event.attendees.map(attendee => {
-    const key = attendeeKey(attendee);
-    return { ...attendee, included: edits[key] ?? savedChoices.get(key) ?? true };
-  });
-  const confirmed = !!saved && saved.subject === event.subject && saved.attendees.length === attendees.length
-    && attendees.every(a => savedChoices.get(attendeeKey(a)) === a.included);
+  const link = calendarLinkFromEvent(event);
+  const selected = sameCalendarEvent(pending, link);
   const title = event.subject || "Untitled meeting";
-
-  function save() {
-    const stored = setPendingCalendar({
-      eventId: event.id,
-      ...(event.source === "ical" ? { source: "ical" as const, sourceId: event.sourceId } : {}),
-      subject: event.subject,
-      attendees,
-    });
-    setSaveFailed(!stored);
-    return stored;
-  }
-
-  const label = confirmed ? "Selected" : "Use";
-  if (!attendees.length) {
-    return (
-      <Button type="button" variant="ghost" size="sm" disabled={confirmed} aria-label={`${label} ${title} for next recording`}
-        onClick={() => { if (!save()) toast.error("Could not save the meeting selection on this device."); }}>
-        {label}
-      </Button>
-    );
-  }
-
   return (
-    <Dialog open={open} onOpenChange={next => { setOpen(next); if (!next) setSaveFailed(false); }}>
-      <DialogTrigger asChild>
-        <Button type="button" variant="ghost" size="sm" aria-label={`${label} ${title} for next recording`}>{label}</Button>
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Use for next recording</DialogTitle>
-          <DialogDescription>{title} · {formatWhen(event.start, event.allDay)}. Untick invitees to leave them out of the summary.</DialogDescription>
-        </DialogHeader>
-        <fieldset className="max-h-64 space-y-1 overflow-y-auto">
-          <legend className="mb-1 text-sm font-medium">Invited attendees</legend>
-          {attendees.map((attendee, index) => {
-            const key = attendeeKey(attendee);
-            return (
-              <label key={key + index} className="flex items-center gap-2 text-sm">
-                <Checkbox checked={attendee.included}
-                  onCheckedChange={value => setEdits(previous => ({ ...previous, [key]: value === true }))} />
-                <span className="break-words">{attendee.name || attendee.email}</span>
-              </label>
-            );
-          })}
-        </fieldset>
-        {saveFailed && !confirmed && <p role="alert" className="text-sm text-error-foreground">
-          Could not save the meeting selection. Check access to app storage and try again.
-        </p>}
-        <DialogFooter>
-          <Button type="button" disabled={confirmed} onClick={() => { if (save()) setOpen(false); }}>
-            {confirmed ? "Set for next recording" : "Use for next recording"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Button type="button" variant="ghost" size="sm" disabled={selected}
+      aria-label={selected ? `Selected ${title} for next recording` : `Use ${title} for next recording`}
+      onClick={() => {
+        if (!setPendingCalendar(link)) toast.error("Could not save the meeting selection on this device.");
+      }}>
+      {selected ? "Selected" : "Use"}
+    </Button>
   );
 }
