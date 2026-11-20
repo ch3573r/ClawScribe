@@ -7,10 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.62.0** is a Windows GPU preview. It fixes defects in starting, stopping and
-quitting a recording, and adds fonts, a text size setting and a transcription
-language setting. See the
-[0.62.0 preview notes](docs/releases/0.62.0.md) and the
+**0.63.0** is a Windows GPU preview. It hardens recording against stuck devices
+and full disks, shows real audio levels, keeps stored keys inside the core and
+finds interrupted recordings on disk. See the
+[0.63.0 preview notes](docs/releases/0.63.0.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -330,6 +330,20 @@ checks. You still choose when to install; checking at launch is a separate optio
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.63.0 preview
+
+- A device reconnect no longer blocks the app, and a failed Stop is shown.
+- A recording does not start on a nearly full disk, and a notice appears when
+  space runs low.
+- Home shows real levels for the microphone and the meeting audio.
+- Recovery also finds interrupted recordings in the recording folders.
+- Stored keys stay in the core and are only sent to the address they were saved
+  for. Files and folders are used when you chose them in a dialog.
+- Engine, cloud and language settings are stored by the core.
+
+See the [preview notes](docs/releases/0.63.0.md) for limits and pending
+real-device checks.
 
 ## What changed in the 0.62.0 preview
 

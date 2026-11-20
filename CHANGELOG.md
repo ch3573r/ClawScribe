@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.63.0
+
+- A device reconnect no longer holds the lock that every recording action needs. Stop gives up after 20 seconds with a message when an audio driver does not answer, and a failed Stop is shown. When a reconnect fails for one source, the other keeps recording.
+- A recording does not start when less than about 1.6 GB is free where recordings are saved, and a notice appears once when less than about 780 MB is left.
+- Home shows real levels for the microphone and the meeting audio during a recording.
+- Recovery also lists interrupted recordings found in the recording folders. Settings → General → Storage reopens the list.
+- The interface no longer receives stored keys or tokens. A stored key is only sent to the address it was saved for; after changing that address the key has to be entered again.
+- Files and folders are used when you chose them in a dialog that the core opened. The recordings folder is chosen with a folder dialog; a folder configured earlier stays in use, including on a network share.
+- The Claude Code program must be a local file named claude, outside a project's node_modules folder. The Codex profile folder is chosen with a folder dialog.
+- GPU use, the separate transcription process, cloud transcription, source labels and the transcription language are stored by the core and loaded before anything can record.
+- A database that cannot be opened is reported in a dialog. A background summary shows as running on its meeting. A failed meeting list load shows an error with Retry.
+- 65 unused commands and 27 unused interface files were removed.
+- The Windows GPU installers and updater use version 0.63.0. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Checked with automated tests, not in an installed build, with real audio devices or with real keys.
+
 ## 0.62.0
 
 - A manually started recording now uses the title and the microphone and system-audio devices you chose. Before, they were dropped and the defaults were used.
