@@ -454,7 +454,10 @@ fn reject_application_folders(profile: &Path) -> Result<(), String> {
     let identifier = config["identifier"]
         .as_str()
         .ok_or_else(|| "The application identifier is unavailable".to_string())?;
-    let mut protected: Vec<PathBuf> = Vec::new();
+    let mut protected = vec![
+        crate::audio::get_default_recordings_folder(),
+        crate::audio::recording_preferences::get_legacy_default_recordings_folder(),
+    ];
     for base in [dirs::data_dir(), dirs::data_local_dir(), dirs::config_dir()]
         .into_iter()
         .flatten()
@@ -1916,6 +1919,16 @@ mod tests {
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(bytes.len(), 44 + 160 * 2);
         assert!(rms(&samples) > 0.1);
+    }
+
+    #[test]
+    fn profile_guard_rejects_children_of_both_recording_roots_without_creating_them() {
+        for root in [
+            crate::audio::get_default_recordings_folder(),
+            crate::audio::recording_preferences::get_legacy_default_recordings_folder(),
+        ] {
+            assert!(reject_application_folders(&root.join("synthetic-acceptance")).is_err());
+        }
     }
 
     #[test]
