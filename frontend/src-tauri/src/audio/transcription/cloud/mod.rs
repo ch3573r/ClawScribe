@@ -1514,14 +1514,16 @@ mod tests {
 pub(crate) mod live_smoke {
     use super::{
         cloud_segments_to_transcribed_segments, mai_transcribe::MaiTranscribeProvider,
-        mime_type_for_path, openai_whisper::OpenAiWhisperProvider, CloudTranscriptSegment,
-        CloudTranscriptionProvider, CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL,
-        DEFAULT_MAI_TRANSCRIBE_MODEL,
+        mime_type_for_path, openai_whisper::OpenAiWhisperProvider, transcribe_mai_file,
+        validate_provider_upload_size, CloudTranscriptSegment, CloudTranscriptionProvider,
+        CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL, DEFAULT_MAI_TRANSCRIBE_MODEL,
+        PROVIDER_CLOUD_WHISPER,
     };
     use crate::api::TranscriptWordTimestampSource;
     use std::{
         env,
         path::{Path, PathBuf},
+        sync::atomic::AtomicBool,
     };
 
     const ENV_AUDIO: &str = "CLAWSCRIBE_SMOKE_AUDIO";
